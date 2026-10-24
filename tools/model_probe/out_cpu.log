@@ -1,0 +1,28 @@
+`torch_dtype` is deprecated! Use `dtype` instead!
+torch=2.9.1+cpu cuda=None device=cpu
+loading model from D:\Code\Kanalib\models\pixai-tagger-v1.0
+model loaded in 2.5s
+classes=30877 tags=30877 categories=[('general', 15043), ('character', 8308), ('copyright', 2460), ('style', 4917), ('meta', 145), ('rating', 4)]
+thresholds={'general': 0.17, 'character': 0.27, 'style': 0.15, 'copyright': 0.24, 'meta': 0.17, 'rating': 0.41}
+input fixtures\anime_girl.png size=(744, 988) mode=RGB
+input fixtures\anime_chibi.png size=(557, 697) mode=RGB
+preprocess 2 images: 40.95ms
+inference batch=2: 48709.17ms (0.04 img/s)
+
+=== anime_girl.png 744x988
+  general    n=  50  1girl:0.998, wings:0.993, halo:0.990, solo:0.988, dress:0.986, white_dress:0.937, long_hair:0.916, flower:0.902
+  character  n=   0  
+  copyright  n=   1  original:0.853
+  style      n=   0  
+  meta       n=   1  ai-generated:0.253
+  rating     n=   2  rating:g:0.618, rating:s:0.431
+
+=== anime_chibi.png 557x697
+  general    n=  56  animal_ears:0.997, 1girl:0.995, cat_ears:0.989, heart:0.986, hat:0.985, ahoge:0.984, heart_hands:0.983, solo:0.979
+  character  n=   0  
+  copyright  n=   2  indie_virtual_youtuber:0.388, original:0.266
+  style      n=   0  
+  meta       n=   1  highres:0.567
+  rating     n=   1  rating:g:0.982
+
+wrote D:\Code\Kanalib\tools\model_probe\out\probe.json

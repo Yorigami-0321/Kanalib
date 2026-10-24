@@ -1,0 +1,50 @@
+`torch_dtype` is deprecated! Use `dtype` instead!
+torch=2.9.1+cu130 cuda=13.0 device=cuda
+gpu=NVIDIA GeForce RTX 4060 Laptop GPU vram=8.0GiB
+loading model from D:\Code\Kanalib\models\pixai-tagger-v1.0
+model loaded in 2.2s half=True autocast=False
+classes=30877 tags=30877 categories=[('general', 15043), ('character', 8308), ('copyright', 2460), ('style', 4917), ('meta', 145), ('rating', 4)]
+thresholds={'general': 0.17, 'character': 0.27, 'style': 0.15, 'copyright': 0.24, 'meta': 0.17, 'rating': 0.41}
+input fixtures\anime_girl.png size=(744, 988) mode=RGB
+input fixtures\anime_chibi.png size=(557, 697) mode=RGB
+input D:\Code\floral-notepaper\Docs\images\AI»æ»­½ØÍ¼.png size=(1300, 1149) mode=RGB
+input fixtures\real_img50.jpg size=(280, 175) mode=RGB
+preprocess 4 images: 80.86ms
+inference batch=4: 1388.61ms (2.88 img/s)
+
+=== anime_girl.png 744x988
+  general    n=  50  1girl:0.998, wings:0.993, halo:0.990, solo:0.988, dress:0.986, white_dress:0.936, long_hair:0.916, head_wreath:0.902
+  character  n=   0  
+  copyright  n=   1  original:0.853
+  style      n=   0  
+  meta       n=   1  ai-generated:0.254
+  rating     n=   2  rating:g:0.618, rating:s:0.432
+
+=== anime_chibi.png 557x697
+  general    n=  56  animal_ears:0.997, 1girl:0.995, cat_ears:0.989, heart:0.987, hat:0.985, ahoge:0.984, heart_hands:0.983, solo:0.979
+  character  n=   0  
+  copyright  n=   2  indie_virtual_youtuber:0.386, original:0.265
+  style      n=   0  
+  meta       n=   1  highres:0.568
+  rating     n=   1  rating:g:0.982
+
+=== AI»æ»­½ØÍ¼.png 1300x1149
+  general    n=  51  1girl:0.996, dress:0.987, wings:0.978, halo:0.971, solo:0.962, white_dress:0.940, angel_wings:0.928, long_hair:0.926
+  character  n=   0  
+  copyright  n=   1  original:0.905
+  style      n=   0  
+  meta       n=   1  highres:0.998
+  rating     n=   1  rating:g:0.673
+
+=== real_img50.jpg 280x175
+  general    n=  19  sky:0.884, cloud:0.801, outdoors:0.766, flower:0.737, blue_sky:0.726, mountain:0.689, no_humans:0.666, tree:0.666
+  character  n=   0  
+  copyright  n=   0  
+  style      n=   0  
+  meta       n=   4  lowres:1.000, photo_(medium):0.770, off-topic:0.629, ai-generated:0.296
+  rating     n=   1  rating:g:0.893
+bench {'batch_size': 1, 'repeats': 3, 'images_per_second': 3.871, 'ms_per_image': 258.33, 'peak_vram_mb': 1127.9}
+bench {'batch_size': 2, 'repeats': 3, 'images_per_second': 3.838, 'ms_per_image': 260.54, 'peak_vram_mb': 1285.5}
+bench {'batch_size': 4, 'repeats': 3, 'images_per_second': 3.893, 'ms_per_image': 256.87, 'peak_vram_mb': 1602.4}
+
+wrote out_half\probe.json

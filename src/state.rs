@@ -1,0 +1,1279 @@
+use std::collections::{HashMap, HashSet};
+use std::io::Write;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::{Instant, UNIX_EPOCH};
+
+use anyhow::{bail, Context, Result};
+use image::{ImageFormat, Rgb, RgbImage};
+use serde::Deserialize;
+use walkdir::WalkDir;
+
+use crate::db::{Db, JobCounts};
+use crate::dedup::{
+    DEFAULT_SIMILAR_THRESHOLD, DuplicateReview, GroupKind, ReviewState, is_protected,
+};
+use crate::media;
+use crate::model::{Asset, is_image, Filter, Shared};
+use crate::sidecar::{project_root, Sidecar};
+
+#[derive(Clone, Copy, Debug, Default)]
+pub struct TrashSummary {
+    pub groups: usize,
+    pub assets: usize,
+    pub failed: usize,
+    pub protected_skipped: usize,
+}
+
+pub struct AppState {
+    pub shared: Mutex<Shared>,
+    cancel: Mutex<Option<Arc<AtomicBool>>>,
+    similar_scan_id: Mutex<u64>,
+    db_path: PathBuf,
+    cache_dir: PathBuf,
+}
+
+impl AppState {
+    pub fn new(folder: PathBuf) -> Arc<Self> {
+        let root = project_root();
+        let data_dir = root.join(".kanalib");
+        let db_path = data_dir.join("kanalib.db");
+        let cache_dir = data_dir.join("thumbs");
+        let _ = std::fs::create_dir_all(&cache_dir);
+        let folder = absolute(folder);
+        let folder_string = folder.to_string_lossy().to_string();
+        let (assets, reviews, similar_threshold, protected_paths, queue_counts) =
+            match Db::open(&db_path) {
+                Ok(db) => {
+                    if let Err(error) = backfill_vocab(&db) {
+                        log::warn!("vocab backfill: {error:#}");
+                    }
+                    let assets = load_tile_thumbs(match db.load_folder(&folder_string) {
+                        Ok(assets) => assets,
+                        Err(error) => {
+                            log::error!("load assets: {error:#}");
+                            Vec::new()
+                        }
+                    });
+                    let reviews = match db.load_duplicate_reviews() {
+                        Ok(reviews) => reviews,
+                        Err(error) => {
+                            log::warn!("load duplicate reviews: {error:#}");
+                            Default::default()
+                        }
+                    };
+                    let threshold = db
+                        .setting("dedup.similar_threshold")
+                        .ok()
+                        .flatten()
+                        .and_then(|value| value.parse::<u8>().ok())
+                        .map(|value| value.clamp(2, 24))
+                        .unwrap_or(DEFAULT_SIMILAR_THRESHOLD);
+                    let protected_paths = db
+                        .setting("dedup.protected_paths")
+                        .ok()
+                        .flatten()
+                        .and_then(|value| serde_json::from_str::<Vec<String>>(&value).ok())
+                        .unwrap_or_default()
+                        .into_iter()
+                        .map(PathBuf::from)
+                        .collect::<Vec<_>>();
+                    if let Err(error) = db.recover_tag_jobs() {
+                        log::warn!("recover tag jobs: {error:#}");
+                    }
+                    if let Err(error) = db.enqueue_tag_jobs(&folder_string) {
+                        log::warn!("enqueue tag jobs: {error:#}");
+                    }
+                    let queue_counts = db.tag_job_counts(&folder_string).unwrap_or_default();
+                    (
+                        assets,
+                        reviews,
+                        threshold,
+                        protected_paths,
+                        queue_counts,
+                    )
+                }
+                Err(error) => {
+                    log::error!("open database: {error:#}");
+                    (
+                        Vec::new(),
+                        Default::default(),
+                        DEFAULT_SIMILAR_THRESHOLD,
+                        Vec::new(),
+                        JobCounts::default(),
+                    )
+                }
+            };
+        let mut shared = Shared::new(
+            folder,
+            assets,
+            reviews,
+            similar_threshold,
+            protected_paths,
+        );
+        shared.set_queue_counts(
+            queue_counts.pending,
+            queue_counts.running,
+            queue_counts.error,
+        );
+        Arc::new(Self {
+            shared: Mutex::new(shared),
+            cancel: Mutex::new(None),
+            similar_scan_id: Mutex::new(0),
+            db_path,
+            cache_dir,
+        })
+    }
+
+    pub fn set_folder(&self, folder: PathBuf) {
+        let folder = absolute(folder);
+        let changed = {
+            let mut shared = self.shared.lock().unwrap();
+            if shared.folder != folder {
+                shared.folder = folder;
+                shared.assets.write().unwrap().clear();
+                shared.counts = Default::default();
+                shared.revision = shared.revision.wrapping_add(1);
+                shared.selected = None;
+                shared.filter = Filter::All;
+                shared.status = "准备扫描".into();
+                shared.error = None;
+                shared.dedup.clear_groups();
+                shared.set_queue_counts(0, 0, 0);
+                true
+            } else {
+                false
+            }
+        };
+        if changed {
+            self.bump_similar_scan_id();
+        }
+    }
+
+    fn bump_similar_scan_id(&self) -> u64 {
+        let mut id = self.similar_scan_id.lock().unwrap();
+        *id = id.wrapping_add(1);
+        *id
+    }
+
+    fn invalidate_similar_scan(&self) {
+        self.bump_similar_scan_id();
+        let mut shared = self.shared.lock().unwrap();
+        shared.dedup.clear_similar();
+        shared.revision = shared.revision.wrapping_add(1);
+    }
+
+    pub fn start_scan(self: &Arc<Self>) {
+        self.invalidate_similar_scan();
+        if let Some(flag) = self.cancel.lock().unwrap().take() {
+            flag.store(true, Ordering::SeqCst);
+        }
+        let flag = Arc::new(AtomicBool::new(false));
+        *self.cancel.lock().unwrap() = Some(flag.clone());
+        let folder = self.shared.lock().unwrap().folder.clone();
+        {
+            let mut shared = self.shared.lock().unwrap();
+            shared.scanning = true;
+            shared.error = None;
+            shared.status = "扫描中...".into();
+        }
+        let state = self.clone();
+        let skip_tag = std::env::var_os("KANALIB_SKIP_TAG").is_some();
+        let spawned = std::thread::Builder::new()
+            .name("kanalib-indexer".into())
+            .spawn(move || {
+                let result = index(&state, &folder, &flag, skip_tag);
+                {
+                    let mut shared = state.shared.lock().unwrap();
+                    shared.refresh_dedup();
+                }
+                if let Err(error) = result {
+                    let mut shared = state.shared.lock().unwrap();
+                    shared.error = Some(format!("{error:#}"));
+                    shared.status = "索引失败".into();
+                    shared.scanning = false;
+                }
+            });
+        if spawned.is_err() {
+            let mut shared = self.shared.lock().unwrap();
+            shared.error = Some("无法创建索引线程".into());
+            shared.scanning = false;
+        }
+    }
+
+    pub fn scan_blocking(self: &Arc<Self>, skip_tag: bool) -> Result<()> {
+        self.invalidate_similar_scan();
+        let folder = self.shared.lock().unwrap().folder.clone();
+        {
+            let mut shared = self.shared.lock().unwrap();
+            shared.scanning = true;
+            shared.error = None;
+            shared.status = "扫描中...".into();
+        }
+        let cancel = Arc::new(AtomicBool::new(false));
+        let result = index(self, &folder, &cancel, skip_tag);
+        {
+            let mut shared = self.shared.lock().unwrap();
+            shared.refresh_dedup();
+        }
+        if let Err(error) = &result {
+            let mut shared = self.shared.lock().unwrap();
+            shared.error = Some(format!("{error:#}"));
+            shared.status = "索引失败".into();
+            shared.scanning = false;
+        }
+        result
+    }
+
+    pub fn set_filter(&self, filter: Filter) {
+        self.shared.lock().unwrap().filter = filter;
+    }
+
+    pub fn select(&self, path: Option<PathBuf>) {
+        self.shared.lock().unwrap().selected = path;
+    }
+
+    pub fn retry_failed(&self) -> Result<usize> {
+        let folder = self
+            .shared
+            .lock()
+            .unwrap()
+            .folder
+            .to_string_lossy()
+            .to_string();
+        Db::open(&self.db_path)?.retry_failed(&folder)
+    }
+
+    pub fn set_dedup_keeper(&self, key: &str, path: PathBuf, kind: GroupKind) -> bool {
+        let review = {
+            let mut shared = self.shared.lock().unwrap();
+            let review = shared.dedup.set_keeper(key, &path, kind);
+            if review.is_some() {
+                shared.revision = shared.revision.wrapping_add(1);
+            }
+            review
+        };
+        let Some(review) = review else {
+            return false;
+        };
+        match Db::open(&self.db_path).and_then(|db| db.save_duplicate_review(&review)) {
+            Ok(()) => true,
+            Err(error) => {
+                log::warn!("save duplicate keeper: {error:#}");
+                true
+            }
+        }
+    }
+
+    pub fn preselect_dedup(&self, kind: GroupKind) -> usize {
+        let mut shared = self.shared.lock().unwrap();
+        let selected = shared.dedup.preselect(kind);
+        if selected > 0 {
+            shared.status = format!("已按规则预选 {selected} 组");
+            shared.revision = shared.revision.wrapping_add(1);
+        }
+        selected
+    }
+
+    pub fn mark_dedup(&self, key: &str, state: ReviewState, kind: GroupKind) -> Result<()> {
+        let review = {
+            let mut shared = self.shared.lock().unwrap();
+            shared.dedup.set_state(key, state, kind)
+        };
+        let Some(review) = review else {
+            bail!("duplicate group not found: {key}");
+        };
+        Db::open(&self.db_path)?.save_duplicate_review(&review)?;
+        let mut shared = self.shared.lock().unwrap();
+        shared.error = None;
+        shared.revision = shared.revision.wrapping_add(1);
+        shared.status = match state {
+            ReviewState::Ignored => "已标记为不是重复".to_string(),
+            ReviewState::Related => "已标记为相关变体".to_string(),
+            ReviewState::Done => "已保留整组".to_string(),
+            ReviewState::Pending => "已重新打开此组".to_string(),
+        };
+        Ok(())
+    }
+
+    pub fn set_similar_threshold(&self, threshold: u8) -> u8 {
+        let threshold = threshold.clamp(2, 24);
+        {
+            let mut shared = self.shared.lock().unwrap();
+            shared.dedup.similar_threshold = threshold;
+            shared.revision = shared.revision.wrapping_add(1);
+        }
+        if let Err(error) = Db::open(&self.db_path).and_then(|db| {
+            db.set_setting("dedup.similar_threshold", &threshold.to_string())
+        }) {
+            log::warn!("save similar threshold: {error:#}");
+        }
+        threshold
+    }
+
+    pub fn add_protected_path(&self, path: PathBuf) -> Result<()> {
+        let path = absolute(path);
+        if !path.is_dir() {
+            bail!("保护路径必须是文件夹: {}", path.display());
+        }
+        let paths = {
+            let shared = self.shared.lock().unwrap();
+            if shared.dedup.protected_paths.iter().any(|item| item == &path) {
+                return Ok(());
+            }
+            let mut paths = shared.dedup.protected_paths.clone();
+            paths.push(path.clone());
+            paths
+        };
+        self.save_protected_paths(&paths)?;
+        let mut shared = self.shared.lock().unwrap();
+        shared.dedup.set_protected_paths(paths);
+        shared.refresh_dedup();
+        shared.error = None;
+        shared.status = format!("已添加保护路径：{}", path.display());
+        Ok(())
+    }
+
+    pub fn remove_protected_path(&self, path: &Path) -> Result<()> {
+        let path = absolute(path.to_path_buf());
+        let paths = {
+            let shared = self.shared.lock().unwrap();
+            let mut paths = shared.dedup.protected_paths.clone();
+            let before = paths.len();
+            paths.retain(|item| item != &path);
+            if paths.len() == before {
+                return Ok(());
+            }
+            paths
+        };
+        self.save_protected_paths(&paths)?;
+        let mut shared = self.shared.lock().unwrap();
+        shared.dedup.set_protected_paths(paths);
+        shared.refresh_dedup();
+        shared.error = None;
+        shared.status = format!("已移除保护路径：{}", path.display());
+        Ok(())
+    }
+
+    fn save_protected_paths(&self, paths: &[PathBuf]) -> Result<()> {
+        let values = paths
+            .iter()
+            .map(|path| path.to_string_lossy().to_string())
+            .collect::<Vec<_>>();
+        let json = serde_json::to_string(&values)?;
+        Db::open(&self.db_path)?.set_setting("dedup.protected_paths", &json)
+    }
+
+    pub fn db_path(&self) -> PathBuf {
+        self.db_path.clone()
+    }
+
+    pub fn cache_dir(&self) -> PathBuf {
+        self.cache_dir.clone()
+    }
+
+    pub fn start_similar_scan(self: &Arc<Self>) {
+        let scan_id = self.bump_similar_scan_id();
+        let (assets, threshold, revision, reviews, old_groups, protected) = {
+            let mut shared = self.shared.lock().unwrap();
+            if shared.scanning {
+                shared.error = Some("图库扫描进行中，完成后再扫描相似图片".into());
+                shared.revision = shared.revision.wrapping_add(1);
+                return;
+            }
+            let assets = shared.assets.read().unwrap().clone();
+            if assets.len() < 2 {
+                shared.dedup.similar_scanning = false;
+                shared.status = "图片不足 2 张，无法扫描相似图片".into();
+                shared.revision = shared.revision.wrapping_add(1);
+                return;
+            }
+            let threshold = shared.dedup.similar_threshold;
+            let reviews = shared.dedup.review_snapshot();
+            let old_groups = shared.dedup.similar_groups.clone();
+            let protected = shared.dedup.protected_paths.clone();
+            shared.dedup.similar_scanning = true;
+            shared.dedup.similar_scanned = false;
+            shared.dedup.similar_groups = Arc::new(Vec::new());
+            shared.status = format!(
+                "相似扫描中 · 汉明距离 ≤{threshold} · {} 张",
+                assets.len()
+            );
+            shared.error = None;
+            shared.revision = shared.revision.wrapping_add(1);
+            (assets, threshold, shared.revision, reviews, old_groups, protected)
+        };
+
+        let state = self.clone();
+        let spawned = std::thread::Builder::new()
+            .name("kanalib-similar".into())
+            .spawn(move || {
+                let groups = crate::dedup::compute_similar_groups(
+                    &assets,
+                    threshold,
+                    &reviews,
+                    &old_groups,
+                    &protected,
+                );
+                let current_id = *state.similar_scan_id.lock().unwrap();
+                if current_id != scan_id {
+                    return;
+                }
+                let mut shared = state.shared.lock().unwrap();
+                if shared.revision != revision {
+                    shared.dedup.similar_scanning = false;
+                    shared.status = "图库已变化，请重新扫描相似图片".into();
+                    shared.revision = shared.revision.wrapping_add(1);
+                    return;
+                }
+                let count = groups.len();
+                let pending = groups
+                    .iter()
+                    .filter(|group| group.state == ReviewState::Pending)
+                    .count();
+                shared.dedup.set_similar_groups(groups, threshold);
+                shared.status =
+                    format!("相似扫描完成 · {count} 组 · 未审 {pending} 组");
+                shared.revision = shared.revision.wrapping_add(1);
+            });
+        if spawned.is_err() {
+            let mut shared = self.shared.lock().unwrap();
+            shared.dedup.similar_scanning = false;
+            shared.error = Some("无法创建相似扫描线程".into());
+            shared.revision = shared.revision.wrapping_add(1);
+        }
+    }
+
+    pub fn trash_dedup_group(&self, key: &str) -> Result<TrashSummary> {
+        let (folder, group, protected) = {
+            let shared = self.shared.lock().unwrap();
+            let group = shared
+                .dedup
+                .group(key)
+                .cloned()
+                .with_context(|| format!("duplicate group not found: {key}"))?;
+            (
+                shared.folder.clone(),
+                group,
+                shared.dedup.protected_paths.clone(),
+            )
+        };
+        let keeper = group
+            .keeper
+            .clone()
+            .context("duplicate group has no keeper")?;
+        if !keeper.starts_with(&folder) {
+            bail!("保留项不在当前图库内: {}", keeper.display());
+        }
+        let paths = group.duplicate_paths();
+        if paths.is_empty() {
+            bail!("这一组没有待移入回收站的副本");
+        }
+        if let Some(blocked) = paths
+            .iter()
+            .find(|path| is_protected(path, &protected))
+        {
+            bail!("受保护路径不能移入回收站: {}", blocked.display());
+        }
+        validate_under(&folder, &paths)?;
+
+        let report = crate::trash::move_to_recycle_bin(&paths)?;
+        let moved = report.moved.iter().cloned().collect::<HashSet<_>>();
+        Db::open(&self.db_path)?.delete_assets(&report.moved)?;
+        let all_moved = report.failed.is_empty();
+        if all_moved {
+            Db::open(&self.db_path)?.save_duplicate_review(&DuplicateReview {
+                group_key: group.key.clone(),
+                state: ReviewState::Done,
+                keeper_path: Some(keeper),
+                member_count: group.member_count,
+                signature: group.signature.clone(),
+            })?;
+        }
+
+        let mut shared = self.shared.lock().unwrap();
+        shared.remove_assets(&moved);
+        shared.refresh_after_removal(&moved);
+        shared.status = if all_moved {
+            format!("已移入回收站 {} 张", report.moved.len())
+        } else {
+            format!(
+                "已移入回收站 {} 张；{} 张仍待处理",
+                report.moved.len(),
+                report.failed.len()
+            )
+        };
+        shared.error = report.error.clone();
+        Ok(TrashSummary {
+            groups: usize::from(all_moved),
+            assets: report.moved.len(),
+            failed: report.failed.len(),
+            protected_skipped: 0,
+        })
+    }
+
+    pub fn trash_preselected(&self) -> Result<TrashSummary> {
+        let (folder, groups, protected) = {
+            let shared = self.shared.lock().unwrap();
+            let groups = shared
+                .dedup
+                .groups
+                .iter()
+                .filter(|group| group.state == ReviewState::Pending)
+                .cloned()
+                .collect::<Vec<_>>();
+            (
+                shared.folder.clone(),
+                groups,
+                shared.dedup.protected_paths.clone(),
+            )
+        };
+        if groups.is_empty() {
+            bail!("没有待处理的重复组");
+        }
+
+        let mut paths = Vec::new();
+        let mut protected_skipped = 0usize;
+        for group in &groups {
+            let keeper = group
+                .keeper
+                .as_ref()
+                .with_context(|| format!("duplicate group has no keeper: {}", group.key))?;
+            if !keeper.starts_with(&folder) {
+                bail!("保留项不在当前图库内: {}", keeper.display());
+            }
+            let copies = group.duplicate_paths();
+            if copies
+                .iter()
+                .any(|path| is_protected(path, &protected))
+            {
+                protected_skipped += 1;
+                continue;
+            }
+            validate_under(&folder, &copies)?;
+            paths.extend(copies);
+        }
+        if paths.is_empty() {
+            bail!("待处理的组都包含受保护路径，未移入回收站");
+        }
+
+        let report = crate::trash::move_to_recycle_bin(&paths)?;
+        let moved = report.moved.iter().cloned().collect::<HashSet<_>>();
+        let db = Db::open(&self.db_path)?;
+        db.delete_assets(&report.moved)?;
+
+        let mut completed = 0usize;
+        for group in &groups {
+            let copies = group.duplicate_paths();
+            if !copies.is_empty() && copies.iter().all(|path| moved.contains(path)) {
+                db.save_duplicate_review(&DuplicateReview {
+                    group_key: group.key.clone(),
+                    state: ReviewState::Done,
+                    keeper_path: group.keeper.clone(),
+                    member_count: group.member_count,
+                    signature: group.signature.clone(),
+                })?;
+                completed += 1;
+            }
+        }
+
+        let mut shared = self.shared.lock().unwrap();
+        shared.remove_assets(&moved);
+        shared.refresh_after_removal(&moved);
+        let mut status = format!(
+            "批量处理完成：{} 组 · 移入回收站 {} 张",
+            completed,
+            report.moved.len()
+        );
+        if protected_skipped > 0 {
+            status.push_str(&format!("；跳过 {protected_skipped} 个受保护组"));
+        }
+        shared.status = status;
+        shared.error = report.error.clone();
+        Ok(TrashSummary {
+            groups: completed,
+            assets: report.moved.len(),
+            failed: report.failed.len(),
+            protected_skipped,
+        })
+    }
+
+    pub fn set_error(&self, message: String) {
+        let mut shared = self.shared.lock().unwrap();
+        shared.error = Some(message);
+        shared.status = "重试失败".into();
+    }
+
+    pub fn search_paths(&self, text: &str) -> Result<HashSet<PathBuf>> {
+        let folder = self
+            .shared
+            .lock()
+            .unwrap()
+            .folder
+            .to_string_lossy()
+            .to_string();
+        let tokens = text
+            .split_whitespace()
+            .map(str::to_string)
+            .collect::<Vec<_>>();
+        Db::open(&self.db_path)?.search_paths(&folder, &tokens)
+    }
+
+    pub fn stop(&self) {
+        if let Some(flag) = self.cancel.lock().unwrap().take() {
+            flag.store(true, Ordering::SeqCst);
+        }
+    }
+}
+
+#[derive(Default, Debug)]
+struct ScanStats {
+    files: usize,
+    imported: usize,
+    unchanged: usize,
+    hashes_reused: usize,
+    hashes_computed: usize,
+    hash_errors: usize,
+    thumb_errors: usize,
+    untagged: usize,
+    tagged: usize,
+    tag_errors: usize,
+    skipped_tagging: bool,
+    walk_secs: f64,
+    import_secs: f64,
+    hash_secs: f64,
+    thumb_secs: f64,
+    tag_load_secs: f64,
+    tag_secs: f64,
+    total_secs: f64,
+}
+
+fn log_scan_metrics(stats: &ScanStats) {
+    let json = serde_json::json!({
+        "files": stats.files,
+        "imported": stats.imported,
+        "unchanged": stats.unchanged,
+        "hashes_reused": stats.hashes_reused,
+        "hashes_computed": stats.hashes_computed,
+        "hash_errors": stats.hash_errors,
+        "thumb_errors": stats.thumb_errors,
+        "untagged": stats.untagged,
+        "tagged": stats.tagged,
+        "tag_errors": stats.tag_errors,
+        "skipped_tagging": stats.skipped_tagging,
+        "walk_secs": stats.walk_secs,
+        "import_secs": stats.import_secs,
+        "hash_secs": stats.hash_secs,
+        "thumb_secs": stats.thumb_secs,
+        "tag_load_secs": stats.tag_load_secs,
+        "tag_secs": stats.tag_secs,
+        "total_secs": stats.total_secs,
+    });
+    log::info!("scan metrics: {json}");
+    if let Some(path) = std::env::var_os("KANALIB_METRICS_PATH") {
+        match std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+        {
+            Ok(mut file) => {
+                let _ = writeln!(file, "{json}");
+            }
+            Err(error) => log::warn!("metrics path {}: {error}", Path::new(&path).display()),
+        }
+    }
+}
+
+fn index(
+    state: &Arc<AppState>,
+    folder: &Path,
+    cancel: &Arc<AtomicBool>,
+    skip_tag: bool,
+) -> Result<()> {
+    let start = Instant::now();
+    let mut stats = ScanStats::default();
+    let result = index_inner(state, folder, cancel, skip_tag, &mut stats);
+    stats.total_secs = start.elapsed().as_secs_f64();
+    log_scan_metrics(&stats);
+    result
+}
+
+fn index_inner(
+    state: &Arc<AppState>,
+    folder: &Path,
+    cancel: &Arc<AtomicBool>,
+    skip_tag: bool,
+    stats: &mut ScanStats,
+) -> Result<()> {
+    let db = Db::open(&state.db_path)?;
+    let folder_string = folder.to_string_lossy().to_string();
+    let walk_start = Instant::now();
+    let mut files = Vec::new();
+    for entry in WalkDir::new(folder).follow_links(false) {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(error) => {
+                log::warn!("walk error: {error}");
+                continue;
+            }
+        };
+        if entry.file_type().is_file() && is_image(entry.path()) {
+            files.push(entry.path().to_path_buf());
+        }
+    }
+    files.sort();
+    stats.files = files.len();
+    stats.walk_secs = walk_start.elapsed().as_secs_f64();
+    {
+        let mut shared = state.shared.lock().unwrap();
+        shared.status = format!("发现 {} 张图片，生成缩略图...", files.len());
+    }
+
+    let import_start = Instant::now();
+    for (index, path) in files.iter().enumerate() {
+        if cancel.load(Ordering::SeqCst) {
+            stats.import_secs = import_start.elapsed().as_secs_f64();
+            let mut shared = state.shared.lock().unwrap();
+            shared.status = "已停止".into();
+            shared.scanning = false;
+            return Ok(());
+        }
+        let metadata = match std::fs::metadata(path) {
+            Ok(metadata) => metadata,
+            Err(error) => {
+                log::warn!("metadata {}: {error}", path.display());
+                continue;
+            }
+        };
+        let bytes = metadata.len();
+        let mtime = metadata
+            .modified()
+            .ok()
+            .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
+            .map(|duration| duration.as_secs())
+            .unwrap_or(0);
+        let stored = db.stored_meta(path)?;
+        let reset_tag_attempts = stored
+            .as_ref()
+            .is_none_or(|meta| meta.mtime != mtime || meta.bytes != bytes);
+        if stored
+            .as_ref()
+            .is_some_and(|meta| meta.is_unchanged(mtime, bytes))
+        {
+            stats.unchanged += 1;
+            stats.imported += 1;
+            if stats.unchanged % 500 == 0 {
+                let mut shared = state.shared.lock().unwrap();
+                shared.status = format!("校验 {}/{}", index + 1, files.len());
+            }
+            continue;
+        }
+        let hashes = stored.and_then(|meta| meta.content_if_current(mtime, bytes));
+        let hashes = match hashes {
+            Some(hashes) => {
+                stats.hashes_reused += 1;
+                hashes
+            }
+            None => {
+                {
+                    let mut shared = state.shared.lock().unwrap();
+                    shared.status = format!(
+                        "哈希 {}/{} · {}",
+                        index + 1,
+                        files.len(),
+                        path.file_name()
+                            .map(|name| name.to_string_lossy().to_string())
+                            .unwrap_or_default()
+                    );
+                }
+                let started = Instant::now();
+                let hashes = match media::hash_file(path) {
+                    Ok(hashes) => {
+                        stats.hashes_computed += 1;
+                        hashes
+                    }
+                    Err(error) => {
+                        stats.hash_errors += 1;
+                        log::warn!("hash {}: {error:#}", path.display());
+                        crate::media::ContentHashes::default()
+                    }
+                };
+                stats.hash_secs += started.elapsed().as_secs_f64();
+                hashes
+            }
+        };
+        let thumb_started = Instant::now();
+        let thumbnail = ensure_thumb(path, &state.cache_dir, mtime, bytes);
+        stats.thumb_secs += thumb_started.elapsed().as_secs_f64();
+        let (thumb, width, height) = match thumbnail {
+            Ok(value) => value,
+            Err(error) => {
+                stats.thumb_errors += 1;
+                log::warn!("thumbnail {}: {error:#}", path.display());
+                (None, 0, 0)
+            }
+        };
+        let asset = db.upsert_meta(
+            &folder_string,
+            path,
+            thumb.as_deref(),
+            width,
+            height,
+            bytes,
+            mtime,
+            &hashes,
+            reset_tag_attempts,
+        )?;
+        {
+            let mut shared = state.shared.lock().unwrap();
+            shared.upsert(asset);
+            shared.status = format!(
+                "缩略图 {}/{} · 已打标 {}/{}",
+                index + 1,
+                files.len(),
+                shared.counts.tagged_count(),
+                shared.counts.total()
+            );
+        }
+        stats.imported += 1;
+        if stats.imported % 1000 == 0 {
+            log::info!(
+                "index progress: imported={} unchanged={} elapsed={:.2}s hash={:.2}s thumb={:.2}s",
+                stats.imported,
+                stats.unchanged,
+                import_start.elapsed().as_secs_f64(),
+                stats.hash_secs,
+                stats.thumb_secs
+            );
+        }
+    }
+    stats.import_secs = import_start.elapsed().as_secs_f64();
+
+    {
+        let mut shared = state.shared.lock().unwrap();
+        shared.sort_assets();
+    }
+    backfill_tile_thumbs(state, cancel);
+    if let Err(error) = db.recover_tag_jobs() {
+        log::warn!("recover tag jobs: {error:#}");
+    }
+    db.enqueue_tag_jobs(&folder_string)?;
+    let queue = db.tag_job_counts(&folder_string)?;
+    stats.untagged = queue.pending;
+    {
+        let mut shared = state.shared.lock().unwrap();
+        shared.set_queue_counts(queue.pending, queue.running, queue.error);
+        shared.status = if queue.pending > 0 {
+            format!("待打标 {} 张 · 队列已恢复", queue.pending)
+        } else if queue.error > 0 {
+            format!("完成 · {} 张图片 · {} 个失败待处理", files.len(), queue.error)
+        } else {
+            format!("完成 · {} 张图片，全部已打标", files.len())
+        };
+    }
+    if queue.pending == 0 {
+        let mut shared = state.shared.lock().unwrap();
+        shared.scanning = false;
+        return Ok(());
+    }
+    if skip_tag {
+        stats.skipped_tagging = true;
+        let mut shared = state.shared.lock().unwrap();
+        shared.set_queue_counts(queue.pending, 0, queue.error);
+        shared.status = format!(
+            "完成 · {} 张图片（跳过打标，队列 {} 张待处理）",
+            files.len(),
+            queue.pending
+        );
+        shared.scanning = false;
+        return Ok(());
+    }
+
+    {
+        let mut shared = state.shared.lock().unwrap();
+        shared.status = format!("加载 PixAI 模型...（队列 {} 张）", queue.pending);
+    }
+    let load_start = Instant::now();
+    let (mut sidecar, ready) = Sidecar::spawn()?;
+    stats.tag_load_secs = load_start.elapsed().as_secs_f64();
+    {
+        let mut shared = state.shared.lock().unwrap();
+        shared.sidecar_device = Some(if ready.half {
+            format!("{} · FP16", ready.device)
+        } else {
+            ready.device.clone()
+        });
+        shared.status = format!(
+            "打标中 0/{} · {} 类标签",
+            queue.pending,
+            ready.classes
+        );
+    }
+    process_tag_queue(
+        state,
+        &db,
+        &folder_string,
+        &mut sidecar,
+        cancel,
+        stats,
+        queue.pending,
+    )?;
+    Ok(())
+}
+
+fn process_tag_queue(
+    state: &Arc<AppState>,
+    db: &Db,
+    folder: &str,
+    sidecar: &mut Sidecar,
+    cancel: &Arc<AtomicBool>,
+    stats: &mut ScanStats,
+    total: usize,
+) -> Result<()> {
+    let tag_start = Instant::now();
+    let mut done = 0usize;
+    loop {
+        if cancel.load(Ordering::SeqCst) {
+            break;
+        }
+        let jobs = db.claim_tag_jobs(folder, 4)?;
+        if jobs.is_empty() {
+            break;
+        }
+        let job_ids = jobs.iter().map(|job| job.id).collect::<Vec<_>>();
+        {
+            let counts = db.tag_job_counts(folder)?;
+            let mut shared = state.shared.lock().unwrap();
+            shared.set_queue_counts(counts.pending, counts.running, counts.error);
+            shared.status = format!(
+                "打标中 {done}/{total} · 队列 {} · 失败 {}",
+                counts.pending, counts.error
+            );
+        }
+        let paths = jobs
+            .iter()
+            .map(|job| job.path.clone())
+            .collect::<Vec<_>>();
+        let items = match sidecar.tag(&paths) {
+            Ok(items) => items,
+            Err(error) => {
+                db.release_tag_jobs(&job_ids)?;
+                let counts = db.tag_job_counts(folder)?;
+                let mut shared = state.shared.lock().unwrap();
+                shared.set_queue_counts(counts.pending, counts.running, counts.error);
+                return Err(error).context("sidecar tag batch");
+            }
+        };
+        let by_path = jobs
+            .iter()
+            .map(|job| (job.path.clone(), job.id))
+            .collect::<HashMap<_, _>>();
+        let mut handled = HashSet::new();
+        for item in items {
+            let path = PathBuf::from(&item.path);
+            let job_id = by_path.get(&path).copied();
+            if let Some(job_id) = job_id {
+                handled.insert(job_id);
+            }
+            if item.ok {
+                let asset = {
+                    let shared = state.shared.lock().unwrap();
+                    let existing = shared
+                        .assets
+                        .read()
+                        .unwrap()
+                        .iter()
+                        .find(|asset| asset.path == path)
+                        .cloned();
+                    existing.map(|mut asset| {
+                        if asset.width == 0 {
+                            asset.width = item.width.unwrap_or(0);
+                            asset.height = item.height.unwrap_or(0);
+                        }
+                        asset.rating = item.rating.clone().unwrap_or_default();
+                        asset.group = item
+                            .group
+                            .clone()
+                            .unwrap_or_else(|| "未分类".to_string());
+                        asset.tags = item.tags.clone().unwrap_or_default();
+                        asset.tagged = true;
+                        asset.tag_attempts = 0;
+                        asset.error = None;
+                        asset
+                    })
+                };
+                let Some(asset) = asset else {
+                    if let Some(job_id) = job_id {
+                        db.fail_tag_job(job_id, "asset not found")?;
+                    }
+                    stats.tag_errors += 1;
+                    done += 1;
+                    continue;
+                };
+                db.update_tags(&asset)?;
+                if let Some(job_id) = job_id {
+                    db.complete_tag_job(job_id)?;
+                }
+                state.shared.lock().unwrap().upsert(asset);
+                stats.tagged += 1;
+            } else {
+                let error = item
+                    .error
+                    .clone()
+                    .unwrap_or_else(|| "sidecar image error".to_string());
+                let attempts = db.mark_error(&path, &error)?;
+                if let Some(job_id) = job_id {
+                    db.fail_tag_job(job_id, &error)?;
+                }
+                stats.tag_errors += 1;
+                let updated = {
+                    let shared = state.shared.lock().unwrap();
+                    let mut asset = shared
+                        .assets
+                        .read()
+                        .unwrap()
+                        .iter()
+                        .find(|asset| asset.path == path)
+                        .cloned();
+                    if let Some(asset) = asset.as_mut() {
+                        asset.error = Some(error);
+                        asset.tag_attempts = attempts;
+                    }
+                    asset
+                };
+                if let Some(asset) = updated {
+                    state.shared.lock().unwrap().upsert(asset);
+                }
+            }
+            done += 1;
+        }
+        let unhandled = jobs
+            .iter()
+            .filter(|job| !handled.contains(&job.id))
+            .map(|job| job.id)
+            .collect::<Vec<_>>();
+        if !unhandled.is_empty() {
+            log::warn!("{} tag jobs returned no result; requeueing", unhandled.len());
+            db.release_tag_jobs(&unhandled)?;
+        }
+        let counts = db.tag_job_counts(folder)?;
+        let mut shared = state.shared.lock().unwrap();
+        shared.set_queue_counts(counts.pending, counts.running, counts.error);
+        shared.status = format!(
+            "打标中 {done}/{total} · 队列 {} · 失败 {}",
+            counts.pending, counts.error
+        );
+    }
+    stats.tag_secs = tag_start.elapsed().as_secs_f64();
+
+    let counts = db.tag_job_counts(folder)?;
+    let mut shared = state.shared.lock().unwrap();
+    shared.set_queue_counts(counts.pending, counts.running, counts.error);
+    shared.sort_assets();
+    shared.status = if cancel.load(Ordering::SeqCst) {
+        format!(
+            "已停止 · 已打标 {done}/{total} · 队列 {} 张待处理",
+            counts.pending
+        )
+    } else if counts.pending > 0 {
+        format!(
+            "打标暂停 · 队列 {} 张待处理 · {} 个失败",
+            counts.pending, counts.error
+        )
+    } else if counts.error > 0 {
+        format!(
+            "完成 · {} 张图片 · {} 个失败待处理",
+            shared.counts.total(),
+            counts.error
+        )
+    } else {
+        format!("完成 · {} 张图片已打标", shared.counts.total())
+    };
+    shared.scanning = false;
+    Ok(())
+}
+
+#[derive(Deserialize)]
+struct ModelConfig {
+    tags: Vec<String>,
+}
+
+fn backfill_vocab(db: &Db) -> Result<()> {
+    let missing = db.tags_missing_vocab()?;
+    if missing.is_empty() {
+        return Ok(());
+    }
+    let config_path = crate::sidecar::model_dir().join("config.json");
+    let bytes = std::fs::read(&config_path)
+        .with_context(|| format!("read {}", config_path.display()))?;
+    let config: ModelConfig =
+        serde_json::from_slice(&bytes).with_context(|| format!("parse {}", config_path.display()))?;
+    let index = config
+        .tags
+        .iter()
+        .enumerate()
+        .map(|(index, tag)| (tag.as_str(), index as u32))
+        .collect::<HashMap<_, _>>();
+    let mappings = missing
+        .iter()
+        .filter_map(|name| index.get(name.as_str()).map(|index| (name.clone(), *index)))
+        .collect::<Vec<_>>();
+    if mappings.is_empty() {
+        return Ok(());
+    }
+    db.set_vocab_indices(&mappings)?;
+    log::info!("backfilled vocab_index for {} tags", mappings.len());
+    Ok(())
+}
+
+fn absolute(path: PathBuf) -> PathBuf {
+    std::path::absolute(&path).unwrap_or(path)
+}
+
+fn validate_under(folder: &Path, paths: &[PathBuf]) -> Result<()> {
+    for path in paths {
+        if !path.is_absolute() {
+            bail!("拒绝处理相对路径: {}", path.display());
+        }
+        if !path.starts_with(folder) {
+            bail!("拒绝处理当前图库之外的文件: {}", path.display());
+        }
+    }
+    Ok(())
+}
+
+/// 启动时把已存在的小档直接挂到资产上，省掉一次生成与等待。
+fn load_tile_thumbs(mut assets: Vec<Asset>) -> Vec<Asset> {
+    for asset in &mut assets {
+        if let Some(thumb) = &asset.thumb {
+            let tile = tile_thumb_path(thumb);
+            if tile.exists() {
+                asset.tile_thumb = Some(tile);
+            }
+        }
+    }
+    assets
+}
+
+/// 网格用小档缩略图路径：与 512 档同目录同前缀，只加 `-t256`。
+fn tile_thumb_path(thumb: &Path) -> PathBuf {
+    let stem = thumb
+        .file_stem()
+        .map(|value| value.to_string_lossy().to_string())
+        .unwrap_or_default();
+    thumb.with_file_name(format!("{stem}-t256.jpg"))
+}
+
+/// 从已有的 512 档再缩到 256；失败时返回 None，网格回退 512 档。
+fn ensure_tile_thumb(thumb: &Path) -> Option<PathBuf> {
+    let target = tile_thumb_path(thumb);
+    if target.exists() {
+        return Some(target);
+    }
+    let image = image::ImageReader::open(thumb)
+        .ok()?
+        .with_guessed_format()
+        .ok()?
+        .decode()
+        .ok()?;
+    image.thumbnail(256, 256).save(&target).ok()?;
+    Some(target)
+}
+
+/// 补齐网格小档。图片 IO 全部在锁外，每批写回一次并 bump revision，
+/// 这样首屏能在几百毫秒内切到小档，其余边滚边补。
+fn backfill_tile_thumbs(state: &Arc<AppState>, cancel: &AtomicBool) {
+    let started = Instant::now();
+    let pending = {
+        let shared = state.shared.lock().unwrap();
+        let assets = shared.assets.read().unwrap();
+        assets
+            .iter()
+            .enumerate()
+            .filter_map(|(index, asset)| match (&asset.thumb, &asset.tile_thumb) {
+                (Some(thumb), None) => Some((index, thumb.clone())),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+    };
+    if pending.is_empty() {
+        return;
+    }
+    let mut filled = 0usize;
+    let mut failed = 0usize;
+    for batch in pending.chunks(256) {
+        if cancel.load(Ordering::SeqCst) {
+            break;
+        }
+        let done = batch
+            .iter()
+            .filter_map(|(index, thumb)| ensure_tile_thumb(thumb).map(|tile| (*index, tile)))
+            .collect::<Vec<_>>();
+        failed += batch.len() - done.len();
+        filled += done.len();
+        let mut shared = state.shared.lock().unwrap();
+        {
+            let mut assets = shared.assets.write().unwrap();
+            for (index, tile) in done {
+                if let Some(asset) = assets.get_mut(index) {
+                    asset.tile_thumb = Some(tile);
+                }
+            }
+        }
+        shared.revision = shared.revision.wrapping_add(1);
+    }
+    log::info!(
+        "tile tier: pending={} filled={} failed={} secs={:.2}",
+        pending.len(),
+        filled,
+        failed,
+        started.elapsed().as_secs_f64()
+    );
+}
+
+fn ensure_thumb(
+    path: &Path,
+    cache_dir: &Path,
+    mtime: u64,
+    bytes: u64,
+) -> Result<(Option<PathBuf>, u32, u32)> {
+    std::fs::create_dir_all(cache_dir)?;
+    let key = format!(
+        "{}-{}-{}-{}",
+        path.to_string_lossy(),
+        mtime,
+        bytes,
+        path.extension().map(|ext| ext.to_string_lossy()).unwrap_or_default()
+    );
+    let hash = blake3::hash(key.as_bytes()).to_hex();
+    let target = cache_dir.join(format!("{}.jpg", &hash.as_str()[..24]));
+
+    if target.exists() {
+        let (width, height) = image::ImageReader::open(path)?
+            .with_guessed_format()?
+            .into_dimensions()
+            .context("read image dimensions")?;
+        return Ok((Some(target), width, height));
+    }
+
+    let image = image::ImageReader::open(path)?
+        .with_guessed_format()?
+        .decode()
+        .with_context(|| format!("decode {}", path.display()))?;
+    let (width, height) = (image.width(), image.height());
+    let rgba = image.thumbnail(512, 512).to_rgba8();
+    let (thumb_width, thumb_height) = rgba.dimensions();
+    let mut rgb = RgbImage::new(thumb_width, thumb_height);
+    for (source, target_pixel) in rgba.pixels().zip(rgb.pixels_mut()) {
+        let alpha = source[3] as u32;
+        let inverse = 255 - alpha;
+        *target_pixel = Rgb([
+            ((source[0] as u32 * alpha + 255 * inverse) / 255) as u8,
+            ((source[1] as u32 * alpha + 255 * inverse) / 255) as u8,
+            ((source[2] as u32 * alpha + 255 * inverse) / 255) as u8,
+        ]);
+    }
+    image::DynamicImage::ImageRgb8(rgb).save_with_format(&target, ImageFormat::Jpeg)?;
+    Ok((Some(target), width, height))
+}

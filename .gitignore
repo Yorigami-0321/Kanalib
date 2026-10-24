@@ -1,0 +1,19 @@
+/models/
+/_research_*
+/tools/model_probe/.venv*/
+/tools/model_probe/out*/
+/tools/model_probe/fixtures/
+/tools/model_probe/*.whl*
+/tools/model_probe/bench_*/
+/runtime/
+/dist/
+/.kanalib/
+/sample_library/
+/target/
+
+# 会话与构建临时产物
+/*.log
+/sidecar_test.out
+/sidecar_test.err
+/.qoder-credits/
+__pycache__/

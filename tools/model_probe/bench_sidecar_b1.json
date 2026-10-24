@@ -1,0 +1,18 @@
+{
+  "backend": "python-sidecar",
+  "ready": {
+    "device": "cuda",
+    "half": true,
+    "classes": 30877
+  },
+  "batch": 1,
+  "runs": 20,
+  "load_seconds": 10.19,
+  "round_trip": {
+    "mean_ms": 327.34,
+    "p50_ms": 318.76,
+    "min_ms": 302.19,
+    "max_ms": 374.45
+  },
+  "images_per_second": 3.055
+}

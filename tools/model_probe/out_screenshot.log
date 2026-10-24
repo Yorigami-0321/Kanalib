@@ -1,0 +1,19 @@
+`torch_dtype` is deprecated! Use `dtype` instead!
+torch=2.9.1+cpu cuda=None device=cpu
+loading model from D:\Code\Kanalib\models\pixai-tagger-v1.0
+model loaded in 1.0s
+classes=30877 tags=30877 categories=[('general', 15043), ('character', 8308), ('copyright', 2460), ('style', 4917), ('meta', 145), ('rating', 4)]
+thresholds={'general': 0.17, 'character': 0.27, 'style': 0.15, 'copyright': 0.24, 'meta': 0.17, 'rating': 0.41}
+input D:\Code\floral-notepaper\Docs\images\AI»æ»­½ØÍ¼.png size=(1300, 1149) mode=RGB
+preprocess 1 images: 27.56ms
+inference batch=1: 22909.01ms (0.04 img/s)
+
+=== AI»æ»­½ØÍ¼.png 1300x1149
+  general    n=  51  1girl:0.996, dress:0.987, wings:0.978, halo:0.971, solo:0.962, white_dress:0.940, angel_wings:0.928, long_hair:0.926
+  character  n=   0  
+  copyright  n=   1  original:0.905
+  style      n=   0  
+  meta       n=   1  highres:0.998
+  rating     n=   1  rating:g:0.673
+
+wrote out_screenshot\probe.json
