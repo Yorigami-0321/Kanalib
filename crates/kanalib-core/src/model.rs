@@ -18,6 +18,8 @@ pub struct TagHit {
 #[derive(Clone, Debug)]
 pub struct Asset {
     pub path: PathBuf,
+    /// 该资产所属的本地根目录。
+    pub library_root: PathBuf,
     pub thumb: Option<PathBuf>,
     /// 网格用小档缩略图（由 `thumb` 同目录的 `-t256.jpg` 派生，不落库）；缺失时回退 `thumb`。
     pub tile_thumb: Option<PathBuf>,
@@ -28,6 +30,8 @@ pub struct Asset {
     pub favorite: bool,
     pub star: u8,
     pub tags: Vec<TagHit>,
+    /// 人工添加的标签；与自动标签分开存储，搜索、计数与 Prompt 合并使用。
+    pub manual_tags: Vec<TagHit>,
     pub tagged: bool,
     pub tag_attempts: u32,
     pub error: Option<String>,
@@ -46,10 +50,13 @@ impl Asset {
             .unwrap_or_else(|| self.path.display().to_string())
     }
 
+    pub fn all_tags(&self) -> impl Iterator<Item = &TagHit> {
+        self.tags.iter().chain(self.manual_tags.iter())
+    }
+
     pub fn top_tags(&self, count: usize) -> Vec<&TagHit> {
-        self.tags
-            .iter()
-            .filter(|tag| tag.category == "general")
+        self.all_tags()
+            .filter(|tag| matches!(tag.category.as_str(), "general" | "manual"))
             .take(count)
             .collect()
     }
@@ -78,6 +85,7 @@ pub struct Counts {
     pub ratings: Vec<(String, usize)>,
     pub groups: Vec<(String, usize)>,
     pub tags: Vec<(String, usize)>,
+    pub sources: Vec<(PathBuf, usize)>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -90,6 +98,7 @@ pub struct CountAccumulator {
     ratings: HashMap<String, usize>,
     groups: HashMap<String, usize>,
     tags: HashMap<String, usize>,
+    sources: HashMap<PathBuf, usize>,
 }
 
 impl CountAccumulator {
@@ -120,8 +129,20 @@ impl CountAccumulator {
         if !asset.group.is_empty() {
             *self.groups.entry(asset.group.clone()).or_default() += 1;
         }
-        for tag in asset.tags.iter().filter(|tag| tag.category == "general") {
-            *self.tags.entry(tag.tag.clone()).or_default() += 1;
+        if !asset.library_root.as_os_str().is_empty() {
+            *self
+                .sources
+                .entry(asset.library_root.clone())
+                .or_default() += 1;
+        }
+        let mut seen = HashSet::new();
+        for tag in asset
+            .all_tags()
+            .filter(|tag| matches!(tag.category.as_str(), "general" | "manual"))
+        {
+            if seen.insert(tag.tag.clone()) {
+                *self.tags.entry(tag.tag.clone()).or_default() += 1;
+            }
         }
     }
 
@@ -144,8 +165,17 @@ impl CountAccumulator {
         if !asset.group.is_empty() {
             decrement(&mut self.groups, &asset.group);
         }
-        for tag in asset.tags.iter().filter(|tag| tag.category == "general") {
-            decrement(&mut self.tags, &tag.tag);
+        if !asset.library_root.as_os_str().is_empty() {
+            decrement_path(&mut self.sources, &asset.library_root);
+        }
+        let mut seen = HashSet::new();
+        for tag in asset
+            .all_tags()
+            .filter(|tag| matches!(tag.category.as_str(), "general" | "manual"))
+        {
+            if seen.insert(tag.tag.clone()) {
+                decrement(&mut self.tags, &tag.tag);
+            }
         }
     }
 
@@ -167,7 +197,31 @@ impl CountAccumulator {
             ratings: top(&self.ratings, 8),
             groups: top(&self.groups, 12),
             tags: top(&self.tags, 18),
+            sources: top_paths(&self.sources, 24),
         }
+    }
+}
+
+fn top_paths(map: &HashMap<PathBuf, usize>, limit: usize) -> Vec<(PathBuf, usize)> {
+    let mut rows = map
+        .iter()
+        .map(|(path, count)| (path.clone(), *count))
+        .collect::<Vec<_>>();
+    rows.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    rows.truncate(limit);
+    rows
+}
+
+fn decrement_path(map: &mut HashMap<PathBuf, usize>, key: &Path) {
+    let remove = match map.get_mut(key) {
+        Some(value) => {
+            *value = value.saturating_sub(1);
+            *value == 0
+        }
+        None => false,
+    };
+    if remove {
+        map.remove(key);
     }
 }
 
@@ -203,6 +257,7 @@ pub enum Filter {
     Rating(String),
     Group(String),
     Tag(String),
+    Source(PathBuf),
 }
 
 impl Filter {
@@ -215,6 +270,10 @@ impl Filter {
             Self::Rating(rating) => format!("评级 {rating}"),
             Self::Group(group) => group.clone(),
             Self::Tag(tag) => format!("#{tag}"),
+            Self::Source(path) => path
+                .file_name()
+                .map(|name| name.to_string_lossy().to_string())
+                .unwrap_or_else(|| path.display().to_string()),
         }
     }
 
@@ -226,7 +285,8 @@ impl Filter {
             Self::Favorites => asset.favorite,
             Self::Rating(rating) => asset.rating.eq_ignore_ascii_case(rating),
             Self::Group(group) => &asset.group == group,
-            Self::Tag(tag) => asset.tags.iter().any(|hit| &hit.tag == tag),
+            Self::Tag(tag) => asset.all_tags().any(|hit| &hit.tag == tag),
+            Self::Source(root) => &asset.library_root == root,
         }
     }
 }
@@ -375,8 +435,7 @@ impl SearchQuery {
         }
         for tag in &self.tags {
             if !asset
-                .tags
-                .iter()
+                .all_tags()
                 .any(|hit| hit.tag.eq_ignore_ascii_case(tag))
             {
                 return false;
@@ -384,8 +443,7 @@ impl SearchQuery {
         }
         for tag in &self.exclude_tags {
             if asset
-                .tags
-                .iter()
+                .all_tags()
                 .any(|hit| hit.tag.eq_ignore_ascii_case(tag))
             {
                 return false;
@@ -398,8 +456,7 @@ impl SearchQuery {
                 }
             } else {
                 let tags = asset
-                    .tags
-                    .iter()
+                    .all_tags()
                     .map(|hit| hit.tag.to_lowercase())
                     .collect::<Vec<_>>()
                     .join(" ");
@@ -428,9 +485,27 @@ pub struct SavedSearch {
     pub query: String,
 }
 
+#[derive(Clone, Debug)]
+pub struct TagSummary {
+    pub name: String,
+    pub category: String,
+    pub count: usize,
+    pub manual_count: usize,
+}
+
+pub fn normalize_tag_name(value: &str) -> String {
+    value
+        .trim()
+        .trim_start_matches('#')
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join("_")
+        .to_lowercase()
+}
+
 #[derive(Debug)]
 pub struct Shared {
-    pub folder: PathBuf,
+    pub roots: Vec<PathBuf>,
     pub assets: Arc<RwLock<Vec<Asset>>>,
     pub counts: CountAccumulator,
     pub revision: u64,
@@ -445,18 +520,24 @@ pub struct Shared {
     pub queue_error: usize,
     pub dedup: DedupState,
     pub saved_searches: Vec<SavedSearch>,
+    /// 只影响侧栏标签面的显示，不修改资产标签本身。
+    pub blocked_tags: HashSet<String>,
 }
 
 impl Shared {
     pub fn new(
-        folder: PathBuf,
+        roots: Vec<PathBuf>,
         assets: Vec<Asset>,
         reviews: std::collections::HashMap<String, DuplicateReview>,
         similar_threshold: u8,
         protected_paths: Vec<PathBuf>,
     ) -> Self {
         let status = if assets.is_empty() {
-            "准备扫描".to_string()
+            if roots.is_empty() {
+                "请添加文件夹".to_string()
+            } else {
+                "准备扫描".to_string()
+            }
         } else {
             format!("已加载 {} 张图片", assets.len())
         };
@@ -466,7 +547,7 @@ impl Shared {
         dedup.set_protected_paths(protected_paths);
         dedup.rebuild(&assets);
         Self {
-            folder,
+            roots,
             assets: Arc::new(RwLock::new(assets)),
             counts,
             revision: 1,
@@ -481,6 +562,7 @@ impl Shared {
             queue_error: 0,
             dedup,
             saved_searches: Vec::new(),
+            blocked_tags: HashSet::new(),
         }
     }
 
@@ -584,6 +666,7 @@ mod tests {
     fn asset(path: &str, tagged: bool, rating: &str, group: &str, tags: Vec<TagHit>) -> Asset {
         Asset {
             path: PathBuf::from(path),
+            library_root: PathBuf::from("lib"),
             thumb: None,
             tile_thumb: None,
             width: 0,
@@ -593,6 +676,7 @@ mod tests {
             favorite: false,
             star: 0,
             tags,
+            manual_tags: Vec::new(),
             tagged,
             tag_attempts: 0,
             error: None,
@@ -670,6 +754,30 @@ mod tests {
     }
 
     #[test]
+    fn manual_tags_join_counts_filters_and_search() {
+        let mut a = asset(
+            "a.png",
+            true,
+            "g",
+            "原创",
+            vec![tag("1girl", "general")],
+        );
+        a.manual_tags.push(tag("custom_tag", "manual"));
+        let counts = CountAccumulator::from_assets(&[a.clone()]);
+        assert_eq!(
+            counts.view().tags,
+            vec![
+                ("1girl".to_string(), 1),
+                ("custom_tag".to_string(), 1)
+            ]
+        );
+        assert!(Filter::Tag("custom_tag".to_string()).matches(&a));
+        let query = SearchQuery::parse("tag:custom_tag");
+        assert!(query.matches(&a, None, None));
+        assert_eq!(a.top_tags(2).len(), 2);
+    }
+
+    #[test]
     fn dup_true_requires_the_duplicate_path_set() {
         let a = asset("a.png", true, "g", "原创", vec![]);
         let query = SearchQuery::parse("dup:true");
@@ -682,7 +790,7 @@ mod tests {
     fn shared_upsert_updates_counts_and_revision() {
         let old = asset("a.png", true, "g", "原创", vec![tag("1girl", "general")]);
         let mut shared = Shared::new(
-            PathBuf::from("lib"),
+            vec![PathBuf::from("lib")],
             vec![old.clone()],
             Default::default(),
             crate::dedup::DEFAULT_SIMILAR_THRESHOLD,

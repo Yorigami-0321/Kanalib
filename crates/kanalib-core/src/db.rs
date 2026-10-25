@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::dedup::{DuplicateReview, ReviewState};
 use crate::media::ContentHashes;
-use crate::model::{Asset, Filter, SavedSearch, TagHit};
+use crate::model::{Asset, Filter, SavedSearch, TagHit, TagSummary, normalize_tag_name};
 
 const SCHEMA_VERSION: i64 = 5;
 
@@ -250,13 +250,28 @@ impl Db {
     }
 
     pub fn load_folder(&self, folder: &str) -> Result<Vec<Asset>> {
-        let mut statement = self.conn.prepare(
+        self.load_library(&[folder.to_string()])
+    }
+
+    pub fn load_library(&self, folders: &[String]) -> Result<Vec<Asset>> {
+        if folders.is_empty() {
+            return Ok(Vec::new());
+        }
+        let placeholders = vec!["?"; folders.len()].join(", ");
+        let sql = format!(
             "SELECT path, thumb, width, height, group_name, rating, tags_json, tagged, error,
-                    sha1, blake3, phash, tag_attempts, bytes, mtime, favorite, star
-             FROM assets WHERE folder = ?1",
-        )?;
-        let rows = statement.query_map([folder], row_to_asset)?;
+                    sha1, blake3, phash, tag_attempts, bytes, mtime, favorite, star, folder
+             FROM assets WHERE folder IN ({placeholders})"
+        );
+        let mut statement = self.conn.prepare(&sql)?;
+        let rows = statement.query_map(rusqlite::params_from_iter(folders.iter()), row_to_asset)?;
         let mut assets = rows.collect::<rusqlite::Result<Vec<_>>>()?;
+        let mut manual = self.manual_tags_for_folders(folders)?;
+        for asset in &mut assets {
+            if let Some(tags) = manual.remove(&asset.path) {
+                asset.manual_tags = tags;
+            }
+        }
         assets.sort_by(|a, b| a.path.cmp(&b.path));
         Ok(assets)
     }
@@ -350,12 +365,6 @@ impl Db {
     pub fn update_tags(&self, asset: &Asset) -> Result<()> {
         let path = asset.path.to_string_lossy().to_string();
         let tags_json = serde_json::to_string(&asset.tags)?;
-        let tags_text = asset
-            .tags
-            .iter()
-            .map(|hit| hit.tag.as_str())
-            .collect::<Vec<_>>()
-            .join(" ");
         let tx = self.conn.unchecked_transaction()?;
         let asset_id: Option<i64> = tx
             .query_row("SELECT id FROM assets WHERE path = ?1", [&path], |row| {
@@ -366,9 +375,9 @@ impl Db {
             bail!("asset not found: {path}");
         };
         tx.execute(
-            "UPDATE assets SET group_name = ?1, rating = ?2, tags_json = ?3, tags_text = ?4,
-                tagged = 1, tag_state = 'done', tag_attempts = 0, error = NULL WHERE id = ?5",
-            params![asset.group, asset.rating, tags_json, tags_text, asset_id],
+            "UPDATE assets SET group_name = ?1, rating = ?2, tags_json = ?3,
+                tagged = 1, tag_state = 'done', tag_attempts = 0, error = NULL WHERE id = ?4",
+            params![asset.group, asset.rating, tags_json, asset_id],
         )?;
         tx.execute(
             "DELETE FROM asset_tags WHERE asset_id = ?1 AND origin = 'auto'",
@@ -382,6 +391,7 @@ impl Db {
                 params![asset_id, tag_id, tag.score as f64],
             )?;
         }
+        refresh_tags_text(&tx, asset_id)?;
         tx.commit()?;
         Ok(())
     }
@@ -409,6 +419,129 @@ impl Db {
         drop(statement);
         tx.commit()?;
         Ok(updated)
+    }
+
+    pub fn add_manual_tags(&self, paths: &[PathBuf], name: &str, category: &str) -> Result<usize> {
+        let name = normalize_tag_name(name);
+        if name.is_empty() {
+            bail!("标签名不能为空");
+        }
+        let category = if category.trim().is_empty() {
+            "manual"
+        } else {
+            category.trim()
+        };
+        let tx = self.conn.unchecked_transaction()?;
+        let mut updated = 0;
+        for path in paths {
+            let asset_id: Option<i64> = tx
+                .query_row(
+                    "SELECT id FROM assets WHERE path = ?1",
+                    [path.to_string_lossy().to_string()],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            let Some(asset_id) = asset_id else {
+                continue;
+            };
+            tx.execute(
+                "INSERT INTO tags(name, category) VALUES(?1, ?2)
+                 ON CONFLICT(name) DO NOTHING",
+                params![name, category],
+            )?;
+            let tag_id: i64 = tx.query_row(
+                "SELECT id FROM tags WHERE name = ?1",
+                [name.as_str()],
+                |row| row.get(0),
+            )?;
+            let inserted = tx.execute(
+                "INSERT OR IGNORE INTO asset_tags(asset_id, tag_id, confidence, origin)
+                 VALUES(?1, ?2, 1.0, 'manual')",
+                params![asset_id, tag_id],
+            )?;
+            if inserted > 0 {
+                refresh_tags_text(&tx, asset_id)?;
+                updated += 1;
+            }
+        }
+        tx.commit()?;
+        Ok(updated)
+    }
+
+    pub fn remove_tags(&self, paths: &[PathBuf], name: &str) -> Result<usize> {
+        let name = normalize_tag_name(name);
+        if name.is_empty() {
+            return Ok(0);
+        }
+        let tx = self.conn.unchecked_transaction()?;
+        let mut updated = 0;
+        for path in paths {
+            let asset_id: Option<i64> = tx
+                .query_row(
+                    "SELECT id FROM assets WHERE path = ?1",
+                    [path.to_string_lossy().to_string()],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            let Some(asset_id) = asset_id else {
+                continue;
+            };
+            let tag_id: Option<i64> = tx
+                .query_row(
+                    "SELECT id FROM tags WHERE name = ?1",
+                    [name.as_str()],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            let Some(tag_id) = tag_id else {
+                continue;
+            };
+            let removed = tx.execute(
+                "DELETE FROM asset_tags WHERE asset_id = ?1 AND tag_id = ?2",
+                params![asset_id, tag_id],
+            )?;
+            if removed > 0 {
+                refresh_auto_tags_json(&tx, asset_id)?;
+                refresh_tags_text(&tx, asset_id)?;
+                updated += 1;
+            }
+        }
+        tx.commit()?;
+        Ok(updated)
+    }
+
+    pub fn list_tags(&self, folder: &str) -> Result<Vec<TagSummary>> {
+        self.list_tags_in(&[folder.to_string()])
+    }
+
+    pub fn list_tags_in(&self, folders: &[String]) -> Result<Vec<TagSummary>> {
+        if folders.is_empty() {
+            return Ok(Vec::new());
+        }
+        let placeholders = vec!["?"; folders.len()].join(", ");
+        let sql = format!(
+            "SELECT t.name, t.category, COUNT(DISTINCT a.id) AS uses,
+                    COUNT(DISTINCT CASE WHEN at.origin = 'manual' THEN a.id END) AS manual
+             FROM tags t
+             JOIN asset_tags at ON at.tag_id = t.id
+             JOIN assets a ON a.id = at.asset_id
+             WHERE a.folder IN ({placeholders})
+             GROUP BY t.id
+             ORDER BY uses DESC, t.name"
+        );
+        let mut statement = self.conn.prepare(&sql)?;
+        let rows = statement.query_map(
+            rusqlite::params_from_iter(folders.iter()),
+            |row| {
+                Ok(TagSummary {
+                    name: row.get(0)?,
+                    category: row.get(1)?,
+                    count: row.get::<_, i64>(2)?.max(0) as usize,
+                    manual_count: row.get::<_, i64>(3)?.max(0) as usize,
+                })
+            },
+        )?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
     pub fn load_saved_searches(&self) -> Result<Vec<SavedSearch>> {
@@ -706,9 +839,18 @@ impl Db {
     }
 
     pub fn search_paths(&self, folder: &str, tokens: &[String]) -> Result<HashSet<PathBuf>> {
-        if tokens.is_empty() {
+        self.search_paths_in(&[folder.to_string()], tokens)
+    }
+
+    pub fn search_paths_in(
+        &self,
+        folders: &[String],
+        tokens: &[String],
+    ) -> Result<HashSet<PathBuf>> {
+        if tokens.is_empty() || folders.is_empty() {
             return Ok(HashSet::new());
         }
+        let placeholders = vec!["?"; folders.len()].join(", ");
         let use_fts = tokens.iter().all(|token| token.chars().count() >= 3);
         if use_fts {
             let query = tokens
@@ -716,14 +858,17 @@ impl Db {
                 .map(|token| format!("\"{}\"", token.replace('"', "\"\"")))
                 .collect::<Vec<_>>()
                 .join(" ");
+            let sql = format!(
+                "SELECT path FROM assets
+                 WHERE folder IN ({placeholders})
+                   AND id IN (SELECT rowid FROM assets_fts WHERE assets_fts MATCH ?)"
+            );
             let result = (|| -> Result<HashSet<PathBuf>> {
-                let mut statement = self.conn.prepare(
-                    "SELECT path FROM assets
-                     WHERE folder = ?1
-                       AND id IN (SELECT rowid FROM assets_fts WHERE assets_fts MATCH ?2)",
+                let mut statement = self.conn.prepare(&sql)?;
+                let rows = statement.query_map(
+                    rusqlite::params_from_iter(folders.iter().chain(std::iter::once(&query))),
+                    |row| row.get::<_, String>(0),
                 )?;
-                let rows =
-                    statement.query_map(params![folder, query], |row| row.get::<_, String>(0))?;
                 Ok(rows
                     .collect::<rusqlite::Result<Vec<_>>>()?
                     .into_iter()
@@ -736,18 +881,20 @@ impl Db {
                 Err(error) => log::warn!("fts search failed, falling back to LIKE: {error:#}"),
             }
         }
-        let mut sql = String::from("SELECT path FROM assets WHERE folder = ?1");
+        let mut sql = format!("SELECT path FROM assets WHERE folder IN ({placeholders})");
         let mut values = Vec::with_capacity(tokens.len());
         for (index, token) in tokens.iter().enumerate() {
-            let slot = index + 2;
+            let slot = folders.len() + index + 1;
             sql.push_str(&format!(
                 " AND (name LIKE ?{slot} ESCAPE '\\' OR path LIKE ?{slot} ESCAPE '\\' OR tags_text LIKE ?{slot} ESCAPE '\\')"
             ));
             values.push(format!("%{}%", escape_like(token)));
         }
         let mut statement = self.conn.prepare(&sql)?;
-        let mut parameters: Vec<&dyn ToSql> = Vec::with_capacity(values.len() + 1);
-        parameters.push(&folder);
+        let mut parameters: Vec<&dyn ToSql> = Vec::with_capacity(folders.len() + values.len());
+        for folder in folders {
+            parameters.push(folder);
+        }
         for value in &values {
             parameters.push(value);
         }
@@ -785,16 +932,60 @@ impl Db {
     }
 
     fn load_asset(&self, path: &Path) -> Result<Asset> {
-        let path = path.to_string_lossy().to_string();
-        self.conn
-            .query_row(
-                "SELECT path, thumb, width, height, group_name, rating, tags_json, tagged, error,
-                        sha1, blake3, phash, tag_attempts, bytes, mtime, favorite, star
-                 FROM assets WHERE path = ?1",
-                [&path],
-                row_to_asset,
-            )
-            .map_err(Into::into)
+        let path_string = path.to_string_lossy().to_string();
+        let mut asset = self.conn.query_row(
+            "SELECT path, thumb, width, height, group_name, rating, tags_json, tagged, error,
+                    sha1, blake3, phash, tag_attempts, bytes, mtime, favorite, star, folder
+             FROM assets WHERE path = ?1",
+            [&path_string],
+            row_to_asset,
+        )?;
+        asset.manual_tags = self.manual_tags_for_path(path)?;
+        Ok(asset)
+    }
+
+    fn manual_tags_for_folders(
+        &self,
+        folders: &[String],
+    ) -> Result<HashMap<PathBuf, Vec<TagHit>>> {
+        if folders.is_empty() {
+            return Ok(HashMap::new());
+        }
+        let placeholders = vec!["?"; folders.len()].join(", ");
+        let sql = format!(
+            "SELECT a.path, t.name, t.category, at.confidence, t.vocab_index
+             FROM asset_tags at
+             JOIN assets a ON a.id = at.asset_id
+             JOIN tags t ON t.id = at.tag_id
+             WHERE a.folder IN ({placeholders}) AND at.origin = 'manual'
+             ORDER BY a.path, t.name"
+        );
+        let mut statement = self.conn.prepare(&sql)?;
+        let rows =
+            statement.query_map(rusqlite::params_from_iter(folders.iter()), manual_tag_row)?;
+        let mut tags: HashMap<PathBuf, Vec<TagHit>> = HashMap::new();
+        for row in rows {
+            let (path, tag) = row?;
+            tags.entry(path).or_default().push(tag);
+        }
+        Ok(tags)
+    }
+
+    fn manual_tags_for_path(&self, path: &Path) -> Result<Vec<TagHit>> {
+        let mut statement = self.conn.prepare(
+            "SELECT a.path, t.name, t.category, at.confidence, t.vocab_index
+             FROM asset_tags at
+             JOIN assets a ON a.id = at.asset_id
+             JOIN tags t ON t.id = at.tag_id
+             WHERE a.path = ?1 AND at.origin = 'manual'
+             ORDER BY t.name",
+        )?;
+        let rows = statement.query_map([path.to_string_lossy().to_string()], manual_tag_row)?;
+        let mut tags = Vec::new();
+        for row in rows {
+            tags.push(row?.1);
+        }
+        Ok(tags)
     }
 
     fn source_id(&self, folder: &str) -> Result<i64> {
@@ -822,6 +1013,7 @@ fn row_to_asset(row: &rusqlite::Row<'_>) -> rusqlite::Result<Asset> {
     let phash: Option<i64> = row.get(11)?;
     Ok(Asset {
         path: PathBuf::from(path),
+        library_root: PathBuf::from(row.get::<_, String>(17)?),
         thumb: (!thumb.is_empty()).then(|| PathBuf::from(thumb)),
         tile_thumb: None,
         width: row.get::<_, i64>(2)?.max(0) as u32,
@@ -831,6 +1023,7 @@ fn row_to_asset(row: &rusqlite::Row<'_>) -> rusqlite::Result<Asset> {
         favorite: row.get::<_, i64>(15)? != 0,
         star: row.get::<_, i64>(16)?.clamp(0, 5) as u8,
         tags: serde_json::from_str::<Vec<TagHit>>(&tags_json).unwrap_or_default(),
+        manual_tags: Vec::new(),
         tagged: tagged != 0,
         tag_attempts: row.get::<_, i64>(12)?.max(0) as u32,
         error: row.get(8)?,
@@ -840,6 +1033,57 @@ fn row_to_asset(row: &rusqlite::Row<'_>) -> rusqlite::Result<Asset> {
         bytes: row.get::<_, i64>(13)?.max(0) as u64,
         mtime: row.get::<_, i64>(14)?.max(0) as u64,
     })
+}
+
+fn manual_tag_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<(PathBuf, TagHit)> {
+    Ok((
+        PathBuf::from(row.get::<_, String>(0)?),
+        TagHit {
+            tag: row.get(1)?,
+            category: row.get(2)?,
+            score: row.get::<_, f64>(3)? as f32,
+            vocab_index: row.get::<_, Option<i64>>(4)?.map(|value| value as u32),
+        },
+    ))
+}
+
+fn refresh_tags_text(conn: &Connection, asset_id: i64) -> Result<()> {
+    let mut statement = conn.prepare(
+        "SELECT DISTINCT t.name
+         FROM asset_tags at JOIN tags t ON t.id = at.tag_id
+         WHERE at.asset_id = ?1
+         ORDER BY t.name",
+    )?;
+    let rows = statement.query_map([asset_id], |row| row.get::<_, String>(0))?;
+    let tags_text = rows.collect::<rusqlite::Result<Vec<_>>>()?.join(" ");
+    conn.execute(
+        "UPDATE assets SET tags_text = ?1 WHERE id = ?2",
+        params![tags_text, asset_id],
+    )?;
+    Ok(())
+}
+
+fn refresh_auto_tags_json(conn: &Connection, asset_id: i64) -> Result<()> {
+    let mut statement = conn.prepare(
+        "SELECT t.name, t.category, at.confidence, t.vocab_index
+         FROM asset_tags at JOIN tags t ON t.id = at.tag_id
+         WHERE at.asset_id = ?1 AND at.origin = 'auto'
+         ORDER BY at.confidence DESC, t.name",
+    )?;
+    let rows = statement.query_map([asset_id], |row| {
+        Ok(TagHit {
+            tag: row.get(0)?,
+            category: row.get(1)?,
+            score: row.get::<_, f64>(2)? as f32,
+            vocab_index: row.get::<_, Option<i64>>(3)?.map(|value| value as u32),
+        })
+    })?;
+    let tags = rows.collect::<rusqlite::Result<Vec<_>>>()?;
+    conn.execute(
+        "UPDATE assets SET tags_json = ?1 WHERE id = ?2",
+        params![serde_json::to_string(&tags)?, asset_id],
+    )?;
+    Ok(())
 }
 
 fn upsert_tag(conn: &Connection, tag: &TagHit) -> Result<i64> {
@@ -1193,6 +1437,37 @@ mod tests {
             assert!(clara.favorite);
             assert_eq!(clara.star, 4);
 
+            db.add_manual_tags(&[clara_path.clone()], "manualtag", "manual")
+                .unwrap();
+            let clara = db
+                .load_folder("C:\\lib")
+                .unwrap()
+                .into_iter()
+                .find(|asset| asset.path.ends_with("克拉拉.png"))
+                .expect("manual tagged clara");
+            assert_eq!(clara.manual_tags.len(), 1);
+            assert_eq!(clara.manual_tags[0].tag, "manualtag");
+            assert_eq!(clara.manual_tags[0].category, "manual");
+            let hits = db.search_paths("C:\\lib", &["manualtag".to_string()]).unwrap();
+            assert!(hits.contains(&clara_path));
+            let summary = db
+                .list_tags("C:\\lib")
+                .unwrap()
+                .into_iter()
+                .find(|tag| tag.name == "manualtag")
+                .expect("manual tag summary");
+            assert_eq!((summary.count, summary.manual_count), (1, 1));
+            assert_eq!(db.remove_tags(&[clara_path.clone()], "manualtag").unwrap(), 1);
+            let clara = db
+                .load_folder("C:\\lib")
+                .unwrap()
+                .into_iter()
+                .find(|asset| asset.path.ends_with("克拉拉.png"))
+                .expect("clara without manual tag");
+            assert!(clara.manual_tags.is_empty());
+            let hits = db.search_paths("C:\\lib", &["manualtag".to_string()]).unwrap();
+            assert!(!hits.contains(&clara_path));
+
             let saved_id = db
                 .save_saved_search("收藏", &Filter::Favorites, "is:fav")
                 .unwrap();
@@ -1344,6 +1619,76 @@ mod tests {
             let counts = db.tag_job_counts("C:\\lib").unwrap();
             assert_eq!((counts.pending, counts.running, counts.error), (0, 0, 1));
         }
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn multi_root_library_loads_searches_and_counts() {
+        let root = std::env::temp_dir().join(format!(
+            "kanalib-multi-root-test-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        let db_path = root.join("kanalib.db");
+        let hashes = |seed: &str| ContentHashes {
+            sha1: format!("{seed:0<40}"),
+            blake3: format!("{seed:0<64}"),
+            phash: 7,
+        };
+        let db = Db::open(&db_path).unwrap();
+        let a = db
+            .upsert_meta(
+                "C:\\lib",
+                Path::new("C:\\lib\\alpha.png"),
+                None,
+                10,
+                10,
+                100,
+                10,
+                &hashes("a"),
+                false,
+            )
+            .unwrap();
+        let b = db
+            .upsert_meta(
+                "C:\\lib2",
+                Path::new("C:\\lib2\\beta.png"),
+                None,
+                20,
+                20,
+                200,
+                20,
+                &hashes("b"),
+                false,
+            )
+            .unwrap();
+        db.add_manual_tags(&[a.path.clone(), b.path.clone()], "sharedtag", "manual")
+            .unwrap();
+        let roots = vec!["C:\\lib".to_string(), "C:\\lib2".to_string()];
+        let assets = db.load_library(&roots).unwrap();
+        assert_eq!(assets.len(), 2);
+        assert!(assets
+            .iter()
+            .any(|asset| asset.library_root == PathBuf::from("C:\\lib2")));
+        assert!(assets
+            .iter()
+            .all(|asset| asset.manual_tags.iter().any(|tag| tag.tag == "sharedtag")));
+        let hits = db
+            .search_paths_in(&roots, &["sharedtag".to_string()])
+            .unwrap();
+        assert_eq!(hits.len(), 2);
+        let summary = db
+            .list_tags_in(&roots)
+            .unwrap()
+            .into_iter()
+            .find(|tag| tag.name == "sharedtag")
+            .expect("multi-root tag summary");
+        assert_eq!((summary.count, summary.manual_count), (2, 2));
+        assert_eq!(
+            db.load_library(&["C:\\lib".to_string()]).unwrap().len(),
+            1
+        );
         let _ = fs::remove_dir_all(&root);
     }
 }

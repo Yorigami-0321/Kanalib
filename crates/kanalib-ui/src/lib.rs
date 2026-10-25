@@ -6,10 +6,10 @@ use std::time::{Duration, Instant};
 use ely_gpui_component::{
     buttons::{Button, ButtonVariant, IconButton, SegmentedControl},
     feedback::{Toast, ToastViewport, Toaster},
-    forms::{Input, Rating, TextInput},
-    menus::{DropdownMenu, Menu, MenuItem},
+    forms::{Choice, Input, Rating, TagInput, TextInput},
+    menus::{ContextMenu, DropdownMenu, Menu, MenuItem},
     navigation::{Command, CommandPalette},
-    overlays::{Lightbox, PromptDialog, Slide},
+    overlays::{ConfirmDialog, Lightbox, PromptDialog, Slide},
     primitives::{Icon, IconName, Severity},
     theme::{ActiveTheme, ControlSize, IconSize, Mode, Theme},
 };
@@ -28,7 +28,9 @@ use kanalib_core::dedup::{
     DedupSummary, DuplicateGroup, GroupKind, ReviewState, is_protected,
     similarity_pct_from_distance,
 };
-use kanalib_core::model::{Asset, Counts, Filter, SavedSearch, SearchQuery, TagHit};
+use kanalib_core::model::{
+    Asset, Counts, Filter, SavedSearch, SearchQuery, TagHit, normalize_tag_name,
+};
 use kanalib_core::state::AppState;
 
 const GRID_GAP: f32 = 12.;
@@ -40,6 +42,7 @@ const DEDUP_GROUP_ROW_HEIGHT: f32 = 78.;
 const DEDUP_CARD_WIDTH: f32 = 214.;
 const DEDUP_MAX_VISIBLE: usize = 4;
 const SETTINGS_MAX_WIDTH: f32 = 1080.;
+const TAG_ROW_HEIGHT: f32 = 54.;
 
 gpui::actions!(
     kanalib,
@@ -92,6 +95,31 @@ impl SortMode {
 
     fn default_ascending(self) -> bool {
         matches!(self, Self::Name)
+    }
+
+    fn key(self) -> &'static str {
+        match self {
+            Self::Name => "name",
+            Self::Modified => "modified",
+            Self::Size => "size",
+            Self::Resolution => "resolution",
+            Self::Star => "star",
+            Self::Favorite => "favorite",
+            Self::Rating => "rating",
+        }
+    }
+
+    fn from_key(value: &str) -> Option<Self> {
+        Some(match value {
+            "name" => Self::Name,
+            "modified" => Self::Modified,
+            "size" => Self::Size,
+            "resolution" => Self::Resolution,
+            "star" => Self::Star,
+            "favorite" => Self::Favorite,
+            "rating" => Self::Rating,
+            _ => return None,
+        })
     }
 }
 
@@ -163,9 +191,13 @@ fn rating_rank(rating: &str) -> u64 {
 
 fn prompt_for(asset: &Asset) -> String {
     let mut tags = asset
-        .tags
-        .iter()
-        .filter(|tag| matches!(tag.category.as_str(), "general" | "character" | "copyright"))
+        .all_tags()
+        .filter(|tag| {
+            matches!(
+                tag.category.as_str(),
+                "general" | "character" | "copyright" | "manual"
+            )
+        })
         .collect::<Vec<_>>();
     tags.sort_by(|a, b| b.score.total_cmp(&a.score));
     tags.iter()
@@ -176,9 +208,8 @@ fn prompt_for(asset: &Asset) -> String {
 
 fn lightbox_caption(asset: &Asset) -> SharedString {
     let general = asset
-        .tags
-        .iter()
-        .filter(|tag| tag.category == "general")
+        .all_tags()
+        .filter(|tag| matches!(tag.category.as_str(), "general" | "manual"))
         .count();
     let mut parts = vec![asset.title(), format!("{} × {}", asset.width, asset.height)];
     if asset.favorite {
@@ -206,6 +237,7 @@ fn push_toast(
 enum Screen {
     Library,
     Duplicates,
+    Tags,
     Settings,
 }
 
@@ -244,6 +276,12 @@ impl DedupFilter {
 enum DedupConfirm {
     Group(String),
     Batch,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TagDialogMode {
+    Add,
+    Remove,
 }
 
 #[derive(Clone, Copy)]
@@ -526,6 +564,8 @@ pub struct KanalibApp {
     state: Arc<AppState>,
     grid_scroll: UniformListScrollHandle,
     dedup_scroll: UniformListScrollHandle,
+    tag_scroll: UniformListScrollHandle,
+    tag_list: Vec<kanalib_core::model::TagSummary>,
     last_search: String,
     search_paths: Option<Arc<HashSet<PathBuf>>>,
     last_scanning: bool,
@@ -558,6 +598,10 @@ pub struct KanalibApp {
     lightbox_at: Option<usize>,
     lightbox_viewed: HashSet<PathBuf>,
     save_search_open: bool,
+    tag_dialog: Option<TagDialogMode>,
+    tag_dialog_epoch: u64,
+    tag_dialog_paths: Vec<PathBuf>,
+    source_remove_confirm: Option<PathBuf>,
     toaster: Entity<Toaster>,
     theme_dark: bool,
     #[cfg(feature = "frame-profiler")]
@@ -621,10 +665,34 @@ impl KanalibApp {
         ]);
         let state = AppState::new(folder);
         let initial_selected = state.shared.lock().unwrap().selected.clone();
+        let sort = state
+            .setting("ui.sort")
+            .and_then(|value| SortMode::from_key(&value))
+            .unwrap_or_default();
+        let sort_ascending = state
+            .setting("ui.sort_ascending")
+            .map(|value| value == "true")
+            .unwrap_or_else(|| sort.default_ascending());
+        let density = state
+            .setting("ui.density")
+            .map(|value| DensityPreset::from_key(&value))
+            .unwrap_or_default();
+        let theme_dark = state
+            .setting("ui.theme")
+            .map(|value| value == "dark")
+            .unwrap_or_else(|| cx.theme().is_dark());
+        if theme_dark != cx.theme().is_dark() {
+            Theme::set_mode_now(
+                if theme_dark { Mode::Dark } else { Mode::Light },
+                cx,
+            );
+        }
         Self {
             state,
             grid_scroll: UniformListScrollHandle::new(),
             dedup_scroll: UniformListScrollHandle::new(),
+            tag_scroll: UniformListScrollHandle::new(),
+            tag_list: Vec::new(),
             last_search: String::new(),
             search_paths: None,
             last_scanning: false,
@@ -656,17 +724,21 @@ impl KanalibApp {
             auto_select_pending: false,
             selection: Arc::new(initial_selected.iter().cloned().collect()),
             selection_anchor: initial_selected,
-            sort: SortMode::Name,
-            sort_ascending: true,
-            density: DensityPreset::Medium,
+            sort,
+            sort_ascending,
+            density,
             search_input: None,
             palette_open: false,
             lightbox_slides: Vec::new(),
             lightbox_at: None,
             lightbox_viewed: HashSet::new(),
             save_search_open: false,
+            tag_dialog: None,
+            tag_dialog_epoch: 0,
+            tag_dialog_paths: Vec::new(),
+            source_remove_confirm: None,
             toaster: cx.new(|_| Toaster::default()),
-            theme_dark: cx.theme().is_dark(),
+            theme_dark,
             #[cfg(feature = "frame-profiler")]
             frame_probe,
             #[cfg(feature = "frame-profiler")]
@@ -833,18 +905,59 @@ impl KanalibApp {
         let weak = cx.entity().downgrade();
         // 同步 rfd 会开嵌套消息循环，GPUI 的 RefCell 在鼠标回调里仍被借用，导致闪退。
         cx.spawn(async move |_, cx| {
-            let Some(handle) = rfd::AsyncFileDialog::new().pick_folder().await else {
+            let Some(handles) = rfd::AsyncFileDialog::new()
+                .set_title("添加图库文件夹")
+                .pick_folders()
+                .await
+            else {
                 return;
             };
-            let folder = handle.path().to_path_buf();
+            let folders = handles
+                .into_iter()
+                .map(|handle| handle.path().to_path_buf())
+                .collect::<Vec<_>>();
+            if folders.is_empty() {
+                return;
+            }
             let _ = weak.update(cx, |app, cx| {
-                app.state.set_folder(folder);
+                match app.state.add_roots(folders) {
+                    Ok(0) => {
+                        push_toast(
+                            &app.toaster,
+                            cx,
+                            "所选文件夹已在图库中",
+                            Severity::Warning,
+                        );
+                        return;
+                    }
+                    Ok(added) => push_toast(
+                        &app.toaster,
+                        cx,
+                        format!("已添加 {added} 个来源"),
+                        Severity::Success,
+                    ),
+                    Err(error) => {
+                        app.state.set_error(format!("添加文件夹失败：{error:#}"));
+                        push_toast(
+                            &app.toaster,
+                            cx,
+                            format!("添加文件夹失败：{error:#}"),
+                            Severity::Danger,
+                        );
+                        return;
+                    }
+                }
+                if let Some(search) = &app.search_input {
+                    search.update(cx, |input, cx| input.set_text("", cx));
+                }
+                app.state.set_filter(Filter::All);
                 app.state.start_scan();
                 app.last_search.clear();
                 app.search_paths = None;
                 app.screen = Screen::Library;
                 app.dedup_selected = None;
                 app.dedup_confirm = None;
+                app.source_remove_confirm = None;
                 app.clear_multi_selection();
                 app.focus_grid_pending = true;
                 app.auto_select_pending = true;
@@ -914,6 +1027,86 @@ impl KanalibApp {
         self.screen = Screen::Settings;
         self.dedup_confirm = None;
         self.settings_notice = None;
+        cx.notify();
+    }
+
+    fn remove_source(&mut self, root: PathBuf, cx: &mut Context<Self>) {
+        match self.state.remove_root(&root) {
+            Ok(removed) => {
+                self.source_remove_confirm = None;
+                self.clear_multi_selection();
+                self.auto_select_pending = true;
+                push_toast(
+                    &self.toaster,
+                    cx,
+                    format!("已移除来源，磁盘文件未删除（{removed} 张资产移出视图）"),
+                    Severity::Success,
+                );
+            }
+            Err(error) => push_toast(
+                &self.toaster,
+                cx,
+                format!("移除来源失败：{error:#}"),
+                Severity::Danger,
+            ),
+        }
+        cx.notify();
+    }
+
+    fn open_tag_manager(&mut self, cx: &mut Context<Self>) {
+        match self.state.list_tags() {
+            Ok(tags) => self.tag_list = tags,
+            Err(error) => {
+                log::warn!("list tags: {error:#}");
+                self.tag_list.clear();
+                push_toast(
+                    &self.toaster,
+                    cx,
+                    format!("读取标签失败：{error:#}"),
+                    Severity::Danger,
+                );
+            }
+        }
+        self.screen = Screen::Tags;
+        self.dedup_confirm = None;
+        self.palette_open = false;
+        self.tag_scroll.scroll_to_item(0, ScrollStrategy::Top);
+        cx.notify();
+    }
+
+    fn refresh_tag_manager(&mut self, cx: &mut Context<Self>) {
+        match self.state.list_tags() {
+            Ok(tags) => self.tag_list = tags,
+            Err(error) => push_toast(
+                &self.toaster,
+                cx,
+                format!("读取标签失败：{error:#}"),
+                Severity::Danger,
+            ),
+        }
+        cx.notify();
+    }
+
+    fn set_tag_blocked(&mut self, name: String, blocked: bool, cx: &mut Context<Self>) {
+        log::info!("tag manager: set blocked name={name} blocked={blocked}");
+        match self.state.set_tag_blocked(&name, blocked) {
+            Ok(()) => push_toast(
+                &self.toaster,
+                cx,
+                if blocked {
+                    format!("已屏蔽标签 #{name}")
+                } else {
+                    format!("已取消屏蔽标签 #{name}")
+                },
+                Severity::Success,
+            ),
+            Err(error) => push_toast(
+                &self.toaster,
+                cx,
+                format!("更新屏蔽失败：{error:#}"),
+                Severity::Danger,
+            ),
+        }
         cx.notify();
     }
 
@@ -1098,6 +1291,13 @@ impl KanalibApp {
         cx.notify();
     }
 
+    fn select_single_path(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+        self.selection = Arc::new(HashSet::from([path.clone()]));
+        self.selection_anchor = Some(path.clone());
+        self.state.select(Some(path));
+        cx.notify();
+    }
+
     fn clear_selection(&mut self, cx: &mut Context<Self>) {
         self.selection = Arc::new(HashSet::new());
         self.selection_anchor = None;
@@ -1200,6 +1400,70 @@ impl KanalibApp {
                     &self.toaster,
                     cx,
                     format!("设置星级失败：{error:#}"),
+                    Severity::Danger,
+                );
+            }
+        }
+        cx.notify();
+    }
+
+    fn open_tag_dialog(&mut self, mode: TagDialogMode, cx: &mut Context<Self>) {
+        let paths = self.selected_paths();
+        if paths.is_empty() {
+            push_toast(&self.toaster, cx, "先选择图片", Severity::Warning);
+            return;
+        }
+        self.palette_open = false;
+        self.tag_dialog = Some(mode);
+        self.tag_dialog_paths = paths;
+        self.tag_dialog_epoch = self.tag_dialog_epoch.wrapping_add(1);
+        cx.notify();
+    }
+
+    fn apply_tag_dialog(&mut self, name: &str, cx: &mut Context<Self>) {
+        let Some(mode) = self.tag_dialog else {
+            return;
+        };
+        let paths = self.tag_dialog_paths.clone();
+        if paths.is_empty() {
+            push_toast(&self.toaster, cx, "先选择图片", Severity::Warning);
+            return;
+        }
+        let result = match mode {
+            TagDialogMode::Add => self.state.add_tags(&paths, name),
+            TagDialogMode::Remove => self.state.remove_tags(&paths, name),
+        };
+        match result {
+            Ok(0) => push_toast(
+                &self.toaster,
+                cx,
+                if mode == TagDialogMode::Add {
+                    "标签已存在或名称无效"
+                } else {
+                    "所选图片没有这个标签"
+                },
+                Severity::Warning,
+            ),
+            Ok(updated) => {
+                self.tag_dialog = None;
+                self.tag_dialog_paths.clear();
+                push_toast(
+                    &self.toaster,
+                    cx,
+                    if mode == TagDialogMode::Add {
+                        format!("已为 {updated} 张添加标签 #{name}")
+                    } else {
+                        format!("已从 {updated} 张移除标签 #{name}")
+                    },
+                    Severity::Success,
+                );
+            }
+            Err(error) => {
+                self.state.set_error(format!("标签操作失败：{error:#}"));
+                push_toast(
+                    &self.toaster,
+                    cx,
+                    format!("标签操作失败：{error:#}"),
                     Severity::Danger,
                 );
             }
@@ -1338,21 +1602,31 @@ impl KanalibApp {
         }
     }
 
+    fn persist_setting(&self, key: &str, value: impl AsRef<str>) {
+        if let Err(error) = self.state.set_setting(key, value.as_ref()) {
+            log::warn!("save setting {key}: {error:#}");
+        }
+    }
+
     fn choose_sort_mode(&mut self, mode: SortMode, cx: &mut Context<Self>) {
         self.sort = mode;
         self.sort_ascending = mode.default_ascending();
+        self.persist_setting("ui.sort", mode.key());
+        self.persist_setting("ui.sort_ascending", self.sort_ascending.to_string());
         self.focus_grid_pending = true;
         cx.notify();
     }
 
     fn set_sort_ascending(&mut self, ascending: bool, cx: &mut Context<Self>) {
         self.sort_ascending = ascending;
+        self.persist_setting("ui.sort_ascending", ascending.to_string());
         self.focus_grid_pending = true;
         cx.notify();
     }
 
     fn set_density(&mut self, density: DensityPreset, cx: &mut Context<Self>) {
         self.density = density;
+        self.persist_setting("ui.density", density.key());
         self.focus_grid_pending = true;
         cx.notify();
     }
@@ -1367,6 +1641,7 @@ impl KanalibApp {
             },
             cx,
         );
+        self.persist_setting("ui.theme", if self.theme_dark { "dark" } else { "light" });
         cx.notify();
     }
 
@@ -1432,6 +1707,7 @@ impl KanalibApp {
             "goto:fav" => self.set_filter(Filter::Favorites, cx),
             "goto:dup" => self.open_dedup_mode(GroupKind::Exact, cx),
             "goto:similar" => self.open_dedup_mode(GroupKind::Similar, cx),
+            "goto:tags" => self.open_tag_manager(cx),
             "goto:settings" => self.open_settings(cx),
             "view:quick" => self.open_quick_view(cx),
             "view:select-all" => self.select_all_visible(cx),
@@ -1458,6 +1734,8 @@ impl KanalibApp {
             "act:star5" => self.apply_star(5, cx),
             "act:copy-prompt" => self.copy_selected_prompt(cx),
             "act:copy-paths" => self.copy_selected_paths(cx),
+            "tag:add" => self.open_tag_dialog(TagDialogMode::Add, cx),
+            "tag:remove" => self.open_tag_dialog(TagDialogMode::Remove, cx),
             "sort:name" => self.choose_sort_mode(SortMode::Name, cx),
             "sort:modified" => self.choose_sort_mode(SortMode::Modified, cx),
             "sort:size" => self.choose_sort_mode(SortMode::Size, cx),
@@ -1506,7 +1784,7 @@ impl Render for KanalibApp {
         );
         let counts_started = Instant::now();
         let (
-            folder,
+            roots,
             status,
             error,
             scanning,
@@ -1528,12 +1806,13 @@ impl Render for KanalibApp {
             similar_threshold,
             protected_paths,
             saved_searches,
+            blocked_tags,
         ) = {
             let shared = self.state.shared.lock().unwrap();
             let revision = shared.revision;
             let counts_view = (revision != self.view.counts_revision).then(|| shared.counts.view());
             (
-                shared.folder.clone(),
+                shared.roots.clone(),
                 shared.status.clone(),
                 shared.error.clone(),
                 shared.scanning,
@@ -1555,6 +1834,7 @@ impl Render for KanalibApp {
                 shared.dedup.similar_threshold,
                 shared.dedup.protected_paths.clone(),
                 shared.saved_searches.clone(),
+                shared.blocked_tags.clone(),
             )
         };
         if let Some(counts) = counts_view {
@@ -1776,7 +2056,7 @@ impl Render for KanalibApp {
 
         let sidebar = self.render_sidebar(
             &this,
-            &folder,
+            &roots,
             &status,
             error.as_deref(),
             scanning,
@@ -1792,14 +2072,26 @@ impl Render for KanalibApp {
             dedup_similar_summary.pending,
             similar_scanned,
             &saved_searches,
+            &blocked_tags,
             &search,
             colors,
         );
-        let content: AnyElement = if self.screen == Screen::Settings {
+        let content: AnyElement = if self.screen == Screen::Tags {
+            let tags_width = (window_width - sidebar_width).max(px(640.));
+            self.render_tags(
+                &this,
+                window,
+                cx,
+                tags_width,
+                &blocked_tags,
+                colors,
+            )
+            .into_any_element()
+        } else if self.screen == Screen::Settings {
             let settings_width = (window_width - sidebar_width).max(px(640.));
             self.render_settings(
                 &this,
-                &folder,
+                &roots,
                 &protected_paths,
                 similar_threshold,
                 queue_pending,
@@ -1839,6 +2131,7 @@ impl Render for KanalibApp {
                 assets,
                 visible_indices,
                 self.selection.clone(),
+                roots.is_empty(),
                 error.as_deref(),
                 scanning,
                 main_width,
@@ -1847,8 +2140,15 @@ impl Render for KanalibApp {
             .into_any_element()
         };
         let inspector = (self.screen == Screen::Library).then(|| {
-            self.render_inspector(&this, selected_asset.as_ref(), inspector_width, colors)
-                .into_any_element()
+            self.render_inspector(
+                &this,
+                selected_asset.as_ref(),
+                &counts,
+                &blocked_tags,
+                inspector_width,
+                colors,
+            )
+            .into_any_element()
         });
 
         let palette = self.palette_open.then(|| {
@@ -1870,6 +2170,7 @@ impl Render for KanalibApp {
                     Command::new("goto:failed", "失败").icon(IconName::ImageOff),
                     Command::new("goto:dup", "重复项").icon(IconName::Copy),
                     Command::new("goto:similar", "相似图片").icon(IconName::LayoutGrid),
+                    Command::new("goto:tags", "标签管理").icon(IconName::Tag),
                     Command::new("goto:settings", "设置").icon(IconName::SlidersHorizontal),
                 ],
             )
@@ -1915,6 +2216,8 @@ impl Render for KanalibApp {
                     Command::new("act:copy-prompt", "复制选中 Prompt")
                         .icon(IconName::ClipboardCheck),
                     Command::new("act:copy-paths", "复制选中路径").icon(IconName::Copy),
+                    Command::new("tag:add", "添加标签…").icon(IconName::Tag),
+                    Command::new("tag:remove", "移除标签…").icon(IconName::X),
                 ],
             )
             .group(
@@ -1935,7 +2238,7 @@ impl Render for KanalibApp {
                 [
                     Command::new("scan:rescan", "重新扫描").icon(IconName::RefreshCw),
                     Command::new("scan:retry", "重试失败的打标").icon(IconName::WandSparkles),
-                    Command::new("view:folder", "选择文件夹").icon(IconName::FolderOpen),
+                    Command::new("view:folder", "添加文件夹").icon(IconName::FolderOpen),
                 ],
             )
             .on_run(move |value, _, cx| {
@@ -2026,6 +2329,80 @@ impl Render for KanalibApp {
             })
             .into_any_element()
         });
+        let tag_dialog = self.tag_dialog.map(|mode| {
+            let epoch = self.tag_dialog_epoch;
+            let field = window.use_keyed_state(
+                SharedString::from(format!("kanalib-tag-field-{epoch}")),
+                cx,
+                |window, cx| TextInput::new(window, cx).placeholder("标签名"),
+            );
+            let close = this.clone();
+            let submit = this.clone();
+            let count = self.tag_dialog_paths.len();
+            let title = if mode == TagDialogMode::Add {
+                "添加标签"
+            } else {
+                "移除标签"
+            };
+            let label = if mode == TagDialogMode::Add {
+                format!("作用于 {count} 张图片；空格会转为下划线")
+            } else {
+                format!("作用于 {count} 张图片；自动与手工标签都会移除")
+            };
+            PromptDialog::new(
+                SharedString::from(format!("kanalib-tag-dialog-{epoch}")),
+                title,
+                &field,
+                move |_, cx| {
+                    let _ = close.update(cx, |app, cx| {
+                        app.tag_dialog = None;
+                        app.tag_dialog_paths.clear();
+                        cx.notify();
+                    });
+                },
+            )
+            .label(label)
+            .submit(if mode == TagDialogMode::Add {
+                "添加"
+            } else {
+                "移除"
+            })
+            .check(|text| {
+                if normalize_tag_name(text).is_empty() {
+                    Err("标签名不能为空".into())
+                } else {
+                    Ok(())
+                }
+            })
+            .on_submit(move |text, _, cx| {
+                let _ = submit.update(cx, |app, cx| app.apply_tag_dialog(text, cx));
+            })
+            .into_any_element()
+        });
+        let remove_source_dialog = self.source_remove_confirm.clone().map(|root| {
+            let close = this.clone();
+            let confirm = this.clone();
+            ConfirmDialog::new(
+                "remove-source-dialog",
+                "移除来源？",
+                format!(
+                    "只会从图库移除，磁盘文件不会删除：\n{}",
+                    root.display()
+                ),
+                move |_, cx| {
+                    let _ = close.update(cx, |app, cx| {
+                        app.source_remove_confirm = None;
+                        cx.notify();
+                    });
+                },
+            )
+            .confirm("移除来源")
+            .destructive()
+            .on_confirm(move |_, cx| {
+                let _ = confirm.update(cx, |app, cx| app.remove_source(root.clone(), cx));
+            })
+            .into_any_element()
+        });
         let shell = div()
             .flex()
             .flex_row()
@@ -2040,6 +2417,8 @@ impl Render for KanalibApp {
             .children(palette)
             .children(lightbox)
             .children(save_dialog)
+            .children(tag_dialog)
+            .children(remove_source_dialog)
             .child(ToastViewport::new("kanalib-toasts", &self.toaster))
             .on_action(cx.listener(|this, _: &OpenPalette, _, cx| {
                 let cleanup = if this.palette_open {
@@ -2083,6 +2462,8 @@ impl Render for KanalibApp {
             && !self.palette_open
             && self.lightbox_at.is_none()
             && !self.save_search_open
+            && self.tag_dialog.is_none()
+            && self.source_remove_confirm.is_none()
         {
             window.focus(&self.grid_focus, cx);
             self.focus_grid_pending = false;
@@ -2182,7 +2563,7 @@ impl KanalibApp {
     fn render_sidebar(
         &self,
         this: &Entity<Self>,
-        folder: &PathBuf,
+        roots: &[PathBuf],
         status: &str,
         error: Option<&str>,
         scanning: bool,
@@ -2198,6 +2579,7 @@ impl KanalibApp {
         dedup_similar_pending: usize,
         dedup_similar_scanned: bool,
         saved_searches: &[SavedSearch],
+        blocked_tags: &HashSet<String>,
         search: &Entity<TextInput>,
         colors: UiColors,
     ) -> impl IntoElement + use<> {
@@ -2219,6 +2601,37 @@ impl KanalibApp {
             .flex()
             .flex_col()
             .gap(px(2.));
+
+        body = body.child(section("来源", colors));
+        if roots.is_empty() {
+            body = body.child(
+                div()
+                    .px(px(8.))
+                    .pb(px(4.))
+                    .text_xs()
+                    .text_color(colors.subtle)
+                    .child("还没有图库文件夹"),
+            );
+        } else {
+            for root in roots {
+                let count = counts
+                    .sources
+                    .iter()
+                    .find(|(path, _)| path == root)
+                    .map(|(_, count)| *count)
+                    .unwrap_or(0);
+                body = body.child(filter_row(
+                    SharedString::from(format!("filter-source-{}", root.display())),
+                    root.display().to_string(),
+                    count,
+                    library && filter == &Filter::Source(root.clone()),
+                    Filter::Source(root.clone()),
+                    state.clone(),
+                    this.clone(),
+                    colors,
+                ));
+            }
+        }
 
         body = body.child(section("筛选", colors));
         body = body.child(filter_row(
@@ -2285,6 +2698,14 @@ impl KanalibApp {
             screen == Screen::Duplicates && dedup_mode == GroupKind::Similar,
             GroupKind::Similar,
             this_dedup,
+            colors,
+        ));
+        let this_tags = this.clone();
+        body = body.child(tag_manager_row(
+            SharedString::from("tag-manager-entry"),
+            "标签管理",
+            screen == Screen::Tags,
+            this_tags,
             colors,
         ));
 
@@ -2422,7 +2843,11 @@ impl KanalibApp {
 
         if !counts.tags.is_empty() {
             body = body.child(section("常用标签", colors));
-            for (tag, count) in counts.tags.iter() {
+            for (tag, count) in counts
+                .tags
+                .iter()
+                .filter(|(tag, _)| !blocked_tags.contains(tag))
+            {
                 body = body.child(filter_row(
                     SharedString::from(format!("filter-tag-{tag}")),
                     format!("#{tag}"),
@@ -2463,7 +2888,11 @@ impl KanalibApp {
                         div()
                             .text_xs()
                             .text_color(colors.muted)
-                            .child(folder.display().to_string()),
+                            .child(match roots.len() {
+                                0 => "未添加文件夹".to_string(),
+                                1 => roots[0].display().to_string(),
+                                count => format!("{count} 个文件夹"),
+                            }),
                     ),
             )
             .child(
@@ -2474,7 +2903,7 @@ impl KanalibApp {
                     .flex_wrap()
                     .gap(px(6.))
                     .child(
-                        Button::new("choose-folder", "选择文件夹")
+                        Button::new("choose-folder", "添加文件夹")
                             .primary()
                             .on_click(move |_, _, cx| {
                                 let _ = this_choose.update(cx, |app, cx| app.choose_folder(cx));
@@ -2569,6 +2998,7 @@ impl KanalibApp {
         assets: Arc<RwLock<Vec<Asset>>>,
         visible_indices: Arc<Vec<usize>>,
         selection: Arc<HashSet<PathBuf>>,
+        roots_empty: bool,
         error: Option<&str>,
         scanning: bool,
         width: Pixels,
@@ -2646,6 +3076,29 @@ impl KanalibApp {
                 .item(menu_item(&this_sort, 0, "清除星级"))
         };
 
+        let tag_menu = {
+            let add = this.clone();
+            let remove = this.clone();
+            Menu::new()
+                .item(
+                    MenuItem::new("添加标签…")
+                        .icon(IconName::Tag)
+                        .on_click(move |_, cx| {
+                            let _ = add.update(cx, |app, cx| {
+                                app.open_tag_dialog(TagDialogMode::Add, cx)
+                            });
+                        }),
+                )
+                .item(
+                    MenuItem::new("移除标签…")
+                        .icon(IconName::X)
+                        .on_click(move |_, cx| {
+                            let _ = remove.update(cx, |app, cx| {
+                                app.open_tag_dialog(TagDialogMode::Remove, cx)
+                            });
+                        }),
+                )
+        };
         let columns = grid_columns(width.as_f32(), self.density.min_width());
         let tile_width = grid_tile_width(width.as_f32(), columns);
         let image_height = self.density.image_height();
@@ -2665,7 +3118,9 @@ impl KanalibApp {
                         .bg(colors.sunken)
                         .text_sm()
                         .text_color(colors.muted)
-                        .child(if scanning {
+                        .child(if roots_empty {
+                            "还没有图库文件夹。点击侧栏“添加文件夹”开始。"
+                        } else if scanning {
                             "正在扫描图片..."
                         } else {
                             "没有符合筛选的图片。"
@@ -2781,6 +3236,11 @@ impl KanalibApp {
                         .child(
                             DropdownMenu::new("bulk-star", "星级", star_menu)
                                 .icon(IconName::Star)
+                                .variant(ButtonVariant::Ghost),
+                        )
+                        .child(
+                            DropdownMenu::new("bulk-tags", "标签", tag_menu)
+                                .icon(IconName::Tag)
                                 .variant(ButtonVariant::Ghost),
                         )
                         .child(
@@ -4034,10 +4494,212 @@ impl KanalibApp {
         Some(overlay)
     }
 
+    fn render_tags(
+        &mut self,
+        this: &Entity<Self>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+        width: Pixels,
+        blocked_tags: &HashSet<String>,
+        colors: UiColors,
+    ) -> impl IntoElement + use<> {
+        let search = window.use_keyed_state("tag-manager-search", cx, |window, cx| {
+            TextInput::new(window, cx).placeholder("筛选标签名 / 类别")
+        });
+        let query = search.read(cx).text().trim().to_lowercase();
+        let filtered = self
+            .tag_list
+            .iter()
+            .filter(|tag| {
+                query.is_empty()
+                    || tag.name.to_lowercase().contains(&query)
+                    || tag.category.to_lowercase().contains(&query)
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        let total = self.tag_list.len();
+        let blocked_count = self
+            .tag_list
+            .iter()
+            .filter(|tag| blocked_tags.contains(&tag.name))
+            .count();
+        let this_back = this.clone();
+        let this_refresh = this.clone();
+        let body: AnyElement = if filtered.is_empty() {
+            div()
+                .flex_1()
+                .p(px(24.))
+                .child(
+                    div()
+                        .p(px(24.))
+                        .rounded(px(8.))
+                        .bg(colors.sunken)
+                        .text_sm()
+                        .text_color(colors.muted)
+                        .child(if total == 0 {
+                            "还没有标签，先导入图片并完成自动打标。"
+                        } else {
+                            "没有匹配的标签。"
+                        }),
+                )
+                .into_any_element()
+        } else {
+            let this_list = this.clone();
+            let blocked = blocked_tags.clone();
+            let row_count = filtered.len();
+            uniform_list("tag-manager-list", row_count, move |range, _, _| {
+                range
+                    .map(|row| {
+                        let tag = &filtered[row];
+                        let blocked_row = blocked.contains(&tag.name);
+                        let name = tag.name.clone();
+                        let block_name = tag.name.clone();
+                        let this_block = this_list.clone();
+                        div()
+                            .w_full()
+                            .h(px(TAG_ROW_HEIGHT))
+                            .px(px(16.))
+                            .flex()
+                            .items_center()
+                            .justify_between()
+                            .gap(px(12.))
+                            .border_b_1()
+                            .border_color(colors.border)
+                            .child(
+                                div()
+                                    .flex()
+                                    .flex_col()
+                                    .gap(px(2.))
+                                    .child(
+                                        div()
+                                            .text_sm()
+                                            .font_weight(if blocked_row {
+                                                FontWeight::NORMAL
+                                            } else {
+                                                FontWeight::SEMIBOLD
+                                            })
+                                            .text_color(if blocked_row {
+                                                colors.muted
+                                            } else {
+                                                colors.fg
+                                            })
+                                            .child(name),
+                                    )
+                                    .child(
+                                        div()
+                                            .text_xs()
+                                            .text_color(colors.subtle)
+                                            .child(format!(
+                                                "#{} · {} 张 · 手工 {} 次{}",
+                                                tag.category,
+                                                tag.count,
+                                                tag.manual_count,
+                                                if blocked_row { " · 已屏蔽" } else { "" }
+                                            )),
+                                    ),
+                            )
+                            .child(
+                                Button::new(
+                                    SharedString::from(format!("block-tag-{}", block_name)),
+                                    if blocked_row { "取消屏蔽" } else { "屏蔽" },
+                                )
+                                .size(ControlSize::Sm)
+                                .on_click(move |_, _, cx| {
+                                    let _ = this_block.update(cx, |app, cx| {
+                                        app.set_tag_blocked(
+                                            block_name.clone(),
+                                            !blocked_row,
+                                            cx,
+                                        )
+                                    });
+                                }),
+                            )
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .track_scroll(&self.tag_scroll)
+            .flex_1()
+            .w_full()
+            .min_h(px(0.))
+            .into_any_element()
+        };
+
+        div()
+            .w(width)
+            .flex_none()
+            .h_full()
+            .flex()
+            .flex_col()
+            .child(
+                div()
+                    .h(px(58.))
+                    .px(px(16.))
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .gap(px(8.))
+                    .border_1()
+                    .border_color(colors.border)
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap(px(2.))
+                            .child(
+                                div()
+                                    .text_lg()
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .child("标签管理"),
+                            )
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(colors.muted)
+                                    .child(format!(
+                                        "共 {total} 个标签 · 已屏蔽 {blocked_count} 个 · 屏蔽只影响侧栏标签面"
+                                    )),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(px(6.))
+                            .child(
+                                div()
+                                    .w(px(260.))
+                                    .child(Input::new(&search).clearable().least("筛选标签")),
+                            )
+                            .child(
+                                Button::new("tags-refresh", "刷新")
+                                    .size(ControlSize::Sm)
+                                    .icon(IconName::RefreshCw)
+                                    .on_click(move |_, _, cx| {
+                                        let _ = this_refresh.update(cx, |app, cx| {
+                                            app.refresh_tag_manager(cx)
+                                        });
+                                    }),
+                            )
+                            .child(
+                                Button::new("tags-back", "返回图库")
+                                    .size(ControlSize::Sm)
+                                    .on_click(move |_, _, cx| {
+                                        let _ = this_back.update(cx, |app, cx| {
+                                            app.screen = Screen::Library;
+                                            app.focus_grid_pending = true;
+                                            cx.notify();
+                                        });
+                                    }),
+                            ),
+                    ),
+            )
+            .child(body)
+    }
+
     fn render_settings(
         &self,
         this: &Entity<Self>,
-        folder: &PathBuf,
+        roots: &[PathBuf],
         protected_paths: &[PathBuf],
         similar_threshold: u8,
         queue_pending: usize,
@@ -4256,6 +4918,89 @@ impl KanalibApp {
                         .child(value.display().to_string()),
                 )
         };
+        let this_add_source = this.clone();
+        let mut source_rows = div().flex().flex_col().gap(px(6.));
+        if roots.is_empty() {
+            source_rows = source_rows.child(
+                div()
+                    .text_xs()
+                    .text_color(colors.subtle)
+                    .child("还没有图库文件夹，添加后开始扫描。"),
+            );
+        } else {
+            for root in roots {
+                let root_for_remove = root.clone();
+                let this_remove = this.clone();
+                source_rows = source_rows.child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .justify_between()
+                        .gap(px(8.))
+                        .px(px(10.))
+                        .py(px(6.))
+                        .rounded(px(6.))
+                        .bg(colors.sunken)
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w(px(0.))
+                                .truncate()
+                                .text_xs()
+                                .text_color(colors.fg)
+                                .child(root.display().to_string()),
+                        )
+                        .child(
+                            Button::new(
+                                SharedString::from(format!("remove-source-{}", root.display())),
+                                "移除",
+                            )
+                            .size(ControlSize::Sm)
+                            .on_click(move |_, _, cx| {
+                                let _ = this_remove.update(cx, |app, cx| {
+                                    app.source_remove_confirm = Some(root_for_remove.clone());
+                                    cx.notify();
+                                });
+                            }),
+                        ),
+                );
+            }
+        }
+        let sources_section = div()
+            .p(px(16.))
+            .rounded(px(10.))
+            .border_1()
+            .border_color(colors.border)
+            .bg(colors.surface)
+            .flex()
+            .flex_col()
+            .gap(px(10.))
+            .child(
+                div()
+                    .text_sm()
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .child("本地来源"),
+            )
+            .child(source_rows)
+            .child(
+                div()
+                    .flex()
+                    .child(
+                        Button::new("add-source", "添加文件夹")
+                            .primary()
+                            .on_click(move |_, _, cx| {
+                                let _ = this_add_source
+                                    .update(cx, |app, cx| app.choose_folder(cx));
+                            }),
+                    ),
+            )
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(colors.muted)
+                    .child("移除来源只影响图库视图，不会删除磁盘文件。"),
+            );
+
         let data_section = div()
             .p(px(16.))
             .rounded(px(10.))
@@ -4271,7 +5016,6 @@ impl KanalibApp {
                     .font_weight(FontWeight::SEMIBOLD)
                     .child("数据位置"),
             )
-            .child(path_row("图库", folder.clone(), colors))
             .child(path_row("数据库", db_path, colors))
             .child(path_row("缩略图缓存", cache_dir, colors))
             .child(
@@ -4305,6 +5049,61 @@ impl KanalibApp {
             .child(div().text_xs().text_color(colors.muted).child(
                 "打标任务持久化在 jobs 表；重启后自动恢复未完成任务，失败项可用侧栏“重试失败”。",
             ));
+
+        let mut shortcut_rows = div().flex().flex_col().gap(px(4.));
+        for (keys, description) in [
+            ("Ctrl+K", "命令面板"),
+            ("Ctrl+F", "聚焦搜索"),
+            ("方向键 / Home / End", "移动选中项"),
+            ("Enter / Space", "快速查看"),
+            ("F", "切换收藏"),
+            ("1–5 / 0", "设置 / 清除星级"),
+            ("Ctrl+A", "全选当前可见"),
+            ("Esc", "清空选择"),
+            ("双击 / 右键", "快速查看 / 上下文菜单"),
+        ] {
+            shortcut_rows = shortcut_rows.child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .gap(px(12.))
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(colors.fg)
+                            .child(description),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(colors.subtle)
+                            .child(keys),
+                    ),
+            );
+        }
+        let shortcut_section = div()
+            .p(px(16.))
+            .rounded(px(10.))
+            .border_1()
+            .border_color(colors.border)
+            .bg(colors.surface)
+            .flex()
+            .flex_col()
+            .gap(px(6.))
+            .child(
+                div()
+                    .text_sm()
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .child("键盘与鼠标"),
+            )
+            .child(shortcut_rows)
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(colors.muted)
+                    .child("快捷键已绑定；方向键与快捷操作以网格获得焦点时生效。"),
+            );
 
         let rules_section = div()
             .p(px(16.))
@@ -4394,10 +5193,12 @@ impl KanalibApp {
                             .flex()
                             .flex_col()
                             .gap(px(12.))
+                            .child(sources_section)
                             .child(protected_section)
                             .child(similar_section)
                             .child(data_section)
                             .child(safety_section)
+                            .child(shortcut_section)
                             .child(rules_section),
                     ),
             )
@@ -4408,6 +5209,8 @@ impl KanalibApp {
         &self,
         this: &Entity<Self>,
         selected: Option<&Asset>,
+        counts: &Counts,
+        blocked_tags: &HashSet<String>,
         width: Pixels,
         colors: UiColors,
     ) -> impl IntoElement {
@@ -4431,6 +5234,106 @@ impl KanalibApp {
                     .child("无预览")
                     .into_any_element(),
             };
+
+            let path = asset.path.clone();
+            let manual_initial = asset
+                .manual_tags
+                .iter()
+                .map(|tag| normalize_tag_name(&tag.tag))
+                .collect::<HashSet<_>>();
+            let manual_names = asset
+                .manual_tags
+                .iter()
+                .map(|tag| SharedString::from(tag.tag.clone()))
+                .collect::<Vec<_>>();
+            let mut suggestion_names = counts
+                .tags
+                .iter()
+                .filter(|(name, _)| !blocked_tags.contains(name))
+                .take(40)
+                .map(|(name, _)| name.clone())
+                .collect::<Vec<_>>();
+            for tag in asset.all_tags() {
+                if !suggestion_names
+                    .iter()
+                    .any(|name| name.eq_ignore_ascii_case(&tag.tag))
+                {
+                    suggestion_names.push(tag.tag.clone());
+                }
+            }
+            let suggestions = suggestion_names
+                .into_iter()
+                .map(|name| Choice::new(name.clone(), name))
+                .collect::<Vec<_>>();
+            let manual_state = state.clone();
+            let manual_this = this.clone();
+            let manual_toaster = self.toaster.clone();
+            let manual_path = path.clone();
+            let manual_input = TagInput::new(
+                SharedString::from(format!("manual-tags-{}", path.display())),
+                manual_names,
+            )
+            .placeholder("添加标签，回车确认")
+            .check(|value| !normalize_tag_name(value).is_empty())
+            .suggestions(suggestions)
+            .on_change(move |next, _, cx| {
+                let next_set = next
+                    .iter()
+                    .map(|value| normalize_tag_name(value))
+                    .filter(|value| !value.is_empty())
+                    .collect::<HashSet<_>>();
+                let added = next_set.difference(&manual_initial).cloned().collect::<Vec<_>>();
+                let removed = manual_initial
+                    .difference(&next_set)
+                    .cloned()
+                    .collect::<Vec<_>>();
+                let mut changed = 0usize;
+                let mut failure = None;
+                for tag in &added {
+                    match manual_state.add_tags(std::slice::from_ref(&manual_path), tag) {
+                        Ok(updated) => changed += updated,
+                        Err(error) => {
+                            failure = Some(format!("{error:#}"));
+                            break;
+                        }
+                    }
+                }
+                if failure.is_none() {
+                    for tag in &removed {
+                        match manual_state.remove_tags(std::slice::from_ref(&manual_path), tag) {
+                            Ok(updated) => changed += updated,
+                            Err(error) => {
+                                failure = Some(format!("{error:#}"));
+                                break;
+                            }
+                        }
+                    }
+                }
+                if let Some(error) = failure {
+                    manual_state.set_error(format!("标签操作失败：{error}"));
+                    push_toast(
+                        &manual_toaster,
+                        cx,
+                        format!("标签操作失败：{error}"),
+                        Severity::Danger,
+                    );
+                } else if changed > 0 {
+                    push_toast(
+                        &manual_toaster,
+                        cx,
+                        "标签已更新",
+                        Severity::Success,
+                    );
+                } else if !added.is_empty() || !removed.is_empty() {
+                    push_toast(
+                        &manual_toaster,
+                        cx,
+                        "标签已存在或无需变更",
+                        Severity::Warning,
+                    );
+                }
+                let _ = manual_this.update(cx, |_, cx| cx.notify());
+            });
 
             let mut tags = div().id("inspector-tags").flex().flex_col().gap(px(2.));
             for category in [
@@ -4460,9 +5363,14 @@ impl KanalibApp {
                 );
                 for hit in hits {
                     let filter = Filter::Tag(hit.tag.clone());
-                    let state = state.clone();
-                    let this = this.clone();
+                    let filter_state = state.clone();
+                    let filter_this = this.clone();
+                    let remove_state = state.clone();
+                    let remove_this = this.clone();
+                    let remove_toaster = self.toaster.clone();
+                    let remove_path = path.clone();
                     let tag = hit.tag.clone();
+                    let remove_tag = tag.clone();
                     let score = hit.score;
                     tags = tags.child(
                         div()
@@ -4479,8 +5387,8 @@ impl KanalibApp {
                             .cursor_pointer()
                             .hover(move |style| style.bg(colors.hover))
                             .on_click(move |_, _, cx| {
-                                state.set_filter(filter.clone());
-                                let _ = this.update(cx, |app, cx| {
+                                filter_state.set_filter(filter.clone());
+                                let _ = filter_this.update(cx, |app, cx| {
                                     app.screen = Screen::Library;
                                     cx.notify();
                                 });
@@ -4493,15 +5401,60 @@ impl KanalibApp {
                             )
                             .child(
                                 div()
-                                    .text_xs()
-                                    .text_color(colors.subtle)
-                                    .child(format!("{score:.3}")),
+                                    .flex()
+                                    .items_center()
+                                    .gap(px(4.))
+                                    .child(
+                                        div()
+                                            .text_xs()
+                                            .text_color(colors.subtle)
+                                            .child(format!("{score:.3}")),
+                                    )
+                                    .child(
+                                        IconButton::new(
+                                            SharedString::from(format!(
+                                                "remove-tag-{}-{}",
+                                                category, tag
+                                            )),
+                                            IconName::X,
+                                        )
+                                        .size(ControlSize::Sm)
+                                        .tooltip("移除标签")
+                                        .on_click(move |_, _, cx| {
+                                            cx.stop_propagation();
+                                            match remove_state.remove_tags(
+                                                std::slice::from_ref(&remove_path),
+                                                &remove_tag,
+                                            ) {
+                                                Ok(updated) => push_toast(
+                                                    &remove_toaster,
+                                                    cx,
+                                                    if updated > 0 {
+                                                        format!("已移除标签 #{remove_tag}")
+                                                    } else {
+                                                        "没有可移除的标签".to_string()
+                                                    },
+                                                    if updated > 0 {
+                                                        Severity::Success
+                                                    } else {
+                                                        Severity::Warning
+                                                    },
+                                                ),
+                                                Err(error) => push_toast(
+                                                    &remove_toaster,
+                                                    cx,
+                                                    format!("移除标签失败：{error:#}"),
+                                                    Severity::Danger,
+                                                ),
+                                            }
+                                            let _ = remove_this.update(cx, |_, cx| cx.notify());
+                                        }),
+                                    ),
                             ),
                     );
                 }
             }
 
-            let path = asset.path.clone();
             let path_for_open = path.clone();
             let open = Button::new("open-file", "打开文件")
                 .size(ControlSize::Sm)
@@ -4644,6 +5597,13 @@ impl KanalibApp {
                     format_bytes(asset.bytes),
                     format_date(asset.mtime)
                 )))
+                .child(
+                    div()
+                        .truncate()
+                        .text_xs()
+                        .text_color(colors.subtle)
+                        .child(format!("来源 · {}", asset.library_root.display())),
+                )
                 .child(div().text_xs().text_color(colors.subtle).child(
                     match (&asset.sha1, &asset.blake3, asset.phash) {
                         (Some(sha1), Some(blake3), Some(phash)) => format!(
@@ -4691,7 +5651,16 @@ impl KanalibApp {
                         .text_xs()
                         .font_weight(FontWeight::SEMIBOLD)
                         .text_color(colors.subtle)
-                        .child("标签（点击筛选）"),
+                        .child("手工标签（回车添加，自动保存）"),
+                )
+                .child(manual_input)
+                .child(
+                    div()
+                        .mt(px(4.))
+                        .text_xs()
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(colors.subtle)
+                        .child("自动标签（点击筛选，× 移除）"),
                 )
                 .child(tags)
                 .into_any_element()
@@ -4752,12 +5721,14 @@ fn filter_row(
     count: usize,
     active: bool,
     filter: Filter,
-    state: Arc<AppState>,
+    _state: Arc<AppState>,
     this: Entity<KanalibApp>,
     colors: UiColors,
 ) -> impl IntoElement {
     let mut row = div()
         .id(id)
+        .role(Role::Button)
+        .aria_label(label.clone())
         .flex()
         .items_center()
         .justify_between()
@@ -4770,16 +5741,23 @@ fn filter_row(
         row = row.bg(colors.selection);
     }
     row.on_click(move |_, _, cx| {
-        state.set_filter(filter.clone());
         let _ = this.update(cx, |app, cx| {
-            app.screen = Screen::Library;
+            app.set_filter(filter.clone(), cx);
             app.dedup_confirm = None;
-            cx.notify();
         });
     })
-    .child(div().text_xs().text_color(colors.fg).child(label))
     .child(
         div()
+            .flex_1()
+            .min_w(px(0.))
+            .truncate()
+            .text_xs()
+            .text_color(colors.fg)
+            .child(label),
+    )
+    .child(
+        div()
+            .flex_none()
             .text_xs()
             .text_color(colors.subtle)
             .child(count.to_string()),
@@ -4797,6 +5775,8 @@ fn dedup_row(
 ) -> impl IntoElement {
     let mut row = div()
         .id(id)
+        .role(Role::Button)
+        .aria_label(label)
         .flex()
         .items_center()
         .justify_between()
@@ -4820,6 +5800,40 @@ fn dedup_row(
     )
 }
 
+fn tag_manager_row(
+    id: SharedString,
+    label: &'static str,
+    active: bool,
+    this: Entity<KanalibApp>,
+    colors: UiColors,
+) -> impl IntoElement {
+    let mut row = div()
+        .id(id)
+        .role(Role::Button)
+        .aria_label(label)
+        .flex()
+        .items_center()
+        .justify_between()
+        .px(px(8.))
+        .py(px(5.))
+        .rounded(px(5.))
+        .cursor_pointer()
+        .hover(move |style| style.bg(colors.hover));
+    if active {
+        row = row.bg(colors.selection);
+    }
+    row.on_click(move |_, _, cx| {
+        let _ = this.update(cx, |app, cx| app.open_tag_manager(cx));
+    })
+    .child(div().text_xs().text_color(colors.fg).child(label))
+    .child(
+        div()
+            .text_xs()
+            .text_color(if active { colors.accent } else { colors.subtle })
+            .child("›"),
+    )
+}
+
 fn settings_row(
     id: SharedString,
     label: &'static str,
@@ -4829,6 +5843,8 @@ fn settings_row(
 ) -> impl IntoElement {
     let mut row = div()
         .id(id)
+        .role(Role::Button)
+        .aria_label(label)
         .flex()
         .items_center()
         .justify_between()
@@ -5286,7 +6302,7 @@ fn dedup_asset_card(
                         .child(format!(
                             "修改 {} · {} 标签 · {rating}",
                             format_date(asset.mtime),
-                            asset.tags.len()
+                            asset.all_tags().count()
                         )),
                 )
                 .child(
@@ -5446,13 +6462,13 @@ fn dedup_diff(group: &DuplicateGroup, assets: &[&Asset], colors: UiColors) -> An
                     .collect::<Vec<_>>()
                     .join(" / ");
                 if top.is_empty() {
-                    format!("{} 个", asset.tags.len())
+                    format!("{} 个", asset.all_tags().count())
                 } else {
-                    format!("{} 个 · {top}", asset.tags.len())
+                    format!("{} 个 · {top}", asset.all_tags().count())
                 }
             })
             .collect(),
-        best_max(assets, |asset| asset.tags.len()),
+        best_max(assets, |asset| asset.all_tags().count()),
     );
     push_diff_row(
         &mut rows,
@@ -5701,15 +6717,115 @@ fn tile(
     let summary = error.unwrap_or_else(|| asset.summary());
     let title = asset.title();
     let tag_count = asset
-        .tags
-        .iter()
-        .filter(|tag| tag.category == "general")
+        .all_tags()
+        .filter(|tag| matches!(tag.category.as_str(), "general" | "manual"))
         .count();
     let rating = asset.rating.to_uppercase();
     let favorite = asset.favorite;
     let star = asset.star;
 
-    div()
+    let star_menu = {
+        let mut menu = Menu::new();
+        for (value, label) in [
+            (1u8, "1 星"),
+            (2, "2 星"),
+            (3, "3 星"),
+            (4, "4 星"),
+            (5, "5 星"),
+        ] {
+            let this = this.clone();
+            let path = path.clone();
+            menu = menu.item(MenuItem::new(label).on_click(move |_, cx| {
+                let _ = this.update(cx, |app, cx| {
+                    app.select_single_path(path.clone(), cx);
+                    app.apply_star(value, cx);
+                });
+            }));
+        }
+        let this = this.clone();
+        let path = path.clone();
+        menu.separator()
+            .item(MenuItem::new("清除星级").on_click(move |_, cx| {
+                let _ = this.update(cx, |app, cx| {
+                    app.select_single_path(path.clone(), cx);
+                    app.apply_star(0, cx);
+                });
+            }))
+    };
+    let menu = {
+        let quick_this = this.clone();
+        let quick_path = path.clone();
+        let favorite_this = this.clone();
+        let favorite_path = path.clone();
+        let prompt_this = this.clone();
+        let prompt_path = path.clone();
+        let paths_this = this.clone();
+        let paths_path = path.clone();
+        let open_file = path.clone();
+        let reveal_file = path.clone();
+        Menu::new()
+            .item(
+                MenuItem::new("快速查看")
+                    .icon(IconName::Maximize2)
+                    .on_click(move |_, cx| {
+                        let _ = quick_this.update(cx, |app, cx| {
+                            app.select_single_path(quick_path.clone(), cx);
+                            app.open_quick_view(cx);
+                        });
+                    }),
+            )
+            .item(
+                MenuItem::new(if favorite { "取消收藏" } else { "收藏" })
+                    .icon(IconName::Heart)
+                    .on_click(move |_, cx| {
+                        let _ = favorite_this.update(cx, |app, cx| {
+                            app.select_single_path(favorite_path.clone(), cx);
+                            app.toggle_favorite(cx);
+                        });
+                    }),
+            )
+            .item(MenuItem::submenu("星级", star_menu))
+            .separator()
+            .item(
+                MenuItem::new("复制 Prompt")
+                    .icon(IconName::ClipboardCheck)
+                    .on_click(move |_, cx| {
+                        let _ = prompt_this.update(cx, |app, cx| {
+                            app.select_single_path(prompt_path.clone(), cx);
+                            app.copy_selected_prompt(cx);
+                        });
+                    }),
+            )
+            .item(
+                MenuItem::new("复制路径")
+                    .icon(IconName::Copy)
+                    .on_click(move |_, cx| {
+                        let _ = paths_this.update(cx, |app, cx| {
+                            app.select_single_path(paths_path.clone(), cx);
+                            app.copy_selected_paths(cx);
+                        });
+                    }),
+            )
+            .separator()
+            .item(
+                MenuItem::new("打开文件")
+                    .icon(IconName::Image)
+                    .on_click(move |_, _| open_path(&open_file)),
+            )
+            .item(
+                MenuItem::new("在资源管理器中显示")
+                    .icon(IconName::FolderOpen)
+                    .on_click(move |_, _| reveal_path(&reveal_file)),
+            )
+    };
+    let this_click = this.clone();
+    let path_click = path.clone();
+    let focus_click = focus.clone();
+    let this_right = this.clone();
+    let path_right = path.clone();
+    let focus_right = focus.clone();
+
+    let tile = div()
         .id(SharedString::from(format!("tile-{}", asset.path.display())))
         .role(Role::Button)
         .aria_label(title.clone())
@@ -5720,13 +6836,13 @@ fn tile(
         .gap(px(5.))
         .cursor_pointer()
         .on_click(move |event, window, cx| {
-            window.focus(&focus, cx);
+            window.focus(&focus_click, cx);
             let (modifiers, click_count) = match event {
                 ClickEvent::Mouse(event) => (event.down.modifiers, event.down.click_count),
                 ClickEvent::Keyboard(_) | ClickEvent::Touch(_) => (Modifiers::default(), 1),
             };
-            let path = path.clone();
-            let _ = this.update(cx, |app, cx| {
+            let path = path_click.clone();
+            let _ = this_click.update(cx, |app, cx| {
                 app.handle_tile_click(path, modifiers, click_count, cx)
             });
         })
@@ -5822,6 +6938,22 @@ fn tile(
                         .text_color(colors.subtle)
                         .child(format!("{tag_count} 标签")),
                 ),
+        );
+
+    div()
+        .flex_none()
+        .on_mouse_down(MouseButton::Right, move |_, window, cx| {
+            window.focus(&focus_right, cx);
+            let _ = this_right.update(cx, |app, cx| {
+                app.select_single_path(path_right.clone(), cx);
+            });
+        })
+        .child(
+            ContextMenu::new(
+                SharedString::from(format!("tile-context-{}", asset.path.display())),
+                menu,
+            )
+            .child(tile),
         )
 }
 
@@ -5833,6 +6965,20 @@ fn open_path(path: &PathBuf) {
 #[cfg(not(target_os = "windows"))]
 fn open_path(path: &PathBuf) {
     let _ = std::process::Command::new("xdg-open").arg(path).spawn();
+}
+
+#[cfg(target_os = "windows")]
+fn reveal_path(path: &PathBuf) {
+    let _ = std::process::Command::new("explorer")
+        .arg(format!("/select,{}", path.display()))
+        .spawn();
+}
+
+#[cfg(not(target_os = "windows"))]
+fn reveal_path(path: &PathBuf) {
+    if let Some(parent) = path.parent() {
+        open_path(&parent.to_path_buf());
+    }
 }
 
 #[cfg(test)]

@@ -779,6 +779,7 @@ mod tests {
     ) -> Asset {
         Asset {
             path: PathBuf::from(path),
+            library_root: PathBuf::from("lib"),
             thumb: None,
             tile_thumb: None,
             width,
@@ -787,6 +788,7 @@ mod tests {
             rating: String::new(),
             favorite: false,
             star: 0,
+            manual_tags: Vec::new(),
             tags: (0..tags)
                 .map(|index| TagHit {
                     tag: format!("tag{index}"),

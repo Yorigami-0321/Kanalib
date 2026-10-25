@@ -15,7 +15,9 @@ use crate::dedup::{
     DEFAULT_SIMILAR_THRESHOLD, DuplicateReview, GroupKind, ReviewState, is_protected,
 };
 use crate::media;
-use crate::model::{Asset, Filter, SavedSearch, Shared, is_image};
+use crate::model::{
+    Asset, Filter, SavedSearch, Shared, TagHit, TagSummary, is_image, normalize_tag_name,
+};
 use crate::sidecar::{Sidecar, project_root};
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -41,15 +43,49 @@ impl AppState {
         let db_path = data_dir.join("kanalib.db");
         let cache_dir = data_dir.join("thumbs");
         let _ = std::fs::create_dir_all(&cache_dir);
-        let folder = absolute(folder);
-        let folder_string = folder.to_string_lossy().to_string();
-        let (assets, reviews, similar_threshold, protected_paths, queue_counts, saved_searches) =
-            match Db::open(&db_path) {
+        let initial_folder = absolute(folder);
+        let (
+            roots,
+            assets,
+            reviews,
+            similar_threshold,
+            protected_paths,
+            queue_counts,
+            saved_searches,
+            blocked_tags,
+        ) = match Db::open(&db_path) {
                 Ok(db) => {
                     if let Err(error) = backfill_vocab(&db) {
                         log::warn!("vocab backfill: {error:#}");
                     }
-                    let assets = load_tile_thumbs(match db.load_folder(&folder_string) {
+                    let saved_roots = db.setting("library.local_roots").ok().flatten();
+                    let mut roots = match saved_roots.as_deref() {
+                        Some(value) => serde_json::from_str::<Vec<String>>(value)
+                            .unwrap_or_default()
+                            .into_iter()
+                            .map(|path| absolute(PathBuf::from(path)))
+                            .collect::<Vec<_>>(),
+                        None => vec![initial_folder.clone()],
+                    };
+                    let mut seen = HashSet::new();
+                    roots.retain(|root| seen.insert(root.clone()));
+                    if saved_roots.is_none() {
+                        let values = roots
+                            .iter()
+                            .map(|root| root.to_string_lossy().to_string())
+                            .collect::<Vec<_>>();
+                        if let Err(error) = db.set_setting(
+                            "library.local_roots",
+                            &serde_json::to_string(&values).unwrap_or_default(),
+                        ) {
+                            log::warn!("save local roots: {error:#}");
+                        }
+                    }
+                    let root_strings = roots
+                        .iter()
+                        .map(|root| root.to_string_lossy().to_string())
+                        .collect::<Vec<_>>();
+                    let assets = load_tile_thumbs(match db.load_library(&root_strings) {
                         Ok(assets) => assets,
                         Err(error) => {
                             log::error!("load assets: {error:#}");
@@ -82,37 +118,55 @@ impl AppState {
                     if let Err(error) = db.recover_tag_jobs() {
                         log::warn!("recover tag jobs: {error:#}");
                     }
-                    if let Err(error) = db.enqueue_tag_jobs(&folder_string) {
-                        log::warn!("enqueue tag jobs: {error:#}");
+                    let mut queue_counts = JobCounts::default();
+                    for root in &root_strings {
+                        if let Err(error) = db.enqueue_tag_jobs(root) {
+                            log::warn!("enqueue tag jobs for {root}: {error:#}");
+                        }
+                        if let Ok(counts) = db.tag_job_counts(root) {
+                            queue_counts.pending += counts.pending;
+                            queue_counts.running += counts.running;
+                            queue_counts.error += counts.error;
+                        }
                     }
-                    let queue_counts = db.tag_job_counts(&folder_string).unwrap_or_default();
                     let saved_searches = db.load_saved_searches().unwrap_or_else(|error| {
                         log::warn!("load saved searches: {error:#}");
                         Vec::new()
                     });
+                    let blocked_tags = db
+                        .setting("tags.blocked")
+                        .ok()
+                        .flatten()
+                        .and_then(|value| serde_json::from_str::<Vec<String>>(&value).ok())
+                        .unwrap_or_default();
                     (
+                        roots,
                         assets,
                         reviews,
                         threshold,
                         protected_paths,
                         queue_counts,
                         saved_searches,
+                        blocked_tags,
                     )
                 }
                 Err(error) => {
                     log::error!("open database: {error:#}");
                     (
+                        vec![initial_folder],
                         Vec::new(),
                         Default::default(),
                         DEFAULT_SIMILAR_THRESHOLD,
                         Vec::new(),
                         JobCounts::default(),
                         Vec::new(),
+                        Vec::new(),
                     )
                 }
             };
-        let mut shared = Shared::new(folder, assets, reviews, similar_threshold, protected_paths);
+        let mut shared = Shared::new(roots, assets, reviews, similar_threshold, protected_paths);
         shared.saved_searches = saved_searches;
+        shared.blocked_tags = blocked_tags.into_iter().collect();
         shared.set_queue_counts(
             queue_counts.pending,
             queue_counts.running,
@@ -127,29 +181,102 @@ impl AppState {
         })
     }
 
-    pub fn set_folder(&self, folder: PathBuf) {
-        let folder = absolute(folder);
-        let changed = {
-            let mut shared = self.shared.lock().unwrap();
-            if shared.folder != folder {
-                shared.folder = folder;
-                shared.assets.write().unwrap().clear();
-                shared.counts = Default::default();
-                shared.revision = shared.revision.wrapping_add(1);
-                shared.selected = None;
-                shared.filter = Filter::All;
-                shared.status = "准备扫描".into();
-                shared.error = None;
-                shared.dedup.clear_groups();
-                shared.set_queue_counts(0, 0, 0);
-                true
-            } else {
-                false
+    pub fn add_roots(&self, paths: Vec<PathBuf>) -> Result<usize> {
+        let mut added = Vec::new();
+        {
+            let shared = self.shared.lock().unwrap();
+            for path in paths {
+                let path = absolute(path);
+                if !path.is_dir() {
+                    bail!("不是文件夹: {}", path.display());
+                }
+                if !shared.roots.contains(&path) && !added.contains(&path) {
+                    added.push(path);
+                }
             }
-        };
-        if changed {
-            self.bump_similar_scan_id();
         }
+        if added.is_empty() {
+            return Ok(0);
+        }
+        let roots = {
+            let shared = self.shared.lock().unwrap();
+            let mut roots = shared.roots.clone();
+            roots.extend(added.iter().cloned());
+            roots
+        };
+        self.save_roots(&roots)?;
+        let mut shared = self.shared.lock().unwrap();
+        shared.roots = roots;
+        shared.revision = shared.revision.wrapping_add(1);
+        shared.status = format!("已添加 {} 个来源", added.len());
+        shared.error = None;
+        Ok(added.len())
+    }
+
+    pub fn remove_root(&self, root: &Path) -> Result<usize> {
+        let root = absolute(root.to_path_buf());
+        let roots = {
+            let shared = self.shared.lock().unwrap();
+            let mut roots = shared.roots.clone();
+            let before = roots.len();
+            roots.retain(|item| item != &root);
+            if roots.len() == before {
+                return Ok(0);
+            }
+            roots
+        };
+        self.save_roots(&roots)?;
+        let removed_paths = {
+            let shared = self.shared.lock().unwrap();
+            let assets = shared.assets.read().unwrap();
+            assets
+                .iter()
+                .filter(|asset| asset.library_root == root)
+                .map(|asset| asset.path.clone())
+                .collect::<HashSet<_>>()
+        };
+        let mut queue_counts = JobCounts::default();
+        if let Ok(db) = Db::open(&self.db_path) {
+            for folder in &roots {
+                if let Ok(counts) = db.tag_job_counts(&folder.to_string_lossy()) {
+                    queue_counts.pending += counts.pending;
+                    queue_counts.running += counts.running;
+                    queue_counts.error += counts.error;
+                }
+            }
+        }
+        let removed = {
+            let mut shared = self.shared.lock().unwrap();
+            shared.roots = roots;
+            if matches!(&shared.filter, Filter::Source(source) if source == &root) {
+                shared.filter = Filter::All;
+            }
+            let removed = shared.remove_assets(&removed_paths);
+            shared.refresh_after_removal(&removed_paths);
+            shared.set_queue_counts(
+                queue_counts.pending,
+                queue_counts.running,
+                queue_counts.error,
+            );
+            shared.status = if shared.roots.is_empty() {
+                "请添加文件夹".to_string()
+            } else {
+                format!("已移除来源 · 磁盘文件未删除 · 剩余 {} 个来源", shared.roots.len())
+            };
+            shared.error = None;
+            removed
+        };
+        self.bump_similar_scan_id();
+        Ok(removed)
+    }
+
+    fn save_roots(&self, roots: &[PathBuf]) -> Result<()> {
+        let values = roots
+            .iter()
+            .map(|root| root.to_string_lossy().to_string())
+            .collect::<Vec<_>>();
+        Db::open(&self.db_path)?
+            .set_setting("library.local_roots", &serde_json::to_string(&values)?)
     }
 
     fn bump_similar_scan_id(&self) -> u64 {
@@ -172,7 +299,14 @@ impl AppState {
         }
         let flag = Arc::new(AtomicBool::new(false));
         *self.cancel.lock().unwrap() = Some(flag.clone());
-        let folder = self.shared.lock().unwrap().folder.clone();
+        let roots = self.shared.lock().unwrap().roots.clone();
+        if roots.is_empty() {
+            let mut shared = self.shared.lock().unwrap();
+            shared.scanning = false;
+            shared.status = "请添加文件夹".into();
+            shared.revision = shared.revision.wrapping_add(1);
+            return;
+        }
         {
             let mut shared = self.shared.lock().unwrap();
             shared.scanning = true;
@@ -184,17 +318,52 @@ impl AppState {
         let spawned = std::thread::Builder::new()
             .name("kanalib-indexer".into())
             .spawn(move || {
-                let result = index(&state, &folder, &flag, skip_tag);
-                {
-                    let mut shared = state.shared.lock().unwrap();
-                    shared.refresh_dedup();
+                let result = scan_roots(&state, &roots, &flag, skip_tag);
+                let root_strings = roots
+                    .iter()
+                    .map(|root| root.to_string_lossy().to_string())
+                    .collect::<Vec<_>>();
+                let mut queue = JobCounts::default();
+                if let Ok(db) = Db::open(&state.db_path) {
+                    for root in &root_strings {
+                        if let Ok(counts) = db.tag_job_counts(root) {
+                            queue.pending += counts.pending;
+                            queue.running += counts.running;
+                            queue.error += counts.error;
+                        }
+                    }
                 }
+                let mut shared = state.shared.lock().unwrap();
+                shared.refresh_dedup();
+                shared.set_queue_counts(queue.pending, queue.running, queue.error);
+                shared.scanning = false;
                 if let Err(error) = result {
-                    let mut shared = state.shared.lock().unwrap();
                     shared.error = Some(format!("{error:#}"));
                     shared.status = "索引失败".into();
-                    shared.scanning = false;
+                } else if flag.load(Ordering::SeqCst) {
+                    shared.status = format!("已停止 · {} 张图片", shared.counts.total());
+                } else if queue.pending > 0 {
+                    shared.status = format!(
+                        "完成 · {} 张图片 · 队列 {} 张待处理 · {} 个来源",
+                        shared.counts.total(),
+                        queue.pending,
+                        roots.len()
+                    );
+                } else if queue.error > 0 {
+                    shared.status = format!(
+                        "完成 · {} 张图片 · {} 个失败待处理 · {} 个来源",
+                        shared.counts.total(),
+                        queue.error,
+                        roots.len()
+                    );
+                } else {
+                    shared.status = format!(
+                        "完成 · {} 张图片 · {} 个来源",
+                        shared.counts.total(),
+                        roots.len()
+                    );
                 }
+                shared.revision = shared.revision.wrapping_add(1);
             });
         if spawned.is_err() {
             let mut shared = self.shared.lock().unwrap();
@@ -205,7 +374,13 @@ impl AppState {
 
     pub fn scan_blocking(self: &Arc<Self>, skip_tag: bool) -> Result<()> {
         self.invalidate_similar_scan();
-        let folder = self.shared.lock().unwrap().folder.clone();
+        let roots = self.shared.lock().unwrap().roots.clone();
+        if roots.is_empty() {
+            let mut shared = self.shared.lock().unwrap();
+            shared.scanning = false;
+            shared.status = "请添加文件夹".into();
+            return Ok(());
+        }
         {
             let mut shared = self.shared.lock().unwrap();
             shared.scanning = true;
@@ -213,16 +388,16 @@ impl AppState {
             shared.status = "扫描中...".into();
         }
         let cancel = Arc::new(AtomicBool::new(false));
-        let result = index(self, &folder, &cancel, skip_tag);
+        let result = scan_roots(self, &roots, &cancel, skip_tag);
         {
             let mut shared = self.shared.lock().unwrap();
             shared.refresh_dedup();
+            shared.scanning = false;
         }
         if let Err(error) = &result {
             let mut shared = self.shared.lock().unwrap();
             shared.error = Some(format!("{error:#}"));
             shared.status = "索引失败".into();
-            shared.scanning = false;
         }
         result
     }
@@ -303,6 +478,166 @@ impl AppState {
         Ok(updated)
     }
 
+    pub fn add_tags(&self, paths: &[PathBuf], name: &str) -> Result<usize> {
+        let name = normalize_tag_name(name);
+        if name.is_empty() {
+            bail!("标签名不能为空");
+        }
+        if paths.is_empty() {
+            return Ok(0);
+        }
+        let targets = paths.iter().map(PathBuf::as_path).collect::<HashSet<_>>();
+        let to_add = {
+            let shared = self.shared.lock().unwrap();
+            let assets = shared.assets.read().unwrap();
+            assets
+                .iter()
+                .filter(|asset| {
+                    targets.contains(asset.path.as_path())
+                        && !asset
+                            .all_tags()
+                            .any(|tag| tag.tag.eq_ignore_ascii_case(&name))
+                })
+                .map(|asset| asset.path.clone())
+                .collect::<Vec<_>>()
+        };
+        if to_add.is_empty() {
+            return Ok(0);
+        }
+        let updated = Db::open(&self.db_path)?.add_manual_tags(&to_add, &name, "manual")?;
+        let added = to_add.iter().map(PathBuf::as_path).collect::<HashSet<_>>();
+        let mut shared = self.shared.lock().unwrap();
+        let Shared {
+            assets,
+            counts,
+            revision,
+            status,
+            error,
+            ..
+        } = &mut *shared;
+        {
+            let mut assets = assets.write().unwrap();
+            for asset in assets.iter_mut() {
+                if added.contains(asset.path.as_path())
+                    && !asset
+                        .all_tags()
+                        .any(|tag| tag.tag.eq_ignore_ascii_case(&name))
+                {
+                    counts.remove(asset);
+                    asset.manual_tags.push(TagHit {
+                        tag: name.clone(),
+                        category: "manual".into(),
+                        score: 1.0,
+                        vocab_index: None,
+                    });
+                    counts.add(asset);
+                }
+            }
+        }
+        *revision = revision.wrapping_add(1);
+        *status = format!("已为 {updated} 张添加标签 #{name}");
+        *error = None;
+        Ok(updated)
+    }
+
+    pub fn remove_tags(&self, paths: &[PathBuf], name: &str) -> Result<usize> {
+        let name = normalize_tag_name(name);
+        if name.is_empty() || paths.is_empty() {
+            return Ok(0);
+        }
+        let updated = Db::open(&self.db_path)?.remove_tags(paths, &name)?;
+        let targets = paths.iter().map(PathBuf::as_path).collect::<HashSet<_>>();
+        let mut shared = self.shared.lock().unwrap();
+        let Shared {
+            assets,
+            counts,
+            revision,
+            status,
+            error,
+            ..
+        } = &mut *shared;
+        {
+            let mut assets = assets.write().unwrap();
+            for asset in assets.iter_mut() {
+                if !targets.contains(asset.path.as_path()) {
+                    continue;
+                }
+                let has_tag = asset
+                    .all_tags()
+                    .any(|tag| tag.tag.eq_ignore_ascii_case(&name));
+                if !has_tag {
+                    continue;
+                }
+                counts.remove(asset);
+                asset
+                    .tags
+                    .retain(|tag| !tag.tag.eq_ignore_ascii_case(&name));
+                asset
+                    .manual_tags
+                    .retain(|tag| !tag.tag.eq_ignore_ascii_case(&name));
+                counts.add(asset);
+            }
+        }
+        *revision = revision.wrapping_add(1);
+        *status = format!("已从 {updated} 张移除标签 #{name}");
+        *error = None;
+        Ok(updated)
+    }
+
+    pub fn setting(&self, key: &str) -> Option<String> {
+        Db::open(&self.db_path)
+            .ok()
+            .and_then(|db| db.setting(key).ok().flatten())
+    }
+
+    pub fn set_setting(&self, key: &str, value: &str) -> Result<()> {
+        Db::open(&self.db_path)?.set_setting(key, value)
+    }
+
+    pub fn list_tags(&self) -> Result<Vec<TagSummary>> {
+        let roots = self
+            .shared
+            .lock()
+            .unwrap()
+            .roots
+            .iter()
+            .map(|root| root.to_string_lossy().to_string())
+            .collect::<Vec<_>>();
+        Db::open(&self.db_path)?.list_tags_in(&roots)
+    }
+
+    pub fn set_tag_blocked(&self, name: &str, blocked: bool) -> Result<()> {
+        let name = normalize_tag_name(name);
+        if name.is_empty() {
+            bail!("标签名不能为空");
+        }
+        let mut values = {
+            let shared = self.shared.lock().unwrap();
+            shared.blocked_tags.iter().cloned().collect::<HashSet<_>>()
+        };
+        let changed = if blocked {
+            values.insert(name.clone())
+        } else {
+            values.remove(&name)
+        };
+        if !changed {
+            return Ok(());
+        }
+        let mut list = values.into_iter().collect::<Vec<_>>();
+        list.sort();
+        Db::open(&self.db_path)?.set_setting("tags.blocked", &serde_json::to_string(&list)?)?;
+        let mut shared = self.shared.lock().unwrap();
+        shared.blocked_tags = list.into_iter().collect();
+        shared.revision = shared.revision.wrapping_add(1);
+        shared.status = if blocked {
+            format!("已屏蔽标签 #{name}")
+        } else {
+            format!("已取消屏蔽标签 #{name}")
+        };
+        shared.error = None;
+        Ok(())
+    }
+
     pub fn save_saved_search(
         &self,
         name: &str,
@@ -349,14 +684,20 @@ impl AppState {
     }
 
     pub fn retry_failed(&self) -> Result<usize> {
-        let folder = self
+        let roots = self
             .shared
             .lock()
             .unwrap()
-            .folder
-            .to_string_lossy()
-            .to_string();
-        Db::open(&self.db_path)?.retry_failed(&folder)
+            .roots
+            .iter()
+            .map(|root| root.to_string_lossy().to_string())
+            .collect::<Vec<_>>();
+        let db = Db::open(&self.db_path)?;
+        let mut total = 0;
+        for root in &roots {
+            total += db.retry_failed(root)?;
+        }
+        Ok(total)
     }
 
     pub fn set_dedup_keeper(&self, key: &str, path: PathBuf, kind: GroupKind) -> bool {
@@ -568,7 +909,7 @@ impl AppState {
     }
 
     pub fn trash_dedup_group(&self, key: &str) -> Result<TrashSummary> {
-        let (folder, group, protected) = {
+        let (roots, group, protected) = {
             let shared = self.shared.lock().unwrap();
             let group = shared
                 .dedup
@@ -576,7 +917,7 @@ impl AppState {
                 .cloned()
                 .with_context(|| format!("duplicate group not found: {key}"))?;
             (
-                shared.folder.clone(),
+                shared.roots.clone(),
                 group,
                 shared.dedup.protected_paths.clone(),
             )
@@ -585,7 +926,7 @@ impl AppState {
             .keeper
             .clone()
             .context("duplicate group has no keeper")?;
-        if !keeper.starts_with(&folder) {
+        if !roots.iter().any(|root| keeper.starts_with(root)) {
             bail!("保留项不在当前图库内: {}", keeper.display());
         }
         let paths = group.duplicate_paths();
@@ -595,7 +936,7 @@ impl AppState {
         if let Some(blocked) = paths.iter().find(|path| is_protected(path, &protected)) {
             bail!("受保护路径不能移入回收站: {}", blocked.display());
         }
-        validate_under(&folder, &paths)?;
+        validate_under_roots(&roots, &paths)?;
 
         let report = crate::trash::move_to_recycle_bin(&paths)?;
         let moved = report.moved.iter().cloned().collect::<HashSet<_>>();
@@ -633,7 +974,7 @@ impl AppState {
     }
 
     pub fn trash_preselected(&self) -> Result<TrashSummary> {
-        let (folder, groups, protected) = {
+        let (roots, groups, protected) = {
             let shared = self.shared.lock().unwrap();
             let groups = shared
                 .dedup
@@ -643,7 +984,7 @@ impl AppState {
                 .cloned()
                 .collect::<Vec<_>>();
             (
-                shared.folder.clone(),
+                shared.roots.clone(),
                 groups,
                 shared.dedup.protected_paths.clone(),
             )
@@ -659,7 +1000,7 @@ impl AppState {
                 .keeper
                 .as_ref()
                 .with_context(|| format!("duplicate group has no keeper: {}", group.key))?;
-            if !keeper.starts_with(&folder) {
+            if !roots.iter().any(|root| keeper.starts_with(root)) {
                 bail!("保留项不在当前图库内: {}", keeper.display());
             }
             let copies = group.duplicate_paths();
@@ -667,7 +1008,7 @@ impl AppState {
                 protected_skipped += 1;
                 continue;
             }
-            validate_under(&folder, &copies)?;
+            validate_under_roots(&roots, &copies)?;
             paths.extend(copies);
         }
         if paths.is_empty() {
@@ -722,18 +1063,19 @@ impl AppState {
     }
 
     pub fn search_paths(&self, text: &str) -> Result<HashSet<PathBuf>> {
-        let folder = self
+        let roots = self
             .shared
             .lock()
             .unwrap()
-            .folder
-            .to_string_lossy()
-            .to_string();
+            .roots
+            .iter()
+            .map(|root| root.to_string_lossy().to_string())
+            .collect::<Vec<_>>();
         let tokens = text
             .split_whitespace()
             .map(str::to_string)
             .collect::<Vec<_>>();
-        Db::open(&self.db_path)?.search_paths(&folder, &tokens)
+        Db::open(&self.db_path)?.search_paths_in(&roots, &tokens)
     }
 
     pub fn stop(&self) {
@@ -799,6 +1141,34 @@ fn log_scan_metrics(stats: &ScanStats) {
             Err(error) => log::warn!("metrics path {}: {error}", Path::new(&path).display()),
         }
     }
+}
+
+fn scan_roots(
+    state: &Arc<AppState>,
+    roots: &[PathBuf],
+    cancel: &Arc<AtomicBool>,
+    skip_tag: bool,
+) -> Result<()> {
+    for (position, root) in roots.iter().enumerate() {
+        if cancel.load(Ordering::SeqCst) {
+            break;
+        }
+        {
+            let mut shared = state.shared.lock().unwrap();
+            shared.scanning = true;
+            shared.status = format!(
+                "扫描来源 {}/{} · {}",
+                position + 1,
+                roots.len(),
+                root.file_name()
+                    .map(|name| name.to_string_lossy().to_string())
+                    .unwrap_or_else(|| root.display().to_string())
+            );
+            shared.revision = shared.revision.wrapping_add(1);
+        }
+        index(state, root, cancel, skip_tag)?;
+    }
+    Ok(())
 }
 
 fn index(
@@ -1244,12 +1614,12 @@ fn absolute(path: PathBuf) -> PathBuf {
     std::path::absolute(&path).unwrap_or(path)
 }
 
-fn validate_under(folder: &Path, paths: &[PathBuf]) -> Result<()> {
+fn validate_under_roots(roots: &[PathBuf], paths: &[PathBuf]) -> Result<()> {
     for path in paths {
         if !path.is_absolute() {
             bail!("拒绝处理相对路径: {}", path.display());
         }
-        if !path.starts_with(folder) {
+        if !roots.iter().any(|root| path.starts_with(root)) {
             bail!("拒绝处理当前图库之外的文件: {}", path.display());
         }
     }

@@ -450,5 +450,12 @@ duplicate_reviews  group_key(sha1), state(pending/ignored/done), keeper_path, me
   - 复用 Ely 成品：`CommandPalette`（Ctrl+K，含跳转、视图、图片操作、排序、图库命令）、`Lightbox`（左右切图、Esc/背景关闭、原图查看，关闭或换图时清理全局图片缓存）、`Toaster`/`ToastViewport`、`Rating`、`DropdownMenu`、`SegmentedControl`、`PromptDialog`、`IconButton`；Ely 组件统一注册 `zh-CN` i18n 词典。
   - 外观与可达性：工具栏新增浅色/深色主题切换（`Theme::set_mode_now`）；网格与瓦片、智能集合行增加 `Role`/`aria_label`，UIA 可识别瓦片与保存视图按钮；网格焦点节点带 id/role，消除无障碍警告。
   - 验证：`cargo test --workspace` 21 通过 + 3 忽略；UIA 实测了收藏、快速查看、命令面板、密度“大”、浅色主题、应用智能集合、全选可见批量栏与保存对话框；键盘快捷键已绑定，但本轮未做按键注入验收（遵守不使用全局键鼠自动化的约定）。截图：`.kanalib/ui_new_main2.png`、`ui_fav.png`、`ui_lightbox.png`、`ui_palette.png`、`ui_large_dark.png`、`ui_large_light.png`、`ui_bulk_bar.png`、`ui_save_dialog.png`、`ui_saved_apply2.png`。测试数据根 `.kanalib/ui_check_root` 为独立 DB（已清理），不触碰真实图库或主 `.kanalib/kanalib.db`。排序/密度/主题目前是会话状态；下一步可写入 `settings` 持久化，并补右键菜单与手工标签编辑。
+- 本地标签与多文件夹（2026-10-25）：
+  - 手工标签：`Asset.manual_tags` 与自动标签分开存储；检查器使用 Ely `TagInput` 添加/移除手工标签，自动标签行可点 × 移除；批量栏/命令面板提供加标签、移除标签对话框。`Db::add_manual_tags`/`remove_tags` 会同步 `tags_text` 供 FTS 搜索，计数、Prompt、灯箱标签数和筛选都合并手工标签。
+  - 标签管理：侧栏新增“标签管理”页，列出标签类别、使用张数和手工出现次数，可屏蔽/取消屏蔽；屏蔽列表持久化在 `settings.tags.blocked`，只从侧栏标签面隐藏，不修改资产标签。别名与阈值调优尚未实现：别名需要显示/搜索映射，阈值会影响 sidecar 输出并涉及重新打标，留作单独设计。
+  - 偏好与右键：`ui.sort`、`ui.sort_ascending`、`ui.density`、`ui.theme` 写入 settings，启动时恢复；瓦片右键菜单提供快速查看、收藏、星级、复制 Prompt/路径、打开文件、资源管理器定位，右键会先选中该瓦片；设置页新增快捷键清单。实际按键注入未做，保留人工验收。
+  - 多文件夹统一图库：`settings.library.local_roots` 保存本地根目录列表，`Shared.roots` 取代单目录；每个根目录是一条 local source，扫描按根顺序执行，资产新增 `library_root`。`load_library`、`search_paths_in`、`list_tags_in` 和任务队列计数都支持多根；去重、收藏/星级、手工标签、屏蔽标签跨根统一。侧栏“来源”可逐根筛选，设置页可多选添加文件夹与移除来源；移除只影响图库视图并保留磁盘文件和 DB 行，重新添加即可恢复。`remove_root` 会同步更新内存计数、选中项和来源筛选。
+  - 验证：`cargo test --workspace` 23 通过 + 3 忽略；UIA/窗口内消息验证了手工标签展示与自动标签移除、标签屏蔽、偏好重启恢复、右键菜单与右键选中、两个根目录的统一网格/来源筛选/来源移除确认。截图：`.kanalib/ui_manual_tag.png`、`ui_tag_blocked2.png`、`ui_tag_removed.png`、`ui_prefs_restored.png`、`ui_context_menu2.png`、`ui_multi_main.png`、`ui_source_filter.png`、`ui_sources_settings.png`、`ui_source_removed.png`。测试根 `.kanalib/ui_tags_root` 与第二来源 `.kanalib/ui_second_source` 已清理，未触碰真实图库。
+  - 未覆盖：真实系统文件夹选择器添加（只验证了种子来源与扫描）、跨根 GPU 打标、标签别名/阈值、快捷键按键注入。下一步是缓存管理、导出与安装包，再回头做标签别名/阈值和跨根打标实测。
 - 合成库的模型输出只用于管道压力测试：9,990 张中 6,556 归为截图/文本、1,651 非动漫/实景、1,273 未分类，不能作为真实图库的分类质量指标。
 - Immich/WebDAV：按 2026-10-24 决定暂缓，先完成本地 MVP；阶段 2 再接入。
