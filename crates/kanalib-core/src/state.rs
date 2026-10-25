@@ -5,7 +5,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Instant, UNIX_EPOCH};
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use image::{ImageFormat, Rgb, RgbImage};
 use serde::Deserialize;
 use walkdir::WalkDir;
@@ -15,8 +15,8 @@ use crate::dedup::{
     DEFAULT_SIMILAR_THRESHOLD, DuplicateReview, GroupKind, ReviewState, is_protected,
 };
 use crate::media;
-use crate::model::{Asset, is_image, Filter, Shared};
-use crate::sidecar::{project_root, Sidecar};
+use crate::model::{Asset, Filter, SavedSearch, Shared, is_image};
+use crate::sidecar::{Sidecar, project_root};
 
 #[derive(Clone, Copy, Debug, Default)]
 pub struct TrashSummary {
@@ -43,7 +43,7 @@ impl AppState {
         let _ = std::fs::create_dir_all(&cache_dir);
         let folder = absolute(folder);
         let folder_string = folder.to_string_lossy().to_string();
-        let (assets, reviews, similar_threshold, protected_paths, queue_counts) =
+        let (assets, reviews, similar_threshold, protected_paths, queue_counts, saved_searches) =
             match Db::open(&db_path) {
                 Ok(db) => {
                     if let Err(error) = backfill_vocab(&db) {
@@ -86,12 +86,17 @@ impl AppState {
                         log::warn!("enqueue tag jobs: {error:#}");
                     }
                     let queue_counts = db.tag_job_counts(&folder_string).unwrap_or_default();
+                    let saved_searches = db.load_saved_searches().unwrap_or_else(|error| {
+                        log::warn!("load saved searches: {error:#}");
+                        Vec::new()
+                    });
                     (
                         assets,
                         reviews,
                         threshold,
                         protected_paths,
                         queue_counts,
+                        saved_searches,
                     )
                 }
                 Err(error) => {
@@ -102,16 +107,12 @@ impl AppState {
                         DEFAULT_SIMILAR_THRESHOLD,
                         Vec::new(),
                         JobCounts::default(),
+                        Vec::new(),
                     )
                 }
             };
-        let mut shared = Shared::new(
-            folder,
-            assets,
-            reviews,
-            similar_threshold,
-            protected_paths,
-        );
+        let mut shared = Shared::new(folder, assets, reviews, similar_threshold, protected_paths);
+        shared.saved_searches = saved_searches;
         shared.set_queue_counts(
             queue_counts.pending,
             queue_counts.running,
@@ -234,6 +235,119 @@ impl AppState {
         self.shared.lock().unwrap().selected = path;
     }
 
+    pub fn set_favorite(&self, paths: &[PathBuf], favorite: bool) -> Result<usize> {
+        if paths.is_empty() {
+            return Ok(0);
+        }
+        let updated = Db::open(&self.db_path)?.set_favorite(paths, favorite)?;
+        let targets = paths.iter().map(PathBuf::as_path).collect::<HashSet<_>>();
+        let mut shared = self.shared.lock().unwrap();
+        let Shared {
+            assets,
+            counts,
+            revision,
+            status,
+            error,
+            ..
+        } = &mut *shared;
+        {
+            let mut assets = assets.write().unwrap();
+            for asset in assets.iter_mut() {
+                if targets.contains(asset.path.as_path()) && asset.favorite != favorite {
+                    counts.remove(asset);
+                    asset.favorite = favorite;
+                    counts.add(asset);
+                }
+            }
+        }
+        *revision = revision.wrapping_add(1);
+        *status = if favorite {
+            format!("已收藏 {updated} 张")
+        } else {
+            format!("已取消收藏 {updated} 张")
+        };
+        *error = None;
+        Ok(updated)
+    }
+
+    pub fn set_star(&self, paths: &[PathBuf], star: u8) -> Result<usize> {
+        if paths.is_empty() {
+            return Ok(0);
+        }
+        let star = star.min(5);
+        let updated = Db::open(&self.db_path)?.set_star(paths, star)?;
+        let targets = paths.iter().map(PathBuf::as_path).collect::<HashSet<_>>();
+        let mut shared = self.shared.lock().unwrap();
+        let Shared {
+            assets,
+            revision,
+            status,
+            error,
+            ..
+        } = &mut *shared;
+        {
+            let mut assets = assets.write().unwrap();
+            for asset in assets.iter_mut() {
+                if targets.contains(asset.path.as_path()) {
+                    asset.star = star;
+                }
+            }
+        }
+        *revision = revision.wrapping_add(1);
+        *status = if star == 0 {
+            format!("已清除 {updated} 张的星级")
+        } else {
+            format!("已设置 {updated} 张为 {star} 星")
+        };
+        *error = None;
+        Ok(updated)
+    }
+
+    pub fn save_saved_search(
+        &self,
+        name: &str,
+        filter: &Filter,
+        query: &str,
+    ) -> Result<SavedSearch> {
+        let name = name.trim();
+        if name.is_empty() {
+            bail!("智能集合名称不能为空");
+        }
+        if self
+            .shared
+            .lock()
+            .unwrap()
+            .saved_searches
+            .iter()
+            .any(|search| search.name == name)
+        {
+            bail!("已存在同名智能集合");
+        }
+        let id = Db::open(&self.db_path)?.save_saved_search(name, filter, query)?;
+        let saved = SavedSearch {
+            id,
+            name: name.to_string(),
+            filter: filter.clone(),
+            query: query.to_string(),
+        };
+        let mut shared = self.shared.lock().unwrap();
+        shared.saved_searches.push(saved.clone());
+        shared.revision = shared.revision.wrapping_add(1);
+        shared.status = format!("已保存智能集合「{}」", saved.name);
+        shared.error = None;
+        Ok(saved)
+    }
+
+    pub fn delete_saved_search(&self, id: i64) -> Result<()> {
+        Db::open(&self.db_path)?.delete_saved_search(id)?;
+        let mut shared = self.shared.lock().unwrap();
+        shared.saved_searches.retain(|search| search.id != id);
+        shared.revision = shared.revision.wrapping_add(1);
+        shared.status = "已删除智能集合".into();
+        shared.error = None;
+        Ok(())
+    }
+
     pub fn retry_failed(&self) -> Result<usize> {
         let folder = self
             .shared
@@ -304,9 +418,9 @@ impl AppState {
             shared.dedup.similar_threshold = threshold;
             shared.revision = shared.revision.wrapping_add(1);
         }
-        if let Err(error) = Db::open(&self.db_path).and_then(|db| {
-            db.set_setting("dedup.similar_threshold", &threshold.to_string())
-        }) {
+        if let Err(error) = Db::open(&self.db_path)
+            .and_then(|db| db.set_setting("dedup.similar_threshold", &threshold.to_string()))
+        {
             log::warn!("save similar threshold: {error:#}");
         }
         threshold
@@ -319,7 +433,12 @@ impl AppState {
         }
         let paths = {
             let shared = self.shared.lock().unwrap();
-            if shared.dedup.protected_paths.iter().any(|item| item == &path) {
+            if shared
+                .dedup
+                .protected_paths
+                .iter()
+                .any(|item| item == &path)
+            {
                 return Ok(());
             }
             let mut paths = shared.dedup.protected_paths.clone();
@@ -396,13 +515,17 @@ impl AppState {
             shared.dedup.similar_scanning = true;
             shared.dedup.similar_scanned = false;
             shared.dedup.similar_groups = Arc::new(Vec::new());
-            shared.status = format!(
-                "相似扫描中 · 汉明距离 ≤{threshold} · {} 张",
-                assets.len()
-            );
+            shared.status = format!("相似扫描中 · 汉明距离 ≤{threshold} · {} 张", assets.len());
             shared.error = None;
             shared.revision = shared.revision.wrapping_add(1);
-            (assets, threshold, shared.revision, reviews, old_groups, protected)
+            (
+                assets,
+                threshold,
+                shared.revision,
+                reviews,
+                old_groups,
+                protected,
+            )
         };
 
         let state = self.clone();
@@ -433,8 +556,7 @@ impl AppState {
                     .filter(|group| group.state == ReviewState::Pending)
                     .count();
                 shared.dedup.set_similar_groups(groups, threshold);
-                shared.status =
-                    format!("相似扫描完成 · {count} 组 · 未审 {pending} 组");
+                shared.status = format!("相似扫描完成 · {count} 组 · 未审 {pending} 组");
                 shared.revision = shared.revision.wrapping_add(1);
             });
         if spawned.is_err() {
@@ -470,10 +592,7 @@ impl AppState {
         if paths.is_empty() {
             bail!("这一组没有待移入回收站的副本");
         }
-        if let Some(blocked) = paths
-            .iter()
-            .find(|path| is_protected(path, &protected))
-        {
+        if let Some(blocked) = paths.iter().find(|path| is_protected(path, &protected)) {
             bail!("受保护路径不能移入回收站: {}", blocked.display());
         }
         validate_under(&folder, &paths)?;
@@ -544,10 +663,7 @@ impl AppState {
                 bail!("保留项不在当前图库内: {}", keeper.display());
             }
             let copies = group.duplicate_paths();
-            if copies
-                .iter()
-                .any(|path| is_protected(path, &protected))
-            {
+            if copies.iter().any(|path| is_protected(path, &protected)) {
                 protected_skipped += 1;
                 continue;
             }
@@ -867,7 +983,11 @@ fn index_inner(
         shared.status = if queue.pending > 0 {
             format!("待打标 {} 张 · 队列已恢复", queue.pending)
         } else if queue.error > 0 {
-            format!("完成 · {} 张图片 · {} 个失败待处理", files.len(), queue.error)
+            format!(
+                "完成 · {} 张图片 · {} 个失败待处理",
+                files.len(),
+                queue.error
+            )
         } else {
             format!("完成 · {} 张图片，全部已打标", files.len())
         };
@@ -904,11 +1024,7 @@ fn index_inner(
         } else {
             ready.device.clone()
         });
-        shared.status = format!(
-            "打标中 0/{} · {} 类标签",
-            queue.pending,
-            ready.classes
-        );
+        shared.status = format!("打标中 0/{} · {} 类标签", queue.pending, ready.classes);
     }
     process_tag_queue(
         state,
@@ -951,10 +1067,7 @@ fn process_tag_queue(
                 counts.pending, counts.error
             );
         }
-        let paths = jobs
-            .iter()
-            .map(|job| job.path.clone())
-            .collect::<Vec<_>>();
+        let paths = jobs.iter().map(|job| job.path.clone()).collect::<Vec<_>>();
         let items = match sidecar.tag(&paths) {
             Ok(items) => items,
             Err(error) => {
@@ -992,10 +1105,7 @@ fn process_tag_queue(
                             asset.height = item.height.unwrap_or(0);
                         }
                         asset.rating = item.rating.clone().unwrap_or_default();
-                        asset.group = item
-                            .group
-                            .clone()
-                            .unwrap_or_else(|| "未分类".to_string());
+                        asset.group = item.group.clone().unwrap_or_else(|| "未分类".to_string());
                         asset.tags = item.tags.clone().unwrap_or_default();
                         asset.tagged = true;
                         asset.tag_attempts = 0;
@@ -1054,7 +1164,10 @@ fn process_tag_queue(
             .map(|job| job.id)
             .collect::<Vec<_>>();
         if !unhandled.is_empty() {
-            log::warn!("{} tag jobs returned no result; requeueing", unhandled.len());
+            log::warn!(
+                "{} tag jobs returned no result; requeueing",
+                unhandled.len()
+            );
             db.release_tag_jobs(&unhandled)?;
         }
         let counts = db.tag_job_counts(folder)?;
@@ -1105,10 +1218,10 @@ fn backfill_vocab(db: &Db) -> Result<()> {
         return Ok(());
     }
     let config_path = crate::sidecar::model_dir().join("config.json");
-    let bytes = std::fs::read(&config_path)
-        .with_context(|| format!("read {}", config_path.display()))?;
-    let config: ModelConfig =
-        serde_json::from_slice(&bytes).with_context(|| format!("parse {}", config_path.display()))?;
+    let bytes =
+        std::fs::read(&config_path).with_context(|| format!("read {}", config_path.display()))?;
+    let config: ModelConfig = serde_json::from_slice(&bytes)
+        .with_context(|| format!("parse {}", config_path.display()))?;
     let index = config
         .tags
         .iter()
@@ -1244,7 +1357,9 @@ fn ensure_thumb(
         path.to_string_lossy(),
         mtime,
         bytes,
-        path.extension().map(|ext| ext.to_string_lossy()).unwrap_or_default()
+        path.extension()
+            .map(|ext| ext.to_string_lossy())
+            .unwrap_or_default()
     );
     let hash = blake3::hash(key.as_bytes()).to_hex();
     let target = cache_dir.join(format!("{}.jpg", &hash.as_str()[..24]));

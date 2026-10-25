@@ -785,6 +785,8 @@ mod tests {
             height,
             group: String::new(),
             rating: String::new(),
+            favorite: false,
+            star: 0,
             tags: (0..tags)
                 .map(|index| TagHit {
                     tag: format!("tag{index}"),

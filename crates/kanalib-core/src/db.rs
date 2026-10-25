@@ -3,12 +3,13 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use anyhow::{bail, Context, Result};
-use rusqlite::{params, Connection, OptionalExtension, ToSql};
+use anyhow::{Context, Result, bail};
+use rusqlite::{Connection, OptionalExtension, ToSql, params};
+use serde::{Deserialize, Serialize};
 
 use crate::dedup::{DuplicateReview, ReviewState};
 use crate::media::ContentHashes;
-use crate::model::{Asset, TagHit};
+use crate::model::{Asset, Filter, SavedSearch, TagHit};
 
 const SCHEMA_VERSION: i64 = 5;
 
@@ -189,7 +190,10 @@ impl StoredMeta {
             return false;
         }
         self.sha1.as_deref().is_some_and(|value| !value.is_empty())
-            && self.blake3.as_deref().is_some_and(|value| !value.is_empty())
+            && self
+                .blake3
+                .as_deref()
+                .is_some_and(|value| !value.is_empty())
             && self.phash.is_some()
     }
 
@@ -248,7 +252,7 @@ impl Db {
     pub fn load_folder(&self, folder: &str) -> Result<Vec<Asset>> {
         let mut statement = self.conn.prepare(
             "SELECT path, thumb, width, height, group_name, rating, tags_json, tagged, error,
-                    sha1, blake3, phash, tag_attempts, bytes, mtime
+                    sha1, blake3, phash, tag_attempts, bytes, mtime, favorite, star
              FROM assets WHERE folder = ?1",
         )?;
         let rows = statement.query_map([folder], row_to_asset)?;
@@ -364,13 +368,7 @@ impl Db {
         tx.execute(
             "UPDATE assets SET group_name = ?1, rating = ?2, tags_json = ?3, tags_text = ?4,
                 tagged = 1, tag_state = 'done', tag_attempts = 0, error = NULL WHERE id = ?5",
-            params![
-                asset.group,
-                asset.rating,
-                tags_json,
-                tags_text,
-                asset_id
-            ],
+            params![asset.group, asset.rating, tags_json, tags_text, asset_id],
         )?;
         tx.execute(
             "DELETE FROM asset_tags WHERE asset_id = ?1 AND origin = 'auto'",
@@ -386,6 +384,69 @@ impl Db {
         }
         tx.commit()?;
         Ok(())
+    }
+
+    pub fn set_favorite(&self, paths: &[PathBuf], favorite: bool) -> Result<usize> {
+        let tx = self.conn.unchecked_transaction()?;
+        let mut statement = tx.prepare("UPDATE assets SET favorite = ?1 WHERE path = ?2")?;
+        let mut updated = 0;
+        for path in paths {
+            updated += statement.execute(params![favorite as i64, path.to_string_lossy()])?;
+        }
+        drop(statement);
+        tx.commit()?;
+        Ok(updated)
+    }
+
+    pub fn set_star(&self, paths: &[PathBuf], star: u8) -> Result<usize> {
+        let star = star.min(5) as i64;
+        let tx = self.conn.unchecked_transaction()?;
+        let mut statement = tx.prepare("UPDATE assets SET star = ?1 WHERE path = ?2")?;
+        let mut updated = 0;
+        for path in paths {
+            updated += statement.execute(params![star, path.to_string_lossy()])?;
+        }
+        drop(statement);
+        tx.commit()?;
+        Ok(updated)
+    }
+
+    pub fn load_saved_searches(&self) -> Result<Vec<SavedSearch>> {
+        let mut statement = self
+            .conn
+            .prepare("SELECT id, name, query_json FROM saved_searches ORDER BY id")?;
+        let rows = statement.query_map([], |row| {
+            let payload: Option<SavedSearchPayload> =
+                serde_json::from_str(&row.get::<_, String>(2)?).ok();
+            Ok(SavedSearch {
+                id: row.get(0)?,
+                name: row.get(1)?,
+                filter: payload
+                    .as_ref()
+                    .map(|payload| payload.filter.clone())
+                    .unwrap_or(Filter::All),
+                query: payload.map(|payload| payload.query).unwrap_or_default(),
+            })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    pub fn save_saved_search(&self, name: &str, filter: &Filter, query: &str) -> Result<i64> {
+        let payload = SavedSearchPayload {
+            filter: filter.clone(),
+            query: query.to_string(),
+        };
+        self.conn.execute(
+            "INSERT INTO saved_searches(name, query_json) VALUES(?1, ?2)",
+            params![name, serde_json::to_string(&payload)?],
+        )?;
+        Ok(self.conn.last_insert_rowid())
+    }
+
+    pub fn delete_saved_search(&self, id: i64) -> Result<usize> {
+        Ok(self
+            .conn
+            .execute("DELETE FROM saved_searches WHERE id = ?1", [id])?)
     }
 
     pub fn retry_failed(&self, folder: &str) -> Result<usize> {
@@ -530,7 +591,10 @@ impl Db {
              GROUP BY j.state",
         )?;
         let rows = statement.query_map([folder], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?.max(0) as usize))
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, i64>(1)?.max(0) as usize,
+            ))
         })?;
         let mut counts = JobCounts::default();
         for row in rows {
@@ -580,7 +644,10 @@ impl Db {
             params![
                 review.group_key,
                 review.state.as_str(),
-                review.keeper_path.as_ref().map(|path| path.to_string_lossy().to_string()),
+                review
+                    .keeper_path
+                    .as_ref()
+                    .map(|path| path.to_string_lossy().to_string()),
                 review.member_count as i64,
                 review.signature,
             ],
@@ -655,9 +722,8 @@ impl Db {
                      WHERE folder = ?1
                        AND id IN (SELECT rowid FROM assets_fts WHERE assets_fts MATCH ?2)",
                 )?;
-                let rows = statement.query_map(params![folder, query], |row| {
-                    row.get::<_, String>(0)
-                })?;
+                let rows =
+                    statement.query_map(params![folder, query], |row| row.get::<_, String>(0))?;
                 Ok(rows
                     .collect::<rusqlite::Result<Vec<_>>>()?
                     .into_iter()
@@ -723,7 +789,7 @@ impl Db {
         self.conn
             .query_row(
                 "SELECT path, thumb, width, height, group_name, rating, tags_json, tagged, error,
-                        sha1, blake3, phash, tag_attempts, bytes, mtime
+                        sha1, blake3, phash, tag_attempts, bytes, mtime, favorite, star
                  FROM assets WHERE path = ?1",
                 [&path],
                 row_to_asset,
@@ -762,6 +828,8 @@ fn row_to_asset(row: &rusqlite::Row<'_>) -> rusqlite::Result<Asset> {
         height: row.get::<_, i64>(3)?.max(0) as u32,
         group: row.get(4)?,
         rating: row.get(5)?,
+        favorite: row.get::<_, i64>(15)? != 0,
+        star: row.get::<_, i64>(16)?.clamp(0, 5) as u8,
         tags: serde_json::from_str::<Vec<TagHit>>(&tags_json).unwrap_or_default(),
         tagged: tagged != 0,
         tag_attempts: row.get::<_, i64>(12)?.max(0) as u32,
@@ -780,7 +848,11 @@ fn upsert_tag(conn: &Connection, tag: &TagHit) -> Result<i64> {
          ON CONFLICT(name) DO UPDATE SET
             category = excluded.category,
             vocab_index = COALESCE(excluded.vocab_index, tags.vocab_index)",
-        params![tag.tag, tag.category, tag.vocab_index.map(|value| value as i64)],
+        params![
+            tag.tag,
+            tag.category,
+            tag.vocab_index.map(|value| value as i64)
+        ],
     )?;
     conn.query_row("SELECT id FROM tags WHERE name = ?1", [&tag.tag], |row| {
         row.get(0)
@@ -842,8 +914,7 @@ fn backup_database(path: &Path, version: i64) -> Result<()> {
         .map(|value| value.to_string_lossy().to_string())
         .unwrap_or_else(|| "kanalib.db".into());
     let backup = path.with_file_name(format!("{file_name}.bak-v{version}-{stamp}"));
-    fs::copy(path, &backup)
-        .with_context(|| format!("backup database to {}", backup.display()))?;
+    fs::copy(path, &backup).with_context(|| format!("backup database to {}", backup.display()))?;
     for suffix in ["-wal", "-shm"] {
         let mut source = path.as_os_str().to_owned();
         source.push(suffix);
@@ -854,7 +925,10 @@ fn backup_database(path: &Path, version: i64) -> Result<()> {
             fs::copy(&source, PathBuf::from(target))?;
         }
     }
-    log::warn!("migrating database from v{version}; backup at {}", backup.display());
+    log::warn!(
+        "migrating database from v{version}; backup at {}",
+        backup.display()
+    );
     Ok(())
 }
 
@@ -869,7 +943,20 @@ fn ensure_asset_columns(conn: &Connection) -> Result<()> {
              UPDATE assets SET tag_attempts = 3 WHERE tag_state = 'error';",
         )?;
     }
+    if !columns.iter().any(|column| column == "favorite") {
+        conn.execute_batch("ALTER TABLE assets ADD COLUMN favorite INTEGER NOT NULL DEFAULT 0;")?;
+    }
+    if !columns.iter().any(|column| column == "star") {
+        conn.execute_batch("ALTER TABLE assets ADD COLUMN star INTEGER NOT NULL DEFAULT 0;")?;
+    }
     Ok(())
+}
+
+#[derive(Serialize, Deserialize)]
+struct SavedSearchPayload {
+    filter: Filter,
+    #[serde(default)]
+    query: String,
 }
 
 fn migrate(conn: &Connection) -> Result<()> {
@@ -879,9 +966,8 @@ fn migrate(conn: &Connection) -> Result<()> {
     if version >= SCHEMA_VERSION {
         return Ok(());
     }
-    let mut statement = conn.prepare(
-        "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'assets'",
-    )?;
+    let mut statement = conn
+        .prepare("SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'assets'")?;
     let has_assets: i64 = statement.query_row([], |row| row.get(0))?;
     let mut old = false;
     if has_assets > 0 {
@@ -889,7 +975,9 @@ fn migrate(conn: &Connection) -> Result<()> {
         let columns = statement
             .query_map([], |row| row.get::<_, String>(1))?
             .collect::<rusqlite::Result<Vec<_>>>()?;
-        old = !columns.iter().any(|column| column == "id" || column == "sha1");
+        old = !columns
+            .iter()
+            .any(|column| column == "id" || column == "sha1");
     }
     if old {
         migrate_v1(conn)?;
@@ -1013,6 +1101,7 @@ mod tests {
     use super::Db;
     use crate::dedup::{DuplicateReview, ReviewState};
     use crate::media::ContentHashes;
+    use crate::model::Filter;
     use rusqlite::Connection;
     use std::fs;
     use std::path::{Path, PathBuf};
@@ -1074,22 +1163,47 @@ mod tests {
                 .find(|asset| asset.path.ends_with("克拉拉.png"))
                 .expect("migrated clara asset");
             assert_eq!(clara.tags.len(), 2);
-            let hits = db
-                .search_paths("C:\\lib", &["1girl".to_string()])
-                .unwrap();
-            assert_eq!(hits, std::collections::HashSet::from([PathBuf::from("C:\\lib\\克拉拉.png")]));
-            let hits = db
-                .search_paths("C:\\lib", &["克拉拉".to_string()])
-                .unwrap();
+            let hits = db.search_paths("C:\\lib", &["1girl".to_string()]).unwrap();
+            assert_eq!(
+                hits,
+                std::collections::HashSet::from([PathBuf::from("C:\\lib\\克拉拉.png")])
+            );
+            let hits = db.search_paths("C:\\lib", &["克拉拉".to_string()]).unwrap();
             assert!(hits.contains(&PathBuf::from("C:\\lib\\克拉拉.png")));
             let hits = db.search_paths("C:\\lib", &["克拉".to_string()]).unwrap();
             assert!(hits.contains(&PathBuf::from("C:\\lib\\克拉拉.png")));
             let conn = Connection::open(&db_path).unwrap();
-            let tag_count: i64 = conn.query_row("SELECT COUNT(*) FROM tags", [], |row| row.get(0)).unwrap();
+            let tag_count: i64 = conn
+                .query_row("SELECT COUNT(*) FROM tags", [], |row| row.get(0))
+                .unwrap();
             assert_eq!(tag_count, 3);
             assert_eq!(db.tags_missing_vocab().unwrap().len(), 3);
             db.set_vocab_indices(&[("1girl".to_string(), 0)]).unwrap();
             assert_eq!(db.tags_missing_vocab().unwrap().len(), 2);
+
+            let clara_path = PathBuf::from("C:\\lib\\克拉拉.png");
+            db.set_favorite(&[clara_path.clone()], true).unwrap();
+            db.set_star(&[clara_path.clone()], 4).unwrap();
+            let clara = db
+                .load_folder("C:\\lib")
+                .unwrap()
+                .into_iter()
+                .find(|asset| asset.path.ends_with("克拉拉.png"))
+                .expect("starred clara asset");
+            assert!(clara.favorite);
+            assert_eq!(clara.star, 4);
+
+            let saved_id = db
+                .save_saved_search("收藏", &Filter::Favorites, "is:fav")
+                .unwrap();
+            let saved = db.load_saved_searches().unwrap();
+            assert_eq!(saved.len(), 1);
+            assert_eq!(saved[0].name, "收藏");
+            assert_eq!(saved[0].filter, Filter::Favorites);
+            assert_eq!(saved[0].query, "is:fav");
+            assert_eq!(db.delete_saved_search(saved_id).unwrap(), 1);
+            assert!(db.load_saved_searches().unwrap().is_empty());
+
             let attempts = db
                 .mark_error(Path::new("C:\\lib\\other.png"), "boom")
                 .unwrap();
@@ -1178,10 +1292,7 @@ mod tests {
 
     #[test]
     fn tag_job_queue_persists_and_recovers() {
-        let root = std::env::temp_dir().join(format!(
-            "kanalib-jobs-test-{}",
-            std::process::id()
-        ));
+        let root = std::env::temp_dir().join(format!("kanalib-jobs-test-{}", std::process::id()));
         let _ = fs::remove_dir_all(&root);
         fs::create_dir_all(&root).unwrap();
         let db_path = root.join("kanalib.db");

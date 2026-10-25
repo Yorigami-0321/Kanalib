@@ -4,17 +4,23 @@ use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 
 use ely_gpui_component::{
-    buttons::{Button, ButtonVariant},
-    forms::{Input, TextInput},
-    theme::ActiveTheme,
-};
-use gpui::{
-    div, image_cache, img, px, uniform_list, AnyElement, App, Context, Entity, ImageCache,
-    ImageCacheError, ImageCacheItem, FontWeight, Hsla, IntoElement, ObjectFit, ParentElement,
-    Pixels, Render, RenderImage, Resource, ScrollStrategy, SharedString, Styled, Task,
-    UniformListScrollHandle, WeakEntity, Window,
+    buttons::{Button, ButtonVariant, IconButton, SegmentedControl},
+    feedback::{Toast, ToastViewport, Toaster},
+    forms::{Input, Rating, TextInput},
+    menus::{DropdownMenu, Menu, MenuItem},
+    navigation::{Command, CommandPalette},
+    overlays::{Lightbox, PromptDialog, Slide},
+    primitives::{Icon, IconName, Severity},
+    theme::{ActiveTheme, ControlSize, IconSize, Mode, Theme},
 };
 use gpui::prelude::*;
+use gpui::{
+    AnyElement, App, ClickEvent, ClipboardItem, Context, Entity, FocusHandle, Focusable,
+    FontWeight, Hsla, ImageCache, ImageCacheError, ImageCacheItem, IntoElement, KeyBinding,
+    Modifiers, MouseButton, ObjectFit, ParentElement, Pixels, Render, RenderImage, Resource, Role,
+    ScrollStrategy, SharedString, Styled, Task, UniformListScrollHandle, WeakEntity, Window, div,
+    image_cache, img, px, uniform_list,
+};
 #[cfg(feature = "frame-profiler")]
 use hdrhistogram::Histogram;
 
@@ -22,29 +28,178 @@ use kanalib_core::dedup::{
     DedupSummary, DuplicateGroup, GroupKind, ReviewState, is_protected,
     similarity_pct_from_distance,
 };
-use kanalib_core::model::{Asset, Counts, Filter, SearchQuery, TagHit};
+use kanalib_core::model::{Asset, Counts, Filter, SavedSearch, SearchQuery, TagHit};
 use kanalib_core::state::AppState;
 
-const TILE_MIN_WIDTH: f32 = 160.;
-const TILE_IMAGE_HEIGHT: f32 = 150.;
 const GRID_GAP: f32 = 12.;
 const GRID_PADDING: f32 = 16.;
 const ROW_PADDING: f32 = 12.;
-const ROW_HEIGHT: f32 = 248.;
+const GRID_CONTEXT: &str = "KanalibGrid";
 const DEDUP_RAIL_WIDTH: f32 = 272.;
 const DEDUP_GROUP_ROW_HEIGHT: f32 = 78.;
 const DEDUP_CARD_WIDTH: f32 = 214.;
 const DEDUP_MAX_VISIBLE: usize = 4;
 const SETTINGS_MAX_WIDTH: f32 = 1080.;
 
-fn grid_columns(available: f32) -> usize {
-    let usable = (available - GRID_PADDING * 2.0 + GRID_GAP) / (TILE_MIN_WIDTH + GRID_GAP);
+gpui::actions!(
+    kanalib,
+    [
+        OpenPalette,
+        FocusSearch,
+        ClearSelection,
+        SelectAllVisible,
+        SelectPrev,
+        SelectNext,
+        SelectPrevRow,
+        SelectNextRow,
+        SelectFirst,
+        SelectLast,
+        OpenQuickView,
+        ToggleFavorite,
+        Rate0,
+        Rate1,
+        Rate2,
+        Rate3,
+        Rate4,
+        Rate5,
+    ]
+);
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+enum SortMode {
+    #[default]
+    Name,
+    Modified,
+    Size,
+    Resolution,
+    Star,
+    Favorite,
+    Rating,
+}
+
+impl SortMode {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Name => "文件名",
+            Self::Modified => "修改时间",
+            Self::Size => "文件大小",
+            Self::Resolution => "分辨率",
+            Self::Star => "星级",
+            Self::Favorite => "收藏优先",
+            Self::Rating => "模型评级",
+        }
+    }
+
+    fn default_ascending(self) -> bool {
+        matches!(self, Self::Name)
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+enum DensityPreset {
+    Small,
+    #[default]
+    Medium,
+    Large,
+}
+
+impl DensityPreset {
+    fn key(self) -> &'static str {
+        match self {
+            Self::Small => "small",
+            Self::Medium => "medium",
+            Self::Large => "large",
+        }
+    }
+
+    fn from_key(value: &str) -> Self {
+        match value {
+            "small" => Self::Small,
+            "large" => Self::Large,
+            _ => Self::Medium,
+        }
+    }
+
+    fn min_width(self) -> f32 {
+        match self {
+            Self::Small => 128.,
+            Self::Medium => 160.,
+            Self::Large => 224.,
+        }
+    }
+
+    fn image_height(self) -> f32 {
+        match self {
+            Self::Small => 112.,
+            Self::Medium => 150.,
+            Self::Large => 208.,
+        }
+    }
+
+    fn row_height(self) -> f32 {
+        self.image_height() + 98.
+    }
+}
+
+fn grid_columns(available: f32, min_width: f32) -> usize {
+    let usable = (available - GRID_PADDING * 2.0 + GRID_GAP) / (min_width + GRID_GAP);
     (usable.floor() as usize).max(1)
 }
 
 fn grid_tile_width(available: f32, columns: usize) -> f32 {
     let usable = available - GRID_PADDING * 2.0 - GRID_GAP * columns.saturating_sub(1) as f32;
     (usable / columns.max(1) as f32).max(1.0)
+}
+
+fn rating_rank(rating: &str) -> u64 {
+    match rating.to_ascii_lowercase().as_str() {
+        "g" => 1,
+        "s" => 2,
+        "q" => 3,
+        "e" => 4,
+        _ => 0,
+    }
+}
+
+fn prompt_for(asset: &Asset) -> String {
+    let mut tags = asset
+        .tags
+        .iter()
+        .filter(|tag| matches!(tag.category.as_str(), "general" | "character" | "copyright"))
+        .collect::<Vec<_>>();
+    tags.sort_by(|a, b| b.score.total_cmp(&a.score));
+    tags.iter()
+        .map(|tag| tag.tag.replace('_', " "))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn lightbox_caption(asset: &Asset) -> SharedString {
+    let general = asset
+        .tags
+        .iter()
+        .filter(|tag| tag.category == "general")
+        .count();
+    let mut parts = vec![asset.title(), format!("{} × {}", asset.width, asset.height)];
+    if asset.favorite {
+        parts.push("收藏".into());
+    }
+    if asset.star > 0 {
+        parts.push(format!("{} 星", asset.star));
+    }
+    parts.push(format!("{general} 个标签"));
+    SharedString::from(parts.join(" · "))
+}
+
+fn push_toast(
+    toaster: &Entity<Toaster>,
+    cx: &mut App,
+    message: impl Into<SharedString>,
+    severity: Severity,
+) {
+    toaster.update(cx, |toaster, cx| {
+        toaster.push(Toast::new(message).severity(severity), cx);
+    });
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -144,7 +299,8 @@ fn clamp_cache_limit(limit: usize) -> usize {
 }
 
 /// 返回需要逐出的 key：按最近使用排序取最旧的，直到长度回到上限，且不动 `keep`。
-fn cache_victims<T>(    entries: &HashMap<Resource, (T, u64)>,
+fn cache_victims<T>(
+    entries: &HashMap<Resource, (T, u64)>,
     limit: usize,
     keep: &Resource,
 ) -> Vec<Resource> {
@@ -250,8 +406,10 @@ fn decode_thumb(resource: &Resource) -> Result<Arc<RenderImage>, ImageCacheError
             "thumb cache only decodes file resources".into(),
         ));
     };
-    let bytes = std::fs::read(path.as_ref()).map_err(|error| ImageCacheError::Io(Arc::new(error)))?;
-    let image = image::load_from_memory(&bytes).map_err(|error| ImageCacheError::Image(Arc::new(error)))?;
+    let bytes =
+        std::fs::read(path.as_ref()).map_err(|error| ImageCacheError::Io(Arc::new(error)))?;
+    let image =
+        image::load_from_memory(&bytes).map_err(|error| ImageCacheError::Image(Arc::new(error)))?;
     let mut buffer = image.into_rgba8();
     for pixel in buffer.chunks_exact_mut(4) {
         pixel.swap(0, 2);
@@ -347,6 +505,8 @@ struct ViewCache {
     visible_filter: Option<Filter>,
     visible_search: String,
     visible_search_revision: u64,
+    visible_sort: SortMode,
+    visible_sort_ascending: bool,
     visible_indices: Arc<Vec<usize>>,
 }
 
@@ -371,6 +531,7 @@ pub struct KanalibApp {
     last_scanning: bool,
     view: ViewCache,
     grid_rows: usize,
+    grid_columns: usize,
     screen: Screen,
     dedup_mode: GroupKind,
     dedup_filter: DedupFilter,
@@ -383,6 +544,22 @@ pub struct KanalibApp {
     thumb_cache: Entity<ThumbCache>,
     scroll_task: Option<Task<()>>,
     similar_task: Option<Task<()>>,
+    grid_focus: FocusHandle,
+    focus_grid_pending: bool,
+    auto_select_pending: bool,
+    selection: Arc<HashSet<PathBuf>>,
+    selection_anchor: Option<PathBuf>,
+    sort: SortMode,
+    sort_ascending: bool,
+    density: DensityPreset,
+    search_input: Option<Entity<TextInput>>,
+    palette_open: bool,
+    lightbox_slides: Vec<(PathBuf, SharedString)>,
+    lightbox_at: Option<usize>,
+    lightbox_viewed: HashSet<PathBuf>,
+    save_search_open: bool,
+    toaster: Entity<Toaster>,
+    theme_dark: bool,
     #[cfg(feature = "frame-profiler")]
     frame_probe: Option<FrameProbe>,
     #[cfg(feature = "frame-profiler")]
@@ -420,8 +597,32 @@ impl KanalibApp {
         if std::env::var_os("KANALIB_FRAME_METRICS").is_some() {
             log::warn!("帧计时需要 --features frame-profiler 构建的二进制");
         }
+        cx.bind_keys([
+            KeyBinding::new("ctrl-k", OpenPalette, None),
+            KeyBinding::new("ctrl-shift-p", OpenPalette, None),
+            KeyBinding::new("ctrl-f", FocusSearch, None),
+            KeyBinding::new("up", SelectPrevRow, Some(GRID_CONTEXT)),
+            KeyBinding::new("down", SelectNextRow, Some(GRID_CONTEXT)),
+            KeyBinding::new("left", SelectPrev, Some(GRID_CONTEXT)),
+            KeyBinding::new("right", SelectNext, Some(GRID_CONTEXT)),
+            KeyBinding::new("home", SelectFirst, Some(GRID_CONTEXT)),
+            KeyBinding::new("end", SelectLast, Some(GRID_CONTEXT)),
+            KeyBinding::new("enter", OpenQuickView, Some(GRID_CONTEXT)),
+            KeyBinding::new("space", OpenQuickView, Some(GRID_CONTEXT)),
+            KeyBinding::new("f", ToggleFavorite, Some(GRID_CONTEXT)),
+            KeyBinding::new("0", Rate0, Some(GRID_CONTEXT)),
+            KeyBinding::new("1", Rate1, Some(GRID_CONTEXT)),
+            KeyBinding::new("2", Rate2, Some(GRID_CONTEXT)),
+            KeyBinding::new("3", Rate3, Some(GRID_CONTEXT)),
+            KeyBinding::new("4", Rate4, Some(GRID_CONTEXT)),
+            KeyBinding::new("5", Rate5, Some(GRID_CONTEXT)),
+            KeyBinding::new("ctrl-a", SelectAllVisible, Some(GRID_CONTEXT)),
+            KeyBinding::new("escape", ClearSelection, Some(GRID_CONTEXT)),
+        ]);
+        let state = AppState::new(folder);
+        let initial_selected = state.shared.lock().unwrap().selected.clone();
         Self {
-            state: AppState::new(folder),
+            state,
             grid_scroll: UniformListScrollHandle::new(),
             dedup_scroll: UniformListScrollHandle::new(),
             last_search: String::new(),
@@ -429,6 +630,7 @@ impl KanalibApp {
             last_scanning: false,
             view: ViewCache::default(),
             grid_rows: 0,
+            grid_columns: 1,
             screen,
             dedup_mode,
             dedup_filter: DedupFilter::Pending,
@@ -449,6 +651,22 @@ impl KanalibApp {
             }),
             scroll_task: None,
             similar_task: None,
+            grid_focus: cx.focus_handle(),
+            focus_grid_pending: true,
+            auto_select_pending: false,
+            selection: Arc::new(initial_selected.iter().cloned().collect()),
+            selection_anchor: initial_selected,
+            sort: SortMode::Name,
+            sort_ascending: true,
+            density: DensityPreset::Medium,
+            search_input: None,
+            palette_open: false,
+            lightbox_slides: Vec::new(),
+            lightbox_at: None,
+            lightbox_viewed: HashSet::new(),
+            save_search_open: false,
+            toaster: cx.new(|_| Toaster::default()),
+            theme_dark: cx.theme().is_dark(),
             #[cfg(feature = "frame-profiler")]
             frame_probe,
             #[cfg(feature = "frame-profiler")]
@@ -468,11 +686,7 @@ impl KanalibApp {
                     .await;
                 let snapshot = weak.update(cx, |app, _| {
                     let shared = app.state.shared.lock().unwrap();
-                    (
-                        shared.status.clone(),
-                        shared.scanning,
-                        shared.revision,
-                    )
+                    (shared.status.clone(), shared.scanning, shared.revision)
                 });
                 let Ok((status, scanning, revision)) = snapshot else {
                     break;
@@ -569,7 +783,9 @@ impl KanalibApp {
                     cx.background_executor().timer(Duration::from_secs(1)).await;
                     let renders = weak
                         .update(cx, |app, _| {
-                            app.frame_probe.as_ref().map_or(-1i64, |probe| probe.renders as i64)
+                            app.frame_probe
+                                .as_ref()
+                                .map_or(-1i64, |probe| probe.renders as i64)
                         })
                         .unwrap_or(-2);
                     log::info!("frame probe heartbeat: tick={tick} renders={renders}");
@@ -629,6 +845,9 @@ impl KanalibApp {
                 app.screen = Screen::Library;
                 app.dedup_selected = None;
                 app.dedup_confirm = None;
+                app.clear_multi_selection();
+                app.focus_grid_pending = true;
+                app.auto_select_pending = true;
                 app.grid_scroll.scroll_to_item(0, ScrollStrategy::Top);
                 cx.notify();
             });
@@ -643,6 +862,9 @@ impl KanalibApp {
         self.screen = Screen::Library;
         self.dedup_selected = None;
         self.dedup_confirm = None;
+        self.clear_multi_selection();
+        self.focus_grid_pending = true;
+        self.auto_select_pending = true;
         self.grid_scroll.scroll_to_item(0, ScrollStrategy::Top);
         cx.notify();
     }
@@ -654,6 +876,8 @@ impl KanalibApp {
                 self.state.set_filter(Filter::All);
                 self.state.start_scan();
                 self.screen = Screen::Library;
+                self.clear_multi_selection();
+                self.auto_select_pending = true;
                 self.grid_scroll.scroll_to_item(0, ScrollStrategy::Top);
             }
             Err(error) => {
@@ -667,6 +891,9 @@ impl KanalibApp {
     fn set_filter(&mut self, filter: Filter, cx: &mut Context<Self>) {
         self.screen = Screen::Library;
         self.state.set_filter(filter);
+        self.clear_multi_selection();
+        self.focus_grid_pending = true;
+        self.auto_select_pending = true;
         self.grid_scroll.scroll_to_item(0, ScrollStrategy::Top);
         cx.notify();
     }
@@ -712,6 +939,537 @@ impl KanalibApp {
         self.dedup_selected = Some(visible[next].clone());
         self.dedup_show_all = false;
     }
+
+    fn visible_paths(&self) -> Vec<PathBuf> {
+        let shared = self.state.shared.lock().unwrap();
+        let assets = shared.assets.read().unwrap();
+        self.view
+            .visible_indices
+            .iter()
+            .filter_map(|&index| assets.get(index).map(|asset| asset.path.clone()))
+            .collect()
+    }
+
+    fn selected_paths(&self) -> Vec<PathBuf> {
+        if !self.selection.is_empty() {
+            return self.selection.iter().cloned().collect();
+        }
+        self.state
+            .shared
+            .lock()
+            .unwrap()
+            .selected
+            .iter()
+            .cloned()
+            .collect()
+    }
+
+    fn range_between(&self, anchor: Option<&Path>, path: &Path) -> Option<Vec<PathBuf>> {
+        let shared = self.state.shared.lock().unwrap();
+        let assets = shared.assets.read().unwrap();
+        let anchor_at = anchor.and_then(|anchor| {
+            self.view.visible_indices.iter().position(|&index| {
+                assets
+                    .get(index)
+                    .is_some_and(|asset| asset.path.as_path() == anchor)
+            })
+        })?;
+        let target_at = self.view.visible_indices.iter().position(|&index| {
+            assets
+                .get(index)
+                .is_some_and(|asset| asset.path.as_path() == path)
+        })?;
+        let (start, end) = if anchor_at <= target_at {
+            (anchor_at, target_at)
+        } else {
+            (target_at, anchor_at)
+        };
+        Some(
+            self.view.visible_indices[start..=end]
+                .iter()
+                .filter_map(|&index| assets.get(index).map(|asset| asset.path.clone()))
+                .collect(),
+        )
+    }
+
+    fn handle_tile_click(
+        &mut self,
+        path: PathBuf,
+        modifiers: Modifiers,
+        click_count: usize,
+        cx: &mut Context<Self>,
+    ) {
+        let primary = self.state.shared.lock().unwrap().selected.clone();
+        if modifiers.shift {
+            let anchor = self.selection_anchor.clone().or(primary.clone());
+            if let Some(paths) = self.range_between(anchor.as_deref(), &path) {
+                self.selection = Arc::new(paths.into_iter().collect());
+            } else {
+                self.selection = Arc::new(HashSet::from([path.clone()]));
+            }
+            self.state.select(Some(path.clone()));
+        } else if modifiers.secondary() {
+            let mut selection = (*self.selection).clone();
+            if selection.remove(&path) {
+                if primary.as_ref() == Some(&path) {
+                    self.state.select(selection.iter().next().cloned());
+                }
+            } else {
+                selection.insert(path.clone());
+                self.state.select(Some(path.clone()));
+            }
+            self.selection = Arc::new(selection);
+            self.selection_anchor = Some(path.clone());
+        } else {
+            self.selection = Arc::new(HashSet::from([path.clone()]));
+            self.selection_anchor = Some(path.clone());
+            self.state.select(Some(path.clone()));
+        }
+        if click_count >= 2 {
+            self.open_lightbox_at(&path);
+        }
+        cx.notify();
+    }
+
+    fn select_position(&mut self, position: usize, cx: &mut Context<Self>) {
+        let path = {
+            let shared = self.state.shared.lock().unwrap();
+            let assets = shared.assets.read().unwrap();
+            let Some(&index) = self.view.visible_indices.get(position) else {
+                return;
+            };
+            let Some(asset) = assets.get(index) else {
+                return;
+            };
+            asset.path.clone()
+        };
+        self.selection = Arc::new(HashSet::from([path.clone()]));
+        self.selection_anchor = Some(path.clone());
+        self.state.select(Some(path));
+        let row = position / self.grid_columns.max(1);
+        self.grid_scroll
+            .scroll_to_item(row, ScrollStrategy::Nearest);
+        cx.notify();
+    }
+
+    fn navigate(&mut self, delta: isize, cx: &mut Context<Self>) {
+        let (len, current) = {
+            let shared = self.state.shared.lock().unwrap();
+            let assets = shared.assets.read().unwrap();
+            let current = shared.selected.as_ref().and_then(|selected| {
+                self.view.visible_indices.iter().position(|&index| {
+                    assets
+                        .get(index)
+                        .is_some_and(|asset| &asset.path == selected)
+                })
+            });
+            (self.view.visible_indices.len(), current)
+        };
+        if len == 0 {
+            return;
+        }
+        let target = match current {
+            Some(position) if delta < 0 => position.saturating_sub((-delta) as usize),
+            Some(position) => (position + delta as usize).min(len - 1),
+            None => 0,
+        };
+        self.select_position(target, cx);
+    }
+
+    fn select_edge(&mut self, last: bool, cx: &mut Context<Self>) {
+        let len = self.view.visible_indices.len();
+        if len > 0 {
+            self.select_position(if last { len - 1 } else { 0 }, cx);
+        }
+    }
+
+    fn select_all_visible(&mut self, cx: &mut Context<Self>) {
+        let paths = self.visible_paths();
+        if paths.is_empty() {
+            return;
+        }
+        self.selection = Arc::new(paths.iter().cloned().collect());
+        self.selection_anchor = paths.first().cloned();
+        let primary = self.state.shared.lock().unwrap().selected.clone();
+        let primary_visible = primary.as_ref().is_some_and(|path| paths.contains(path));
+        if !primary_visible {
+            self.state.select(paths.first().cloned());
+        }
+        cx.notify();
+    }
+
+    fn clear_selection(&mut self, cx: &mut Context<Self>) {
+        self.selection = Arc::new(HashSet::new());
+        self.selection_anchor = None;
+        self.auto_select_pending = false;
+        self.state.select(None);
+        cx.notify();
+    }
+
+    fn clear_multi_selection(&mut self) {
+        self.selection = Arc::new(HashSet::new());
+        self.selection_anchor = None;
+    }
+
+    fn paths_all_favorite(&self, paths: &[PathBuf]) -> bool {
+        if paths.is_empty() {
+            return false;
+        }
+        let targets = paths.iter().map(PathBuf::as_path).collect::<HashSet<_>>();
+        let shared = self.state.shared.lock().unwrap();
+        let assets = shared.assets.read().unwrap();
+        let mut found = 0;
+        let mut favorite = 0;
+        for asset in assets.iter() {
+            if targets.contains(asset.path.as_path()) {
+                found += 1;
+                if asset.favorite {
+                    favorite += 1;
+                }
+            }
+        }
+        found == targets.len() && favorite == found
+    }
+
+    fn apply_favorite(&mut self, favorite: bool, cx: &mut Context<Self>) {
+        let paths = self.selected_paths();
+        if paths.is_empty() {
+            push_toast(&self.toaster, cx, "先选择图片", Severity::Warning);
+            return;
+        }
+        match self.state.set_favorite(&paths, favorite) {
+            Ok(updated) => push_toast(
+                &self.toaster,
+                cx,
+                if favorite {
+                    format!("已收藏 {updated} 张")
+                } else {
+                    format!("已取消收藏 {updated} 张")
+                },
+                Severity::Success,
+            ),
+            Err(error) => {
+                self.state.set_error(format!("收藏失败：{error:#}"));
+                push_toast(
+                    &self.toaster,
+                    cx,
+                    format!("收藏失败：{error:#}"),
+                    Severity::Danger,
+                );
+            }
+        }
+        let leaving_favorites =
+            !favorite && self.state.shared.lock().unwrap().filter == Filter::Favorites;
+        if leaving_favorites {
+            self.selection = Arc::new(HashSet::new());
+            self.selection_anchor = None;
+            self.state.select(None);
+            self.auto_select_pending = true;
+            cx.notify();
+        } else {
+            cx.notify();
+        }
+    }
+
+    fn toggle_favorite(&mut self, cx: &mut Context<Self>) {
+        let paths = self.selected_paths();
+        let favorite = !self.paths_all_favorite(&paths);
+        self.apply_favorite(favorite, cx);
+    }
+
+    fn apply_star(&mut self, star: u8, cx: &mut Context<Self>) {
+        let paths = self.selected_paths();
+        if paths.is_empty() {
+            push_toast(&self.toaster, cx, "先选择图片", Severity::Warning);
+            return;
+        }
+        match self.state.set_star(&paths, star) {
+            Ok(updated) => push_toast(
+                &self.toaster,
+                cx,
+                if star == 0 {
+                    format!("已清除 {updated} 张的星级")
+                } else {
+                    format!("已设置 {updated} 张为 {star} 星")
+                },
+                Severity::Success,
+            ),
+            Err(error) => {
+                self.state.set_error(format!("设置星级失败：{error:#}"));
+                push_toast(
+                    &self.toaster,
+                    cx,
+                    format!("设置星级失败：{error:#}"),
+                    Severity::Danger,
+                );
+            }
+        }
+        cx.notify();
+    }
+
+    fn copy_selected_prompt(&mut self, cx: &mut Context<Self>) {
+        let paths = self.selected_paths();
+        if paths.is_empty() {
+            push_toast(&self.toaster, cx, "先选择图片", Severity::Warning);
+            return;
+        }
+        let targets = paths.iter().map(PathBuf::as_path).collect::<HashSet<_>>();
+        let prompts = {
+            let shared = self.state.shared.lock().unwrap();
+            let assets = shared.assets.read().unwrap();
+            let mut prompts = Vec::new();
+            for asset in assets.iter() {
+                if targets.contains(asset.path.as_path()) {
+                    let prompt = prompt_for(asset);
+                    if !prompt.is_empty() {
+                        prompts.push(prompt);
+                    }
+                }
+            }
+            prompts
+        };
+        if prompts.is_empty() {
+            push_toast(
+                &self.toaster,
+                cx,
+                "所选图片没有可复制的标签",
+                Severity::Warning,
+            );
+            return;
+        }
+        cx.write_to_clipboard(ClipboardItem::new_string(prompts.join("\n\n")));
+        push_toast(
+            &self.toaster,
+            cx,
+            format!("已复制 {} 张图片的 Prompt", prompts.len()),
+            Severity::Success,
+        );
+    }
+
+    fn copy_selected_paths(&mut self, cx: &mut Context<Self>) {
+        let mut paths = self.selected_paths();
+        if paths.is_empty() {
+            push_toast(&self.toaster, cx, "先选择图片", Severity::Warning);
+            return;
+        }
+        paths.sort();
+        let text = paths
+            .iter()
+            .map(|path| path.display().to_string())
+            .collect::<Vec<_>>()
+            .join("\n");
+        cx.write_to_clipboard(ClipboardItem::new_string(text));
+        push_toast(
+            &self.toaster,
+            cx,
+            format!("已复制 {} 条路径", paths.len()),
+            Severity::Success,
+        );
+    }
+
+    fn open_lightbox_at(&mut self, path: &Path) {
+        let (slides, at) = {
+            let shared = self.state.shared.lock().unwrap();
+            let assets = shared.assets.read().unwrap();
+            let mut slides = Vec::new();
+            let mut at = None;
+            for &index in self.view.visible_indices.iter() {
+                let Some(asset) = assets.get(index) else {
+                    continue;
+                };
+                if asset.path.as_path() == path {
+                    at = Some(slides.len());
+                }
+                slides.push((asset.path.clone(), lightbox_caption(asset)));
+            }
+            if at.is_none() {
+                if let Some(asset) = assets.iter().find(|asset| asset.path.as_path() == path) {
+                    slides = vec![(asset.path.clone(), lightbox_caption(asset))];
+                    at = Some(0);
+                }
+            }
+            (slides, at)
+        };
+        if let Some(at) = at {
+            self.palette_open = false;
+            self.lightbox_viewed.clear();
+            if let Some((path, _)) = slides.get(at) {
+                self.lightbox_viewed.insert(path.clone());
+            }
+            self.lightbox_slides = slides;
+            self.lightbox_at = Some(at);
+        }
+    }
+
+    fn open_quick_view(&mut self, cx: &mut Context<Self>) {
+        let path = self
+            .state
+            .shared
+            .lock()
+            .unwrap()
+            .selected
+            .clone()
+            .or_else(|| self.selection.iter().next().cloned())
+            .or_else(|| self.visible_paths().first().cloned());
+        match path {
+            Some(path) => {
+                self.open_lightbox_at(&path);
+                cx.notify();
+            }
+            None => push_toast(&self.toaster, cx, "没有可查看的图片", Severity::Warning),
+        }
+    }
+
+    fn take_lightbox_cleanup(&mut self) -> Vec<PathBuf> {
+        if let Some(at) = self.lightbox_at {
+            if let Some((path, _)) = self.lightbox_slides.get(at) {
+                self.lightbox_viewed.insert(path.clone());
+            }
+        }
+        self.lightbox_at = None;
+        self.lightbox_slides.clear();
+        self.lightbox_viewed.drain().collect()
+    }
+
+    fn focus_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(search) = &self.search_input {
+            let handle = search.read(cx).focus_handle(cx);
+            window.focus(&handle, cx);
+        }
+    }
+
+    fn choose_sort_mode(&mut self, mode: SortMode, cx: &mut Context<Self>) {
+        self.sort = mode;
+        self.sort_ascending = mode.default_ascending();
+        self.focus_grid_pending = true;
+        cx.notify();
+    }
+
+    fn set_sort_ascending(&mut self, ascending: bool, cx: &mut Context<Self>) {
+        self.sort_ascending = ascending;
+        self.focus_grid_pending = true;
+        cx.notify();
+    }
+
+    fn set_density(&mut self, density: DensityPreset, cx: &mut Context<Self>) {
+        self.density = density;
+        self.focus_grid_pending = true;
+        cx.notify();
+    }
+
+    fn toggle_theme(&mut self, cx: &mut Context<Self>) {
+        self.theme_dark = !self.theme_dark;
+        Theme::set_mode_now(
+            if self.theme_dark {
+                Mode::Dark
+            } else {
+                Mode::Light
+            },
+            cx,
+        );
+        cx.notify();
+    }
+
+    fn apply_saved_search(
+        &mut self,
+        saved: &SavedSearch,
+        search: &Entity<TextInput>,
+        cx: &mut Context<Self>,
+    ) {
+        search.update(cx, |input, cx| input.set_text(saved.query.clone(), cx));
+        self.state.set_filter(saved.filter.clone());
+        self.screen = Screen::Library;
+        self.dedup_confirm = None;
+        self.clear_multi_selection();
+        self.focus_grid_pending = true;
+        self.auto_select_pending = true;
+        self.grid_scroll.scroll_to_item(0, ScrollStrategy::Top);
+        cx.notify();
+    }
+
+    fn delete_saved_search(&mut self, id: i64, cx: &mut Context<Self>) {
+        match self.state.delete_saved_search(id) {
+            Ok(()) => push_toast(&self.toaster, cx, "已删除智能集合", Severity::Success),
+            Err(error) => push_toast(
+                &self.toaster,
+                cx,
+                format!("删除智能集合失败：{error:#}"),
+                Severity::Danger,
+            ),
+        }
+        cx.notify();
+    }
+
+    fn confirm_save_search(&mut self, name: &str, cx: &mut Context<Self>) {
+        let filter = self.state.shared.lock().unwrap().filter.clone();
+        let query = self.last_search.clone();
+        match self.state.save_saved_search(name, &filter, &query) {
+            Ok(saved) => {
+                self.save_search_open = false;
+                push_toast(
+                    &self.toaster,
+                    cx,
+                    format!("已保存智能集合「{}」", saved.name),
+                    Severity::Success,
+                );
+            }
+            Err(error) => push_toast(
+                &self.toaster,
+                cx,
+                format!("保存失败：{error:#}"),
+                Severity::Danger,
+            ),
+        }
+        cx.notify();
+    }
+
+    fn run_palette_command(&mut self, command: &str, cx: &mut Context<Self>) {
+        self.palette_open = false;
+        match command {
+            "goto:all" => self.set_filter(Filter::All, cx),
+            "goto:untagged" => self.set_filter(Filter::Untagged, cx),
+            "goto:failed" => self.set_filter(Filter::Failed, cx),
+            "goto:fav" => self.set_filter(Filter::Favorites, cx),
+            "goto:dup" => self.open_dedup_mode(GroupKind::Exact, cx),
+            "goto:similar" => self.open_dedup_mode(GroupKind::Similar, cx),
+            "goto:settings" => self.open_settings(cx),
+            "view:quick" => self.open_quick_view(cx),
+            "view:select-all" => self.select_all_visible(cx),
+            "view:clear" => self.clear_selection(cx),
+            "view:save" => {
+                self.save_search_open = true;
+                cx.notify();
+            }
+            "view:theme" => self.toggle_theme(cx),
+            "view:small" => self.set_density(DensityPreset::Small, cx),
+            "view:medium" => self.set_density(DensityPreset::Medium, cx),
+            "view:large" => self.set_density(DensityPreset::Large, cx),
+            "view:folder" => self.choose_folder(cx),
+            "scan:rescan" => self.rescan(cx),
+            "scan:retry" => self.retry_failed(cx),
+            "act:fav" => self.apply_favorite(true, cx),
+            "act:unfav" => self.apply_favorite(false, cx),
+            "act:toggle-fav" => self.toggle_favorite(cx),
+            "act:star0" => self.apply_star(0, cx),
+            "act:star1" => self.apply_star(1, cx),
+            "act:star2" => self.apply_star(2, cx),
+            "act:star3" => self.apply_star(3, cx),
+            "act:star4" => self.apply_star(4, cx),
+            "act:star5" => self.apply_star(5, cx),
+            "act:copy-prompt" => self.copy_selected_prompt(cx),
+            "act:copy-paths" => self.copy_selected_paths(cx),
+            "sort:name" => self.choose_sort_mode(SortMode::Name, cx),
+            "sort:modified" => self.choose_sort_mode(SortMode::Modified, cx),
+            "sort:size" => self.choose_sort_mode(SortMode::Size, cx),
+            "sort:resolution" => self.choose_sort_mode(SortMode::Resolution, cx),
+            "sort:star" => self.choose_sort_mode(SortMode::Star, cx),
+            "sort:fav" => self.choose_sort_mode(SortMode::Favorite, cx),
+            "sort:rating" => self.choose_sort_mode(SortMode::Rating, cx),
+            "sort:toggle" => self.set_sort_ascending(!self.sort_ascending, cx),
+            _ => {}
+        }
+        cx.notify();
+    }
 }
 
 impl Render for KanalibApp {
@@ -721,8 +1479,11 @@ impl Render for KanalibApp {
         let colors = UiColors::from_theme(cx);
         let this = cx.entity();
         let search = window.use_keyed_state("kanalib-search", cx, |window, cx| {
-            TextInput::new(window, cx).placeholder("搜索文件名 / 标签")
+            TextInput::new(window, cx).placeholder("搜索文件名 / 标签 / is:fav / star:>=4")
         });
+        if self.search_input.is_none() {
+            self.search_input = Some(search.clone());
+        }
         let search_text = search.read(cx).text().to_string();
         let search_query = SearchQuery::parse(&search_text);
         // gpui-pre 的 viewport_size 自 0.3.x 起就是逻辑像素，不能再按 DPI 除一次。
@@ -754,7 +1515,7 @@ impl Render for KanalibApp {
             queue_running,
             queue_error,
             filter,
-            selected,
+            mut selected,
             assets,
             revision,
             counts_view,
@@ -766,6 +1527,7 @@ impl Render for KanalibApp {
             similar_scanning,
             similar_threshold,
             protected_paths,
+            saved_searches,
         ) = {
             let shared = self.state.shared.lock().unwrap();
             let revision = shared.revision;
@@ -792,6 +1554,7 @@ impl Render for KanalibApp {
                 shared.dedup.similar_scanning,
                 shared.dedup.similar_threshold,
                 shared.dedup.protected_paths.clone(),
+                shared.saved_searches.clone(),
             )
         };
         if let Some(counts) = counts_view {
@@ -828,12 +1591,16 @@ impl Render for KanalibApp {
             self.view.search_revision = self.view.search_revision.wrapping_add(1);
         }
         if query_changed {
+            self.clear_multi_selection();
+            self.auto_select_pending = true;
             self.grid_scroll.scroll_to_item(0, ScrollStrategy::Top);
         }
         let needs_visible = revision != self.view.visible_revision
             || self.view.visible_filter.as_ref() != Some(&filter)
             || self.view.visible_search != search_text
-            || self.view.visible_search_revision != self.view.search_revision;
+            || self.view.visible_search_revision != self.view.search_revision
+            || self.view.visible_sort != self.sort
+            || self.view.visible_sort_ascending != self.sort_ascending;
         if needs_visible {
             let started = Instant::now();
             let duplicate_paths = dedup_exact_groups
@@ -843,7 +1610,7 @@ impl Render for KanalibApp {
                 .collect::<HashSet<PathBuf>>();
             let indices = {
                 let assets = assets.read().unwrap();
-                assets
+                let mut indices = assets
                     .iter()
                     .enumerate()
                     .filter(|(_, asset)| {
@@ -855,7 +1622,39 @@ impl Render for KanalibApp {
                             )
                     })
                     .map(|(index, _)| index)
-                    .collect::<Vec<_>>()
+                    .collect::<Vec<_>>();
+                match self.sort {
+                    SortMode::Name => {
+                        indices.sort_by_cached_key(|&index| {
+                            let asset = &assets[index];
+                            (asset.title().to_lowercase(), asset.path.clone())
+                        });
+                        if !self.sort_ascending {
+                            indices.reverse();
+                        }
+                    }
+                    mode => {
+                        indices.sort_by_cached_key(|&index| {
+                            let asset = &assets[index];
+                            let primary = match mode {
+                                SortMode::Modified => asset.mtime,
+                                SortMode::Size => asset.bytes,
+                                SortMode::Resolution => asset.width as u64 * asset.height as u64,
+                                SortMode::Star => asset.star as u64,
+                                SortMode::Favorite => asset.favorite as u64,
+                                SortMode::Rating => rating_rank(&asset.rating),
+                                SortMode::Name => unreachable!(),
+                            };
+                            let primary = if self.sort_ascending {
+                                primary
+                            } else {
+                                u64::MAX - primary
+                            };
+                            (primary, asset.title().to_lowercase(), asset.path.clone())
+                        });
+                    }
+                }
+                indices
             };
             let elapsed_us = started.elapsed().as_secs_f64() * 1_000_000.0;
             self.view.visible_indices = Arc::new(indices);
@@ -863,14 +1662,45 @@ impl Render for KanalibApp {
             self.view.visible_filter = Some(filter.clone());
             self.view.visible_search = search_text;
             self.view.visible_search_revision = self.view.search_revision;
+            self.view.visible_sort = self.sort;
+            self.view.visible_sort_ascending = self.sort_ascending;
             if ui_metrics {
                 log::info!(
-                    "ui visible rebuild: us={elapsed_us:.0} visible={} revision={revision}",
-                    self.view.visible_indices.len()
+                    "ui visible rebuild: us={elapsed_us:.0} visible={} revision={revision} sort={:?}",
+                    self.view.visible_indices.len(),
+                    self.sort
                 );
             }
         }
         let visible_indices = self.view.visible_indices.clone();
+        if self.auto_select_pending {
+            self.auto_select_pending = false;
+            let selected_visible = selected.as_ref().is_some_and(|path| {
+                let assets = assets.read().unwrap();
+                visible_indices
+                    .iter()
+                    .any(|&index| assets.get(index).is_some_and(|asset| &asset.path == path))
+            });
+            if !selected_visible {
+                let first = {
+                    let assets = assets.read().unwrap();
+                    visible_indices
+                        .first()
+                        .and_then(|&index| assets.get(index).map(|asset| asset.path.clone()))
+                };
+                self.state.select(first.clone());
+                selected = first.clone();
+                if let Some(path) = first {
+                    if self.selection.is_empty() {
+                        self.selection = Arc::new(HashSet::from([path.clone()]));
+                        self.selection_anchor = Some(path);
+                    }
+                } else {
+                    self.selection = Arc::new(HashSet::new());
+                    self.selection_anchor = None;
+                }
+            }
+        }
         #[cfg(feature = "frame-profiler")]
         {
             let mut finished = None;
@@ -931,8 +1761,9 @@ impl Render for KanalibApp {
                 self.frame_probe = None;
             }
         }
-        let columns = grid_columns(main_width.as_f32());
+        let columns = grid_columns(main_width.as_f32(), self.density.min_width());
         self.grid_rows = visible_indices.len().div_ceil(columns);
+        self.grid_columns = columns;
         let selected_asset = {
             let assets = assets.read().unwrap();
             selected.as_ref().and_then(|path| {
@@ -960,6 +1791,8 @@ impl Render for KanalibApp {
             dedup_exact_summary.pending,
             dedup_similar_summary.pending,
             similar_scanned,
+            &saved_searches,
+            &search,
             colors,
         );
         let content: AnyElement = if self.screen == Screen::Settings {
@@ -1005,7 +1838,7 @@ impl Render for KanalibApp {
                 &search,
                 assets,
                 visible_indices,
-                selected,
+                self.selection.clone(),
                 error.as_deref(),
                 scanning,
                 main_width,
@@ -1018,6 +1851,181 @@ impl Render for KanalibApp {
                 .into_any_element()
         });
 
+        let palette = self.palette_open.then(|| {
+            let close = this.clone();
+            let run = this.clone();
+            let dark = self.theme_dark;
+            CommandPalette::new("kanalib-palette", move |_, cx| {
+                let _ = close.update(cx, |app, cx| {
+                    app.palette_open = false;
+                    cx.notify();
+                });
+            })
+            .group(
+                "跳转",
+                [
+                    Command::new("goto:all", "全部图片").icon(IconName::Image),
+                    Command::new("goto:untagged", "未打标").icon(IconName::Sparkles),
+                    Command::new("goto:fav", "收藏").icon(IconName::Heart),
+                    Command::new("goto:failed", "失败").icon(IconName::ImageOff),
+                    Command::new("goto:dup", "重复项").icon(IconName::Copy),
+                    Command::new("goto:similar", "相似图片").icon(IconName::LayoutGrid),
+                    Command::new("goto:settings", "设置").icon(IconName::SlidersHorizontal),
+                ],
+            )
+            .group(
+                "视图",
+                [
+                    Command::new("view:quick", "快速查看")
+                        .icon(IconName::Maximize2)
+                        .keys("enter"),
+                    Command::new("view:select-all", "全选可见")
+                        .icon(IconName::SquareCheck)
+                        .keys("ctrl-a"),
+                    Command::new("view:clear", "清除选择")
+                        .icon(IconName::X)
+                        .keys("escape"),
+                    Command::new("view:save", "保存当前视图为智能集合").icon(IconName::Plus),
+                    Command::new("view:small", "缩略图 · 小").icon(IconName::LayoutGrid),
+                    Command::new("view:medium", "缩略图 · 中").icon(IconName::LayoutGrid),
+                    Command::new("view:large", "缩略图 · 大").icon(IconName::LayoutGrid),
+                    Command::new(
+                        "view:theme",
+                        if dark {
+                            "切换到浅色主题"
+                        } else {
+                            "切换到深色主题"
+                        },
+                    )
+                    .icon(if dark { IconName::Sun } else { IconName::Moon }),
+                ],
+            )
+            .group(
+                "图片操作",
+                [
+                    Command::new("act:toggle-fav", "切换收藏")
+                        .icon(IconName::Heart)
+                        .keys("f"),
+                    Command::new("act:star1", "设为 1 星").icon(IconName::Star),
+                    Command::new("act:star2", "设为 2 星").icon(IconName::Star),
+                    Command::new("act:star3", "设为 3 星").icon(IconName::Star),
+                    Command::new("act:star4", "设为 4 星").icon(IconName::Star),
+                    Command::new("act:star5", "设为 5 星").icon(IconName::Star),
+                    Command::new("act:star0", "清除星级").icon(IconName::Star),
+                    Command::new("act:copy-prompt", "复制选中 Prompt")
+                        .icon(IconName::ClipboardCheck),
+                    Command::new("act:copy-paths", "复制选中路径").icon(IconName::Copy),
+                ],
+            )
+            .group(
+                "排序",
+                [
+                    Command::new("sort:name", "按文件名排序").icon(IconName::ArrowDownUp),
+                    Command::new("sort:modified", "按修改时间排序").icon(IconName::Clock),
+                    Command::new("sort:size", "按文件大小排序").icon(IconName::FileImage),
+                    Command::new("sort:resolution", "按分辨率排序").icon(IconName::Maximize2),
+                    Command::new("sort:star", "按星级排序").icon(IconName::Star),
+                    Command::new("sort:fav", "收藏优先").icon(IconName::Heart),
+                    Command::new("sort:rating", "按模型评级排序").icon(IconName::Sparkles),
+                    Command::new("sort:toggle", "切换排序方向").icon(IconName::ArrowDownUp),
+                ],
+            )
+            .group(
+                "图库",
+                [
+                    Command::new("scan:rescan", "重新扫描").icon(IconName::RefreshCw),
+                    Command::new("scan:retry", "重试失败的打标").icon(IconName::WandSparkles),
+                    Command::new("view:folder", "选择文件夹").icon(IconName::FolderOpen),
+                ],
+            )
+            .on_run(move |value, _, cx| {
+                let _ = run.update(cx, |app, cx| app.run_palette_command(value, cx));
+            })
+            .into_any_element()
+        });
+        let lightbox = self.lightbox_at.and_then(|at| {
+            if self.lightbox_slides.is_empty() {
+                return None;
+            }
+            let slides = self
+                .lightbox_slides
+                .iter()
+                .map(|(path, caption)| Slide::new(path.clone(), caption.clone()))
+                .collect::<Vec<_>>();
+            let close = this.downgrade();
+            let step = this.downgrade();
+            Some(
+                Lightbox::new("kanalib-lightbox", slides, at, move |_, cx| {
+                    let paths = close
+                        .update(cx, |app, cx| {
+                            let paths = app.take_lightbox_cleanup();
+                            app.focus_grid_pending = true;
+                            cx.notify();
+                            paths
+                        })
+                        .unwrap_or_default();
+                    for path in paths {
+                        cx.remove_asset::<gpui::ImgResourceLoader>(&Resource::from(path));
+                    }
+                })
+                .on_step(move |to, _, cx| {
+                    let previous = step
+                        .update(cx, |app, cx| {
+                            let previous = app.lightbox_at.and_then(|at| {
+                                app.lightbox_slides.get(at).map(|(path, _)| path.clone())
+                            });
+                            app.lightbox_at = Some(to);
+                            if let Some((path, _)) = app.lightbox_slides.get(to) {
+                                let path = path.clone();
+                                app.lightbox_viewed.insert(path.clone());
+                                app.selection = Arc::new(HashSet::from([path.clone()]));
+                                app.selection_anchor = Some(path.clone());
+                                app.state.select(Some(path));
+                            }
+                            cx.notify();
+                            previous
+                        })
+                        .ok()
+                        .flatten();
+                    if let Some(previous) = previous {
+                        cx.remove_asset::<gpui::ImgResourceLoader>(&Resource::from(previous));
+                    }
+                })
+                .into_any_element(),
+            )
+        });
+        let save_dialog = self.save_search_open.then(|| {
+            let field = window.use_keyed_state("kanalib-save-search", cx, |window, cx| {
+                TextInput::new(window, cx).placeholder("智能集合名称")
+            });
+            let close = this.clone();
+            let submit = this.clone();
+            let filter_label = filter.label();
+            PromptDialog::new(
+                "kanalib-save-search",
+                "保存为智能集合",
+                &field,
+                move |_, cx| {
+                    let _ = close.update(cx, |app, cx| {
+                        app.save_search_open = false;
+                        cx.notify();
+                    });
+                },
+            )
+            .label(format!("当前筛选：{filter_label}；搜索词会一起保存"))
+            .submit("保存")
+            .check(|text| {
+                if text.trim().is_empty() {
+                    Err("名称不能为空".into())
+                } else {
+                    Ok(())
+                }
+            })
+            .on_submit(move |text, _, cx| {
+                let _ = submit.update(cx, |app, cx| app.confirm_save_search(text, cx));
+            })
+            .into_any_element()
+        });
         let shell = div()
             .flex()
             .flex_row()
@@ -1028,7 +2036,57 @@ impl Render for KanalibApp {
             .font_family(cx.theme().font_family.clone())
             .child(sidebar)
             .child(content)
-            .children(inspector);
+            .children(inspector)
+            .children(palette)
+            .children(lightbox)
+            .children(save_dialog)
+            .child(ToastViewport::new("kanalib-toasts", &self.toaster))
+            .on_action(cx.listener(|this, _: &OpenPalette, _, cx| {
+                let cleanup = if this.palette_open {
+                    Vec::new()
+                } else {
+                    this.take_lightbox_cleanup()
+                };
+                this.palette_open = !this.palette_open;
+                for path in cleanup {
+                    cx.remove_asset::<gpui::ImgResourceLoader>(&Resource::from(path));
+                }
+                cx.notify();
+            }))
+            .on_action(cx.listener(|this, _: &FocusSearch, window, cx| {
+                this.focus_search(window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &SelectPrev, _, cx| this.navigate(-1, cx)))
+            .on_action(cx.listener(|this, _: &SelectNext, _, cx| this.navigate(1, cx)))
+            .on_action(cx.listener(|this, _: &SelectPrevRow, _, cx| {
+                this.navigate(-(this.grid_columns as isize), cx);
+            }))
+            .on_action(cx.listener(|this, _: &SelectNextRow, _, cx| {
+                this.navigate(this.grid_columns as isize, cx);
+            }))
+            .on_action(cx.listener(|this, _: &SelectFirst, _, cx| this.select_edge(false, cx)))
+            .on_action(cx.listener(|this, _: &SelectLast, _, cx| this.select_edge(true, cx)))
+            .on_action(cx.listener(|this, _: &SelectAllVisible, _, cx| {
+                this.select_all_visible(cx);
+            }))
+            .on_action(cx.listener(|this, _: &ClearSelection, _, cx| this.clear_selection(cx)))
+            .on_action(cx.listener(|this, _: &OpenQuickView, _, cx| this.open_quick_view(cx)))
+            .on_action(cx.listener(|this, _: &ToggleFavorite, _, cx| this.toggle_favorite(cx)))
+            .on_action(cx.listener(|this, _: &Rate0, _, cx| this.apply_star(0, cx)))
+            .on_action(cx.listener(|this, _: &Rate1, _, cx| this.apply_star(1, cx)))
+            .on_action(cx.listener(|this, _: &Rate2, _, cx| this.apply_star(2, cx)))
+            .on_action(cx.listener(|this, _: &Rate3, _, cx| this.apply_star(3, cx)))
+            .on_action(cx.listener(|this, _: &Rate4, _, cx| this.apply_star(4, cx)))
+            .on_action(cx.listener(|this, _: &Rate5, _, cx| this.apply_star(5, cx)));
+        if self.focus_grid_pending
+            && self.screen == Screen::Library
+            && !self.palette_open
+            && self.lightbox_at.is_none()
+            && !self.save_search_open
+        {
+            window.focus(&self.grid_focus, cx);
+            self.focus_grid_pending = false;
+        }
         if ui_metrics {
             log::info!(
                 "ui render build: ms={:.2}",
@@ -1036,7 +2094,9 @@ impl Render for KanalibApp {
             );
         }
         // 整棵树共用一个有界图片缓存：子树里所有 img 都走它，不再进无上限的全局 asset cache。
-        image_cache(self.thumb_cache.clone()).size_full().child(shell)
+        image_cache(self.thumb_cache.clone())
+            .size_full()
+            .child(shell)
     }
 }
 
@@ -1053,10 +2113,16 @@ fn report_frame_probe(
     use std::io::Write as _;
 
     let snapshot = window.frame_duration_snapshot();
-    let presents = snapshot.present_interval_histogram.len().saturating_sub(baseline_presents);
+    let presents = snapshot
+        .present_interval_histogram
+        .len()
+        .saturating_sub(baseline_presents);
     let seconds = elapsed.as_secs_f64();
     let viewport = window.viewport_size();
-    let over_budget = 100. - snapshot.present_interval_histogram.percentile_below(16_666_666);
+    let over_budget = 100.
+        - snapshot
+            .present_interval_histogram
+            .percentile_below(16_666_666);
     let json = serde_json::json!({
         "kind": "frame_metrics",
         "profile": if cfg!(debug_assertions) { "debug" } else { "release" },
@@ -1078,7 +2144,11 @@ fn report_frame_probe(
         log::warn!("帧计时无效：窗口不在前台活动时 gpui 不记录 present 间隔");
     }
     if let Some(path) = std::env::var_os("KANALIB_METRICS_PATH") {
-        match std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+        match std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+        {
             Ok(mut file) => {
                 let _ = file.write_all(format!("{json}\n").as_bytes());
             }
@@ -1127,6 +2197,8 @@ impl KanalibApp {
         dedup_pending: usize,
         dedup_similar_pending: usize,
         dedup_similar_scanned: bool,
+        saved_searches: &[SavedSearch],
+        search: &Entity<TextInput>,
         colors: UiColors,
     ) -> impl IntoElement + use<> {
         let state = self.state.clone();
@@ -1169,6 +2241,16 @@ impl KanalibApp {
             this.clone(),
             colors,
         ));
+        body = body.child(filter_row(
+            SharedString::from("filter-favorites"),
+            "收藏".into(),
+            counts.favorites,
+            library && *filter == Filter::Favorites,
+            Filter::Favorites,
+            state.clone(),
+            this.clone(),
+            colors,
+        ));
         if counts.failed > 0 {
             body = body.child(filter_row(
                 SharedString::from("filter-failed"),
@@ -1205,6 +2287,106 @@ impl KanalibApp {
             this_dedup,
             colors,
         ));
+
+        let this_save_search = this.clone();
+        body = body.child(
+            div()
+                .flex()
+                .items_center()
+                .justify_between()
+                .px(px(8.))
+                .pt(px(10.))
+                .pb(px(4.))
+                .child(
+                    div()
+                        .text_xs()
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(colors.subtle)
+                        .child("智能集合"),
+                )
+                .child(
+                    IconButton::new("save-saved-search", IconName::Plus)
+                        .size(ControlSize::Sm)
+                        .tooltip("保存当前视图")
+                        .on_click(move |_, _, cx| {
+                            let _ = this_save_search.update(cx, |app, cx| {
+                                app.save_search_open = true;
+                                cx.notify();
+                            });
+                        }),
+                ),
+        );
+        if saved_searches.is_empty() {
+            body = body.child(
+                div()
+                    .px(px(8.))
+                    .pb(px(4.))
+                    .text_xs()
+                    .text_color(colors.subtle)
+                    .child("保存筛选与搜索，随时回来"),
+            );
+        } else {
+            for saved in saved_searches {
+                let name = saved.name.clone();
+                let detail = if saved.query.is_empty() {
+                    saved.filter.label()
+                } else {
+                    format!("{} · {}", saved.filter.label(), saved.query)
+                };
+                let saved_for_apply = saved.clone();
+                let search_for_apply = search.clone();
+                let this_apply = this.clone();
+                let this_delete = this.clone();
+                let id = saved.id;
+                body = body.child(
+                    div()
+                        .id(SharedString::from(format!("saved-search-{id}")))
+                        .role(Role::Button)
+                        .aria_label(name.clone())
+                        .flex()
+                        .items_center()
+                        .gap(px(4.))
+                        .px(px(8.))
+                        .py(px(4.))
+                        .rounded(px(6.))
+                        .cursor_pointer()
+                        .hover(move |style| style.bg(colors.hover))
+                        .on_click(move |_, _, cx| {
+                            let _ = this_apply.update(cx, |app, cx| {
+                                app.apply_saved_search(&saved_for_apply, &search_for_apply, cx)
+                            });
+                        })
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w(px(0.))
+                                .flex()
+                                .flex_col()
+                                .child(div().truncate().text_xs().text_color(colors.fg).child(name))
+                                .child(
+                                    div()
+                                        .truncate()
+                                        .text_xs()
+                                        .text_color(colors.subtle)
+                                        .child(detail),
+                                ),
+                        )
+                        .child(
+                            IconButton::new(
+                                SharedString::from(format!("delete-saved-search-{id}")),
+                                IconName::X,
+                            )
+                            .size(ControlSize::Sm)
+                            .tooltip("删除智能集合")
+                            .on_click(move |_, _, cx| {
+                                cx.stop_propagation();
+                                let _ = this_delete
+                                    .update(cx, |app, cx| app.delete_saved_search(id, cx));
+                            }),
+                        ),
+                );
+            }
+        }
 
         if !counts.ratings.is_empty() {
             body = body.child(section("评级", colors));
@@ -1306,16 +2488,14 @@ impl KanalibApp {
                             let _ = this_retry.update(cx, |app, cx| app.retry_failed(cx));
                         })
                     }))
-                    .child(if scanning {
+                    .children(scanning.then(|| {
                         Button::new("stop", "停止").on_click(move |_, _, cx| {
                             let _ = this_stop.update(cx, |app, cx| {
                                 app.state.stop();
                                 cx.notify();
                             });
                         })
-                    } else {
-                        Button::new("stop", "停止")
-                    }),
+                    })),
             )
             .child(
                 div()
@@ -1388,33 +2568,88 @@ impl KanalibApp {
         search: &Entity<TextInput>,
         assets: Arc<RwLock<Vec<Asset>>>,
         visible_indices: Arc<Vec<usize>>,
-        selected: Option<PathBuf>,
+        selection: Arc<HashSet<PathBuf>>,
         error: Option<&str>,
         scanning: bool,
         width: Pixels,
         colors: UiColors,
     ) -> impl IntoElement {
-        let state = self.state.clone();
         let this_clear = this.clone();
         let this_stop = this.clone();
+        let this_palette = this.clone();
+        let this_theme = this.clone();
+        let this_density = this.clone();
+        let this_sort = this.clone();
         let clear = (*filter != Filter::All).then(|| {
-            Button::new("clear-filter", "清除筛选").on_click(move |_, _, cx| {
-                let _ = this_clear.update(cx, |app, cx| {
-                    app.set_filter(Filter::All, cx);
-                });
-            })
+            Button::new("clear-filter", "清除筛选")
+                .size(ControlSize::Sm)
+                .on_click(move |_, _, cx| {
+                    let _ = this_clear.update(cx, |app, cx| {
+                        app.set_filter(Filter::All, cx);
+                    });
+                })
         });
         let stop = scanning.then(|| {
-            Button::new("stop-main", "停止").on_click(move |_, _, cx| {
-                let _ = this_stop.update(cx, |app, cx| {
-                    app.state.stop();
-                    cx.notify();
-                });
-            })
+            Button::new("stop-main", "停止")
+                .variant(ButtonVariant::Danger)
+                .size(ControlSize::Sm)
+                .on_click(move |_, _, cx| {
+                    let _ = this_stop.update(cx, |app, cx| {
+                        app.state.stop();
+                        cx.notify();
+                    });
+                })
         });
+        let sort_menu = {
+            let menu = |this: &Entity<Self>, mode: SortMode| {
+                let this = this.clone();
+                MenuItem::radio(mode.label(), self.sort == mode).on_click(move |_, cx| {
+                    let _ = this.update(cx, |app, cx| app.choose_sort_mode(mode, cx));
+                })
+            };
+            let ascending = this_sort.clone();
+            let descending = this_sort.clone();
+            Menu::new()
+                .item(menu(&this_sort, SortMode::Name))
+                .item(menu(&this_sort, SortMode::Modified))
+                .item(menu(&this_sort, SortMode::Size))
+                .item(menu(&this_sort, SortMode::Resolution))
+                .item(menu(&this_sort, SortMode::Star))
+                .item(menu(&this_sort, SortMode::Favorite))
+                .item(menu(&this_sort, SortMode::Rating))
+                .separator()
+                .item(
+                    MenuItem::radio("升序", self.sort_ascending).on_click(move |_, cx| {
+                        let _ = ascending.update(cx, |app, cx| app.set_sort_ascending(true, cx));
+                    }),
+                )
+                .item(
+                    MenuItem::radio("降序", !self.sort_ascending).on_click(move |_, cx| {
+                        let _ = descending.update(cx, |app, cx| app.set_sort_ascending(false, cx));
+                    }),
+                )
+        };
+        let star_menu = {
+            let menu_item = |this: &Entity<Self>, star: u8, label: &'static str| {
+                let this = this.clone();
+                MenuItem::new(label).on_click(move |_, cx| {
+                    let _ = this.update(cx, |app, cx| app.apply_star(star, cx));
+                })
+            };
+            Menu::new()
+                .item(menu_item(&this_sort, 1, "1 星"))
+                .item(menu_item(&this_sort, 2, "2 星"))
+                .item(menu_item(&this_sort, 3, "3 星"))
+                .item(menu_item(&this_sort, 4, "4 星"))
+                .item(menu_item(&this_sort, 5, "5 星"))
+                .separator()
+                .item(menu_item(&this_sort, 0, "清除星级"))
+        };
 
-        let columns = grid_columns(width.as_f32());
+        let columns = grid_columns(width.as_f32(), self.density.min_width());
         let tile_width = grid_tile_width(width.as_f32(), columns);
+        let image_height = self.density.image_height();
+        let row_height = self.density.row_height();
         let visible = visible_indices.len();
         let row_count = visible.div_ceil(columns);
         let assets_for_list = assets;
@@ -1438,10 +2673,10 @@ impl KanalibApp {
                 )
                 .into_any_element()
         } else {
-            let state_for_list = state.clone();
             let this_for_list = this.clone();
             let thumb_cache_for_list = self.thumb_cache.clone();
-            let selected_for_list = selected.clone();
+            let focus_for_list = self.grid_focus.clone();
+            let selection_for_list = selection.clone();
             uniform_list("asset-grid", row_count, move |range, _, _| {
                 let Ok(assets) = assets_for_list.read() else {
                     return Vec::new();
@@ -1452,7 +2687,7 @@ impl KanalibApp {
                         let end = (start + columns).min(rows_for_list.len());
                         let mut line = div()
                             .w_full()
-                            .h(px(ROW_HEIGHT))
+                            .h(px(row_height))
                             .flex()
                             .gap(px(GRID_GAP))
                             .px(px(GRID_PADDING))
@@ -1460,16 +2695,15 @@ impl KanalibApp {
                             .pb(px(ROW_PADDING));
                         for &asset_index in &rows_for_list[start..end] {
                             let asset = &assets[asset_index];
-                            let is_selected = selected_for_list
-                                .as_ref()
-                                .is_some_and(|path| path == &asset.path);
+                            let is_selected = selection_for_list.contains(&asset.path);
                             line = line.child(tile(
                                 asset.clone(),
                                 is_selected,
-                                state_for_list.clone(),
                                 this_for_list.clone(),
                                 thumb_cache_for_list.clone(),
                                 tile_width,
+                                image_height,
+                                focus_for_list.clone(),
                                 colors,
                             ));
                         }
@@ -1483,6 +2717,97 @@ impl KanalibApp {
             .min_h(px(0.))
             .into_any_element()
         };
+        let grid_area = div()
+            .id("library-grid")
+            .role(Role::Grid)
+            .flex_1()
+            .min_h(px(0.))
+            .w_full()
+            .flex()
+            .flex_col()
+            .track_focus(&self.grid_focus)
+            .key_context(GRID_CONTEXT)
+            .on_mouse_down(MouseButton::Left, {
+                let focus = self.grid_focus.clone();
+                move |_, window, cx| window.focus(&focus, cx)
+            })
+            .child(grid);
+
+        let bulk = (selection.len() >= 2).then(|| {
+            let this_fav = this.clone();
+            let this_unfav = this.clone();
+            let this_prompt = this.clone();
+            let this_paths = this.clone();
+            let this_bulk_clear = this.clone();
+            div()
+                .px(px(16.))
+                .py(px(6.))
+                .flex()
+                .items_center()
+                .justify_between()
+                .gap(px(8.))
+                .bg(colors.sunken)
+                .border_b_1()
+                .border_color(colors.border)
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(6.))
+                        .child(
+                            div()
+                                .text_xs()
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .text_color(colors.fg)
+                                .child(format!("已选 {} 张", selection.len())),
+                        )
+                        .child(
+                            Button::new("bulk-favorite", "收藏")
+                                .size(ControlSize::Sm)
+                                .icon(IconName::Heart)
+                                .on_click(move |_, _, cx| {
+                                    let _ =
+                                        this_fav.update(cx, |app, cx| app.apply_favorite(true, cx));
+                                }),
+                        )
+                        .child(
+                            Button::new("bulk-unfavorite", "取消收藏")
+                                .size(ControlSize::Sm)
+                                .on_click(move |_, _, cx| {
+                                    let _ = this_unfav
+                                        .update(cx, |app, cx| app.apply_favorite(false, cx));
+                                }),
+                        )
+                        .child(
+                            DropdownMenu::new("bulk-star", "星级", star_menu)
+                                .icon(IconName::Star)
+                                .variant(ButtonVariant::Ghost),
+                        )
+                        .child(
+                            Button::new("bulk-copy-prompt", "复制 Prompt")
+                                .size(ControlSize::Sm)
+                                .on_click(move |_, _, cx| {
+                                    let _ = this_prompt
+                                        .update(cx, |app, cx| app.copy_selected_prompt(cx));
+                                }),
+                        )
+                        .child(
+                            Button::new("bulk-copy-paths", "复制路径")
+                                .size(ControlSize::Sm)
+                                .on_click(move |_, _, cx| {
+                                    let _ = this_paths
+                                        .update(cx, |app, cx| app.copy_selected_paths(cx));
+                                }),
+                        ),
+                )
+                .child(
+                    Button::new("bulk-clear", "取消选择")
+                        .size(ControlSize::Sm)
+                        .on_click(move |_, _, cx| {
+                            let _ = this_bulk_clear.update(cx, |app, cx| app.clear_selection(cx));
+                        }),
+                )
+        });
 
         div()
             .w(width)
@@ -1497,40 +2822,98 @@ impl KanalibApp {
                     .flex()
                     .items_center()
                     .justify_between()
+                    .gap(px(8.))
                     .border_1()
                     .border_color(colors.border)
                     .child(
                         div()
                             .flex()
-                            .flex_col()
-                            .gap(px(2.))
+                            .items_center()
+                            .gap(px(8.))
+                            .min_w(px(0.))
                             .child(
                                 div()
-                                    .text_lg()
-                                    .font_weight(FontWeight::SEMIBOLD)
-                                    .child(filter.label()),
+                                    .flex()
+                                    .flex_col()
+                                    .gap(px(2.))
+                                    .child(
+                                        div()
+                                            .truncate()
+                                            .text_lg()
+                                            .font_weight(FontWeight::SEMIBOLD)
+                                            .child(filter.label()),
+                                    )
+                                    .child(
+                                        div()
+                                            .text_xs()
+                                            .text_color(colors.muted)
+                                            .child(format!("{} 张可见", visible)),
+                                    ),
                             )
-                            .child(
-                                div()
-                                    .text_xs()
-                                    .text_color(colors.muted)
-                                    .child(format!("{} 张可见", visible)),
-                            ),
+                            .children(clear),
                     )
                     .child(
                         div()
                             .flex()
                             .items_center()
-                            .gap(px(8.))
+                            .gap(px(6.))
+                            .child(
+                                IconButton::new("open-palette", IconName::Command)
+                                    .tooltip("命令面板 (Ctrl+K)")
+                                    .on_click(move |_, _, cx| {
+                                        let _ = this_palette.update(cx, |app, cx| {
+                                            app.palette_open = true;
+                                            cx.notify();
+                                        });
+                                    }),
+                            )
+                            .child(
+                                DropdownMenu::new("library-sort", "排序", sort_menu)
+                                    .icon(IconName::ArrowDownUp)
+                                    .variant(ButtonVariant::Ghost),
+                            )
+                            .child(
+                                SegmentedControl::new("library-density", self.density.key())
+                                    .size(ControlSize::Sm)
+                                    .segment("small", "小", None)
+                                    .segment("medium", "中", None)
+                                    .segment("large", "大", None)
+                                    .on_change(move |value, _, cx| {
+                                        let _ = this_density.update(cx, |app, cx| {
+                                            app.set_density(
+                                                DensityPreset::from_key(value.as_ref()),
+                                                cx,
+                                            )
+                                        });
+                                    }),
+                            )
+                            .child(
+                                IconButton::new(
+                                    "theme-toggle",
+                                    if self.theme_dark {
+                                        IconName::Sun
+                                    } else {
+                                        IconName::Moon
+                                    },
+                                )
+                                .tooltip(if self.theme_dark {
+                                    "切换到浅色主题"
+                                } else {
+                                    "切换到深色主题"
+                                })
+                                .on_click(move |_, _, cx| {
+                                    let _ = this_theme.update(cx, |app, cx| app.toggle_theme(cx));
+                                }),
+                            )
                             .child(
                                 div()
-                                    .w(px(320.))
-                                    .child(Input::new(search).clearable().least("搜索文件名 / 标签")),
+                                    .w(px(240.))
+                                    .child(Input::new(search).clearable().least("搜索 / is:fav")),
                             )
-                            .children(clear)
                             .children(stop),
                     ),
             )
+            .children(bulk)
             .children(error.map(|message| {
                 div()
                     .mx(px(16.))
@@ -1542,7 +2925,7 @@ impl KanalibApp {
                     .text_color(colors.danger)
                     .child(message.to_string())
             }))
-            .child(grid)
+            .child(grid_area)
     }
 
     fn render_dedup(
@@ -1565,9 +2948,7 @@ impl KanalibApp {
     ) -> impl IntoElement {
         let similar_mode = self.dedup_mode == GroupKind::Similar;
         let has_banner = error.is_some() || self.dedup_notice.is_some();
-        let chrome = 104.
-            + if similar_mode { 48. } else { 0. }
-            + if has_banner { 30. } else { 0. };
+        let chrome = 104. + if similar_mode { 48. } else { 0. } + if has_banner { 30. } else { 0. };
         let body_height = (height - px(chrome)).max(px(480.));
         let groups = if similar_mode {
             similar_groups
@@ -1587,12 +2968,14 @@ impl KanalibApp {
             .filter(|(_, group)| self.dedup_filter.matches(group.state))
             .map(|(index, _)| index)
             .collect::<Vec<_>>();
-        if self
-            .dedup_selected
-            .as_ref()
-            .is_none_or(|key| !visible_indices.iter().any(|&index| &groups[index].key == key))
-        {
-            self.dedup_selected = visible_indices.first().map(|&index| groups[index].key.clone());
+        if self.dedup_selected.as_ref().is_none_or(|key| {
+            !visible_indices
+                .iter()
+                .any(|&index| &groups[index].key == key)
+        }) {
+            self.dedup_selected = visible_indices
+                .first()
+                .map(|&index| groups[index].key.clone());
         }
         let selected = self
             .dedup_selected
@@ -1657,27 +3040,27 @@ impl KanalibApp {
                             .flex()
                             .items_center()
                             .gap(px(8.))
-                            .child(div().text_lg().font_weight(FontWeight::SEMIBOLD).child("重复项"))
+                            .child(
+                                div()
+                                    .text_lg()
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .child("重复项"),
+                            )
                             .child(tabs),
                     )
-                    .child(
-                        div()
-                            .text_xs()
-                            .text_color(colors.muted)
-                            .child(format!(
-                                "未审 {} 组 · {} 张 · 可释放 {} · {}",
-                                summary.pending,
-                                summary.pending_assets,
-                                format_bytes(summary.pending_bytes),
-                                if library_scanning {
-                                    "图库扫描中..."
-                                } else if similar_mode && similar_scanning {
-                                    "相似扫描中..."
-                                } else {
-                                    status
-                                }
-                            )),
-                    ),
+                    .child(div().text_xs().text_color(colors.muted).child(format!(
+                        "未审 {} 组 · {} 张 · 可释放 {} · {}",
+                        summary.pending,
+                        summary.pending_assets,
+                        format_bytes(summary.pending_bytes),
+                        if library_scanning {
+                            "图库扫描中..."
+                        } else if similar_mode && similar_scanning {
+                            "相似扫描中..."
+                        } else {
+                            status
+                        }
+                    ))),
             )
             .child(
                 div()
@@ -1726,7 +3109,9 @@ impl KanalibApp {
                                     app.dedup_notice = Some(if selected == 0 {
                                         "没有待处理的组".to_string()
                                     } else {
-                                        format!("已按规则预选 {selected} 组；移入回收站前仍会汇总确认")
+                                        format!(
+                                            "已按规则预选 {selected} 组；移入回收站前仍会汇总确认"
+                                        )
                                     });
                                     cx.notify();
                                 });
@@ -1742,13 +3127,15 @@ impl KanalibApp {
                                 });
                             })
                     }))
-                    .child(Button::new("dedup-library", "返回图库").on_click(move |_, _, cx| {
-                        let _ = this_library.update(cx, |app, cx| {
-                            app.screen = Screen::Library;
-                            app.dedup_confirm = None;
-                            cx.notify();
-                        });
-                    })),
+                    .child(
+                        Button::new("dedup-library", "返回图库").on_click(move |_, _, cx| {
+                            let _ = this_library.update(cx, |app, cx| {
+                                app.screen = Screen::Library;
+                                app.dedup_confirm = None;
+                                cx.notify();
+                            });
+                        }),
+                    ),
             );
 
         let threshold_bar: Option<AnyElement> = similar_mode.then(|| {
@@ -1782,16 +3169,11 @@ impl KanalibApp {
                     busy,
                     this.clone(),
                 ))
-                .child(
-                    div()
-                        .text_xs()
-                        .text_color(colors.subtle)
-                        .child(format!(
-                            "当前 ≤{} · 约 {}% 相似",
-                            similar_threshold,
-                            similarity_pct_from_distance(similar_threshold as u32)
-                        )),
-                )
+                .child(div().text_xs().text_color(colors.subtle).child(format!(
+                    "当前 ≤{} · 约 {}% 相似",
+                    similar_threshold,
+                    similarity_pct_from_distance(similar_threshold as u32)
+                )))
                 .child(div().flex_1())
                 .child(
                     div()
@@ -1854,18 +3236,13 @@ impl KanalibApp {
                 colors,
             ))
             .child(div().flex_1())
-            .child(
-                div()
-                    .text_xs()
-                    .text_color(colors.subtle)
-                    .child(if busy {
-                        "扫描中，完成后更新分组"
-                    } else if similar_mode {
-                        "相似组只逐组处理，不提供批量删除"
-                    } else {
-                        "先预选，再逐组确认"
-                    }),
-            );
+            .child(div().text_xs().text_color(colors.subtle).child(if busy {
+                "扫描中，完成后更新分组"
+            } else if similar_mode {
+                "相似组只逐组处理，不提供批量删除"
+            } else {
+                "先预选，再逐组确认"
+            }));
 
         let rail_header = div()
             .px(px(12.))
@@ -1875,7 +3252,12 @@ impl KanalibApp {
             .flex()
             .items_center()
             .justify_between()
-            .child(div().text_xs().font_weight(FontWeight::SEMIBOLD).child("组"))
+            .child(
+                div()
+                    .text_xs()
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .child("组"),
+            )
             .child(
                 div()
                     .text_xs()
@@ -2028,7 +3410,6 @@ impl KanalibApp {
             .children(overlay)
     }
 
-
     fn render_dedup_detail(
         &mut self,
         this: &Entity<Self>,
@@ -2102,17 +3483,12 @@ impl KanalibApp {
                                 }
                             )),
                     )
-                    .child(
-                        div()
-                            .text_xs()
-                            .text_color(colors.muted)
-                            .child(format!(
-                                "{} · 可释放 {} · 当前保留：{}",
-                                group.suggested_reason,
-                                format_bytes(reclaimable),
-                                keeper.map(Asset::title).unwrap_or_else(|| "未选择".into())
-                            )),
-                    ),
+                    .child(div().text_xs().text_color(colors.muted).child(format!(
+                        "{} · 可释放 {} · 当前保留：{}",
+                        group.suggested_reason,
+                        format_bytes(reclaimable),
+                        keeper.map(Asset::title).unwrap_or_else(|| "未选择".into())
+                    ))),
             )
             .child(
                 div()
@@ -2157,7 +3533,11 @@ impl KanalibApp {
         let shown_assets = if self.dedup_show_all {
             group.assets.iter().collect::<Vec<_>>()
         } else {
-            group.assets.iter().take(DEDUP_MAX_VISIBLE).collect::<Vec<_>>()
+            group
+                .assets
+                .iter()
+                .take(DEDUP_MAX_VISIBLE)
+                .collect::<Vec<_>>()
         };
         let side_by_side = detail_width >= px(1050.);
         let cards = shown_assets
@@ -2269,24 +3649,32 @@ impl KanalibApp {
                 .flex()
                 .items_center()
                 .gap(px(5.))
-                .child(Button::new("dedup-ignore", "不是重复").disabled(scanning).on_click({
-                    let key = key.clone();
-                    move |_, _, cx| {
-                        let _ = this_ignore.update(cx, |app, cx| {
-                            let groups = groups_ignore.clone();
-                            match app.state.mark_dedup(&key, ReviewState::Ignored, group_kind) {
-                                Ok(()) => {
-                                    app.dedup_notice = Some("已忽略此组".into());
-                                    app.advance_dedup(&groups, true);
-                                }
-                                Err(error) => {
-                                    app.dedup_notice = Some(format!("操作失败: {error:#}"));
-                                }
+                .child(
+                    Button::new("dedup-ignore", "不是重复")
+                        .disabled(scanning)
+                        .on_click({
+                            let key = key.clone();
+                            move |_, _, cx| {
+                                let _ = this_ignore.update(cx, |app, cx| {
+                                    let groups = groups_ignore.clone();
+                                    match app.state.mark_dedup(
+                                        &key,
+                                        ReviewState::Ignored,
+                                        group_kind,
+                                    ) {
+                                        Ok(()) => {
+                                            app.dedup_notice = Some("已忽略此组".into());
+                                            app.advance_dedup(&groups, true);
+                                        }
+                                        Err(error) => {
+                                            app.dedup_notice = Some(format!("操作失败: {error:#}"));
+                                        }
+                                    }
+                                    cx.notify();
+                                });
                             }
-                            cx.notify();
-                        });
-                    }
-                }))
+                        }),
+                )
                 .children((group_kind == GroupKind::Similar).then(|| {
                     Button::new("dedup-related", "相关变体")
                         .disabled(scanning)
@@ -2301,13 +3689,11 @@ impl KanalibApp {
                                         GroupKind::Similar,
                                     ) {
                                         Ok(()) => {
-                                            app.dedup_notice =
-                                                Some("已标记为相关变体".into());
+                                            app.dedup_notice = Some("已标记为相关变体".into());
                                             app.advance_dedup(&groups, true);
                                         }
                                         Err(error) => {
-                                            app.dedup_notice =
-                                                Some(format!("操作失败: {error:#}"));
+                                            app.dedup_notice = Some(format!("操作失败: {error:#}"));
                                         }
                                     }
                                     cx.notify();
@@ -2315,30 +3701,37 @@ impl KanalibApp {
                             }
                         })
                 }))
-                .child(Button::new("dedup-later", "稍后").on_click(move |_, _, cx| {
-                    let _ = this_later.update(cx, |app, cx| {
-                        app.advance_dedup(&groups_later, true);
-                        cx.notify();
-                    });
-                }))
-                .child(Button::new("dedup-keep-all", "全部保留").disabled(scanning).on_click({
-                    let key = key.clone();
-                    move |_, _, cx| {
-                        let _ = this_keep.update(cx, |app, cx| {
-                            let groups = groups_keep.clone();
-                            match app.state.mark_dedup(&key, ReviewState::Done, group_kind) {
-                                Ok(()) => {
-                                    app.dedup_notice = Some("已保留整组".into());
-                                    app.advance_dedup(&groups, true);
-                                }
-                                Err(error) => {
-                                    app.dedup_notice = Some(format!("操作失败: {error:#}"));
-                                }
-                            }
+                .child(
+                    Button::new("dedup-later", "稍后").on_click(move |_, _, cx| {
+                        let _ = this_later.update(cx, |app, cx| {
+                            app.advance_dedup(&groups_later, true);
                             cx.notify();
                         });
-                    }
-                }))
+                    }),
+                )
+                .child(
+                    Button::new("dedup-keep-all", "全部保留")
+                        .disabled(scanning)
+                        .on_click({
+                            let key = key.clone();
+                            move |_, _, cx| {
+                                let _ = this_keep.update(cx, |app, cx| {
+                                    let groups = groups_keep.clone();
+                                    match app.state.mark_dedup(&key, ReviewState::Done, group_kind)
+                                    {
+                                        Ok(()) => {
+                                            app.dedup_notice = Some("已保留整组".into());
+                                            app.advance_dedup(&groups, true);
+                                        }
+                                        Err(error) => {
+                                            app.dedup_notice = Some(format!("操作失败: {error:#}"));
+                                        }
+                                    }
+                                    cx.notify();
+                                });
+                            }
+                        }),
+                )
                 .child(
                     Button::new("dedup-trash", format!("移入回收站 ({duplicate_count})"))
                         .variant(ButtonVariant::Danger)
@@ -2362,23 +3755,19 @@ impl KanalibApp {
                     Button::new("dedup-reopen", "重新打开此组")
                         .disabled(scanning)
                         .on_click(move |_, _, cx| {
-                        let _ = this_reopen.update(cx, |app, cx| {
-                            match app.state.mark_dedup(
-                                &key,
-                                ReviewState::Pending,
-                                group_kind,
-                            ) {
-                                Ok(()) => {
-                                    app.dedup_notice = Some("已重新打开此组".into());
-                                    app.dedup_selected = Some(key.clone());
+                            let _ = this_reopen.update(cx, |app, cx| {
+                                match app.state.mark_dedup(&key, ReviewState::Pending, group_kind) {
+                                    Ok(()) => {
+                                        app.dedup_notice = Some("已重新打开此组".into());
+                                        app.dedup_selected = Some(key.clone());
+                                    }
+                                    Err(error) => {
+                                        app.dedup_notice = Some(format!("操作失败: {error:#}"));
+                                    }
                                 }
-                                Err(error) => {
-                                    app.dedup_notice = Some(format!("操作失败: {error:#}"));
-                                }
-                            }
-                            cx.notify();
-                        });
-                    }),
+                                cx.notify();
+                            });
+                        }),
                 )
                 .into_any_element()
         };
@@ -2569,7 +3958,13 @@ impl KanalibApp {
                                     } else {
                                         colors.sunken
                                     })
-                                    .child(div().truncate().text_xs().text_color(colors.fg).child(name.clone()))
+                                    .child(
+                                        div()
+                                            .truncate()
+                                            .text_xs()
+                                            .text_color(colors.fg)
+                                            .child(name.clone()),
+                                    )
                                     .child(
                                         div()
                                             .flex_none()
@@ -2584,14 +3979,14 @@ impl KanalibApp {
                             .flex()
                             .justify_end()
                             .gap(px(6.))
-                            .child(Button::new("dedup-cancel", "取消").on_click(
-                                move |_, _, cx| {
+                            .child(
+                                Button::new("dedup-cancel", "取消").on_click(move |_, _, cx| {
                                     let _ = this_cancel.update(cx, |app, cx| {
                                         app.dedup_confirm = None;
                                         cx.notify();
                                     });
-                                },
-                            ))
+                                }),
+                            )
                             .child(
                                 Button::new("dedup-confirm", "确认移入回收站")
                                     .variant(ButtonVariant::Danger)
@@ -2712,10 +4107,7 @@ impl KanalibApp {
                         )
                         .child(
                             Button::new(
-                                SharedString::from(format!(
-                                    "remove-protected-{}",
-                                    path.display()
-                                )),
+                                SharedString::from(format!("remove-protected-{}", path.display())),
                                 "移除",
                             )
                             .on_click(move |_, _, cx| {
@@ -2723,10 +4115,8 @@ impl KanalibApp {
                                 let _ = this_remove.update(cx, |app, cx| {
                                     match app.state.remove_protected_path(&path) {
                                         Ok(()) => {
-                                            app.settings_notice = Some(format!(
-                                                "已移除保护路径：{}",
-                                                path.display()
-                                            ));
+                                            app.settings_notice =
+                                                Some(format!("已移除保护路径：{}", path.display()));
                                         }
                                         Err(error) => {
                                             app.settings_notice =
@@ -2771,8 +4161,7 @@ impl KanalibApp {
                         .on_click(move |_, _, cx| {
                             let weak = this_add.downgrade();
                             cx.spawn(async move |cx| {
-                                let Some(handle) =
-                                    rfd::AsyncFileDialog::new().pick_folder().await
+                                let Some(handle) = rfd::AsyncFileDialog::new().pick_folder().await
                                 else {
                                     return;
                                 };
@@ -2797,7 +4186,8 @@ impl KanalibApp {
             );
 
         let mut threshold_row = div().flex().items_center().gap(px(6.));
-        for (value, label) in [(6u8, "严格 ≤6"), (10u8, "标准 ≤10"), (14u8, "宽松 ≤14")] {
+        for (value, label) in [(6u8, "严格 ≤6"), (10u8, "标准 ≤10"), (14u8, "宽松 ≤14")]
+        {
             let this_threshold = this.clone();
             threshold_row = threshold_row.child(
                 Button::new(
@@ -2812,8 +4202,7 @@ impl KanalibApp {
                 .on_click(move |_, _, cx| {
                     let _ = this_threshold.update(cx, |app, cx| {
                         let saved = app.state.set_similar_threshold(value);
-                        app.settings_notice =
-                            Some(format!("相似阈值默认值已设为 ≤{saved}"));
+                        app.settings_notice = Some(format!("相似阈值默认值已设为 ≤{saved}"));
                         cx.notify();
                     });
                 }),
@@ -2886,11 +4275,13 @@ impl KanalibApp {
             .child(path_row("数据库", db_path, colors))
             .child(path_row("缩略图缓存", cache_dir, colors))
             .child(
-                div().flex().child(
-                    Button::new("open-data-dir", "打开数据目录").on_click(move |_, _, _| {
-                        open_path(&data_dir_for_open);
-                    }),
-                ),
+                div()
+                    .flex()
+                    .child(Button::new("open-data-dir", "打开数据目录").on_click(
+                        move |_, _, _| {
+                            open_path(&data_dir_for_open);
+                        },
+                    )),
             );
 
         let safety_section = div()
@@ -2908,20 +4299,12 @@ impl KanalibApp {
                     .font_weight(FontWeight::SEMIBOLD)
                     .child("任务队列"),
             )
-            .child(
-                div()
-                    .text_xs()
-                    .text_color(colors.muted)
-                    .child(format!(
-                        "等待 {queue_pending} · 运行 {queue_running} · 失败 {queue_error}"
-                    )),
-            )
-            .child(
-                div()
-                    .text_xs()
-                    .text_color(colors.muted)
-                    .child("打标任务持久化在 jobs 表；重启后自动恢复未完成任务，失败项可用侧栏“重试失败”。"),
-            );
+            .child(div().text_xs().text_color(colors.muted).child(format!(
+                "等待 {queue_pending} · 运行 {queue_running} · 失败 {queue_error}"
+            )))
+            .child(div().text_xs().text_color(colors.muted).child(
+                "打标任务持久化在 jobs 表；重启后自动恢复未完成任务，失败项可用侧栏“重试失败”。",
+            ));
 
         let rules_section = div()
             .p(px(16.))
@@ -2987,14 +4370,14 @@ impl KanalibApp {
                                     .child("数据、去重与安全"),
                             ),
                     )
-                    .child(Button::new("settings-back", "返回图库").on_click(
-                        move |_, _, cx| {
+                    .child(
+                        Button::new("settings-back", "返回图库").on_click(move |_, _, cx| {
                             let _ = this_back.update(cx, |app, cx| {
                                 app.screen = Screen::Library;
                                 cx.notify();
                             });
-                        },
-                    )),
+                        }),
+                    ),
             )
             .children(banner)
             .child(
@@ -3049,12 +4432,15 @@ impl KanalibApp {
                     .into_any_element(),
             };
 
-            let mut tags = div()
-                .id("inspector-tags")
-                .flex()
-                .flex_col()
-                .gap(px(2.));
-            for category in ["general", "character", "copyright", "style", "meta", "rating"] {
+            let mut tags = div().id("inspector-tags").flex().flex_col().gap(px(2.));
+            for category in [
+                "general",
+                "character",
+                "copyright",
+                "style",
+                "meta",
+                "rating",
+            ] {
                 let hits: Vec<&TagHit> = asset
                     .tags
                     .iter()
@@ -3116,9 +4502,120 @@ impl KanalibApp {
             }
 
             let path = asset.path.clone();
-            let open = Button::new("open-file", "打开文件").on_click(move |_, _, _| {
-                open_path(&path);
+            let path_for_open = path.clone();
+            let open = Button::new("open-file", "打开文件")
+                .size(ControlSize::Sm)
+                .on_click(move |_, _, _| {
+                    open_path(&path_for_open);
+                });
+            let this_quick = this.clone();
+            let quick = Button::new("quick-view", "快速查看")
+                .size(ControlSize::Sm)
+                .icon(IconName::Maximize2)
+                .on_click(move |_, _, cx| {
+                    let _ = this_quick.update(cx, |app, cx| app.open_quick_view(cx));
+                });
+            let favorite = asset.favorite;
+            let favorite_state = state.clone();
+            let favorite_this = this.clone();
+            let favorite_toaster = self.toaster.clone();
+            let favorite_path = path.clone();
+            let mut favorite_button = Button::new(
+                SharedString::from(format!("inspector-favorite-{}", path.display())),
+                if favorite { "已收藏" } else { "收藏" },
+            )
+            .size(ControlSize::Sm)
+            .icon(IconName::Heart)
+            .on_click(move |_, _, cx| {
+                match favorite_state.set_favorite(std::slice::from_ref(&favorite_path), !favorite) {
+                    Ok(updated) => push_toast(
+                        &favorite_toaster,
+                        cx,
+                        if favorite {
+                            format!("已取消收藏 {updated} 张")
+                        } else {
+                            format!("已收藏 {updated} 张")
+                        },
+                        Severity::Success,
+                    ),
+                    Err(error) => {
+                        favorite_state.set_error(format!("收藏失败：{error:#}"));
+                        push_toast(
+                            &favorite_toaster,
+                            cx,
+                            format!("收藏失败：{error:#}"),
+                            Severity::Danger,
+                        );
+                    }
+                }
+                let _ = favorite_this.update(cx, |_, cx| cx.notify());
             });
+            if favorite {
+                favorite_button = favorite_button.primary();
+            }
+            let star_state = state.clone();
+            let star_this = this.clone();
+            let star_toaster = self.toaster.clone();
+            let star_path = path.clone();
+            let rating_control = Rating::new(
+                SharedString::from(format!("inspector-star-{}", path.display())),
+                asset.star,
+            )
+            .on_change(move |value, _, cx| {
+                match star_state.set_star(std::slice::from_ref(&star_path), value) {
+                    Ok(updated) => push_toast(
+                        &star_toaster,
+                        cx,
+                        if value == 0 {
+                            format!("已清除 {updated} 张的星级")
+                        } else {
+                            format!("已设置 {updated} 张为 {value} 星")
+                        },
+                        Severity::Success,
+                    ),
+                    Err(error) => {
+                        star_state.set_error(format!("设置星级失败：{error:#}"));
+                        push_toast(
+                            &star_toaster,
+                            cx,
+                            format!("设置星级失败：{error:#}"),
+                            Severity::Danger,
+                        );
+                    }
+                }
+                let _ = star_this.update(cx, |_, cx| cx.notify());
+            });
+            let prompt = prompt_for(asset);
+            let prompt_empty = prompt.is_empty();
+            let prompt_count = asset
+                .tags
+                .iter()
+                .filter(|tag| {
+                    matches!(tag.category.as_str(), "general" | "character" | "copyright")
+                })
+                .count();
+            let prompt_toaster = self.toaster.clone();
+            let copy_prompt = Button::new("copy-prompt", "复制 Prompt")
+                .size(ControlSize::Sm)
+                .disabled(prompt_empty)
+                .on_click(move |_, _, cx| {
+                    cx.write_to_clipboard(ClipboardItem::new_string(prompt.clone()));
+                    push_toast(
+                        &prompt_toaster,
+                        cx,
+                        format!("已复制 {prompt_count} 个标签"),
+                        Severity::Success,
+                    );
+                });
+            let copy_path_text = path.display().to_string();
+            let copy_path_toaster = self.toaster.clone();
+            let copy_path = Button::new("copy-path", "复制路径")
+                .size(ControlSize::Sm)
+                .icon(IconName::Copy)
+                .on_click(move |_, _, cx| {
+                    cx.write_to_clipboard(ClipboardItem::new_string(copy_path_text.clone()));
+                    push_toast(&copy_path_toaster, cx, "已复制文件路径", Severity::Success);
+                });
 
             div()
                 .flex()
@@ -3131,42 +4628,63 @@ impl KanalibApp {
                         .font_weight(FontWeight::SEMIBOLD)
                         .child(asset.title()),
                 )
-                .child(
-                    div()
-                        .text_xs()
-                        .text_color(colors.muted)
-                        .child(format!(
-                            "{} × {} · {} · {}",
-                            asset.width,
-                            asset.height,
-                            if asset.rating.is_empty() {
-                                "未评级"
-                            } else {
-                                asset.rating.as_str()
-                            },
-                            asset.group
-                        )),
-                )
-                .child(
-                    div()
-                        .text_xs()
-                        .text_color(colors.subtle)
-                        .child(match (&asset.sha1, &asset.blake3, asset.phash) {
-                            (Some(sha1), Some(blake3), Some(phash)) => format!(
-                                "SHA1 {} · B3 {} · pHash {phash:016x}",
-                                &sha1[..12.min(sha1.len())],
-                                &blake3[..8.min(blake3.len())]
-                            ),
-                            _ => "内容哈希未计算".to_string(),
-                        }),
-                )
+                .child(div().text_xs().text_color(colors.muted).child(format!(
+                    "{} × {} · {} · {}",
+                    asset.width,
+                    asset.height,
+                    if asset.rating.is_empty() {
+                        "未评级"
+                    } else {
+                        asset.rating.as_str()
+                    },
+                    asset.group
+                )))
+                .child(div().text_xs().text_color(colors.subtle).child(format!(
+                    "{} · {}",
+                    format_bytes(asset.bytes),
+                    format_date(asset.mtime)
+                )))
+                .child(div().text_xs().text_color(colors.subtle).child(
+                    match (&asset.sha1, &asset.blake3, asset.phash) {
+                        (Some(sha1), Some(blake3), Some(phash)) => format!(
+                            "SHA1 {} · B3 {} · pHash {phash:016x}",
+                            &sha1[..12.min(sha1.len())],
+                            &blake3[..8.min(blake3.len())]
+                        ),
+                        _ => "内容哈希未计算".to_string(),
+                    },
+                ))
                 .children(asset.error.as_ref().map(|message| {
                     div()
                         .text_xs()
                         .text_color(colors.danger)
                         .child(message.clone())
                 }))
-                .child(open)
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(6.))
+                        .child(favorite_button)
+                        .child(quick)
+                        .child(open),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .justify_between()
+                        .child(div().text_xs().text_color(colors.subtle).child("个人星级"))
+                        .child(rating_control),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(6.))
+                        .child(copy_prompt)
+                        .child(copy_path),
+                )
                 .child(
                     div()
                         .mt(px(4.))
@@ -3259,12 +4777,7 @@ fn filter_row(
             cx.notify();
         });
     })
-    .child(
-        div()
-            .text_xs()
-            .text_color(colors.fg)
-            .child(label),
-    )
+    .child(div().text_xs().text_color(colors.fg).child(label))
     .child(
         div()
             .text_xs()
@@ -3281,7 +4794,8 @@ fn dedup_row(
     mode: GroupKind,
     this: Entity<KanalibApp>,
     colors: UiColors,
-) -> impl IntoElement {    let mut row = div()
+) -> impl IntoElement {
+    let mut row = div()
         .id(id)
         .flex()
         .items_center()
@@ -3341,12 +4855,19 @@ fn dedup_filter_chip(
     colors: UiColors,
 ) -> AnyElement {
     div()
-        .id(SharedString::from(format!("dedup-filter-{}", filter.label())))
+        .id(SharedString::from(format!(
+            "dedup-filter-{}",
+            filter.label()
+        )))
         .px(px(9.))
         .py(px(4.))
         .rounded(px(5.))
         .cursor_pointer()
-        .bg(if active { colors.selection } else { colors.sunken })
+        .bg(if active {
+            colors.selection
+        } else {
+            colors.sunken
+        })
         .text_xs()
         .text_color(if active { colors.fg } else { colors.muted })
         .hover(move |style| style.bg(colors.hover))
@@ -3376,7 +4897,11 @@ fn dedup_tab(
         .py(px(4.))
         .rounded(px(5.))
         .cursor_pointer()
-        .bg(if active { colors.surface } else { colors.sunken })
+        .bg(if active {
+            colors.surface
+        } else {
+            colors.sunken
+        })
         .text_xs()
         .font_weight(if active {
             FontWeight::SEMIBOLD
@@ -3483,7 +5008,11 @@ fn dedup_group_row(
         .iter()
         .any(|asset| is_protected(&asset.path, protected_paths));
     let (kind_label, kind_fg, kind_bg) = match group.kind {
-        GroupKind::Exact => ("完全相同".to_string(), colors.success, colors.success_subtle),
+        GroupKind::Exact => (
+            "完全相同".to_string(),
+            colors.success,
+            colors.success_subtle,
+        ),
         GroupKind::Similar => (
             format!("相似 {}%", group.similarity_pct().unwrap_or(0)),
             colors.warning,
@@ -3573,7 +5102,10 @@ fn dedup_group_row(
                                 .truncate()
                                 .text_xs()
                                 .text_color(colors.subtle)
-                                .child(format!("可释放 {reclaimable} · {}", group.suggested_reason)),
+                                .child(format!(
+                                    "可释放 {reclaimable} · {}",
+                                    group.suggested_reason
+                                )),
                         ),
                 ),
         )
@@ -3647,10 +5179,18 @@ fn dedup_asset_card(
         .items_center()
         .gap(px(4.));
     if is_keeper {
-        badge = badge.child(small_badge("保留".into(), colors.success, colors.success_subtle));
+        badge = badge.child(small_badge(
+            "保留".into(),
+            colors.success,
+            colors.success_subtle,
+        ));
     }
     if is_suggested && !is_keeper {
-        badge = badge.child(small_badge("推荐".into(), colors.warning, colors.warning_subtle));
+        badge = badge.child(small_badge(
+            "推荐".into(),
+            colors.warning,
+            colors.warning_subtle,
+        ));
     }
     if is_protected_path {
         badge = badge.child(small_badge("保护".into(), colors.accent, colors.selection));
@@ -3677,7 +5217,8 @@ fn dedup_asset_card(
             .hover(move |style| style.border_color(colors.accent))
             .on_click(move |_, _, cx| {
                 let _ = this.update(cx, |app, cx| {
-                    app.state.set_dedup_keeper(&group_key, path.clone(), group_kind);
+                    app.state
+                        .set_dedup_keeper(&group_key, path.clone(), group_kind);
                     cx.notify();
                 });
             });
@@ -3698,86 +5239,87 @@ fn dedup_asset_card(
             .into_any_element()
     });
 
-    card = card.child(
-        div()
-            .relative()
-            .w_full()
-            .h(px(176.))
-            .flex_none()
-            .overflow_hidden()
-            .bg(colors.sunken)
-            .child(media)
-            .child(badge)
-            .children(similarity_badge),
-    )
-    .child(
-        div()
-            .h(px(124.))
-            .min_h(px(124.))
-            .overflow_hidden()
-            .p(px(8.))
-            .flex()
-            .flex_col()
-            .gap(px(3.))
-            .child(
-                div()
-                    .truncate()
-                    .text_xs()
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .child(asset.title()),
-            )
-            .child(
-                div()
-                    .truncate()
-                    .text_xs()
-                    .text_color(colors.muted)
-                    .child(format!(
-                        "{dimensions} · {extension} · {}",
-                        format_bytes(asset.bytes)
-                    )),
-            )
-            .child(
-                div()
-                    .truncate()
-                    .text_xs()
-                    .text_color(colors.subtle)
-                    .child(format!(
-                        "修改 {} · {} 标签 · {rating}",
-                        format_date(asset.mtime),
-                        asset.tags.len()
-                    )),
-            )
-            .child(
-                div()
-                    .truncate()
-                    .text_xs()
-                    .text_color(colors.subtle)
-                    .child(asset.path.display().to_string()),
-            )
-            .child(
-                div()
-                    .truncate()
-                    .text_xs()
-                    .text_color(if is_keeper {
-                        colors.success
-                    } else if is_suggested {
-                        colors.warning
-                    } else {
-                        colors.subtle
-                    })
-                    .child(if is_keeper {
-                        "当前保留项".to_string()
-                    } else if is_suggested {
-                        format!("推荐：{}", group.suggested_reason)
-                    } else if editable {
-                        "点击设为保留".to_string()
-                    } else if pending {
-                        "扫描中，暂不可操作".to_string()
-                    } else {
-                        "此组已保留".to_string()
-                    }),
-            ),
-    );
+    card = card
+        .child(
+            div()
+                .relative()
+                .w_full()
+                .h(px(176.))
+                .flex_none()
+                .overflow_hidden()
+                .bg(colors.sunken)
+                .child(media)
+                .child(badge)
+                .children(similarity_badge),
+        )
+        .child(
+            div()
+                .h(px(124.))
+                .min_h(px(124.))
+                .overflow_hidden()
+                .p(px(8.))
+                .flex()
+                .flex_col()
+                .gap(px(3.))
+                .child(
+                    div()
+                        .truncate()
+                        .text_xs()
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .child(asset.title()),
+                )
+                .child(
+                    div()
+                        .truncate()
+                        .text_xs()
+                        .text_color(colors.muted)
+                        .child(format!(
+                            "{dimensions} · {extension} · {}",
+                            format_bytes(asset.bytes)
+                        )),
+                )
+                .child(
+                    div()
+                        .truncate()
+                        .text_xs()
+                        .text_color(colors.subtle)
+                        .child(format!(
+                            "修改 {} · {} 标签 · {rating}",
+                            format_date(asset.mtime),
+                            asset.tags.len()
+                        )),
+                )
+                .child(
+                    div()
+                        .truncate()
+                        .text_xs()
+                        .text_color(colors.subtle)
+                        .child(asset.path.display().to_string()),
+                )
+                .child(
+                    div()
+                        .truncate()
+                        .text_xs()
+                        .text_color(if is_keeper {
+                            colors.success
+                        } else if is_suggested {
+                            colors.warning
+                        } else {
+                            colors.subtle
+                        })
+                        .child(if is_keeper {
+                            "当前保留项".to_string()
+                        } else if is_suggested {
+                            format!("推荐：{}", group.suggested_reason)
+                        } else if editable {
+                            "点击设为保留".to_string()
+                        } else if pending {
+                            "扫描中，暂不可操作".to_string()
+                        } else {
+                            "此组已保留".to_string()
+                        }),
+                ),
+        );
 
     div()
         .w(px(DEDUP_CARD_WIDTH))
@@ -3946,9 +5488,7 @@ fn dedup_diff(group: &DuplicateGroup, assets: &[&Asset], colors: UiColors) -> An
                 })
                 .collect(),
             best_min(assets, |asset| {
-                group
-                    .distance_to_keeper(asset)
-                    .unwrap_or(u32::MAX)
+                group.distance_to_keeper(asset).unwrap_or(u32::MAX)
             }),
         );
     }
@@ -4035,7 +5575,13 @@ fn dedup_diff(group: &DuplicateGroup, assets: &[&Asset], colors: UiColors) -> An
         .gap(px(8.))
         .text_xs()
         .text_color(colors.muted)
-        .child(format!("建议保留：{}", group.suggested_asset().map(Asset::title).unwrap_or_default()))
+        .child(format!(
+            "建议保留：{}",
+            group
+                .suggested_asset()
+                .map(Asset::title)
+                .unwrap_or_default()
+        ))
         .child(
             div()
                 .text_color(colors.warning)
@@ -4055,21 +5601,28 @@ fn dedup_diff(group: &DuplicateGroup, assets: &[&Asset], colors: UiColors) -> An
                 .flex()
                 .items_center()
                 .justify_between()
-                .child(div().text_xs().font_weight(FontWeight::SEMIBOLD).child("差异"))
-                .child(div().text_xs().text_color(colors.subtle).child("只显示不同字段")),
+                .child(
+                    div()
+                        .text_xs()
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .child("差异"),
+                )
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(colors.subtle)
+                        .child("只显示不同字段"),
+                ),
         )
         .child(recommendation)
         .child(table)
-        .child(
-            div()
-                .text_xs()
-                .text_color(colors.subtle)
-                .child(if group.kind == GroupKind::Similar {
-                    "相似度按 pHash 汉明距离换算；组内可能链式合并，请逐组确认。"
-                } else {
-                    "字节相同：重点看路径、日期和标签；分辨率/大小通常相同。"
-                }),
-        )
+        .child(div().text_xs().text_color(colors.subtle).child(
+            if group.kind == GroupKind::Similar {
+                "相似度按 pHash 汉明距离换算；组内可能链式合并，请逐组确认。"
+            } else {
+                "字节相同：重点看路径、日期和标签；分辨率/大小通常相同。"
+            },
+        ))
         .into_any_element()
 }
 
@@ -4112,10 +5665,11 @@ fn format_date(seconds: u64) -> String {
 fn tile(
     asset: Asset,
     selected: bool,
-    state: Arc<AppState>,
     this: Entity<KanalibApp>,
     thumb_cache: Entity<ThumbCache>,
     width: f32,
+    image_height: f32,
+    focus: FocusHandle,
     colors: UiColors,
 ) -> impl IntoElement {
     let path = asset.path.clone();
@@ -4137,7 +5691,11 @@ fn tile(
             .child("…")
             .into_any_element()
     };
-    let border = if selected { colors.accent } else { colors.border };
+    let border = if selected {
+        colors.accent
+    } else {
+        colors.border
+    };
     let error = asset.error.clone();
     let has_error = error.is_some();
     let summary = error.unwrap_or_else(|| asset.summary());
@@ -4148,32 +5706,75 @@ fn tile(
         .filter(|tag| tag.category == "general")
         .count();
     let rating = asset.rating.to_uppercase();
+    let favorite = asset.favorite;
+    let star = asset.star;
 
     div()
-        .id(SharedString::from(format!(
-            "tile-{}",
-            asset.path.display()
-        )))
+        .id(SharedString::from(format!("tile-{}", asset.path.display())))
+        .role(Role::Button)
+        .aria_label(title.clone())
         .w(px(width))
         .flex_none()
         .flex()
         .flex_col()
         .gap(px(5.))
         .cursor_pointer()
-        .on_click(move |_, _, cx| {
-            state.select(Some(path.clone()));
-            let _ = this.update(cx, |_, cx| cx.notify());
+        .on_click(move |event, window, cx| {
+            window.focus(&focus, cx);
+            let (modifiers, click_count) = match event {
+                ClickEvent::Mouse(event) => (event.down.modifiers, event.down.click_count),
+                ClickEvent::Keyboard(_) | ClickEvent::Touch(_) => (Modifiers::default(), 1),
+            };
+            let path = path.clone();
+            let _ = this.update(cx, |app, cx| {
+                app.handle_tile_click(path, modifiers, click_count, cx)
+            });
         })
         .child(
             div()
+                .relative()
                 .w_full()
-                .h(px(TILE_IMAGE_HEIGHT))
+                .h(px(image_height))
                 .rounded(px(8.))
                 .overflow_hidden()
                 .border_1()
                 .border_color(border)
                 .bg(colors.sunken)
-                .child(media),
+                .child(media)
+                .children(selected.then(|| {
+                    div()
+                        .absolute()
+                        .top(px(6.))
+                        .left(px(6.))
+                        .size(px(20.))
+                        .rounded_full()
+                        .bg(colors.accent)
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .child(
+                            Icon::new(IconName::Check)
+                                .size(IconSize::Xs)
+                                .color(colors.bg),
+                        )
+                }))
+                .children(favorite.then(|| {
+                    div()
+                        .absolute()
+                        .top(px(6.))
+                        .right(px(6.))
+                        .size(px(22.))
+                        .rounded_full()
+                        .bg(colors.backdrop)
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .child(
+                            Icon::new(IconName::Heart)
+                                .size(IconSize::Sm)
+                                .color(colors.danger),
+                        )
+                })),
         )
         .child(
             div()
@@ -4187,7 +5788,11 @@ fn tile(
             div()
                 .truncate()
                 .text_xs()
-                .text_color(if has_error { colors.danger } else { colors.muted })
+                .text_color(if has_error {
+                    colors.danger
+                } else {
+                    colors.muted
+                })
                 .child(summary),
         )
         .child(
@@ -4200,7 +5805,13 @@ fn tile(
                         .text_xs()
                         .text_color(colors.subtle)
                         .child(if rating.is_empty() {
-                            "未评级".to_string()
+                            if star > 0 {
+                                format!("★ {star}")
+                            } else {
+                                "未评级".to_string()
+                            }
+                        } else if star > 0 {
+                            format!("评级 {rating} · ★ {star}")
                         } else {
                             format!("评级 {rating}")
                         }),
@@ -4226,9 +5837,9 @@ fn open_path(path: &PathBuf) {
 
 #[cfg(test)]
 mod tests {
-    use super::{Resource, cache_victims, clamp_cache_limit};
     #[cfg(feature = "frame-profiler")]
     use super::decode_thumb;
+    use super::{Resource, cache_victims, clamp_cache_limit};
     use std::collections::HashMap;
     use std::path::Path;
 
@@ -4268,11 +5879,7 @@ mod tests {
             .into_iter()
             .filter_map(|entry| entry.ok())
             .filter(|entry| {
-                entry.file_type().is_file()
-                    && entry
-                        .file_name()
-                        .to_string_lossy()
-                        .contains("-t256")
+                entry.file_type().is_file() && entry.file_name().to_string_lossy().contains("-t256")
             })
             .map(|entry| entry.into_path())
             .take(300)

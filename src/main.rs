@@ -5,12 +5,11 @@ static ALLOC: kanalib_core::alloc_stats::CountingAlloc = kanalib_core::alloc_sta
 use std::path::PathBuf;
 
 use ely_gpui_component::{
-    theme::{Mode, Theme},
     Assets,
+    i18n::I18n,
+    theme::{Mode, Theme},
 };
-use gpui::{
-    px, size, App, AppContext as _, Bounds, TitlebarOptions, WindowBounds, WindowOptions,
-};
+use gpui::{App, AppContext as _, Bounds, TitlebarOptions, WindowBounds, WindowOptions, px, size};
 use kanalib_core::{sidecar, state};
 use kanalib_ui::KanalibApp;
 
@@ -97,8 +96,13 @@ fn main() {
             let reviews = std::collections::HashMap::new();
             for threshold in [6u8, 10, 14] {
                 let started = std::time::Instant::now();
-                let groups =
-                    kanalib_core::dedup::compute_similar_groups(&assets, threshold, &reviews, &[], &[]);
+                let groups = kanalib_core::dedup::compute_similar_groups(
+                    &assets,
+                    threshold,
+                    &reviews,
+                    &[],
+                    &[],
+                );
                 let members: usize = groups.iter().map(|group| group.assets.len()).sum();
                 log::info!(
                     "similar metrics: threshold={threshold} assets={} groups={} members={} ms={:.1}",
@@ -116,6 +120,7 @@ fn main() {
         .with_assets(Assets)
         .run(move |cx: &mut App| {
             ely_gpui_component::init(cx).expect("Ely failed to start");
+            cx.set_global(I18n::new("zh-CN"));
             Theme::set_mode_now(Mode::Dark, cx);
             Theme::update(cx, |theme| {
                 theme.font_family = "Microsoft YaHei UI".into();

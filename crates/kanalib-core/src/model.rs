@@ -25,6 +25,8 @@ pub struct Asset {
     pub height: u32,
     pub group: String,
     pub rating: String,
+    pub favorite: bool,
+    pub star: u8,
     pub tags: Vec<TagHit>,
     pub tagged: bool,
     pub tag_attempts: u32,
@@ -72,6 +74,7 @@ pub struct Counts {
     pub tagged: usize,
     pub untagged: usize,
     pub failed: usize,
+    pub favorites: usize,
     pub ratings: Vec<(String, usize)>,
     pub groups: Vec<(String, usize)>,
     pub tags: Vec<(String, usize)>,
@@ -83,6 +86,7 @@ pub struct CountAccumulator {
     tagged: usize,
     untagged: usize,
     failed: usize,
+    favorites: usize,
     ratings: HashMap<String, usize>,
     groups: HashMap<String, usize>,
     tags: HashMap<String, usize>,
@@ -107,6 +111,9 @@ impl CountAccumulator {
         if asset.error.is_some() {
             self.failed += 1;
         }
+        if asset.favorite {
+            self.favorites += 1;
+        }
         if !asset.rating.is_empty() {
             *self.ratings.entry(asset.rating.to_uppercase()).or_default() += 1;
         }
@@ -127,6 +134,9 @@ impl CountAccumulator {
         }
         if asset.error.is_some() {
             self.failed = self.failed.saturating_sub(1);
+        }
+        if asset.favorite {
+            self.favorites = self.favorites.saturating_sub(1);
         }
         if !asset.rating.is_empty() {
             decrement(&mut self.ratings, &asset.rating.to_uppercase());
@@ -153,6 +163,7 @@ impl CountAccumulator {
             tagged: self.tagged,
             untagged: self.untagged,
             failed: self.failed,
+            favorites: self.favorites,
             ratings: top(&self.ratings, 8),
             groups: top(&self.groups, 12),
             tags: top(&self.tags, 18),
@@ -183,11 +194,12 @@ fn decrement(map: &mut HashMap<String, usize>, key: &str) {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Filter {
     All,
     Untagged,
     Failed,
+    Favorites,
     Rating(String),
     Group(String),
     Tag(String),
@@ -199,6 +211,7 @@ impl Filter {
             Self::All => "全部图片".to_string(),
             Self::Untagged => "未打标".to_string(),
             Self::Failed => "失败".to_string(),
+            Self::Favorites => "收藏".to_string(),
             Self::Rating(rating) => format!("评级 {rating}"),
             Self::Group(group) => group.clone(),
             Self::Tag(tag) => format!("#{tag}"),
@@ -210,6 +223,7 @@ impl Filter {
             Self::All => true,
             Self::Untagged => !asset.tagged,
             Self::Failed => asset.error.is_some(),
+            Self::Favorites => asset.favorite,
             Self::Rating(rating) => asset.rating.eq_ignore_ascii_case(rating),
             Self::Group(group) => &asset.group == group,
             Self::Tag(tag) => asset.tags.iter().any(|hit| &hit.tag == tag),
@@ -225,6 +239,10 @@ pub struct SearchQuery {
     rating: Option<String>,
     exclude_rating: Option<String>,
     tagged: Option<bool>,
+    favorite: Option<bool>,
+    star: Option<u8>,
+    star_min: Option<u8>,
+    exclude_star: Option<u8>,
     duplicates_only: bool,
     impossible: bool,
 }
@@ -260,7 +278,24 @@ impl SearchQuery {
                 match (&lower[3..], negated) {
                     ("untagged", false) | ("tagged", true) => query.tagged = Some(false),
                     ("tagged", false) | ("untagged", true) => query.tagged = Some(true),
+                    ("fav", _) | ("favorite", _) | ("favourite", _) => {
+                        query.favorite = Some(!negated)
+                    }
                     _ => {}
+                }
+            } else if lower.starts_with("star:") {
+                let value = token[5..].trim();
+                if let Some(min) = value.strip_prefix(">=") {
+                    if let Ok(min) = min.trim().parse::<u8>() {
+                        query.star_min = Some(min.min(5));
+                    }
+                } else if let Ok(star) = value.parse::<u8>() {
+                    let star = star.min(5);
+                    if negated {
+                        query.exclude_star = Some(star);
+                    } else {
+                        query.star = Some(star);
+                    }
                 }
             } else if lower.starts_with("source:") {
                 if lower[7..].trim() != "local" {
@@ -318,6 +353,26 @@ impl SearchQuery {
                 return false;
             }
         }
+        if let Some(favorite) = self.favorite {
+            if asset.favorite != favorite {
+                return false;
+            }
+        }
+        if let Some(star) = self.star {
+            if asset.star != star {
+                return false;
+            }
+        }
+        if let Some(min) = self.star_min {
+            if asset.star < min {
+                return false;
+            }
+        }
+        if let Some(star) = self.exclude_star {
+            if asset.star == star {
+                return false;
+            }
+        }
         for tag in &self.tags {
             if !asset
                 .tags
@@ -365,6 +420,14 @@ impl SearchQuery {
     }
 }
 
+#[derive(Clone, Debug)]
+pub struct SavedSearch {
+    pub id: i64,
+    pub name: String,
+    pub filter: Filter,
+    pub query: String,
+}
+
 #[derive(Debug)]
 pub struct Shared {
     pub folder: PathBuf,
@@ -381,6 +444,7 @@ pub struct Shared {
     pub queue_running: usize,
     pub queue_error: usize,
     pub dedup: DedupState,
+    pub saved_searches: Vec<SavedSearch>,
 }
 
 impl Shared {
@@ -416,6 +480,7 @@ impl Shared {
             queue_running: 0,
             queue_error: 0,
             dedup,
+            saved_searches: Vec::new(),
         }
     }
 
@@ -426,15 +491,12 @@ impl Shared {
     }
 
     pub fn sort_assets(&mut self) {
-        self.assets
-            .write()
-            .unwrap()
-            .sort_by(|a, b| {
-                a.title()
-                    .to_lowercase()
-                    .cmp(&b.title().to_lowercase())
-                    .then_with(|| a.path.cmp(&b.path))
-            });
+        self.assets.write().unwrap().sort_by(|a, b| {
+            a.title()
+                .to_lowercase()
+                .cmp(&b.title().to_lowercase())
+                .then_with(|| a.path.cmp(&b.path))
+        });
         self.revision = self.revision.wrapping_add(1);
     }
 
@@ -528,6 +590,8 @@ mod tests {
             height: 0,
             group: group.to_string(),
             rating: rating.to_string(),
+            favorite: false,
+            star: 0,
             tags,
             tagged,
             tag_attempts: 0,
@@ -584,6 +648,28 @@ mod tests {
     }
 
     #[test]
+    fn favorites_and_stars_filter_and_count() {
+        let mut favorite = asset("a.png", true, "g", "原创", vec![]);
+        favorite.favorite = true;
+        favorite.star = 4;
+        let mut plain = asset("b.png", true, "s", "作品: X", vec![]);
+        plain.star = 2;
+        let counts = CountAccumulator::from_assets(&[favorite.clone(), plain.clone()]);
+        assert_eq!(counts.view().favorites, 1);
+
+        let query = SearchQuery::parse("is:fav star:>=3");
+        assert!(query.matches(&favorite, None, None));
+        assert!(!query.matches(&plain, None, None));
+
+        let query = SearchQuery::parse("-is:favorite star:2");
+        assert!(!query.matches(&favorite, None, None));
+        assert!(query.matches(&plain, None, None));
+
+        assert!(Filter::Favorites.matches(&favorite));
+        assert!(!Filter::Favorites.matches(&plain));
+    }
+
+    #[test]
     fn dup_true_requires_the_duplicate_path_set() {
         let a = asset("a.png", true, "g", "原创", vec![]);
         let query = SearchQuery::parse("dup:true");
@@ -594,13 +680,7 @@ mod tests {
 
     #[test]
     fn shared_upsert_updates_counts_and_revision() {
-        let old = asset(
-            "a.png",
-            true,
-            "g",
-            "原创",
-            vec![tag("1girl", "general")],
-        );
+        let old = asset("a.png", true, "g", "原创", vec![tag("1girl", "general")]);
         let mut shared = Shared::new(
             PathBuf::from("lib"),
             vec![old.clone()],
@@ -611,13 +691,7 @@ mod tests {
         assert_eq!(shared.revision, 1);
         assert_eq!(shared.counts.view().tagged, 1);
 
-        let new = asset(
-            "a.png",
-            false,
-            "s",
-            "作品: X",
-            vec![tag("sky", "general")],
-        );
+        let new = asset("a.png", false, "s", "作品: X", vec![tag("sky", "general")]);
         shared.upsert(new);
         let view = shared.counts.view();
         assert_eq!(shared.revision, 2);
