@@ -35,15 +35,16 @@ Write-Host "started pid=$($proc.Id) probe=$ProbeSecs scroll=$ScrollTest"
 # gpui 只在窗口处于活动状态时记录 present 间隔，所以反复把本进程窗口取到前台。
 $shell = New-Object -ComObject WScript.Shell
 function Invoke-Foreground([int]$targetPid) {
-    try { return $shell.AppActivate($targetPid) } catch { return $false }
+    try { return [bool]$shell.AppActivate($targetPid) } catch { return $false }
 }
 Start-Sleep -Milliseconds 600
 Write-Host "foreground_first=$([bool](Invoke-Foreground $proc.Id))"
 
 $deadline = (Get-Date).AddSeconds($WaitSecs)
 $hit = $null
+$lastForeground = $false
 while ((Get-Date) -lt $deadline) {
-    [bool](Invoke-Foreground $proc.Id) | Out-Null
+    $lastForeground = [bool](Invoke-Foreground $proc.Id)
     if (Test-Path $LogPath) {
         $hit = Select-String -Path $LogPath -Pattern "frame metrics:" -SimpleMatch -ErrorAction SilentlyContinue
         if ($hit) { break }
@@ -51,6 +52,8 @@ while ((Get-Date) -lt $deadline) {
     if ($proc.HasExited) { break }
     Start-Sleep -Milliseconds 1000
 }
+$proc.Refresh()
+Write-Host "foreground_last=$lastForeground minimized=$($proc.MainWindowHandle -eq 0) title=$($proc.MainWindowTitle)"
 
 if ($hit) {
     $hit.Line
