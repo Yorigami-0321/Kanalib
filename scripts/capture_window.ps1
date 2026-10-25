@@ -13,6 +13,7 @@ public class Win32Capture {
     [DllImport("user32.dll")] private static extern bool IsWindowVisible(IntPtr hWnd);
     [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr hWnd, out RECT rect);
     [DllImport("user32.dll")] public static extern bool PrintWindow(IntPtr hWnd, IntPtr hdcBlt, uint nFlags);
+    [DllImport("user32.dll")] public static extern IntPtr SetThreadDpiAwarenessContext(IntPtr dpiContext);
 
     private delegate bool EnumProc(IntPtr hWnd, IntPtr lParam);
 
@@ -39,6 +40,9 @@ public class Win32Capture {
     }
 }
 "@
+
+# 以物理像素工作，避免 125%/150% 缩放下 PrintWindow 只截到虚拟化后的左上角。
+[Win32Capture]::SetThreadDpiAwarenessContext([IntPtr](-4)) | Out-Null
 
 $processes = @(Get-Process -Name $ProcessName -ErrorAction Stop)
 $hwnd = [IntPtr]::Zero

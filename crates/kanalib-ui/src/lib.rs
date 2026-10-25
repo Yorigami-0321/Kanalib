@@ -25,7 +25,7 @@ use kanalib_core::dedup::{
 use kanalib_core::model::{Asset, Counts, Filter, SearchQuery, TagHit};
 use kanalib_core::state::AppState;
 
-const TILE_WIDTH: f32 = 188.;
+const TILE_MIN_WIDTH: f32 = 160.;
 const TILE_IMAGE_HEIGHT: f32 = 150.;
 const GRID_GAP: f32 = 12.;
 const GRID_PADDING: f32 = 16.;
@@ -35,6 +35,17 @@ const DEDUP_RAIL_WIDTH: f32 = 272.;
 const DEDUP_GROUP_ROW_HEIGHT: f32 = 78.;
 const DEDUP_CARD_WIDTH: f32 = 214.;
 const DEDUP_MAX_VISIBLE: usize = 4;
+const SETTINGS_MAX_WIDTH: f32 = 1080.;
+
+fn grid_columns(available: f32) -> usize {
+    let usable = (available - GRID_PADDING * 2.0 + GRID_GAP) / (TILE_MIN_WIDTH + GRID_GAP);
+    (usable.floor() as usize).max(1)
+}
+
+fn grid_tile_width(available: f32, columns: usize) -> f32 {
+    let usable = available - GRID_PADDING * 2.0 - GRID_GAP * columns.saturating_sub(1) as f32;
+    (usable / columns.max(1) as f32).max(1.0)
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Screen {
@@ -603,17 +614,26 @@ impl KanalibApp {
     }
 
     fn choose_folder(&mut self, cx: &mut Context<Self>) {
-        if let Some(folder) = rfd::FileDialog::new().pick_folder() {
-            self.state.set_folder(folder);
-            self.state.start_scan();
-            self.last_search.clear();
-            self.search_paths = None;
-            self.screen = Screen::Library;
-            self.dedup_selected = None;
-            self.dedup_confirm = None;
-            self.grid_scroll.scroll_to_item(0, ScrollStrategy::Top);
-            cx.notify();
-        }
+        let weak = cx.entity().downgrade();
+        // 同步 rfd 会开嵌套消息循环，GPUI 的 RefCell 在鼠标回调里仍被借用，导致闪退。
+        cx.spawn(async move |_, cx| {
+            let Some(handle) = rfd::AsyncFileDialog::new().pick_folder().await else {
+                return;
+            };
+            let folder = handle.path().to_path_buf();
+            let _ = weak.update(cx, |app, cx| {
+                app.state.set_folder(folder);
+                app.state.start_scan();
+                app.last_search.clear();
+                app.search_paths = None;
+                app.screen = Screen::Library;
+                app.dedup_selected = None;
+                app.dedup_confirm = None;
+                app.grid_scroll.scroll_to_item(0, ScrollStrategy::Top);
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     fn rescan(&mut self, cx: &mut Context<Self>) {
@@ -705,11 +725,11 @@ impl Render for KanalibApp {
         });
         let search_text = search.read(cx).text().to_string();
         let search_query = SearchQuery::parse(&search_text);
-        // gpui-pre reports the physical client size as the viewport while styles scale by DPI.
+        // gpui-pre 的 viewport_size 自 0.3.x 起就是逻辑像素，不能再按 DPI 除一次。
         let scale = window.scale_factor();
         let viewport = window.viewport_size();
-        let window_width = px(viewport.width.as_f32() / scale);
-        let window_height = px(viewport.height.as_f32() / scale);
+        let window_width = viewport.width;
+        let window_height = viewport.height;
         let sidebar_width = px(245.);
         let inspector_width = px(310.);
         let mut main_width = window_width - sidebar_width - inspector_width;
@@ -911,10 +931,7 @@ impl Render for KanalibApp {
                 self.frame_probe = None;
             }
         }
-        let columns = (((main_width.as_f32() - GRID_PADDING * 2.0 + GRID_GAP)
-            / (TILE_WIDTH + GRID_GAP))
-            .floor() as usize)
-            .max(1);
+        let columns = grid_columns(main_width.as_f32());
         self.grid_rows = visible_indices.len().div_ceil(columns);
         let selected_asset = {
             let assets = assets.read().unwrap();
@@ -1123,6 +1140,7 @@ impl KanalibApp {
         let mut body = div()
             .id("sidebar-body")
             .flex_1()
+            .min_h(px(0.))
             .overflow_y_scroll()
             .px(px(8.))
             .pb(px(12.))
@@ -1395,10 +1413,8 @@ impl KanalibApp {
             })
         });
 
-        let columns = (((width.as_f32() - GRID_PADDING * 2.0 + GRID_GAP)
-            / (TILE_WIDTH + GRID_GAP))
-            .floor() as usize)
-            .max(1);
+        let columns = grid_columns(width.as_f32());
+        let tile_width = grid_tile_width(width.as_f32(), columns);
         let visible = visible_indices.len();
         let row_count = visible.div_ceil(columns);
         let assets_for_list = assets;
@@ -1453,6 +1469,7 @@ impl KanalibApp {
                                 state_for_list.clone(),
                                 this_for_list.clone(),
                                 thumb_cache_for_list.clone(),
+                                tile_width,
                                 colors,
                             ));
                         }
@@ -2752,23 +2769,29 @@ impl KanalibApp {
                     Button::new("add-protected", "添加保护文件夹")
                         .primary()
                         .on_click(move |_, _, cx| {
-                            let folder = rfd::FileDialog::new().pick_folder();
-                            let Some(folder) = folder else {
-                                return;
-                            };
-                            let _ = this_add.update(cx, |app, cx| {
-                                match app.state.add_protected_path(folder) {
-                                    Ok(()) => {
-                                        app.settings_notice =
-                                            Some("已添加保护路径".to_string());
+                            let weak = this_add.downgrade();
+                            cx.spawn(async move |cx| {
+                                let Some(handle) =
+                                    rfd::AsyncFileDialog::new().pick_folder().await
+                                else {
+                                    return;
+                                };
+                                let folder = handle.path().to_path_buf();
+                                let _ = weak.update(cx, |app, cx| {
+                                    match app.state.add_protected_path(folder) {
+                                        Ok(()) => {
+                                            app.settings_notice =
+                                                Some("已添加保护路径".to_string());
+                                        }
+                                        Err(error) => {
+                                            app.settings_notice =
+                                                Some(format!("添加失败: {error:#}"));
+                                        }
                                     }
-                                    Err(error) => {
-                                        app.settings_notice =
-                                            Some(format!("添加失败: {error:#}"));
-                                    }
-                                }
-                                cx.notify();
-                            });
+                                    cx.notify();
+                                });
+                            })
+                            .detach();
                         }),
                 ),
             );
@@ -2928,6 +2951,9 @@ impl KanalibApp {
                     .child("相似组不提供批量删除；受保护路径与只读来源不会被移入回收站。"),
             );
 
+        let column_width = (width - px(48.)).min(px(SETTINGS_MAX_WIDTH));
+        let side_padding = px(((width.as_f32() - column_width.as_f32()) / 2.0).max(24.));
+
         div()
             .w(width)
             .h_full()
@@ -2937,7 +2963,7 @@ impl KanalibApp {
             .child(
                 div()
                     .h(px(58.))
-                    .px(px(24.))
+                    .px(side_padding)
                     .flex()
                     .items_center()
                     .justify_between()
@@ -2977,10 +3003,11 @@ impl KanalibApp {
                     .flex_1()
                     .min_h(px(0.))
                     .overflow_y_scroll()
-                    .p(px(24.))
+                    .px(side_padding)
+                    .py(px(24.))
                     .child(
                         div()
-                            .w(px(820.))
+                            .w(column_width)
                             .flex()
                             .flex_col()
                             .gap(px(12.))
@@ -4088,6 +4115,7 @@ fn tile(
     state: Arc<AppState>,
     this: Entity<KanalibApp>,
     thumb_cache: Entity<ThumbCache>,
+    width: f32,
     colors: UiColors,
 ) -> impl IntoElement {
     let path = asset.path.clone();
@@ -4126,7 +4154,8 @@ fn tile(
             "tile-{}",
             asset.path.display()
         )))
-        .w(px(TILE_WIDTH))
+        .w(px(width))
+        .flex_none()
         .flex()
         .flex_col()
         .gap(px(5.))

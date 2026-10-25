@@ -122,7 +122,18 @@ fn main() {
                 theme.mono_family = "Cascadia Mono".into();
             });
 
-            let bounds = Bounds::centered(None, size(px(1700.), px(1000.)), cx);
+            let work_area = cx
+                .primary_display()
+                .map(|display| display.visible_bounds().size);
+            let window_size = work_area
+                .map(|work| {
+                    size(
+                        px((work.width.as_f32() - 80.).min(1280.).max(960.)),
+                        px((work.height.as_f32() - 80.).min(820.).max(640.)),
+                    )
+                })
+                .unwrap_or_else(|| size(px(1280.), px(820.)));
+            let bounds = Bounds::centered(None, window_size, cx);
             let view = cx
                 .open_window(
                     WindowOptions {
