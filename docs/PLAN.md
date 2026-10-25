@@ -336,7 +336,7 @@ duplicate_reviews  group_key(sha1), state(pending/ignored/done), keeper_path, me
 
 - 模型：GPU 吞吐（张/秒）、峰值显存、与 CPU/官方 logits 的标签一致率。
 - 索引：本地扫描张/秒、缩略图张/秒、失败率、重启恢复率。
-- UI：10 万资产滚动帧时间、搜索 p95、内存占用、缩略图缓存命中率。10k 实测（2026-10-24）：搜索 p95 26.4–76.7ms；滚动 render build p95 0.68ms；10k 滚动合成器实测 164.8fps、present 间隔 p99 8.41ms、0.0% 帧超 16.67ms 预算（小档+缓存修复前为 149.3fps / p99 15.69ms / 0.5%）。10 万实测（2026-10-25）：冷导入 49.3min 峰值 134MB、暖重扫 36.9s、搜索 p95 28.6–284ms、相似扫描 2.65–2.99s、滚动内存峰值 329MB 且 256K 档恒定；滚动帧时间待窗口前台后补测（替代口径 draw p99 7.3ms）。
+- UI：10 万资产滚动帧时间、搜索 p95、内存占用、缩略图缓存命中率。10k 实测（2026-10-24）：搜索 p95 26.4–76.7ms；滚动 render build p95 0.68ms；10k 滚动合成器实测 164.8fps、present 间隔 p99 8.41ms、0.0% 帧超 16.67ms 预算（小档+缓存修复前为 149.3fps / p99 15.69ms / 0.5%）。10 万实测（2026-10-25）：冷导入 49.3min 峰值 134MB、暖重扫 36.9s、搜索 p95 28.6–284ms、相似扫描 2.65–2.99s、滚动内存峰值 329MB 且 256K 档恒定；10 万滚动 151.5fps、present p99 15.84ms、超 16.67ms 预算 0.91%。
 - 数据：跨源精确匹配率、pHash 待审核组准确率（人工抽样）。相似扫描 10k 全量两两比较 270ms（测试构建，无命中）；当前 O(n²)，10 万级需分桶/索引。
 - 稳定性：sidecar 崩溃重启次数、单源失败不影响其他源、无原文件写入。
 
@@ -435,11 +435,11 @@ duplicate_reviews  group_key(sha1), state(pending/ignored/done), keeper_path, me
   - 搜索 p95（每查询 100 次，headless）：`synthetic`（命中 10 万）p50 244 / p95 284ms、`合成`（2 万）104/116ms、`sky`（1 万）26/28.6ms、`1girl`（0 命中）98/110ms。
   - 相似扫描（并行实现）：阈值 6/10/14 → 2.69 / 2.65 / 2.99s，组数 1,697 / 10 / 1（合成库 pHash 高度聚集，阈值 14 时 99,990/100,000 并为一组）。
   - 滚动内存（45s、1,200 次跳转）：256K 档恒定 28.5MB / 131 块，总存活约 124MB；峰值工作集 326–329MB、静置 202.7MB。
-  - 10 万滚动帧率：未能取到合成器口径——四轮探针里 100k 窗口始终未激活（`presents=0`、`renders≈1,230` 即失焦 30fps 节流），同期 10k 冒烟正常；疑与 35s 暖重扫期间窗口未响应、前台被占导致激活被拒有关。替代口径：`draw_ms` p50 4.0–4.2ms / p95 5.1–5.8ms / p99 6.6–7.3ms / max 89–195ms（10k 为 p50 2.5 / p99 4.5ms），远低于 16.67ms 预算；合成器 fps 需在窗口能保持前台时补测。
+  - 10 万滚动帧率（2026-10-25，窗口保持前台）：**151.5fps**（renders 6,819 / presents 6,817），present 间隔 p50 6.10 / p95 7.38 / p99 15.84 / max 156.9ms，超 16.67ms 预算 0.91%（≈62 帧）；draw p50 2.48 / p95 3.77 / p99 14.24 / max 152.2ms；`cached_images` 128 / 27.3MB；静置工作集约 215MB、256K 档 27.9MB 恒定。60fps 验收通过（p95 7.4ms）；相对 10k（164.9fps / p99 8.33ms / 0.03%）出现少量超预算帧与 ~157ms 单帧尖峰，属首访行构建+纹理上传类抖动的残留，后续可按需做预热或分帧上传。取数前提：窗口必须保持激活（`scripts/focus_window.ps1` 用 AttachThreadInput 置前）；失焦会退化为 30fps 节流且 `presents=0`。探针收尾偶发挂起，外部结束进程后数据完整。
 - gpui-pre 0.3.9 升级验证（2026-10-25，分支 `gpui-039`）：上游 Ely 自 `f3cfbad` 起已重构为 workspace 多 crate；我们的 vendor 是 floral-notepaper 的旧单 crate 快照（同为 0.1.1，pin gpui-pre 0.3.8）。采用最小路径：保留 vendor 代码，仅把 pin 升到 0.3.9，并用 0.3.9 的平台 crate 重建 `vendor/gpui-pre-windows`（平台层 0.3.8→0.3.9 仅 4 文件 / ~111 行，`directx_atlas.rs` 与 `direct_write.rs` 零差异，我们的补丁原样保留）；核心 crate 0.3.9 有 21 文件 / ~2,140 行改动，但应用与旧 Ely 代码零改动即编译通过。
   - 结果：`cargo check` / `cargo test` 全绿（20 通过 + 3 忽略）；`--features frame-profiler` 编译通过；10k 库 UI 截图中文渲染/布局正常；45s 滚动 163.3fps、present p99 11.11ms、超预算 0.1%、256K 档恒定 29MB（0.3.8 基线 164.9fps / 8.33ms / 0.03%）。
   - 待办：中文 IME 冒烟（合成输入需人工操作）；通过后合并回 main。
   - 中文 IME 冒烟（2026-10-25，微软拼音）：组字与候选窗正常（候选窗定位在搜索框附近）、上屏「合成」后正确过滤 2,000 张，无方块/丢字；组字过程中过滤按原始输入执行（如「夜景d'd'd'd」会暂时 0 命中），属可接受边界行为。截图 `.kanalib/ime_039_committed.png`、`.kanalib/ime_039_composing.png`。分支已合并回 main。
-- UI 拆 crate（2026-10-25）：工作区三包——`kanalib`（bin：入口/窗口/全局分配器/headless）、`crates/kanalib-core`（扫描/DB/去重/状态/sidecar/trash，无 gpui 依赖）、`crates/kanalib-ui`（GPUI/Ely 视图、虚拟网格、图片缓存与帧探针）。`frame-profiler` 由根 feature 转发到 core（分配器计数）与 ui（帧直方图）；vendor 两处不再作为成员构建（ely 关闭 tests/examples/doctests 并移除显式 `[[example]]` 目标）。验证：`cargo test --workspace` 20 通过 + 3 忽略、`--features frame-profiler` 编译、release UI 冒烟截图正常（`.kanalib/ui_split.png`）；拆分后未重测合成器帧率（纯结构调整，前一轮 0.3.9 数据 163.3fps 仍代表同一代码路径）。
+- UI 拆 crate（2026-10-25）：工作区三包——`kanalib`（bin：入口/窗口/全局分配器/headless）、`crates/kanalib-core`（扫描/DB/去重/状态/sidecar/trash，无 gpui 依赖）、`crates/kanalib-ui`（GPUI/Ely 视图、虚拟网格、图片缓存与帧探针）。`frame-profiler` 由根 feature 转发到 core（分配器计数）与 ui（帧直方图）；vendor 两处不再作为成员构建（ely 关闭 tests/examples/doctests 并移除显式 `[[example]]` 目标）。验证：`cargo test --workspace` 20 通过 + 3 忽略、`--features frame-profiler` 编译、release UI 冒烟截图正常（`.kanalib/ui_split.png`）；拆分后以 10 万档复测滚动为 151.5fps（见上一条，同一二进制路径）。
 - 合成库的模型输出只用于管道压力测试：9,990 张中 6,556 归为截图/文本、1,651 非动漫/实景、1,273 未分类，不能作为真实图库的分类质量指标。
 - Immich/WebDAV：按 2026-10-24 决定暂缓，先完成本地 MVP；阶段 2 再接入。

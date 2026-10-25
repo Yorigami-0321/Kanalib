@@ -33,9 +33,10 @@ $proc = Start-Process -FilePath $Exe -ArgumentList @("`"$Folder`"") `
 Write-Host "started pid=$($proc.Id) probe=$ProbeSecs scroll=$ScrollTest"
 
 # gpui 只在窗口处于活动状态时记录 present 间隔，所以反复把本进程窗口取到前台。
-$shell = New-Object -ComObject WScript.Shell
+# AttachThreadInput 版本可绕过前台锁；实现放在纯 ASCII 的 focus_window.ps1。
+. (Join-Path $PSScriptRoot "focus_window.ps1")
 function Invoke-Foreground([int]$targetPid) {
-    try { return [bool]$shell.AppActivate($targetPid) } catch { return $false }
+    return [bool](Focus-Window -TargetPid $targetPid)
 }
 Start-Sleep -Milliseconds 600
 Write-Host "foreground_first=$([bool](Invoke-Foreground $proc.Id))"
