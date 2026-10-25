@@ -28,6 +28,14 @@ pub struct TrashSummary {
     pub protected_skipped: usize,
 }
 
+#[derive(Clone, Debug, Default)]
+pub struct CacheStats {
+    pub files: usize,
+    pub bytes: u64,
+    pub orphan_files: usize,
+    pub orphan_bytes: u64,
+}
+
 pub struct AppState {
     pub shared: Mutex<Shared>,
     cancel: Mutex<Option<Arc<AtomicBool>>>,
@@ -831,6 +839,74 @@ impl AppState {
 
     pub fn cache_dir(&self) -> PathBuf {
         self.cache_dir.clone()
+    }
+
+    pub fn cache_stats(&self) -> Result<CacheStats> {
+        Ok(self.scan_cache()?.0)
+    }
+
+    pub fn cleanup_orphan_thumbs(&self) -> Result<(usize, u64)> {
+        let (_, orphans) = self.scan_cache()?;
+        let mut removed = 0;
+        let mut bytes = 0;
+        for (path, size) in orphans {
+            match std::fs::remove_file(&path) {
+                Ok(()) => {
+                    removed += 1;
+                    bytes += size;
+                }
+                Err(error) => log::warn!("remove thumb {}: {error}", path.display()),
+            }
+        }
+        Ok((removed, bytes))
+    }
+
+    fn scan_cache(&self) -> Result<(CacheStats, Vec<(PathBuf, u64)>)> {
+        let referenced = Db::open(&self.db_path)?.all_thumb_paths()?;
+        let names = referenced
+            .iter()
+            .filter_map(|path| path.file_name())
+            .map(|name| name.to_string_lossy().to_string())
+            .collect::<HashSet<_>>();
+        let mut stats = CacheStats::default();
+        let mut orphans = Vec::new();
+        let entries = match std::fs::read_dir(&self.cache_dir) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Ok((stats, orphans));
+            }
+            Err(error) => return Err(error.into()),
+        };
+        for entry in entries {
+            let entry = match entry {
+                Ok(entry) => entry,
+                Err(error) => {
+                    log::warn!("read cache entry: {error}");
+                    continue;
+                }
+            };
+            let path = entry.path();
+            if !path.is_file() {
+                continue;
+            }
+            let size = entry.metadata().map(|meta| meta.len()).unwrap_or(0);
+            stats.files += 1;
+            stats.bytes += size;
+            let name = path
+                .file_name()
+                .map(|name| name.to_string_lossy().to_string())
+                .unwrap_or_default();
+            let derived = name
+                .strip_suffix("-t256.jpg")
+                .map(|stem| format!("{stem}.jpg"));
+            let used = names.contains(&name) || derived.is_some_and(|base| names.contains(&base));
+            if !used {
+                stats.orphan_files += 1;
+                stats.orphan_bytes += size;
+                orphans.push((path, size));
+            }
+        }
+        Ok((stats, orphans))
     }
 
     pub fn start_similar_scan(self: &Arc<Self>) {

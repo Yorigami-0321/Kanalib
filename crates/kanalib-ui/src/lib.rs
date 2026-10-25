@@ -31,7 +31,8 @@ use kanalib_core::dedup::{
 use kanalib_core::model::{
     Asset, Counts, Filter, SavedSearch, SearchQuery, TagHit, normalize_tag_name,
 };
-use kanalib_core::state::AppState;
+use kanalib_core::export;
+use kanalib_core::state::{AppState, CacheStats};
 
 const GRID_GAP: f32 = 12.;
 const GRID_PADDING: f32 = 16.;
@@ -282,6 +283,36 @@ enum DedupConfirm {
 enum TagDialogMode {
     Add,
     Remove,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ExportFormat {
+    Csv,
+    Json,
+}
+
+impl ExportFormat {
+    fn extension(self) -> &'static str {
+        match self {
+            Self::Csv => "csv",
+            Self::Json => "json",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ExportTarget {
+    Selected,
+    View,
+}
+
+impl ExportTarget {
+    fn slug(self) -> &'static str {
+        match self {
+            Self::Selected => "selected",
+            Self::View => "view",
+        }
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -566,6 +597,7 @@ pub struct KanalibApp {
     dedup_scroll: UniformListScrollHandle,
     tag_scroll: UniformListScrollHandle,
     tag_list: Vec<kanalib_core::model::TagSummary>,
+    cache_stats: Option<CacheStats>,
     last_search: String,
     search_paths: Option<Arc<HashSet<PathBuf>>>,
     last_scanning: bool,
@@ -693,6 +725,7 @@ impl KanalibApp {
             dedup_scroll: UniformListScrollHandle::new(),
             tag_scroll: UniformListScrollHandle::new(),
             tag_list: Vec::new(),
+            cache_stats: None,
             last_search: String::new(),
             search_paths: None,
             last_scanning: false,
@@ -1027,6 +1060,52 @@ impl KanalibApp {
         self.screen = Screen::Settings;
         self.dedup_confirm = None;
         self.settings_notice = None;
+        self.refresh_cache_stats(cx);
+    }
+
+    fn refresh_cache_stats(&mut self, cx: &mut Context<Self>) {
+        match self.state.cache_stats() {
+            Ok(stats) => self.cache_stats = Some(stats),
+            Err(error) => {
+                log::warn!("cache stats: {error:#}");
+                push_toast(
+                    &self.toaster,
+                    cx,
+                    format!("读取缓存统计失败：{error:#}"),
+                    Severity::Danger,
+                );
+            }
+        }
+        cx.notify();
+    }
+
+    fn cleanup_cache(&mut self, cx: &mut Context<Self>) {
+        if self.state.shared.lock().unwrap().scanning {
+            push_toast(
+                &self.toaster,
+                cx,
+                "扫描进行中，完成后再清理缓存",
+                Severity::Warning,
+            );
+            return;
+        }
+        match self.state.cleanup_orphan_thumbs() {
+            Ok((files, bytes)) => {
+                push_toast(
+                    &self.toaster,
+                    cx,
+                    format!("已清理 {files} 个孤儿缩略图 · {}", format_bytes(bytes)),
+                    Severity::Success,
+                );
+                self.refresh_cache_stats(cx);
+            }
+            Err(error) => push_toast(
+                &self.toaster,
+                cx,
+                format!("清理缓存失败：{error:#}"),
+                Severity::Danger,
+            ),
+        }
         cx.notify();
     }
 
@@ -1471,6 +1550,95 @@ impl KanalibApp {
         cx.notify();
     }
 
+    fn export_assets(
+        &mut self,
+        target: ExportTarget,
+        export_format: ExportFormat,
+        cx: &mut Context<Self>,
+    ) {
+        let mut paths = match target {
+            ExportTarget::Selected => self.selected_paths(),
+            ExportTarget::View => self.visible_paths(),
+        };
+        if target == ExportTarget::Selected {
+            paths.sort();
+            paths.dedup();
+        }
+        if paths.is_empty() {
+            push_toast(&self.toaster, cx, "没有可导出的图片", Severity::Warning);
+            return;
+        }
+        let assets = {
+            let shared = self.state.shared.lock().unwrap();
+            let assets = shared.assets.read().unwrap();
+            let by_path = assets
+                .iter()
+                .map(|asset| (asset.path.as_path(), asset))
+                .collect::<HashMap<_, _>>();
+            paths
+                .iter()
+                .filter_map(|path| by_path.get(path.as_path()).map(|asset| (*asset).clone()))
+                .collect::<Vec<_>>()
+        };
+        if assets.is_empty() {
+            push_toast(&self.toaster, cx, "没有可导出的图片", Severity::Warning);
+            return;
+        }
+        let content = match export_format {
+            ExportFormat::Csv => export::to_csv(&assets),
+            ExportFormat::Json => match export::to_json(&assets) {
+                Ok(content) => content,
+                Err(error) => {
+                    push_toast(
+                        &self.toaster,
+                        cx,
+                        format!("生成 JSON 失败：{error:#}"),
+                        Severity::Danger,
+                    );
+                    return;
+                }
+            },
+        };
+        let filename = format!(
+            "kanalib-{}.{}",
+            target.slug(),
+            export_format.extension()
+        );
+        let count = assets.len();
+        let bytes = content.len() as u64;
+        let weak = cx.entity().downgrade();
+        let toaster = self.toaster.clone();
+        cx.spawn(async move |_, cx| {
+            let Some(handle) = rfd::AsyncFileDialog::new()
+                .set_file_name(&filename)
+                .save_file()
+                .await
+            else {
+                return;
+            };
+            let path = handle.path().to_path_buf();
+            let result = std::fs::write(&path, content);
+            let _ = weak.update(cx, |_, cx| {
+                match result {
+                    Ok(()) => push_toast(
+                        &toaster,
+                        cx,
+                        format!("已导出 {count} 张 · {}", format_bytes(bytes)),
+                        Severity::Success,
+                    ),
+                    Err(error) => push_toast(
+                        &toaster,
+                        cx,
+                        format!("导出失败：{error:#}"),
+                        Severity::Danger,
+                    ),
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
     fn copy_selected_prompt(&mut self, cx: &mut Context<Self>) {
         let paths = self.selected_paths();
         if paths.is_empty() {
@@ -1736,6 +1904,14 @@ impl KanalibApp {
             "act:copy-paths" => self.copy_selected_paths(cx),
             "tag:add" => self.open_tag_dialog(TagDialogMode::Add, cx),
             "tag:remove" => self.open_tag_dialog(TagDialogMode::Remove, cx),
+            "export:selected-csv" => {
+                self.export_assets(ExportTarget::Selected, ExportFormat::Csv, cx)
+            }
+            "export:selected-json" => {
+                self.export_assets(ExportTarget::Selected, ExportFormat::Json, cx)
+            }
+            "export:view-csv" => self.export_assets(ExportTarget::View, ExportFormat::Csv, cx),
+            "export:view-json" => self.export_assets(ExportTarget::View, ExportFormat::Json, cx),
             "sort:name" => self.choose_sort_mode(SortMode::Name, cx),
             "sort:modified" => self.choose_sort_mode(SortMode::Modified, cx),
             "sort:size" => self.choose_sort_mode(SortMode::Size, cx),
@@ -2218,6 +2394,19 @@ impl Render for KanalibApp {
                     Command::new("act:copy-paths", "复制选中路径").icon(IconName::Copy),
                     Command::new("tag:add", "添加标签…").icon(IconName::Tag),
                     Command::new("tag:remove", "移除标签…").icon(IconName::X),
+                ],
+            )
+            .group(
+                "导出",
+                [
+                    Command::new("export:selected-csv", "导出选中 · CSV")
+                        .icon(IconName::Download),
+                    Command::new("export:selected-json", "导出选中 · JSON")
+                        .icon(IconName::Download),
+                    Command::new("export:view-csv", "导出当前视图 · CSV")
+                        .icon(IconName::Download),
+                    Command::new("export:view-json", "导出当前视图 · JSON")
+                        .icon(IconName::Download),
                 ],
             )
             .group(
@@ -3099,6 +3288,59 @@ impl KanalibApp {
                         }),
                 )
         };
+        let export_menu = {
+            let selected_csv = this.clone();
+            let selected_json = this.clone();
+            let view_csv = this.clone();
+            let view_json = this.clone();
+            Menu::new()
+                .item(
+                    MenuItem::new("选中 · CSV")
+                        .icon(IconName::Download)
+                        .on_click(move |_, cx| {
+                            let _ = selected_csv.update(cx, |app, cx| {
+                                app.export_assets(
+                                    ExportTarget::Selected,
+                                    ExportFormat::Csv,
+                                    cx,
+                                )
+                            });
+                        }),
+                )
+                .item(
+                    MenuItem::new("选中 · JSON")
+                        .icon(IconName::Download)
+                        .on_click(move |_, cx| {
+                            let _ = selected_json.update(cx, |app, cx| {
+                                app.export_assets(
+                                    ExportTarget::Selected,
+                                    ExportFormat::Json,
+                                    cx,
+                                )
+                            });
+                        }),
+                )
+                .separator()
+                .item(
+                    MenuItem::new("当前视图 · CSV")
+                        .icon(IconName::Download)
+                        .on_click(move |_, cx| {
+                            let _ = view_csv.update(cx, |app, cx| {
+                                app.export_assets(ExportTarget::View, ExportFormat::Csv, cx)
+                            });
+                        }),
+                )
+                .item(
+                    MenuItem::new("当前视图 · JSON")
+                        .icon(IconName::Download)
+                        .on_click(move |_, cx| {
+                            let _ = view_json.update(cx, |app, cx| {
+                                app.export_assets(ExportTarget::View, ExportFormat::Json, cx)
+                            });
+                        }),
+                )
+        };
+        let toolbar_export = export_menu.clone();
         let columns = grid_columns(width.as_f32(), self.density.min_width());
         let tile_width = grid_tile_width(width.as_f32(), columns);
         let image_height = self.density.image_height();
@@ -3258,6 +3500,11 @@ impl KanalibApp {
                                     let _ = this_paths
                                         .update(cx, |app, cx| app.copy_selected_paths(cx));
                                 }),
+                        )
+                        .child(
+                            DropdownMenu::new("bulk-export", "导出", export_menu)
+                                .icon(IconName::Download)
+                                .variant(ButtonVariant::Ghost),
                         ),
                 )
                 .child(
@@ -3366,8 +3613,13 @@ impl KanalibApp {
                                 }),
                             )
                             .child(
+                                DropdownMenu::new("library-export", "导出", toolbar_export)
+                                    .icon(IconName::Download)
+                                    .variant(ButtonVariant::Ghost),
+                            )
+                            .child(
                                 div()
-                                    .w(px(240.))
+                                    .w(px(200.))
                                     .child(Input::new(search).clearable().least("搜索 / is:fav")),
                             )
                             .children(stop),
@@ -4712,8 +4964,27 @@ impl KanalibApp {
     ) -> AnyElement {
         let this_back = this.clone();
         let this_add = this.clone();
+        let this_refresh_cache = this.clone();
+        let this_cleanup_cache = this.clone();
+        let cache_stats = self.cache_stats.clone();
         let db_path = self.state.db_path();
         let cache_dir = self.state.cache_dir();
+        let db_bytes = std::fs::metadata(&db_path)
+            .map(|meta| meta.len())
+            .unwrap_or(0);
+        let cache_summary = cache_stats
+            .as_ref()
+            .map(|stats| {
+                format!(
+                    "{} 个文件 · {} · 孤儿 {} 个 · {}",
+                    stats.files,
+                    format_bytes(stats.bytes),
+                    stats.orphan_files,
+                    format_bytes(stats.orphan_bytes)
+                )
+            })
+            .unwrap_or_else(|| "尚未统计，点击“刷新统计”".to_string());
+        let orphan_count = cache_stats.as_ref().map_or(0, |stats| stats.orphan_files);
         let data_dir = db_path
             .parent()
             .map(Path::to_path_buf)
@@ -5014,18 +5285,57 @@ impl KanalibApp {
                 div()
                     .text_sm()
                     .font_weight(FontWeight::SEMIBOLD)
-                    .child("数据位置"),
+                    .child("数据与缓存"),
             )
             .child(path_row("数据库", db_path, colors))
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(colors.subtle)
+                    .child(format!("数据库大小 {}", format_bytes(db_bytes))),
+            )
             .child(path_row("缩略图缓存", cache_dir, colors))
             .child(
                 div()
+                    .text_xs()
+                    .text_color(colors.muted)
+                    .child(cache_summary),
+            )
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(colors.subtle)
+                    .child("只清理没有任何资产引用的缩略图；缓存预算淘汰暂未启用。"),
+            )
+            .child(
+                div()
                     .flex()
+                    .flex_wrap()
+                    .items_center()
+                    .gap(px(6.))
                     .child(Button::new("open-data-dir", "打开数据目录").on_click(
                         move |_, _, _| {
                             open_path(&data_dir_for_open);
                         },
-                    )),
+                    ))
+                    .child(
+                        Button::new("refresh-cache", "刷新统计")
+                            .size(ControlSize::Sm)
+                            .icon(IconName::RefreshCw)
+                            .on_click(move |_, _, cx| {
+                                let _ = this_refresh_cache
+                                    .update(cx, |app, cx| app.refresh_cache_stats(cx));
+                            }),
+                    )
+                    .child(
+                        Button::new("cleanup-cache", "清理孤儿")
+                            .size(ControlSize::Sm)
+                            .disabled(orphan_count == 0)
+                            .on_click(move |_, _, cx| {
+                                let _ = this_cleanup_cache
+                                    .update(cx, |app, cx| app.cleanup_cache(cx));
+                            }),
+                    ),
             );
 
         let safety_section = div()

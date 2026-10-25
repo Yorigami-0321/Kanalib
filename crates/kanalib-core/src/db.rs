@@ -253,6 +253,18 @@ impl Db {
         self.load_library(&[folder.to_string()])
     }
 
+    pub fn all_thumb_paths(&self) -> Result<HashSet<PathBuf>> {
+        let mut statement = self
+            .conn
+            .prepare("SELECT thumb FROM assets WHERE thumb <> ''")?;
+        let rows = statement.query_map([], |row| row.get::<_, String>(0))?;
+        Ok(rows
+            .collect::<rusqlite::Result<Vec<_>>>()?
+            .into_iter()
+            .map(PathBuf::from)
+            .collect())
+    }
+
     pub fn load_library(&self, folders: &[String]) -> Result<Vec<Asset>> {
         if folders.is_empty() {
             return Ok(Vec::new());

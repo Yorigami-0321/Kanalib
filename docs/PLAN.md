@@ -456,6 +456,12 @@ duplicate_reviews  group_key(sha1), state(pending/ignored/done), keeper_path, me
   - 偏好与右键：`ui.sort`、`ui.sort_ascending`、`ui.density`、`ui.theme` 写入 settings，启动时恢复；瓦片右键菜单提供快速查看、收藏、星级、复制 Prompt/路径、打开文件、资源管理器定位，右键会先选中该瓦片；设置页新增快捷键清单。实际按键注入未做，保留人工验收。
   - 多文件夹统一图库：`settings.library.local_roots` 保存本地根目录列表，`Shared.roots` 取代单目录；每个根目录是一条 local source，扫描按根顺序执行，资产新增 `library_root`。`load_library`、`search_paths_in`、`list_tags_in` 和任务队列计数都支持多根；去重、收藏/星级、手工标签、屏蔽标签跨根统一。侧栏“来源”可逐根筛选，设置页可多选添加文件夹与移除来源；移除只影响图库视图并保留磁盘文件和 DB 行，重新添加即可恢复。`remove_root` 会同步更新内存计数、选中项和来源筛选。
   - 验证：`cargo test --workspace` 23 通过 + 3 忽略；UIA/窗口内消息验证了手工标签展示与自动标签移除、标签屏蔽、偏好重启恢复、右键菜单与右键选中、两个根目录的统一网格/来源筛选/来源移除确认。截图：`.kanalib/ui_manual_tag.png`、`ui_tag_blocked2.png`、`ui_tag_removed.png`、`ui_prefs_restored.png`、`ui_context_menu2.png`、`ui_multi_main.png`、`ui_source_filter.png`、`ui_sources_settings.png`、`ui_source_removed.png`。测试根 `.kanalib/ui_tags_root` 与第二来源 `.kanalib/ui_second_source` 已清理，未触碰真实图库。
-  - 未覆盖：真实系统文件夹选择器添加（只验证了种子来源与扫描）、跨根 GPU 打标、标签别名/阈值、快捷键按键注入。下一步是缓存管理、导出与安装包，再回头做标签别名/阈值和跨根打标实测。
+  - 未覆盖：真实系统文件夹选择器添加（只验证了种子来源与扫描）、跨根 GPU 打标、标签别名/阈值、快捷键按键注入；缓存、导出与便携发布见下一条。
+- 缓存、导出与便携发布（2026-10-25）：
+  - 缓存管理：`AppState::cache_stats`/`cleanup_orphan_thumbs` 按 DB 中全部资产的 thumb 文件名判断孤儿（含 `-t256` 派生），设置页“数据与缓存”显示数据库大小、缓存文件数/字节、孤儿数/字节，支持刷新与清理；扫描中拒绝清理。实测 3 个孤儿文件清理后统计归零。
+  - 导出：core `export.rs` 生成 CSV/JSON（路径、来源根、尺寸、字节、mtime、模型评级、分组、收藏、星级、自动/手工标签、SHA1/BLAKE3/pHash、错误），CSV 做引号转义；工具栏导出菜单、批量栏导出菜单与命令面板均支持“选中/当前视图”，保存对话框异步，CSV 已实测落盘 14 行。
+  - 便携发布：`scripts/build_portable.ps1` 组装 `kanalib.exe` + `runtime/python` + `sidecar` + `dist/models`，默认输出 `dist/Kanalib-portable`（3.77GB、12,687 个文件）；`scripts/portable_readme.txt` 说明启动、数据与迁移。打包后从包内跑 headless 实测 14/14 打标成功，sidecar Python 与模型路径均指向包内；脚本支持可选 `-Zip`（系统 tar），未提供 MSI/签名安装器。
+  - 验证：`cargo test --workspace` 25 通过 + 3 忽略（含 2 个导出测试）；UIA 验证缓存统计/孤儿清理，工具栏导出菜单与 CSV 保存流程走通。截图：`.kanalib/ui_cache_cleaned3.png`、`.kanalib/ui_export_menu.png`。
+  - 剩余：缓存预算淘汰（当前只清理孤儿）、MSI/代码签名、标签别名/阈值、跨根 GPU 打标实测。
 - 合成库的模型输出只用于管道压力测试：9,990 张中 6,556 归为截图/文本、1,651 非动漫/实景、1,273 未分类，不能作为真实图库的分类质量指标。
 - Immich/WebDAV：按 2026-10-24 决定暂缓，先完成本地 MVP；阶段 2 再接入。
