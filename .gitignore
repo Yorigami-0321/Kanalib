@@ -12,9 +12,9 @@
 /target/
 
 # 会话与构建临时产物
-/*.log
+*.log
+*.err
 /sidecar_test.out
-/sidecar_test.err
 /.qoder-credits/
 __pycache__/
 /crates/*/.kanalib/
