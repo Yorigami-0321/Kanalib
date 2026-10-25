@@ -300,7 +300,7 @@ duplicate_reviews  group_key(sha1), state(pending/ignored/done), keeper_path, me
 
 ### 阶段 1：本地 MVP
 - workspace、Ely 外壳、SQLite schema/迁移、本地源、SHA1/BLAKE3/pHash、缩略图、虚拟网格、检查器、sidecar 队列、FTS 搜索、标签面、设置。
-- 当前（2026-10-24）：已有本地扫描、缩略图、v5 schema/自动备份迁移、SHA1/BLAKE3/pHash、`tags`/`asset_tags`、FTS5 搜索（trigram + 短词 LIKE 回退）、自动归类/评级、标签 facets、检查器、虚拟网格、RwLock 共享资产列表、Counts/筛选缓存、未变文件快速重扫和失败 3 次封顶；完全重复去重（忽略/全部保留/单组与批量移入回收站）与相似图片（pHash 阈值扫描/逐组评审/相关变体）均已完成；设置页已具备去重保护路径、相似阈值、数据位置和任务队列状态；打标任务已持久化到 jobs 表并支持重启恢复；10k 导入/打标/搜索/滚动已完成。缺网络源凭据；60fps 已在 10k 滚动下实测并达标（p99 8.4ms，10 万资产未测）；网格已用 256 小档 + 有界 LRU 图片缓存，但上色板翻涌下的内存增长未解决；代码仍为单 crate。
+- 当前（2026-10-24）：已有本地扫描、缩略图、v5 schema/自动备份迁移、SHA1/BLAKE3/pHash、`tags`/`asset_tags`、FTS5 搜索（trigram + 短词 LIKE 回退）、自动归类/评级、标签 facets、检查器、虚拟网格、RwLock 共享资产列表、Counts/筛选缓存、未变文件快速重扫和失败 3 次封顶；完全重复去重（忽略/全部保留/单组与批量移入回收站）与相似图片（pHash 阈值扫描/逐组评审/相关变体）均已完成；设置页已具备去重保护路径、相似阈值、数据位置和任务队列状态；打标任务已持久化到 jobs 表并支持重启恢复；10k 导入/打标/搜索/滚动已完成。缺网络源凭据；60fps 已在 10k 滚动下实测并达标（p99 8.4ms，10 万资产未测）；网格已用 256 小档 + 有界 LRU 图片缓存，2.2GB 内存不回落已定位并修复（img 绘制阶段回退到全局缓存，见 2026-10-25 条目）；代码仍为单 crate。
 - 验收：1 万张本地图片端到端可导入、打标、按标签搜索；重启后任务可恢复；不修改原文件。
 
 ### 阶段 2：多源与去重
@@ -418,7 +418,12 @@ duplicate_reviews  group_key(sha1), state(pending/ignored/done), keeper_path, me
   - 改动 2：实现 `gpui::ImageCache` 的 LRU（`ThumbCache`，默认 128 项，`KANALIB_IMAGE_CACHE` 可调），用 `image_cache(entity)` 包住整棵树，逐出时 `cx.drop_image`；可见 tile 每帧 touch，不会被自己挤掉。
   - 效果（同一 10k 暖库、同 400 步跳距 32、release 取证档、窗口前台）：present 间隔 p99 15.69→8.41ms，max 251.53→14.88ms，超 16.67ms 预算 0.5%→0.0%，fps 149.3→164.8；12 秒峰值工作集 2,588→1,020MB。
   - 长跑（45s、1,200 次跳转、7,420 帧）：164.8fps、p99 8.36ms、max 26.30ms、超预算 0.03% → 尖峰问题关闭。
-  - 上限对照：缓存压到 8 项（`cached_mb` 2.2MB）峰值仍 985MB、帧率不变 → 剩余约 1GB 由 tile 翻涌本身驱动（上色板/纹理侧），与缓存保留量无关；但 cap 8 的 dirty→present p50 从 2.31ms 升到 5.61ms，所以默认取 128。**未解决**：45s 长跑峰值 2,211MB，停滚 20s 后仍 2,203MB 不回落，需要给 vendor 的 `directx_atlas` 加页/矩形计数才能定位。
+  - 上限对照：缓存压到 8 项（`cached_mb` 2.2MB）峰值仍 985MB、帧率不变 → 剩余约 1GB 由 tile 翻涌本身驱动（上色板/纹理侧），与缓存保留量无关；但 cap 8 的 dirty→present p50 从 2.31ms 升到 5.61ms，所以默认取 128。（该增长的根因已于 2026-10-25 定位并修复，见下条。）
+  - 根因与修复（2026-10-25，内存不回落）：全部增长落在 (128K,256K] 分配档（256×256 BGRA 解码缓冲）。45s 长跑计数 alloc=73,121 / free=63,001 / live=10,120 块，停滚后一条不释放。逐层排除：atlas 页恒定 10 页/41.9MB；`KANALIB_ATLAS_SKIP_UPLOAD` 跳过上传无变化；`drop_image → AtlasState::remove → etagere deallocate` 链完整；`remove_asset` 按原始库路径清缓存是一轮无效探针（实际绘制用的是缩略图路径，键不匹配）；把解码换成自解码后仍复现。最终用「按 Arc 指针登记 + 256K 档分配 backtrace」定位：泄漏块由 gpui 的 `ImageAssetLoader` 在**绘制阶段**解码——`img` 元素绘制时 `image_cache_stack` 为空（`interactivity.paint` 的绘制路径不在 `image_cache` 元素的作用域内），回退到 `window.use_asset` 的全局资产缓存，该缓存永不淘汰。布局阶段走 `ThumbCache`、逐出时 `drop_image` 正常，所以只观察 LRU/Arc 时一切像是干净的，这是此前判断被误导的原因。
+  - 改动 3：所有 `img()` 显式挂 `.image_cache(&thumb_cache)`（网格 tile、inspector、去重组卡片/资产卡），不再依赖 `image_cache_stack` 的作用域；`ThumbCache` 的 Path 资源改为自解码（`decode_thumb`：`fs::read` + `image::load_from_memory` + `RenderImage::new([frame])`），去掉 gpui `CachedLoad`/`SmallVec::from_elem` 的克隆路径，余下非 Path 资源仍走 `ImageCacheItem`；解码中的条目延迟到下一轮逐出，避免取消后台解码。
+  - 修复后实测（45s、1,200 次跳转、7,422 帧）：164.9fps、present p99 8.33ms、超 16.67ms 预算 0.03%；峰值工作集 132.9MB、停滚后 113.6MB（修复前 2,213.9 / 2,204.8MB）；256K 档全程恒定 28.5MB / 130 块（alloc 28,768 / free 28,638），`cached_images` 128 / `cached_mb` 27.3。
+  - 取证工具（只在 `--features frame-profiler` 档编译，默认档零影响）：`src/alloc_stats.rs` 按 2 的幂尺寸档统计存活字节与 alloc/free 次数（`KANALIB_ALLOC_STATS=<秒>`；`KANALIB_ALLOC_TRACES=1` 记录 256K 档存活块分配栈，dbghelp 非线程安全故捕获全程持锁）；vendor `directx_atlas` 的 `KANALIB_ATLAS_STATS=<秒>` 计数与 `KANALIB_ATLAS_SKIP_UPLOAD=1` 开关；`KANALIB_WATCH_IMAGES=1` 按 Arc 指针登记存活解码图；`[profile.probe]`（release + debug=1）用于解析栈符号。探针脚本新增 `-AtlasStatsSecs` 并回显 alloc/atlas/watch 行。
+  - 测量有效性：低前台帧率（4–112fps）的几轮出现过同样的 2.2GB 平台，属同一泄漏；任何一轮都必须先确认 `renders>0`、窗口在前台，否则数据作废（曾出现整轮 139MB 的假数据）。
   - 测量前提：gpui 只在窗口活动时记录 present 间隔，失焦会被 `inactive_frame_interval=33.333ms` 限到 30fps 且样本为 0；脚本现在每秒 `AppActivate` 本进程窗口，探针在 `presents==0` 时打 warn。
 - 合成库的模型输出只用于管道压力测试：9,990 张中 6,556 归为截图/文本、1,651 非动漫/实景、1,273 未分类，不能作为真实图库的分类质量指标。
 - Immich/WebDAV：按 2026-10-24 决定暂缓，先完成本地 MVP；阶段 2 再接入。

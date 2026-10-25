@@ -7,6 +7,7 @@ param(
     [int]$Stride = 0,
     [int]$Steps = 0,
     [int]$IdleSecs = 0,
+    [int]$AtlasStatsSecs = 0,
     [string]$MetricsPath = "",
     [string]$LogPath = "D:\Code\Kanalib\.kanalib\frame_probe.log",
     [int]$WaitSecs = 90
@@ -25,6 +26,7 @@ if ($ScrollTest) { $env:KANALIB_UI_SCROLL_TEST = "1" } else { Remove-Item Env:KA
 if ($Stride -gt 0) { $env:KANALIB_UI_SCROLL_STRIDE = "$Stride" } else { Remove-Item Env:KANALIB_UI_SCROLL_STRIDE -ErrorAction SilentlyContinue }
 if ($Steps -gt 0) { $env:KANALIB_UI_SCROLL_STEPS = "$Steps" } else { Remove-Item Env:KANALIB_UI_SCROLL_STEPS -ErrorAction SilentlyContinue }
 if ($MetricsPath -ne "") { $env:KANALIB_METRICS_PATH = $MetricsPath } else { Remove-Item Env:KANALIB_METRICS_PATH -ErrorAction SilentlyContinue }
+if ($AtlasStatsSecs -gt 0) { $env:KANALIB_ATLAS_STATS = "$AtlasStatsSecs" } else { Remove-Item Env:KANALIB_ATLAS_STATS -ErrorAction SilentlyContinue }
 
 $proc = Start-Process -FilePath $Exe -ArgumentList @("`"$Folder`"") `
     -RedirectStandardError $LogPath -RedirectStandardOutput $outPath -PassThru
@@ -58,15 +60,15 @@ if ($hit) {
 if ($hit -and $IdleSecs -gt 0 -and -not $proc.HasExited) {
     Start-Sleep -Seconds $IdleSecs
     $proc.Refresh()
-    Write-Host ("idle_working_set_mb={0:N1}" -f ($proc.WorkingSet64 / 1MB))
+    Write-Host ("idle_working_set_mb={0:N1} idle_private_mb={1:N1}" -f ($proc.WorkingSet64 / 1MB), ($proc.PrivateMemorySize64 / 1MB))
 }
 Write-Host "--- probe lifecycle lines ---"
-Select-String -Path $LogPath -Pattern "frame probe|scan metrics|ui scroll test" -ErrorAction SilentlyContinue |
+Select-String -Path $LogPath -Pattern "frame probe|scan metrics|ui scroll test|atlas stats|alloc stats|image watch" -ErrorAction SilentlyContinue |
     ForEach-Object { $_.Line }
 
 if (-not $proc.HasExited) {
     $proc.Refresh()
-    Write-Host ("peak_working_set_mb={0:N1} rss_mb={1:N1}" -f ($proc.PeakWorkingSet64 / 1MB), ($proc.WorkingSet64 / 1MB))
+    Write-Host ("peak_working_set_mb={0:N1} rss_mb={1:N1} private_mb={2:N1}" -f ($proc.PeakWorkingSet64 / 1MB), ($proc.WorkingSet64 / 1MB), ($proc.PrivateMemorySize64 / 1MB))
     Stop-Process -Id $proc.Id -Force
 }
 Write-Host "stopped pid=$($proc.Id)"

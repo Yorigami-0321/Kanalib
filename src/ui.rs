@@ -12,7 +12,7 @@ use gpui::{
     div, image_cache, img, px, uniform_list, AnyElement, App, Context, Entity, ImageCache,
     ImageCacheError, ImageCacheItem, FontWeight, Hsla, IntoElement, ObjectFit, ParentElement,
     Pixels, Render, RenderImage, Resource, ScrollStrategy, SharedString, Styled, Task,
-    UniformListScrollHandle, Window,
+    UniformListScrollHandle, WeakEntity, Window,
 };
 use gpui::prelude::*;
 #[cfg(feature = "frame-profiler")]
@@ -128,9 +128,12 @@ impl UiColors {
 /// 多少张 BGRA（512 档约 1MB/张，10k 库跑一遍就是 GB 级），这里换成按 LRU 限量的缓存。
 const IMAGE_CACHE_LIMIT: usize = 128;
 
+fn clamp_cache_limit(limit: usize) -> usize {
+    limit.max(1)
+}
+
 /// 返回需要逐出的 key：按最近使用排序取最旧的，直到长度回到上限，且不动 `keep`。
-fn cache_victims<T>(
-    entries: &HashMap<Resource, (T, u64)>,
+fn cache_victims<T>(    entries: &HashMap<Resource, (T, u64)>,
     limit: usize,
     keep: &Resource,
 ) -> Vec<Resource> {
@@ -151,20 +154,52 @@ fn cache_victims<T>(
         .collect()
 }
 
+/// Path 资源的解码由本缓存自己负责（绕开 gpui 的 CachedLoad/ImageCacheItem）；其余资源仍走 gpui。
+enum ThumbEntry {
+    Gpui(ImageCacheItem),
+    Loading,
+    Loaded(Result<Arc<RenderImage>, ImageCacheError>),
+}
+
 /// 有界的解码图缓存：可见 tile 每帧都会 touch，所以只会被更近的挤掉，不会被自己挤掉。
 pub struct ThumbCache {
-    entries: HashMap<Resource, (ImageCacheItem, u64)>,
+    entries: HashMap<Resource, (ThumbEntry, u64)>,
     clock: u64,
     limit: usize,
+    /// 取证档：按 Arc 指针登记每个交出的解码图，dump 时统计仍存活的 RenderImage 数。
+    #[cfg(feature = "frame-profiler")]
+    watch: HashMap<usize, std::sync::Weak<RenderImage>>,
+    entity: WeakEntity<ThumbCache>,
 }
 
 impl ThumbCache {
-    fn with_limit(limit: usize) -> Self {
+    fn with_limit(limit: usize, cx: &mut Context<Self>) -> Self {
         Self {
             entries: HashMap::new(),
             clock: 0,
-            limit: limit.max(1),
+            limit: clamp_cache_limit(limit),
+            #[cfg(feature = "frame-profiler")]
+            watch: HashMap::new(),
+            entity: cx.entity().downgrade(),
         }
+    }
+
+    fn spawn_decode(&self, resource: Resource, cx: &mut App) {
+        let key = resource.clone();
+        let task = cx
+            .background_executor()
+            .spawn(async move { decode_thumb(&resource) });
+        let weak = self.entity.clone();
+        cx.spawn(async move |cx| {
+            let result = task.await;
+            let _ = weak.update(cx, |cache, cx| {
+                if let Some((entry, _)) = cache.entries.get_mut(&key) {
+                    *entry = ThumbEntry::Loaded(result);
+                }
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     /// 缓存里已解码位图的字节数（BGRA，逐帧累计），用来区分"缓存装太多"和"上色板涨"。
@@ -172,16 +207,51 @@ impl ThumbCache {
     fn cached_bytes(&self) -> u64 {
         self.entries
             .values()
-            .filter_map(|(item, _)| match item.get() {
-                Some(Ok(image)) => {
-                    let size = image.size(0);
-                    let frames = image.frame_count().max(1) as u64;
-                    Some(size.width.0 as u64 * size.height.0 as u64 * 4 * frames)
-                }
-                _ => None,
+            .filter_map(|(entry, _)| {
+                let image: Arc<RenderImage> = match entry {
+                    ThumbEntry::Loaded(Ok(image)) => image.clone(),
+                    ThumbEntry::Gpui(item) => item.get()?.ok()?,
+                    _ => return None,
+                };
+                let size = image.size(0);
+                let frames = image.frame_count().max(1) as u64;
+                Some(size.width.0 as u64 * size.height.0 as u64 * 4 * frames)
             })
             .sum()
     }
+
+    #[cfg(feature = "frame-profiler")]
+    fn watch_stats(&self) -> (usize, usize) {
+        (
+            self.watch.len(),
+            self.watch
+                .values()
+                .filter(|weak| weak.strong_count() > 0)
+                .count(),
+        )
+    }
+}
+
+/// 与 gpui 的 ImageAssetLoader 对齐：解码为 BGRA 单帧。
+fn decode_thumb(resource: &Resource) -> Result<Arc<RenderImage>, ImageCacheError> {
+    let Resource::Path(path) = resource else {
+        return Err(ImageCacheError::Asset(
+            "thumb cache only decodes file resources".into(),
+        ));
+    };
+    let bytes = std::fs::read(path.as_ref()).map_err(|error| ImageCacheError::Io(Arc::new(error)))?;
+    let image = image::load_from_memory(&bytes).map_err(|error| ImageCacheError::Image(Arc::new(error)))?;
+    let mut buffer = image.into_rgba8();
+    for pixel in buffer.chunks_exact_mut(4) {
+        pixel.swap(0, 2);
+    }
+    Ok(Arc::new(RenderImage::new([image::Frame::new(buffer)])))
+}
+
+#[cfg(feature = "frame-profiler")]
+fn watch_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var_os("KANALIB_WATCH_IMAGES").is_some())
 }
 
 impl ImageCache for ThumbCache {
@@ -193,22 +263,64 @@ impl ImageCache for ThumbCache {
     ) -> Option<Result<Arc<RenderImage>, ImageCacheError>> {
         self.clock += 1;
         let clock = self.clock;
-        self.entries
-            .entry(resource.clone())
-            .or_insert_with(|| (ImageCacheItem::new(resource, cx), clock));
-        let result = self
-            .entries
-            .get_mut(resource)
-            .map(|(item, used)| {
-                *used = clock;
-                item.use_image(window)
-            })
-            .flatten();
+        if let Some((entry, used)) = self.entries.get_mut(resource) {
+            *used = clock;
+            if let ThumbEntry::Gpui(item) = entry {
+                let _ = item.use_image(window);
+            }
+        } else {
+            match resource {
+                Resource::Path(_) => {
+                    self.entries
+                        .insert(resource.clone(), (ThumbEntry::Loading, clock));
+                    self.spawn_decode(resource.clone(), cx);
+                }
+                _ => {
+                    let item = ImageCacheItem::new(resource, cx);
+                    self.entries
+                        .insert(resource.clone(), (ThumbEntry::Gpui(item), clock));
+                }
+            }
+        }
+        let result = match self.entries.get(resource) {
+            Some((ThumbEntry::Loaded(result), _)) => Some(result.clone()),
+            Some((ThumbEntry::Gpui(item), _)) => item.use_image(window),
+            _ => None,
+        };
         for victim in cache_victims(&self.entries, self.limit, resource) {
-            if let Some((item, _)) = self.entries.remove(&victim)
-                && let Some(Ok(image)) = item.get()
-            {
-                cx.drop_image(image, Some(window));
+            // 解码中的条目下一轮再逐出，避免取消后台解码任务。
+            let evictable = self
+                .entries
+                .get(&victim)
+                .is_some_and(|(entry, _)| !matches!(entry, ThumbEntry::Loading));
+            if !evictable {
+                continue;
+            }
+            if let Some((entry, _)) = self.entries.remove(&victim) {
+                match entry {
+                    ThumbEntry::Loaded(Ok(image)) => cx.drop_image(image, Some(window)),
+                    ThumbEntry::Gpui(item) => {
+                        if let Some(Ok(image)) = item.get() {
+                            cx.drop_image(image, Some(window));
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        #[cfg(feature = "frame-profiler")]
+        if watch_enabled()
+            && let Some(Ok(image)) = &result
+        {
+            let ptr = std::sync::Arc::as_ptr(image) as usize;
+            let weak = std::sync::Arc::downgrade(image);
+            match self.watch.get_mut(&ptr) {
+                // 地址被新 Arc 复用时，旧 Weak 已死则替换，否则保持原对象。
+                Some(existing) if existing.strong_count() == 0 => *existing = weak,
+                Some(_) => {}
+                None => {
+                    self.watch.insert(ptr, weak);
+                }
             }
         }
         result
@@ -315,12 +427,13 @@ impl KanalibApp {
             dedup_notice: None,
             settings_notice: None,
             refresh_task: None,
-            thumb_cache: cx.new(|_cx| {
+            thumb_cache: cx.new(|cx| {
                 ThumbCache::with_limit(
                     std::env::var("KANALIB_IMAGE_CACHE")
                         .ok()
                         .and_then(|value| value.parse::<usize>().ok())
                         .unwrap_or(IMAGE_CACHE_LIMIT),
+                    cx,
                 )
             }),
             scroll_task: None,
@@ -408,6 +521,33 @@ impl KanalibApp {
                     }
                 }
                 log::info!("ui scroll test end");
+                #[cfg(feature = "frame-profiler")]
+                let _ = weak.update(cx, |app, cx| {
+                    let (handed_out, alive) = {
+                        let cache = app.thumb_cache.read(cx);
+                        cache.watch_stats()
+                    };
+                    log::info!("image watch: handed_out={handed_out} alive_at_scroll_end={alive}");
+                    #[cfg(feature = "frame-profiler")]
+                    crate::alloc_stats::traces::dump();
+                    if watch_enabled() {
+                        let paths: Vec<gpui::Resource> = {
+                            let shared = app.state.shared.lock().unwrap();
+                            shared
+                                .assets
+                                .read()
+                                .unwrap()
+                                .iter()
+                                .map(|asset| gpui::Resource::from(asset.path.clone()))
+                                .collect()
+                        };
+                        let total = paths.len();
+                        for resource in &paths {
+                            cx.remove_asset::<gpui::ImgResourceLoader>(resource);
+                        }
+                        log::info!("global image store purge: paths={total}");
+                    }
+                });
             }));
         }
         #[cfg(feature = "frame-profiler")]
@@ -752,6 +892,14 @@ impl Render for KanalibApp {
                     let cache = self.thumb_cache.read(cx);
                     (cache.entries.len(), cache.cached_bytes())
                 };
+                #[cfg(feature = "frame-profiler")]
+                {
+                    let (handed_out, alive) = {
+                        let cache = self.thumb_cache.read(cx);
+                        cache.watch_stats()
+                    };
+                    log::info!("image watch: handed_out={handed_out} alive_at_probe_end={alive}");
+                }
                 report_frame_probe(
                     window,
                     renders,
@@ -1276,6 +1424,7 @@ impl KanalibApp {
         } else {
             let state_for_list = state.clone();
             let this_for_list = this.clone();
+            let thumb_cache_for_list = self.thumb_cache.clone();
             let selected_for_list = selected.clone();
             uniform_list("asset-grid", row_count, move |range, _, _| {
                 let Ok(assets) = assets_for_list.read() else {
@@ -1303,6 +1452,7 @@ impl KanalibApp {
                                 is_selected,
                                 state_for_list.clone(),
                                 this_for_list.clone(),
+                                thumb_cache_for_list.clone(),
                                 colors,
                             ));
                         }
@@ -1737,6 +1887,7 @@ impl KanalibApp {
             let indices_for_list = Arc::new(visible_indices.clone());
             let selected_key = self.dedup_selected.clone();
             let this_for_list = this.clone();
+            let thumb_cache_for_list = self.thumb_cache.clone();
             let protected_for_list = protected_paths.to_vec();
             uniform_list(
                 "dedup-groups",
@@ -1750,6 +1901,7 @@ impl KanalibApp {
                                 group,
                                 selected_key.as_deref() == Some(group.key.as_str()),
                                 this_for_list.clone(),
+                                thumb_cache_for_list.clone(),
                                 colors,
                                 &protected_for_list,
                             )
@@ -2001,6 +2153,7 @@ impl KanalibApp {
                     group.suggested == asset.path,
                     editable,
                     this.clone(),
+                    &self.thumb_cache,
                     colors,
                     protected_paths,
                 )
@@ -2853,6 +3006,7 @@ impl KanalibApp {
         let content: AnyElement = if let Some(asset) = selected {
             let preview: AnyElement = match asset.thumb.as_ref().or(Some(&asset.path)) {
                 Some(path) => img(path.clone())
+                    .image_cache(&self.thumb_cache)
                     .w_full()
                     .h(px(230.))
                     .object_fit(ObjectFit::Contain)
@@ -3263,6 +3417,7 @@ fn dedup_group_row(
     group: &DuplicateGroup,
     selected: bool,
     this: Entity<KanalibApp>,
+    thumb_cache: Entity<ThumbCache>,
     colors: UiColors,
     protected_paths: &[PathBuf],
 ) -> AnyElement {
@@ -3276,6 +3431,7 @@ fn dedup_group_row(
         .and_then(|asset| asset.thumb.clone());
     let media: AnyElement = match thumb {
         Some(path) => img(path)
+            .image_cache(&thumb_cache)
             .size_full()
             .object_fit(ObjectFit::Cover)
             .into_any_element(),
@@ -3404,6 +3560,7 @@ fn dedup_asset_card(
     is_suggested: bool,
     editable: bool,
     this: Entity<KanalibApp>,
+    thumb_cache: &Entity<ThumbCache>,
     colors: UiColors,
     protected_paths: &[PathBuf],
 ) -> AnyElement {
@@ -3417,6 +3574,7 @@ fn dedup_asset_card(
         .map(similarity_pct_from_distance);
     let media: AnyElement = match asset.thumb.clone() {
         Some(thumb) => img(thumb)
+            .image_cache(thumb_cache)
             .w_full()
             .h(px(176.))
             .object_fit(ObjectFit::Contain)
@@ -3929,12 +4087,14 @@ fn tile(
     selected: bool,
     state: Arc<AppState>,
     this: Entity<KanalibApp>,
+    thumb_cache: Entity<ThumbCache>,
     colors: UiColors,
 ) -> impl IntoElement {
     let path = asset.path.clone();
     let thumb = asset.tile_thumb.clone().or_else(|| asset.thumb.clone());
     let media: AnyElement = if let Some(thumb) = thumb {
         img(thumb)
+            .image_cache(&thumb_cache)
             .size_full()
             .object_fit(ObjectFit::Cover)
             .into_any_element()
@@ -4037,7 +4197,9 @@ fn open_path(path: &PathBuf) {
 
 #[cfg(test)]
 mod tests {
-    use super::{Resource, ThumbCache, cache_victims};
+    use super::{Resource, cache_victims, clamp_cache_limit};
+    #[cfg(feature = "frame-profiler")]
+    use super::decode_thumb;
     use std::collections::HashMap;
     use std::path::Path;
 
@@ -4063,7 +4225,42 @@ mod tests {
 
     #[test]
     fn image_cache_limit_is_at_least_one() {
-        assert_eq!(ThumbCache::with_limit(0).limit, 1);
-        assert_eq!(ThumbCache::with_limit(128).limit, 128);
+        assert_eq!(clamp_cache_limit(0), 1);
+        assert_eq!(clamp_cache_limit(128), 128);
+    }
+
+    /// 手动取证：解码 300 张 t256 后立即丢弃，观察 256K 档是否有泄漏。
+    #[cfg(feature = "frame-profiler")]
+    #[test]
+    #[ignore]
+    fn decode_does_not_leak_256k_bucket() {
+        let library = std::path::Path::new(".kanalib/thumbs");
+        let mut files: Vec<std::path::PathBuf> = walkdir::WalkDir::new(library)
+            .into_iter()
+            .filter_map(|entry| entry.ok())
+            .filter(|entry| {
+                entry.file_type().is_file()
+                    && entry
+                        .file_name()
+                        .to_string_lossy()
+                        .contains("-t256")
+            })
+            .map(|entry| entry.into_path())
+            .take(300)
+            .collect();
+        files.sort();
+        assert!(!files.is_empty(), "stress library with t256 files required");
+        let bucket = 18 - 10;
+        let before = crate::alloc_stats::live_bucket_bytes(bucket);
+        for path in &files {
+            let result = decode_thumb(&Resource::from(path.clone()));
+            assert!(result.is_ok(), "decode failed for {}", path.display());
+        }
+        let after = crate::alloc_stats::live_bucket_bytes(bucket);
+        eprintln!(
+            "decode bucket delta: files={} before={before} after={after} delta_kb={}",
+            files.len(),
+            (after as i64 - before as i64) / 1024,
+        );
     }
 }

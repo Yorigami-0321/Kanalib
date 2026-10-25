@@ -37,5 +37,10 @@ opt-level = 1
 [profile.dev.package."*"]
 opt-level = 2
 
+# 取证档：release 优化 + 行级符号，供分配器 backtrace 解析函数名。
+[profile.probe]
+inherits = "release"
+debug = 1
+
 [patch.crates-io]
 gpui-pre-windows = { path = "vendor/gpui-pre-windows" }

@@ -15,6 +15,105 @@ use gpui::{
 
 pub(crate) struct DirectXAtlas(Mutex<AtlasState<DirectXAtlasTextures>>);
 
+/// 临时取证计数（KANALIB_ATLAS_STATS=<秒> 开启，默认零开销）：
+/// 区分「tile 没被 remove（引用链断）」和「tile 移除了但纹理页因碎片不释放」。
+mod stats {
+    use gpui::AtlasTextureKind;
+    use parking_lot::Mutex;
+    use std::sync::Once;
+    use std::time::Duration;
+
+    #[derive(Clone, Copy)]
+    pub struct KindCounters {
+        pub pages_live: u64,
+        pub pages_created: u64,
+        pub pages_freed: u64,
+        pub page_bytes_live: u64,
+        pub tiles_inserted: u64,
+        pub tiles_removed: u64,
+        pub alloc_px_live: i64,
+        pub upload_bytes: u64,
+    }
+
+    impl KindCounters {
+        const ZERO: Self = Self {
+            pages_live: 0,
+            pages_created: 0,
+            pages_freed: 0,
+            page_bytes_live: 0,
+            tiles_inserted: 0,
+            tiles_removed: 0,
+            alloc_px_live: 0,
+            upload_bytes: 0,
+        };
+    }
+
+    pub struct Counters {
+        pub kinds: [KindCounters; 3],
+        pub removes_missing_texture: u64,
+    }
+
+    pub static COUNTERS: Mutex<Counters> = Mutex::new(Counters {
+        kinds: [KindCounters::ZERO, KindCounters::ZERO, KindCounters::ZERO],
+        removes_missing_texture: 0,
+    });
+
+    static LOGGER: Once = Once::new();
+
+    pub fn kind_index(kind: AtlasTextureKind) -> usize {
+        match kind {
+            AtlasTextureKind::Monochrome => 0,
+            AtlasTextureKind::Polychrome => 1,
+            AtlasTextureKind::Subpixel => 2,
+        }
+    }
+
+    pub fn bytes_per_pixel(kind: AtlasTextureKind) -> u64 {
+        match kind {
+            AtlasTextureKind::Monochrome => 1,
+            AtlasTextureKind::Polychrome | AtlasTextureKind::Subpixel => 4,
+        }
+    }
+
+    pub fn ensure_logger() {
+        let Some(interval) = std::env::var("KANALIB_ATLAS_STATS")
+            .ok()
+            .and_then(|value| value.parse::<u64>().ok())
+            .filter(|value| *value > 0)
+        else {
+            return;
+        };
+        LOGGER.call_once(|| {
+            std::thread::spawn(move || loop {
+                std::thread::sleep(Duration::from_secs(interval));
+                let counters = COUNTERS.lock();
+                let kind = |k: &KindCounters| {
+                    format!(
+                        "{{\"pages_live\":{},\"page_MB_live\":{:.1},\"pages_created\":{},\"pages_freed\":{},\
+\"tiles_ins\":{},\"tiles_rem\":{},\"live_tiles\":{},\"alloc_Mpx_live\":{:.2},\"upload_MB\":{:.1}}}",
+                        k.pages_live,
+                        k.page_bytes_live as f64 / 1e6,
+                        k.pages_created,
+                        k.pages_freed,
+                        k.tiles_inserted,
+                        k.tiles_removed,
+                        k.tiles_inserted as i64 - k.tiles_removed as i64,
+                        k.alloc_px_live as f64 / 1e6,
+                        k.upload_bytes as f64 / 1e6,
+                    )
+                };
+                log::info!(
+                    "atlas stats: {{\"mono\":{},\"poly\":{},\"sub\":{},\"removes_missing_texture\":{}}}",
+                    kind(&counters.kinds[0]),
+                    kind(&counters.kinds[1]),
+                    kind(&counters.kinds[2]),
+                    counters.removes_missing_texture,
+                );
+            });
+        });
+    }
+}
+
 struct DirectXAtlasTextures {
     device: ID3D11Device,
     device_context: ID3D11DeviceContext,
@@ -30,10 +129,12 @@ struct DirectXAtlasTexture {
     texture: ID3D11Texture2D,
     view: [Option<ID3D11ShaderResourceView>; 1],
     live_atlas_keys: u32,
+    page_bytes: u64,
 }
 
 impl DirectXAtlas {
     pub(crate) fn new(device: &ID3D11Device, device_context: &ID3D11DeviceContext) -> Self {
+        stats::ensure_logger();
         DirectXAtlas(Mutex::new(AtlasState::new(DirectXAtlasTextures {
             device: device.clone(),
             device_context: device_context.clone(),
@@ -68,6 +169,13 @@ impl DirectXAtlas {
             textures.monochrome_textures = AtlasTextureList::default();
             textures.polychrome_textures = AtlasTextureList::default();
             textures.subpixel_textures = AtlasTextureList::default();
+            let mut counters = stats::COUNTERS.lock();
+            for kind in counters.kinds.iter_mut() {
+                kind.pages_live = 0;
+                kind.page_bytes_live = 0;
+                kind.alloc_px_live = 0;
+            }
+            log::info!("atlas stats: device lost, live page counters reset");
         });
     }
 }
@@ -102,11 +210,27 @@ impl AtlasBackend for DirectXAtlasTextures {
             .texture(tile.texture_id)
             .ok_or_else(|| anyhow::anyhow!("allocated tile refers to a missing texture"))?;
         texture.upload(&self.device_context, tile.bounds, bytes);
+        let width = size.width.0.max(0) as u64;
+        let height = size.height.0.max(0) as u64;
+        let mut counters = stats::COUNTERS.lock();
+        let kind_counters = &mut counters.kinds[stats::kind_index(kind)];
+        kind_counters.tiles_inserted += 1;
+        kind_counters.upload_bytes += width * height * stats::bytes_per_pixel(kind);
+        kind_counters.alloc_px_live += (width * height) as i64;
         Ok(tile)
     }
 
     fn remove(&mut self, tile: AtlasTile) {
         let id = tile.texture_id;
+
+        let area = (tile.bounds.size.width.0.max(0) as u64
+            * tile.bounds.size.height.0.max(0) as u64) as i64;
+        {
+            let mut counters = stats::COUNTERS.lock();
+            let kind_counters = &mut counters.kinds[stats::kind_index(id.kind)];
+            kind_counters.tiles_removed += 1;
+            kind_counters.alloc_px_live -= area;
+        }
 
         let textures = match id.kind {
             AtlasTextureKind::Monochrome => &mut self.monochrome_textures,
@@ -115,6 +239,7 @@ impl AtlasBackend for DirectXAtlasTextures {
         };
 
         let Some(texture_slot) = textures.textures.get_mut(id.index as usize) else {
+            stats::COUNTERS.lock().removes_missing_texture += 1;
             return;
         };
 
@@ -122,10 +247,17 @@ impl AtlasBackend for DirectXAtlasTextures {
             texture.allocator.deallocate(tile.tile_id.into());
             texture.decrement_ref_count();
             if texture.is_unreferenced() {
+                let mut counters = stats::COUNTERS.lock();
+                let kind_counters = &mut counters.kinds[stats::kind_index(id.kind)];
+                kind_counters.pages_freed += 1;
+                kind_counters.pages_live -= 1;
+                kind_counters.page_bytes_live -= texture.page_bytes;
                 textures.free_list.push(texture.id.index as usize);
             } else {
                 *texture_slot = Some(texture);
             }
+        } else {
+            stats::COUNTERS.lock().removes_missing_texture += 1;
         }
     }
 }
@@ -240,7 +372,17 @@ impl DirectXAtlasTextures {
             texture,
             view,
             live_atlas_keys: 0,
+            page_bytes: size.width.0.max(0) as u64
+                * size.height.0.max(0) as u64
+                * bytes_per_pixel as u64,
         };
+        {
+            let mut counters = stats::COUNTERS.lock();
+            let kind_counters = &mut counters.kinds[stats::kind_index(kind)];
+            kind_counters.pages_live += 1;
+            kind_counters.pages_created += 1;
+            kind_counters.page_bytes_live += atlas_texture.page_bytes;
+        }
         if let Some(ix) = index {
             texture_list.textures[ix] = Some(atlas_texture);
             texture_list.textures.get_mut(ix).unwrap().as_mut()
@@ -282,6 +424,11 @@ impl DirectXAtlasTexture {
         bounds: Bounds<DevicePixels>,
         bytes: &[u8],
     ) {
+        // 临时取证开关：跳过真实上传，隔离 D3D staging/驱动内存与解码堆churn。
+        static SKIP_UPLOAD: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        if *SKIP_UPLOAD.get_or_init(|| std::env::var_os("KANALIB_ATLAS_SKIP_UPLOAD").is_some()) {
+            return;
+        }
         // `UpdateSubresource` reads `row_pitch * height` bytes from `bytes` based on the
         // `D3D11_BOX` below. If the caller hands us a slice shorter than that, the driver would
         // over-read past the end of the source buffer (potentially by multiple megabytes), so bail

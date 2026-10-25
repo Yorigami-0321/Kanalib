@@ -7,6 +7,13 @@ mod state;
 mod trash;
 mod ui;
 
+#[cfg(feature = "frame-profiler")]
+mod alloc_stats;
+
+#[cfg(feature = "frame-profiler")]
+#[global_allocator]
+static ALLOC: alloc_stats::CountingAlloc = alloc_stats::CountingAlloc;
+
 use std::path::PathBuf;
 
 use ely_gpui_component::{
@@ -19,6 +26,8 @@ use gpui::{
 
 fn main() {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
+    #[cfg(feature = "frame-profiler")]
+    alloc_stats::spawn_logger();
     let root = sidecar::project_root();
     let folder = std::env::args()
         .nth(1)
