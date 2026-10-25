@@ -45,13 +45,13 @@ pub struct AppState {
 }
 
 impl AppState {
-    pub fn new(folder: PathBuf) -> Arc<Self> {
+    pub fn new(folder: Option<PathBuf>) -> Arc<Self> {
         let root = project_root();
         let data_dir = root.join(".kanalib");
         let db_path = data_dir.join("kanalib.db");
         let cache_dir = data_dir.join("thumbs");
         let _ = std::fs::create_dir_all(&cache_dir);
-        let initial_folder = absolute(folder);
+        let initial_folder = folder.map(absolute);
         let (
             roots,
             assets,
@@ -73,7 +73,7 @@ impl AppState {
                             .into_iter()
                             .map(|path| absolute(PathBuf::from(path)))
                             .collect::<Vec<_>>(),
-                        None => vec![initial_folder.clone()],
+                        None => initial_folder.clone().into_iter().collect(),
                     };
                     let mut seen = HashSet::new();
                     roots.retain(|root| seen.insert(root.clone()));
@@ -161,7 +161,7 @@ impl AppState {
                 Err(error) => {
                     log::error!("open database: {error:#}");
                     (
-                        vec![initial_folder],
+                        initial_folder.into_iter().collect(),
                         Vec::new(),
                         Default::default(),
                         DEFAULT_SIMILAR_THRESHOLD,
@@ -175,6 +175,14 @@ impl AppState {
         let mut shared = Shared::new(roots, assets, reviews, similar_threshold, protected_paths);
         shared.saved_searches = saved_searches;
         shared.blocked_tags = blocked_tags.into_iter().collect();
+        shared.source_aliases = Db::open(&db_path)
+            .ok()
+            .and_then(|db| db.setting("library.source_aliases").ok().flatten())
+            .and_then(|value| serde_json::from_str::<HashMap<String, String>>(&value).ok())
+            .unwrap_or_default()
+            .into_iter()
+            .map(|(path, alias)| (absolute(PathBuf::from(path)), alias))
+            .collect();
         shared.set_queue_counts(
             queue_counts.pending,
             queue_counts.running,
@@ -612,6 +620,44 @@ impl AppState {
             .map(|root| root.to_string_lossy().to_string())
             .collect::<Vec<_>>();
         Db::open(&self.db_path)?.list_tags_in(&roots)
+    }
+
+    pub fn set_source_alias(&self, root: &Path, alias: &str) -> Result<()> {
+        let root = absolute(root.to_path_buf());
+        let alias = alias.trim();
+        let mut aliases = {
+            let shared = self.shared.lock().unwrap();
+            if !shared.roots.contains(&root) {
+                bail!("来源不存在: {}", root.display());
+            }
+            shared.source_aliases.clone()
+        };
+        if alias.is_empty() {
+            aliases.remove(&root);
+        } else {
+            aliases.insert(root.clone(), alias.to_string());
+        }
+        let values = aliases
+            .iter()
+            .map(|(path, alias)| {
+                (
+                    path.to_string_lossy().to_string(),
+                    alias.to_string(),
+                )
+            })
+            .collect::<HashMap<_, _>>();
+        Db::open(&self.db_path)?
+            .set_setting("library.source_aliases", &serde_json::to_string(&values)?)?;
+        let mut shared = self.shared.lock().unwrap();
+        shared.source_aliases = aliases;
+        shared.revision = shared.revision.wrapping_add(1);
+        shared.status = if alias.is_empty() {
+            format!("已恢复来源默认名称 · {}", root.display())
+        } else {
+            format!("已重命名来源为 {alias}")
+        };
+        shared.error = None;
+        Ok(())
     }
 
     pub fn set_tag_blocked(&self, name: &str, blocked: bool) -> Result<()> {

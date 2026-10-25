@@ -459,9 +459,16 @@ duplicate_reviews  group_key(sha1), state(pending/ignored/done), keeper_path, me
   - 未覆盖：真实系统文件夹选择器添加（只验证了种子来源与扫描）、跨根 GPU 打标、标签别名/阈值、快捷键按键注入；缓存、导出与便携发布见下一条。
 - 缓存、导出与便携发布（2026-10-25）：
   - 缓存管理：`AppState::cache_stats`/`cleanup_orphan_thumbs` 按 DB 中全部资产的 thumb 文件名判断孤儿（含 `-t256` 派生），设置页“数据与缓存”显示数据库大小、缓存文件数/字节、孤儿数/字节，支持刷新与清理；扫描中拒绝清理。实测 3 个孤儿文件清理后统计归零。
-  - 导出：core `export.rs` 生成 CSV/JSON（路径、来源根、尺寸、字节、mtime、模型评级、分组、收藏、星级、自动/手工标签、SHA1/BLAKE3/pHash、错误），CSV 做引号转义；工具栏导出菜单、批量栏导出菜单与命令面板均支持“选中/当前视图”，保存对话框异步，CSV 已实测落盘 14 行。
+  - 导出：core `export.rs` 生成 CSV/JSON（路径、来源根、尺寸、字节、mtime、模型评级、分组、收藏、星级、自动/手工标签、SHA1/BLAKE3/pHash、错误），CSV 做引号转义；批量栏导出菜单与命令面板支持“选中/当前视图”，保存对话框异步，CSV 已实测落盘 14 行。
   - 便携发布：`scripts/build_portable.ps1` 组装 `kanalib.exe` + `runtime/python` + `sidecar` + `dist/models`，默认输出 `dist/Kanalib-portable`（3.77GB、12,687 个文件）；`scripts/portable_readme.txt` 说明启动、数据与迁移。打包后从包内跑 headless 实测 14/14 打标成功，sidecar Python 与模型路径均指向包内；脚本支持可选 `-Zip`（系统 tar），未提供 MSI/签名安装器。
-  - 验证：`cargo test --workspace` 25 通过 + 3 忽略（含 2 个导出测试）；UIA 验证缓存统计/孤儿清理，工具栏导出菜单与 CSV 保存流程走通。截图：`.kanalib/ui_cache_cleaned3.png`、`.kanalib/ui_export_menu.png`。
+  - 验证：`cargo test --workspace` 25 通过 + 3 忽略（含 2 个导出测试）；UIA 验证缓存统计/孤儿清理，CSV 保存流程走通。截图：`.kanalib/ui_cache_cleaned3.png`、`.kanalib/ui_export_menu.png`。
   - 剩余：缓存预算淘汰（当前只清理孤儿）、MSI/代码签名、标签别名/阈值、跨根 GPU 打标实测。
+- 2026-10-25 反馈修复：
+  - 默认文件夹：移除 `main.rs` 的 `sample_library` 隐式回退；首次启动不再自动添加来源，仅在已有 `library.local_roots` 或显式 CLI/`KANALIB_FOLDER` 时加载。空库界面提示“添加文件夹”。
+  - 来源显示：侧栏 Kanalib 标题下不再显示文件夹路径；来源行只显示最后一级文件夹名，若有显示别名则优先显示别名；检查器来源行同样只显示别名/末级名。设置页保留完整路径用于管理。
+  - 来源右键/重命名：来源行右键菜单提供“重命名…”“在资源管理器中打开”“移除来源…”；重命名写入 `settings.library.source_aliases`，只改图库显示名，不改磁盘文件夹，留空恢复文件夹名。设置页也提供重命名按钮。
+  - 标题/工具栏：筛选标题与“N 张”合并为单行，标题 `flex_1`/`min_w(0)`/`truncate`，右侧控件 `flex_none`，清除筛选改为图标，导出入口从工具栏移除（批量栏与命令面板保留）；长来源别名不再压住命令/排序控件。截图：`.kanalib/ui_fix_long_title3.png`。
+  - 便携版控制台：release 使用 `windows_subsystem = "windows"`，不再弹控制台；headless 默认把日志写到 `.kanalib/headless.log`，也可用 `KANALIB_LOG_FILE` 指定。PE 头实测 subsystem=2，包内 headless 运行成功。
+  - 验证截图：`.kanalib/ui_fix_empty2.png`（首次空库）、`ui_source_menu2.png`（来源右键）、`ui_source_rename_dialog.png`（别名重命名）、`ui_fix_long_title3.png`（长标题）。测试数据已清理；`dist/Kanalib` 为用户现有副本，未覆盖；修复版输出在 `dist/Kanalib-portable`。
 - 合成库的模型输出只用于管道压力测试：9,990 张中 6,556 归为截图/文本、1,651 非动漫/实景、1,273 未分类，不能作为真实图库的分类质量指标。
 - Immich/WebDAV：按 2026-10-24 决定暂缓，先完成本地 MVP；阶段 2 再接入。

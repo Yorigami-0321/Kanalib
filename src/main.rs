@@ -1,3 +1,5 @@
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
 #[cfg(feature = "frame-profiler")]
 #[global_allocator]
 static ALLOC: kanalib_core::alloc_stats::CountingAlloc = kanalib_core::alloc_stats::CountingAlloc;
@@ -13,20 +15,43 @@ use gpui::{App, AppContext as _, Bounds, TitlebarOptions, WindowBounds, WindowOp
 use kanalib_core::{sidecar, state};
 use kanalib_ui::KanalibApp;
 
+fn init_logging() {
+    let log_path = std::env::var_os("KANALIB_LOG_FILE")
+        .map(PathBuf::from)
+        .or_else(|| {
+            if std::env::var_os("KANALIB_HEADLESS").is_some() {
+                let dir = sidecar::project_root().join(".kanalib");
+                std::fs::create_dir_all(&dir).ok()?;
+                Some(dir.join("headless.log"))
+            } else {
+                None
+            }
+        });
+    let mut builder =
+        env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"));
+    if let Some(path) = log_path {
+        match std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+        {
+            Ok(file) => {
+                builder.target(env_logger::Target::Pipe(Box::new(file)));
+            }
+            Err(error) => eprintln!("open log file {}: {error}", path.display()),
+        }
+    }
+    builder.init();
+}
+
 fn main() {
-    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
+    init_logging();
     #[cfg(feature = "frame-profiler")]
     kanalib_core::alloc_stats::spawn_logger();
-    let root = sidecar::project_root();
     let folder = std::env::args()
         .nth(1)
         .map(PathBuf::from)
-        .or_else(|| std::env::var_os("KANALIB_FOLDER").map(PathBuf::from))
-        .or_else(|| {
-            let sample = root.join("sample_library");
-            sample.exists().then_some(sample)
-        })
-        .unwrap_or_else(|| root.join("sample_library"));
+        .or_else(|| std::env::var_os("KANALIB_FOLDER").map(PathBuf::from));
 
     if std::env::var_os("KANALIB_HEADLESS").is_some() {
         let state = state::AppState::new(folder.clone());

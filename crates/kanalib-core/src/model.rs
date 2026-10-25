@@ -522,6 +522,8 @@ pub struct Shared {
     pub saved_searches: Vec<SavedSearch>,
     /// 只影响侧栏标签面的显示，不修改资产标签本身。
     pub blocked_tags: HashSet<String>,
+    /// 来源显示别名；键为根目录，只影响 UI，不改磁盘目录。
+    pub source_aliases: HashMap<PathBuf, String>,
 }
 
 impl Shared {
@@ -563,6 +565,7 @@ impl Shared {
             dedup,
             saved_searches: Vec::new(),
             blocked_tags: HashSet::new(),
+            source_aliases: HashMap::new(),
         }
     }
 

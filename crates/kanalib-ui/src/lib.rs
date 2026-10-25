@@ -207,6 +207,18 @@ fn prompt_for(asset: &Asset) -> String {
         .join(", ")
 }
 
+fn source_label(root: &Path, aliases: &HashMap<PathBuf, String>) -> String {
+    aliases
+        .get(root)
+        .filter(|alias| !alias.trim().is_empty())
+        .cloned()
+        .or_else(|| {
+            root.file_name()
+                .map(|name| name.to_string_lossy().to_string())
+        })
+        .unwrap_or_else(|| root.display().to_string())
+}
+
 fn lightbox_caption(asset: &Asset) -> SharedString {
     let general = asset
         .all_tags()
@@ -283,6 +295,13 @@ enum DedupConfirm {
 enum TagDialogMode {
     Add,
     Remove,
+}
+
+#[derive(Clone)]
+struct SourceMenuState {
+    request: u64,
+    root: PathBuf,
+    position: gpui::Point<Pixels>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -634,6 +653,10 @@ pub struct KanalibApp {
     tag_dialog_epoch: u64,
     tag_dialog_paths: Vec<PathBuf>,
     source_remove_confirm: Option<PathBuf>,
+    source_rename: Option<PathBuf>,
+    source_rename_epoch: u64,
+    source_menu: Option<SourceMenuState>,
+    source_menu_epoch: u64,
     toaster: Entity<Toaster>,
     theme_dark: bool,
     #[cfg(feature = "frame-profiler")]
@@ -643,7 +666,7 @@ pub struct KanalibApp {
 }
 
 impl KanalibApp {
-    pub fn new(folder: PathBuf, cx: &mut Context<Self>) -> Self {
+    pub fn new(folder: Option<PathBuf>, cx: &mut Context<Self>) -> Self {
         let open_dedup = std::env::var("KANALIB_OPEN_DEDUP").ok();
         let open_settings = std::env::var_os("KANALIB_OPEN_SETTINGS").is_some();
         let screen = if open_settings {
@@ -770,6 +793,10 @@ impl KanalibApp {
             tag_dialog_epoch: 0,
             tag_dialog_paths: Vec::new(),
             source_remove_confirm: None,
+            source_rename: None,
+            source_rename_epoch: 0,
+            source_menu: None,
+            source_menu_epoch: 0,
             toaster: cx.new(|_| Toaster::default()),
             theme_dark,
             #[cfg(feature = "frame-profiler")]
@@ -1126,6 +1153,40 @@ impl KanalibApp {
                 &self.toaster,
                 cx,
                 format!("移除来源失败：{error:#}"),
+                Severity::Danger,
+            ),
+        }
+        cx.notify();
+    }
+
+    fn open_source_rename(&mut self, root: PathBuf, cx: &mut Context<Self>) {
+        self.source_rename = Some(root);
+        self.source_rename_epoch = self.source_rename_epoch.wrapping_add(1);
+        cx.notify();
+    }
+
+    fn apply_source_rename(&mut self, alias: &str, cx: &mut Context<Self>) {
+        let Some(root) = self.source_rename.clone() else {
+            return;
+        };
+        match self.state.set_source_alias(&root, alias) {
+            Ok(()) => {
+                self.source_rename = None;
+                push_toast(
+                    &self.toaster,
+                    cx,
+                    if alias.trim().is_empty() {
+                        "已恢复来源默认名称".to_string()
+                    } else {
+                        format!("已将来源重命名为 {}", alias.trim())
+                    },
+                    Severity::Success,
+                );
+            }
+            Err(error) => push_toast(
+                &self.toaster,
+                cx,
+                format!("重命名来源失败：{error:#}"),
                 Severity::Danger,
             ),
         }
@@ -1983,6 +2044,7 @@ impl Render for KanalibApp {
             protected_paths,
             saved_searches,
             blocked_tags,
+            source_aliases,
         ) = {
             let shared = self.state.shared.lock().unwrap();
             let revision = shared.revision;
@@ -2011,6 +2073,7 @@ impl Render for KanalibApp {
                 shared.dedup.protected_paths.clone(),
                 shared.saved_searches.clone(),
                 shared.blocked_tags.clone(),
+                shared.source_aliases.clone(),
             )
         };
         if let Some(counts) = counts_view {
@@ -2230,9 +2293,14 @@ impl Render for KanalibApp {
             })
         };
 
+        let filter_title = match &filter {
+            Filter::Source(root) => source_label(root, &source_aliases),
+            _ => filter.label(),
+        };
         let sidebar = self.render_sidebar(
             &this,
             &roots,
+            &source_aliases,
             &status,
             error.as_deref(),
             scanning,
@@ -2268,6 +2336,7 @@ impl Render for KanalibApp {
             self.render_settings(
                 &this,
                 &roots,
+                &source_aliases,
                 &protected_paths,
                 similar_threshold,
                 queue_pending,
@@ -2303,6 +2372,7 @@ impl Render for KanalibApp {
             self.render_main(
                 &this,
                 &filter,
+                &filter_title,
                 &search,
                 assets,
                 visible_indices,
@@ -2321,6 +2391,7 @@ impl Render for KanalibApp {
                 selected_asset.as_ref(),
                 &counts,
                 &blocked_tags,
+                &source_aliases,
                 inspector_width,
                 colors,
             )
@@ -2592,6 +2663,50 @@ impl Render for KanalibApp {
             })
             .into_any_element()
         });
+        let source_rename_dialog = self.source_rename.clone().map(|root| {
+            let epoch = self.source_rename_epoch;
+            let alias = source_aliases.get(&root).cloned().unwrap_or_default();
+            let placeholder = source_label(&root, &source_aliases);
+            let field_holder = window.use_keyed_state(
+                SharedString::from(format!("source-rename-field-{epoch}")),
+                cx,
+                move |window, cx| {
+                    let input =
+                        cx.new(|cx| TextInput::new(window, cx).placeholder(placeholder));
+                    input.update(cx, |input, cx| input.set_text(alias, cx));
+                    input
+                },
+            );
+            let field = field_holder.read(cx).clone();
+            let close = this.clone();
+            let submit = this.clone();
+            PromptDialog::new(
+                SharedString::from(format!("source-rename-dialog-{epoch}")),
+                "重命名来源",
+                &field,
+                move |_, cx| {
+                    let _ = close.update(cx, |app, cx| {
+                        app.source_rename = None;
+                        cx.notify();
+                    });
+                },
+            )
+            .label("只改图库内显示名，不改磁盘文件夹；留空恢复文件夹名")
+            .submit("保存")
+            .on_submit(move |text, _, cx| {
+                let _ = submit.update(cx, |app, cx| app.apply_source_rename(text, cx));
+            })
+            .into_any_element()
+        });
+        let source_context_menu = self.source_menu.as_ref().map(|state| {
+            ContextMenu::new(
+                "source-context-global",
+                source_menu(&state.root, this.clone()),
+            )
+            .manual(Some((state.request, state.position)))
+            .child(div().size(px(0.)))
+            .into_any_element()
+        });
         let shell = div()
             .flex()
             .flex_row()
@@ -2608,6 +2723,8 @@ impl Render for KanalibApp {
             .children(save_dialog)
             .children(tag_dialog)
             .children(remove_source_dialog)
+            .children(source_rename_dialog)
+            .children(source_context_menu)
             .child(ToastViewport::new("kanalib-toasts", &self.toaster))
             .on_action(cx.listener(|this, _: &OpenPalette, _, cx| {
                 let cleanup = if this.palette_open {
@@ -2653,6 +2770,7 @@ impl Render for KanalibApp {
             && !self.save_search_open
             && self.tag_dialog.is_none()
             && self.source_remove_confirm.is_none()
+            && self.source_rename.is_none()
         {
             window.focus(&self.grid_focus, cx);
             self.focus_grid_pending = false;
@@ -2753,6 +2871,7 @@ impl KanalibApp {
         &self,
         this: &Entity<Self>,
         roots: &[PathBuf],
+        source_aliases: &HashMap<PathBuf, String>,
         status: &str,
         error: Option<&str>,
         scanning: bool,
@@ -2809,13 +2928,12 @@ impl KanalibApp {
                     .find(|(path, _)| path == root)
                     .map(|(_, count)| *count)
                     .unwrap_or(0);
-                body = body.child(filter_row(
+                body = body.child(source_row(
                     SharedString::from(format!("filter-source-{}", root.display())),
-                    root.display().to_string(),
+                    root.clone(),
+                    source_label(root, source_aliases),
                     count,
                     library && filter == &Filter::Source(root.clone()),
-                    Filter::Source(root.clone()),
-                    state.clone(),
                     this.clone(),
                     colors,
                 ));
@@ -3072,16 +3190,6 @@ impl KanalibApp {
                             .text_xl()
                             .font_weight(FontWeight::BOLD)
                             .child("Kanalib"),
-                    )
-                    .child(
-                        div()
-                            .text_xs()
-                            .text_color(colors.muted)
-                            .child(match roots.len() {
-                                0 => "未添加文件夹".to_string(),
-                                1 => roots[0].display().to_string(),
-                                count => format!("{count} 个文件夹"),
-                            }),
                     ),
             )
             .child(
@@ -3183,6 +3291,7 @@ impl KanalibApp {
         &self,
         this: &Entity<Self>,
         filter: &Filter,
+        filter_title: &str,
         search: &Entity<TextInput>,
         assets: Arc<RwLock<Vec<Asset>>>,
         visible_indices: Arc<Vec<usize>>,
@@ -3200,8 +3309,8 @@ impl KanalibApp {
         let this_density = this.clone();
         let this_sort = this.clone();
         let clear = (*filter != Filter::All).then(|| {
-            Button::new("clear-filter", "清除筛选")
-                .size(ControlSize::Sm)
+            IconButton::new("clear-filter", IconName::X)
+                .tooltip("清除筛选")
                 .on_click(move |_, _, cx| {
                     let _ = this_clear.update(cx, |app, cx| {
                         app.set_filter(Filter::All, cx);
@@ -3340,7 +3449,6 @@ impl KanalibApp {
                         }),
                 )
         };
-        let toolbar_export = export_menu.clone();
         let columns = grid_columns(width.as_f32(), self.density.min_width());
         let tile_width = grid_tile_width(width.as_f32(), columns);
         let image_height = self.density.image_height();
@@ -3540,30 +3648,36 @@ impl KanalibApp {
                             .min_w(px(0.))
                             .child(
                                 div()
+                                    .flex_1()
+                                    .min_w(px(0.))
                                     .flex()
-                                    .flex_col()
-                                    .gap(px(2.))
+                                    .items_center()
+                                    .gap(px(6.))
                                     .child(
                                         div()
+                                            .flex_1()
+                                            .min_w(px(0.))
                                             .truncate()
                                             .text_lg()
                                             .font_weight(FontWeight::SEMIBOLD)
-                                            .child(filter.label()),
+                                            .child(filter_title.to_string()),
                                     )
                                     .child(
                                         div()
+                                            .flex_none()
                                             .text_xs()
                                             .text_color(colors.muted)
-                                            .child(format!("{} 张可见", visible)),
+                                            .child(format!("{visible} 张")),
                                     ),
                             )
                             .children(clear),
                     )
                     .child(
                         div()
+                            .flex_none()
                             .flex()
                             .items_center()
-                            .gap(px(6.))
+                            .gap(px(4.))
                             .child(
                                 IconButton::new("open-palette", IconName::Command)
                                     .tooltip("命令面板 (Ctrl+K)")
@@ -3613,13 +3727,8 @@ impl KanalibApp {
                                 }),
                             )
                             .child(
-                                DropdownMenu::new("library-export", "导出", toolbar_export)
-                                    .icon(IconName::Download)
-                                    .variant(ButtonVariant::Ghost),
-                            )
-                            .child(
                                 div()
-                                    .w(px(200.))
+                                    .w(px(160.))
                                     .child(Input::new(search).clearable().least("搜索 / is:fav")),
                             )
                             .children(stop),
@@ -4952,6 +5061,7 @@ impl KanalibApp {
         &self,
         this: &Entity<Self>,
         roots: &[PathBuf],
+        source_aliases: &HashMap<PathBuf, String>,
         protected_paths: &[PathBuf],
         similar_threshold: u8,
         queue_pending: usize,
@@ -5201,7 +5311,9 @@ impl KanalibApp {
         } else {
             for root in roots {
                 let root_for_remove = root.clone();
+                let root_for_rename = root.clone();
                 let this_remove = this.clone();
+                let this_rename = this.clone();
                 source_rows = source_rows.child(
                     div()
                         .flex()
@@ -5216,23 +5328,65 @@ impl KanalibApp {
                             div()
                                 .flex_1()
                                 .min_w(px(0.))
-                                .truncate()
-                                .text_xs()
-                                .text_color(colors.fg)
-                                .child(root.display().to_string()),
+                                .flex()
+                                .flex_col()
+                                .gap(px(1.))
+                                .child(
+                                    div()
+                                        .truncate()
+                                        .text_xs()
+                                        .text_color(colors.fg)
+                                        .child(source_label(root, source_aliases)),
+                                )
+                                .child(
+                                    div()
+                                        .truncate()
+                                        .text_xs()
+                                        .text_color(colors.subtle)
+                                        .child(root.display().to_string()),
+                                ),
                         )
                         .child(
-                            Button::new(
-                                SharedString::from(format!("remove-source-{}", root.display())),
-                                "移除",
-                            )
-                            .size(ControlSize::Sm)
-                            .on_click(move |_, _, cx| {
-                                let _ = this_remove.update(cx, |app, cx| {
-                                    app.source_remove_confirm = Some(root_for_remove.clone());
-                                    cx.notify();
-                                });
-                            }),
+                            div()
+                                .flex_none()
+                                .flex()
+                                .items_center()
+                                .gap(px(4.))
+                                .child(
+                                    Button::new(
+                                        SharedString::from(format!(
+                                            "rename-source-{}",
+                                            root.display()
+                                        )),
+                                        "重命名",
+                                    )
+                                    .size(ControlSize::Sm)
+                                    .on_click(move |_, _, cx| {
+                                        let _ = this_rename.update(cx, |app, cx| {
+                                            app.open_source_rename(
+                                                root_for_rename.clone(),
+                                                cx,
+                                            );
+                                        });
+                                    }),
+                                )
+                                .child(
+                                    Button::new(
+                                        SharedString::from(format!(
+                                            "remove-source-{}",
+                                            root.display()
+                                        )),
+                                        "移除",
+                                    )
+                                    .size(ControlSize::Sm)
+                                    .on_click(move |_, _, cx| {
+                                        let _ = this_remove.update(cx, |app, cx| {
+                                            app.source_remove_confirm =
+                                                Some(root_for_remove.clone());
+                                            cx.notify();
+                                        });
+                                    }),
+                                ),
                         ),
                 );
             }
@@ -5521,6 +5675,7 @@ impl KanalibApp {
         selected: Option<&Asset>,
         counts: &Counts,
         blocked_tags: &HashSet<String>,
+        source_aliases: &HashMap<PathBuf, String>,
         width: Pixels,
         colors: UiColors,
     ) -> impl IntoElement {
@@ -5912,7 +6067,10 @@ impl KanalibApp {
                         .truncate()
                         .text_xs()
                         .text_color(colors.subtle)
-                        .child(format!("来源 · {}", asset.library_root.display())),
+                        .child(format!(
+                            "来源 · {}",
+                            source_label(&asset.library_root, source_aliases)
+                        )),
                 )
                 .child(div().text_xs().text_color(colors.subtle).child(
                     match (&asset.sha1, &asset.blake3, asset.phash) {
@@ -6023,6 +6181,104 @@ fn section(title: &str, colors: UiColors) -> impl IntoElement {
         .font_weight(FontWeight::SEMIBOLD)
         .text_color(colors.subtle)
         .child(title.to_string())
+}
+
+fn source_row(
+    id: SharedString,
+    root: PathBuf,
+    label: String,
+    count: usize,
+    active: bool,
+    this: Entity<KanalibApp>,
+    colors: UiColors,
+) -> impl IntoElement {
+    let filter = Filter::Source(root.clone());
+    let this_click = this.clone();
+    let this_right = this.clone();
+    let root_right = root.clone();
+    let mut row = div()
+        .id(id)
+        .role(Role::Button)
+        .aria_label(root.display().to_string())
+        .flex()
+        .items_center()
+        .justify_between()
+        .px(px(8.))
+        .py(px(5.))
+        .rounded(px(5.))
+        .cursor_pointer()
+        .hover(move |style| style.bg(colors.hover));
+    if active {
+        row = row.bg(colors.selection);
+    }
+    row.on_click(move |_, _, cx| {
+        let _ = this_click.update(cx, |app, cx| {
+            app.set_filter(filter.clone(), cx);
+            app.dedup_confirm = None;
+        });
+    })
+    .on_mouse_down(MouseButton::Right, move |event, window, cx| {
+        window.prevent_default();
+        let _ = this_right.update(cx, |app, cx| {
+            app.source_menu_epoch = app.source_menu_epoch.wrapping_add(1);
+            app.source_menu = Some(SourceMenuState {
+                request: app.source_menu_epoch,
+                root: root_right.clone(),
+                position: event.position,
+            });
+            cx.notify();
+        });
+    })
+    .child(
+        div()
+            .flex_1()
+            .min_w(px(0.))
+            .truncate()
+            .text_xs()
+            .text_color(colors.fg)
+            .child(label),
+    )
+    .child(
+        div()
+            .flex_none()
+            .text_xs()
+            .text_color(colors.subtle)
+            .child(count.to_string()),
+    )
+}
+
+fn source_menu(root: &Path, this: Entity<KanalibApp>) -> Menu {
+    let rename_this = this.clone();
+    let rename_root = root.to_path_buf();
+    let remove_this = this.clone();
+    let remove_root = root.to_path_buf();
+    let reveal_root = root.to_path_buf();
+    Menu::new()
+        .item(
+            MenuItem::new("重命名…")
+                .icon(IconName::Pencil)
+                .on_click(move |_, cx| {
+                    let _ = rename_this.update(cx, |app, cx| {
+                        app.open_source_rename(rename_root.clone(), cx);
+                    });
+                }),
+        )
+        .item(
+            MenuItem::new("在资源管理器中打开")
+                .icon(IconName::FolderOpen)
+                .on_click(move |_, _| reveal_path(&reveal_root)),
+        )
+        .separator()
+        .item(
+            MenuItem::new("移除来源…")
+                .icon(IconName::Trash2)
+                .on_click(move |_, cx| {
+                    let _ = remove_this.update(cx, |app, cx| {
+                        app.source_remove_confirm = Some(remove_root.clone());
+                        cx.notify();
+                    });
+                }),
+        )
 }
 
 fn filter_row(

@@ -1,8 +1,9 @@
 Kanalib 便携版
 
 启动
-- 双击 kanalib.exe。
-- 首次启动会生成 .kanalib 数据目录；图库文件夹通过左侧「添加文件夹」选择，可添加多个。
+- 双击 kanalib.exe，不会显示控制台窗口。
+- 首次启动会生成 .kanalib 数据目录，但不会自动添加任何文件夹；请通过左侧「添加文件夹」选择，可添加多个。
+- 来源项支持右键菜单；「重命名」只修改图库内的显示别名，不改磁盘文件夹名。
 - 打标需要 runtime/python 与 dist/models；本目录已包含，不要单独移动 exe。
 
 数据
@@ -17,3 +18,4 @@ Kanalib 便携版
 常见问题
 - 如果启动提示缺少模型或 Python，请确认 runtime/python、dist/models 与 sidecar 目录完整。
 - 推理设备与队列状态显示在左侧状态卡；设置页可以查看缓存并清理孤儿缩略图。
+- 便携版默认无控制台。无界面扫描或诊断时设置 KANALIB_HEADLESS=1，日志写入 .kanalib/headless.log；也可用 KANALIB_LOG_FILE 指定日志路径。
