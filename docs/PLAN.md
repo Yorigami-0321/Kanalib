@@ -439,5 +439,6 @@ duplicate_reviews  group_key(sha1), state(pending/ignored/done), keeper_path, me
 - gpui-pre 0.3.9 升级验证（2026-10-25，分支 `gpui-039`）：上游 Ely 自 `f3cfbad` 起已重构为 workspace 多 crate；我们的 vendor 是 floral-notepaper 的旧单 crate 快照（同为 0.1.1，pin gpui-pre 0.3.8）。采用最小路径：保留 vendor 代码，仅把 pin 升到 0.3.9，并用 0.3.9 的平台 crate 重建 `vendor/gpui-pre-windows`（平台层 0.3.8→0.3.9 仅 4 文件 / ~111 行，`directx_atlas.rs` 与 `direct_write.rs` 零差异，我们的补丁原样保留）；核心 crate 0.3.9 有 21 文件 / ~2,140 行改动，但应用与旧 Ely 代码零改动即编译通过。
   - 结果：`cargo check` / `cargo test` 全绿（20 通过 + 3 忽略）；`--features frame-profiler` 编译通过；10k 库 UI 截图中文渲染/布局正常；45s 滚动 163.3fps、present p99 11.11ms、超预算 0.1%、256K 档恒定 29MB（0.3.8 基线 164.9fps / 8.33ms / 0.03%）。
   - 待办：中文 IME 冒烟（合成输入需人工操作）；通过后合并回 main。
+  - 中文 IME 冒烟（2026-10-25，微软拼音）：组字与候选窗正常（候选窗定位在搜索框附近）、上屏「合成」后正确过滤 2,000 张，无方块/丢字；组字过程中过滤按原始输入执行（如「夜景d'd'd'd」会暂时 0 命中），属可接受边界行为。截图 `.kanalib/ime_039_committed.png`、`.kanalib/ime_039_composing.png`。分支已合并回 main。
 - 合成库的模型输出只用于管道压力测试：9,990 张中 6,556 归为截图/文本、1,651 非动漫/实景、1,273 未分类，不能作为真实图库的分类质量指标。
 - Immich/WebDAV：按 2026-10-24 决定暂缓，先完成本地 MVP；阶段 2 再接入。
