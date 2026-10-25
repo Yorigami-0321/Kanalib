@@ -300,7 +300,7 @@ duplicate_reviews  group_key(sha1), state(pending/ignored/done), keeper_path, me
 
 ### 阶段 1：本地 MVP
 - workspace、Ely 外壳、SQLite schema/迁移、本地源、SHA1/BLAKE3/pHash、缩略图、虚拟网格、检查器、sidecar 队列、FTS 搜索、标签面、设置。
-- 当前（2026-10-24）：已有本地扫描、缩略图、v5 schema/自动备份迁移、SHA1/BLAKE3/pHash、`tags`/`asset_tags`、FTS5 搜索（trigram + 短词 LIKE 回退）、自动归类/评级、标签 facets、检查器、虚拟网格、RwLock 共享资产列表、Counts/筛选缓存、未变文件快速重扫和失败 3 次封顶；完全重复去重（忽略/全部保留/单组与批量移入回收站）与相似图片（pHash 阈值扫描/逐组评审/相关变体）均已完成；设置页已具备去重保护路径、相似阈值、数据位置和任务队列状态；打标任务已持久化到 jobs 表并支持重启恢复；10k 导入/打标/搜索/滚动已完成。缺网络源凭据；60fps 已在 10k 滚动下实测并达标（p99 8.4ms，10 万资产未测）；网格已用 256 小档 + 有界 LRU 图片缓存，2.2GB 内存不回落已定位并修复（img 绘制阶段回退到全局缓存，见 2026-10-25 条目）；代码仍为单 crate。
+- 当前（2026-10-24）：已有本地扫描、缩略图、v5 schema/自动备份迁移、SHA1/BLAKE3/pHash、`tags`/`asset_tags`、FTS5 搜索（trigram + 短词 LIKE 回退）、自动归类/评级、标签 facets、检查器、虚拟网格、RwLock 共享资产列表、Counts/筛选缓存、未变文件快速重扫和失败 3 次封顶；完全重复去重（忽略/全部保留/单组与批量移入回收站）与相似图片（pHash 阈值扫描/逐组评审/相关变体）均已完成；设置页已具备去重保护路径、相似阈值、数据位置和任务队列状态；打标任务已持久化到 jobs 表并支持重启恢复；10k 导入/打标/搜索/滚动已完成。缺网络源凭据；60fps 已在 10k 滚动下实测并达标（p99 8.4ms，10 万资产未测）；网格已用 256 小档 + 有界 LRU 图片缓存，2.2GB 内存不回落已定位并修复（img 绘制阶段回退到全局缓存，见 2026-10-25 条目）；代码已拆为工作区三包（`kanalib` bin + `crates/kanalib-core` + `crates/kanalib-ui`，见 2026-10-25 条目）。
 - 验收：1 万张本地图片端到端可导入、打标、按标签搜索；重启后任务可恢复；不修改原文件。
 
 ### 阶段 2：多源与去重
@@ -440,5 +440,6 @@ duplicate_reviews  group_key(sha1), state(pending/ignored/done), keeper_path, me
   - 结果：`cargo check` / `cargo test` 全绿（20 通过 + 3 忽略）；`--features frame-profiler` 编译通过；10k 库 UI 截图中文渲染/布局正常；45s 滚动 163.3fps、present p99 11.11ms、超预算 0.1%、256K 档恒定 29MB（0.3.8 基线 164.9fps / 8.33ms / 0.03%）。
   - 待办：中文 IME 冒烟（合成输入需人工操作）；通过后合并回 main。
   - 中文 IME 冒烟（2026-10-25，微软拼音）：组字与候选窗正常（候选窗定位在搜索框附近）、上屏「合成」后正确过滤 2,000 张，无方块/丢字；组字过程中过滤按原始输入执行（如「夜景d'd'd'd」会暂时 0 命中），属可接受边界行为。截图 `.kanalib/ime_039_committed.png`、`.kanalib/ime_039_composing.png`。分支已合并回 main。
+- UI 拆 crate（2026-10-25）：工作区三包——`kanalib`（bin：入口/窗口/全局分配器/headless）、`crates/kanalib-core`（扫描/DB/去重/状态/sidecar/trash，无 gpui 依赖）、`crates/kanalib-ui`（GPUI/Ely 视图、虚拟网格、图片缓存与帧探针）。`frame-profiler` 由根 feature 转发到 core（分配器计数）与 ui（帧直方图）；vendor 两处不再作为成员构建（ely 关闭 tests/examples/doctests 并移除显式 `[[example]]` 目标）。验证：`cargo test --workspace` 20 通过 + 3 忽略、`--features frame-profiler` 编译、release UI 冒烟截图正常（`.kanalib/ui_split.png`）；拆分后未重测合成器帧率（纯结构调整，前一轮 0.3.9 数据 163.3fps 仍代表同一代码路径）。
 - 合成库的模型输出只用于管道压力测试：9,990 张中 6,556 归为截图/文本、1,651 非动漫/实景、1,273 未分类，不能作为真实图库的分类质量指标。
 - Immich/WebDAV：按 2026-10-24 决定暂缓，先完成本地 MVP；阶段 2 再接入。

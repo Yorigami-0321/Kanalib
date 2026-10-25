@@ -7,6 +7,13 @@ license = "MIT"
 description = "A restrained component library for GPUI, in light and dark."
 repository = "https://github.com/ELY-Open-Source/Ely-GPUI-Components"
 publish = false
+autotests = false
+autoexamples = false
+autobenches = false
+
+[lib]
+test = false
+doctest = false
 
 [features]
 default = ["runtime_shaders"]
@@ -96,42 +103,13 @@ opt-level = "z"
 lto = true
 codegen-units = 1
 
-[[example]]
-name = "gallery"
-path = "examples/gallery/main.rs"
 
-[[example]]
-name = "docs_hello"
-path = "examples/docs/hello.rs"
 
-[[example]]
-name = "docs_start"
-path = "examples/docs/start.rs"
 
-[[example]]
-name = "docs_theme"
-path = "examples/docs/theme.rs"
 
-[[example]]
-name = "docs_focus"
-path = "examples/docs/focus.rs"
 
-[[example]]
-name = "docs_motion"
-path = "examples/docs/motion.rs"
 
-[[example]]
-name = "docs_icons"
-path = "examples/docs/icons.rs"
 
-[[example]]
-name = "docs_overlays"
-path = "examples/docs/overlays.rs"
 
-[[example]]
-name = "docs_i18n"
-path = "examples/docs/i18n.rs"
 
-[[example]]
-name = "docs_render"
-path = "examples/docs/render.rs"
+

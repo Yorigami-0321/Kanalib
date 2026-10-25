@@ -18,12 +18,12 @@ use gpui::prelude::*;
 #[cfg(feature = "frame-profiler")]
 use hdrhistogram::Histogram;
 
-use crate::dedup::{
+use kanalib_core::dedup::{
     DedupSummary, DuplicateGroup, GroupKind, ReviewState, is_protected,
     similarity_pct_from_distance,
 };
-use crate::model::{Asset, Counts, Filter, SearchQuery, TagHit};
-use crate::state::AppState;
+use kanalib_core::model::{Asset, Counts, Filter, SearchQuery, TagHit};
+use kanalib_core::state::AppState;
 
 const TILE_WIDTH: f32 = 188.;
 const TILE_IMAGE_HEIGHT: f32 = 150.;
@@ -529,7 +529,7 @@ impl KanalibApp {
                     };
                     log::info!("image watch: handed_out={handed_out} alive_at_scroll_end={alive}");
                     #[cfg(feature = "frame-profiler")]
-                    crate::alloc_stats::traces::dump();
+                    kanalib_core::alloc_stats::traces::dump();
                     if watch_enabled() {
                         let paths: Vec<gpui::Resource> = {
                             let shared = app.state.shared.lock().unwrap();
@@ -4251,12 +4251,12 @@ mod tests {
         files.sort();
         assert!(!files.is_empty(), "stress library with t256 files required");
         let bucket = 18 - 10;
-        let before = crate::alloc_stats::live_bucket_bytes(bucket);
+        let before = kanalib_core::alloc_stats::live_bucket_bytes(bucket);
         for path in &files {
             let result = decode_thumb(&Resource::from(path.clone()));
             assert!(result.is_ok(), "decode failed for {}", path.display());
         }
-        let after = crate::alloc_stats::live_bucket_bytes(bucket);
+        let after = kanalib_core::alloc_stats::live_bucket_bytes(bucket);
         eprintln!(
             "decode bucket delta: files={} before={before} after={after} delta_kb={}",
             files.len(),

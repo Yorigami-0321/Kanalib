@@ -1,3 +1,8 @@
+[workspace]
+members = [".", "crates/kanalib-core", "crates/kanalib-ui"]
+exclude = ["vendor/ely-gpui-components", "vendor/gpui-pre-windows"]
+resolver = "3"
+
 [package]
 name = "kanalib"
 version = "0.1.0"
@@ -11,25 +16,20 @@ path = "src/main.rs"
 
 [features]
 # 取证档位：开启 gpui 的帧计时直方图，供 KANALIB_FRAME_METRICS 读取合成器帧间隔。
-frame-profiler = ["dep:hdrhistogram", "gpui/profiler"]
+frame-profiler = [
+    "kanalib-core/frame-profiler",
+    "kanalib-ui/frame-profiler",
+    "gpui/profiler",
+]
 
 [dependencies]
-anyhow = "1"
-blake3 = "1"
-dirs = "6"
 ely-gpui-component = { path = "vendor/ely-gpui-components" }
 env_logger = "0.11"
 gpui = { package = "gpui-pre", version = "=0.3.9", default-features = false, features = ["stacker"] }
-hdrhistogram = { version = "7.6", optional = true }
 gpui_platform = { package = "gpui-pre-platform", version = "=0.3.9", features = ["font-kit"] }
-image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp", "gif", "bmp"] }
+kanalib-core = { path = "crates/kanalib-core" }
+kanalib-ui = { path = "crates/kanalib-ui" }
 log = "0.4"
-rfd = "0.17"
-rusqlite = { version = "0.32", features = ["bundled"] }
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-sha1 = "0.10"
-walkdir = "2"
 
 [profile.dev]
 opt-level = 1

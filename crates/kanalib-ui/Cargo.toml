@@ -1,0 +1,21 @@
+[package]
+name = "kanalib-ui"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.95"
+license = "MIT"
+publish = false
+
+[features]
+default = []
+frame-profiler = ["dep:hdrhistogram", "gpui/profiler", "kanalib-core/frame-profiler"]
+
+[dependencies]
+ely-gpui-component = { path = "../../vendor/ely-gpui-components" }
+gpui = { package = "gpui-pre", version = "=0.3.9", default-features = false, features = ["stacker"] }
+image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp", "gif", "bmp"] }
+kanalib-core = { path = "../kanalib-core" }
+log = "0.4"
+rfd = "0.17"
+serde_json = "1"
+hdrhistogram = { version = "7.6", optional = true }

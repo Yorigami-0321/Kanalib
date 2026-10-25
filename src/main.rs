@@ -1,18 +1,6 @@
-mod db;
-mod dedup;
-mod media;
-mod model;
-mod sidecar;
-mod state;
-mod trash;
-mod ui;
-
-#[cfg(feature = "frame-profiler")]
-mod alloc_stats;
-
 #[cfg(feature = "frame-profiler")]
 #[global_allocator]
-static ALLOC: alloc_stats::CountingAlloc = alloc_stats::CountingAlloc;
+static ALLOC: kanalib_core::alloc_stats::CountingAlloc = kanalib_core::alloc_stats::CountingAlloc;
 
 use std::path::PathBuf;
 
@@ -23,11 +11,13 @@ use ely_gpui_component::{
 use gpui::{
     px, size, App, AppContext as _, Bounds, TitlebarOptions, WindowBounds, WindowOptions,
 };
+use kanalib_core::{sidecar, state};
+use kanalib_ui::KanalibApp;
 
 fn main() {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
     #[cfg(feature = "frame-profiler")]
-    alloc_stats::spawn_logger();
+    kanalib_core::alloc_stats::spawn_logger();
     let root = sidecar::project_root();
     let folder = std::env::args()
         .nth(1)
@@ -53,7 +43,7 @@ fn main() {
         }
         {
             let shared = state.shared.lock().unwrap();
-            let summary = shared.dedup.summary(crate::dedup::GroupKind::Exact);
+            let summary = shared.dedup.summary(kanalib_core::dedup::GroupKind::Exact);
             log::info!(
                 "dedup summary: groups={} pending={} pending_assets={} ignored={} done={} pending_bytes={}",
                 summary.total,
@@ -108,7 +98,7 @@ fn main() {
             for threshold in [6u8, 10, 14] {
                 let started = std::time::Instant::now();
                 let groups =
-                    crate::dedup::compute_similar_groups(&assets, threshold, &reviews, &[], &[]);
+                    kanalib_core::dedup::compute_similar_groups(&assets, threshold, &reviews, &[], &[]);
                 let members: usize = groups.iter().map(|group| group.assets.len()).sum();
                 log::info!(
                     "similar metrics: threshold={threshold} assets={} groups={} members={} ms={:.1}",
@@ -146,7 +136,7 @@ fn main() {
                     },
                     move |_window, cx| {
                         let folder = folder.clone();
-                        cx.new(|cx| ui::KanalibApp::new(folder, cx))
+                        cx.new(|cx| KanalibApp::new(folder, cx))
                     },
                 )
                 .expect("open Kanalib window");
