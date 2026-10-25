@@ -399,20 +399,7 @@ pub fn compute_similar_groups(
         .filter(|asset| asset.phash.is_some())
         .collect::<Vec<_>>();
     let threshold = threshold.min(32) as u32;
-    let mut union = UnionFind::new(items.len());
-    for i in 0..items.len() {
-        for j in (i + 1)..items.len() {
-            if items[i].sha1 == items[j].sha1 {
-                continue;
-            }
-            let (Some(a), Some(b)) = (items[i].phash, items[j].phash) else {
-                continue;
-            };
-            if (a ^ b).count_ones() <= threshold {
-                union.union(i, j);
-            }
-        }
-    }
+    let mut union = similar_union(&items, threshold);
 
     let mut components: HashMap<usize, Vec<Asset>> = HashMap::new();
     for (index, asset) in items.iter().enumerate() {
@@ -648,6 +635,94 @@ fn fallback_keeper(assets: &[Asset]) -> (PathBuf, String) {
 struct UnionFind {
     parent: Vec<usize>,
     rank: Vec<u8>,
+}
+
+fn intern_sha_ids(items: &[&Asset]) -> Vec<u32> {
+    let mut interned: HashMap<&str, u32> = HashMap::new();
+    items
+        .iter()
+        .map(|asset| match asset.sha1.as_deref() {
+            None => u32::MAX,
+            Some(sha1) => {
+                let next = interned.len() as u32;
+                *interned.entry(sha1).or_insert(next)
+            }
+        })
+        .collect()
+}
+
+fn similar_workers(count: usize, per_worker: usize) -> usize {
+    std::thread::available_parallelism()
+        .map(|value| value.get())
+        .unwrap_or(1)
+        .min(16)
+        .min(count / per_worker + 1)
+}
+
+fn merge_partials(partials: &mut [UnionFind], count: usize) -> UnionFind {
+    let mut merged = UnionFind::new(count);
+    for partial in partials.iter_mut() {
+        for i in 0..count {
+            let root = partial.find(i);
+            if root != i {
+                merged.union(i, root);
+            }
+        }
+    }
+    merged
+}
+
+/// 相似判定是「64 位 pHash 汉明距离 ≤ 阈值」的配对：10k 档 5,000 万对、10 万档 50 亿对。
+/// 按 i 区间切给多个线程、各持一份 UnionFind，最后按每行根节点合并；
+/// sha1 先驻留成 u32，内层循环只剩异或+popcount，单对约 1–2ns。
+/// 语义与全量两两一致（含「sha1 相同则跳过」）。
+/// 曾按 czkawka 的方案试过 BK-tree（`bk-tree` crate）：100k 合成哈希、阈值 10/14 下
+/// 38.7s / 66.5s，比本实现（1.8s）慢 20–37 倍，故不引入该依赖。
+fn similar_union(items: &[&Asset], threshold: u32) -> UnionFind {
+    let count = items.len();
+    if count < 2 {
+        return UnionFind::new(count);
+    }
+    let hashes = items
+        .iter()
+        .map(|asset| asset.phash.unwrap_or_default())
+        .collect::<Vec<_>>();
+    let sha_ids = intern_sha_ids(items);
+    let scan = |start: usize, end: usize| {
+        let mut union = UnionFind::new(count);
+        for i in start..end {
+            let a = hashes[i];
+            let sha_a = sha_ids[i];
+            for j in (i + 1)..count {
+                if sha_a == sha_ids[j] {
+                    continue;
+                }
+                if (a ^ hashes[j]).count_ones() <= threshold {
+                    union.union(i, j);
+                }
+            }
+        }
+        union
+    };
+    let workers = similar_workers(count, 2048);
+    if workers <= 1 {
+        return scan(0, count);
+    }
+    let chunk = count.div_ceil(workers);
+    let mut partials = std::thread::scope(|scope| {
+        (0..workers)
+            .map(|worker| {
+                let start = worker * chunk;
+                let end = ((worker + 1) * chunk).min(count);
+                let scan = &scan;
+                scope.spawn(move || scan(start, end))
+            })
+            .collect::<Vec<_>>()
+            .into_iter()
+            .map(|handle| handle.join().expect("similar scan worker panicked"))
+            .collect::<Vec<_>>()
+    });
+    merge_partials(&mut partials, count)
 }
 
 impl UnionFind {
@@ -891,12 +966,127 @@ mod tests {
                 &path, &sha1, phash, 100, 10, 100, 100, 0,
             ));
         }
-        let started = std::time::Instant::now();
-        let groups = compute_similar_groups(&assets, 10, &HashMap::new(), &[], &[]);
-        println!(
-            "similar 10k: groups={} elapsed_ms={:.0}",
-            groups.len(),
-            started.elapsed().as_secs_f64() * 1000.0
-        );
+        for threshold in [6u8, 10, 14] {
+            let started = std::time::Instant::now();
+            let groups = compute_similar_groups(&assets, threshold, &HashMap::new(), &[], &[]);
+            let elapsed_ms = started.elapsed().as_secs_f64() * 1000.0;
+            println!(
+                "similar 10k: threshold={threshold} groups={} elapsed_ms={elapsed_ms:.0}",
+                groups.len(),
+            );
+        }
+    }
+
+    #[test]
+    fn parallel_similar_matches_serial_reference() {
+        let mut seed = 0x9E37_79B9_7F4A_7C15u64;
+        let mut next = || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed
+        };
+        // 5,000 条以覆盖多线程路径（worker 数 = count/2048+1）。
+        let mut assets: Vec<Asset> = Vec::new();
+        for index in 0..5_000usize {
+            let mut phash = next();
+            if index > 0 && index % 7 == 0 {
+                phash = assets[index - 1].phash.unwrap_or_default() ^ (next() % 8);
+            }
+            let sha1 = if index % 11 == 0 {
+                "dup".to_string()
+            } else {
+                format!("sha{index}")
+            };
+            assets.push(asset_with(
+                &format!("C:/lib/p{index}.jpg"),
+                &sha1,
+                phash,
+                100,
+                100,
+                100,
+                100,
+                0,
+            ));
+        }
+        assets[5].sha1 = None;
+        assets[6].sha1 = None;
+        for threshold in [0u8, 6, 10, 14, 32] {
+            let expected = brute_force_components(&assets, threshold);
+            let groups = compute_similar_groups(&assets, threshold, &HashMap::new(), &[], &[]);
+            let mut actual = groups
+                .iter()
+                .map(|group| {
+                    let mut paths = group
+                        .assets
+                        .iter()
+                        .map(|asset| asset.path.display().to_string())
+                        .collect::<Vec<_>>();
+                    paths.sort();
+                    paths
+                })
+                .collect::<Vec<_>>();
+            actual.sort();
+            assert_eq!(actual, expected, "threshold={threshold}");
+        }
+    }
+
+    #[test]
+    #[ignore = "100k similar-scan benchmark"]
+    fn benchmark_similar_100k() {
+        let mut assets = Vec::with_capacity(100_000);
+        for index in 0..100_000u64 {
+            let path = format!("C:/lib/{index:06}.png");
+            let sha1 = format!("{index:040x}");
+            let phash = index
+                .wrapping_mul(0x9E37_79B9_7F4A_7C15)
+                .rotate_left(17);
+            assets.push(asset_with(&path, &sha1, phash, 100, 10, 100, 100, 0));
+        }
+        for threshold in [10u8, 14] {
+            let started = std::time::Instant::now();
+            let groups = compute_similar_groups(&assets, threshold, &HashMap::new(), &[], &[]);
+            let elapsed_ms = started.elapsed().as_secs_f64() * 1000.0;
+            println!(
+                "similar 100k: threshold={threshold} groups={} elapsed_ms={elapsed_ms:.0}",
+                groups.len(),
+            );
+        }
+    }
+
+    fn brute_force_components(assets: &[Asset], threshold: u8) -> Vec<Vec<String>> {
+        let items = assets
+            .iter()
+            .filter(|asset| asset.phash.is_some())
+            .collect::<Vec<_>>();
+        let threshold = threshold.min(32) as u32;
+        let mut union = UnionFind::new(items.len());
+        for i in 0..items.len() {
+            for j in (i + 1)..items.len() {
+                if items[i].sha1 == items[j].sha1 {
+                    continue;
+                }
+                if (items[i].phash.unwrap() ^ items[j].phash.unwrap()).count_ones() <= threshold {
+                    union.union(i, j);
+                }
+            }
+        }
+        let mut components: HashMap<usize, Vec<String>> = HashMap::new();
+        for (index, item) in items.iter().enumerate() {
+            components
+                .entry(union.find(index))
+                .or_default()
+                .push(item.path.display().to_string());
+        }
+        let mut groups = components
+            .into_values()
+            .filter(|members| members.len() >= 2)
+            .map(|mut members| {
+                members.sort();
+                members
+            })
+            .collect::<Vec<_>>();
+        groups.sort();
+        groups
     }
 }

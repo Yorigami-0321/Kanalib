@@ -102,6 +102,23 @@ fn main() {
                 "search metrics: query={query} hits={hits} runs={runs} p50_ms={p50:.2} p95_ms={p95:.2} max_ms={max:.2}"
             );
         }
+        if std::env::var_os("KANALIB_SIMILAR_SCAN").is_some() {
+            let assets = state.shared.lock().unwrap().assets.read().unwrap().clone();
+            let reviews = std::collections::HashMap::new();
+            for threshold in [6u8, 10, 14] {
+                let started = std::time::Instant::now();
+                let groups =
+                    crate::dedup::compute_similar_groups(&assets, threshold, &reviews, &[], &[]);
+                let members: usize = groups.iter().map(|group| group.assets.len()).sum();
+                log::info!(
+                    "similar metrics: threshold={threshold} assets={} groups={} members={} ms={:.1}",
+                    assets.len(),
+                    groups.len(),
+                    members,
+                    started.elapsed().as_secs_f64() * 1000.0
+                );
+            }
+        }
         return;
     }
 

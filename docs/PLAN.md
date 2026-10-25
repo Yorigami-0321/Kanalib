@@ -425,5 +425,9 @@ duplicate_reviews  group_key(sha1), state(pending/ignored/done), keeper_path, me
   - 取证工具（只在 `--features frame-profiler` 档编译，默认档零影响）：`src/alloc_stats.rs` 按 2 的幂尺寸档统计存活字节与 alloc/free 次数（`KANALIB_ALLOC_STATS=<秒>`；`KANALIB_ALLOC_TRACES=1` 记录 256K 档存活块分配栈，dbghelp 非线程安全故捕获全程持锁）；vendor `directx_atlas` 的 `KANALIB_ATLAS_STATS=<秒>` 计数与 `KANALIB_ATLAS_SKIP_UPLOAD=1` 开关；`KANALIB_WATCH_IMAGES=1` 按 Arc 指针登记存活解码图；`[profile.probe]`（release + debug=1）用于解析栈符号。探针脚本新增 `-AtlasStatsSecs` 并回显 alloc/atlas/watch 行。
   - 测量有效性：低前台帧率（4–112fps）的几轮出现过同样的 2.2GB 平台，属同一泄漏；任何一轮都必须先确认 `renders>0`、窗口在前台，否则数据作废（曾出现整轮 139MB 的假数据）。
   - 测量前提：gpui 只在窗口活动时记录 present 间隔，失焦会被 `inactive_frame_interval=33.333ms` 限到 30fps 且样本为 0；脚本现在每秒 `AppActivate` 本进程窗口，探针在 `presents==0` 时打 warn。
+- 相似扫描并行化（2026-10-25）：相似 = 64 位 pHash 汉明距离 ≤ 阈值（6/10/14），10k 档 5,000 万对、10 万档 50 亿对。
+  - 实现：按 i 区间切线程（`available_parallelism`，≤16）+ 每线程独立 `UnionFind`，结束后按每行根节点合并；sha1 先驻留成 u32，内层只剩异或+popcount；语义与原串行全量两两一致（含「sha1 相同则跳过」）。单元测试用 5,000 条 × 阈值 0/6/10/14/32 对串行参考实现做等价性校验。
+  - 基准（合成哈希）：BK-tree（czkawka 同款 `bk-tree` crate）在 100k、阈值 10/14 下为 38.7s / 66.5s，同数据并行暴力 2.05s / 2.13s（慢 20–30 倍）；10k 下 BK-tree 也慢 2–3 倍 → 不引入该依赖。
+  - 实测（10k 合成库真实 pHash）：阈值 6/10/14 分别 92.8 / 117.0 / 97.8ms（旧单线程约 270ms@阈值 10）；该库 pHash 高度聚集（阈值 14 时 9,987/10,000 并为一组），属压力测试数据特性，不代表真实照片库。
 - 合成库的模型输出只用于管道压力测试：9,990 张中 6,556 归为截图/文本、1,651 非动漫/实景、1,273 未分类，不能作为真实图库的分类质量指标。
 - Immich/WebDAV：按 2026-10-24 决定暂缓，先完成本地 MVP；阶段 2 再接入。
