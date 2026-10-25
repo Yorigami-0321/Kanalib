@@ -436,5 +436,8 @@ duplicate_reviews  group_key(sha1), state(pending/ignored/done), keeper_path, me
   - 相似扫描（并行实现）：阈值 6/10/14 → 2.69 / 2.65 / 2.99s，组数 1,697 / 10 / 1（合成库 pHash 高度聚集，阈值 14 时 99,990/100,000 并为一组）。
   - 滚动内存（45s、1,200 次跳转）：256K 档恒定 28.5MB / 131 块，总存活约 124MB；峰值工作集 326–329MB、静置 202.7MB。
   - 10 万滚动帧率：未能取到合成器口径——四轮探针里 100k 窗口始终未激活（`presents=0`、`renders≈1,230` 即失焦 30fps 节流），同期 10k 冒烟正常；疑与 35s 暖重扫期间窗口未响应、前台被占导致激活被拒有关。替代口径：`draw_ms` p50 4.0–4.2ms / p95 5.1–5.8ms / p99 6.6–7.3ms / max 89–195ms（10k 为 p50 2.5 / p99 4.5ms），远低于 16.67ms 预算；合成器 fps 需在窗口能保持前台时补测。
+- gpui-pre 0.3.9 升级验证（2026-10-25，分支 `gpui-039`）：上游 Ely 自 `f3cfbad` 起已重构为 workspace 多 crate；我们的 vendor 是 floral-notepaper 的旧单 crate 快照（同为 0.1.1，pin gpui-pre 0.3.8）。采用最小路径：保留 vendor 代码，仅把 pin 升到 0.3.9，并用 0.3.9 的平台 crate 重建 `vendor/gpui-pre-windows`（平台层 0.3.8→0.3.9 仅 4 文件 / ~111 行，`directx_atlas.rs` 与 `direct_write.rs` 零差异，我们的补丁原样保留）；核心 crate 0.3.9 有 21 文件 / ~2,140 行改动，但应用与旧 Ely 代码零改动即编译通过。
+  - 结果：`cargo check` / `cargo test` 全绿（20 通过 + 3 忽略）；`--features frame-profiler` 编译通过；10k 库 UI 截图中文渲染/布局正常；45s 滚动 163.3fps、present p99 11.11ms、超预算 0.1%、256K 档恒定 29MB（0.3.8 基线 164.9fps / 8.33ms / 0.03%）。
+  - 待办：中文 IME 冒烟（合成输入需人工操作）；通过后合并回 main。
 - 合成库的模型输出只用于管道压力测试：9,990 张中 6,556 归为截图/文本、1,651 非动漫/实景、1,273 未分类，不能作为真实图库的分类质量指标。
 - Immich/WebDAV：按 2026-10-24 决定暂缓，先完成本地 MVP；阶段 2 再接入。

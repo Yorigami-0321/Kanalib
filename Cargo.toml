@@ -19,9 +19,9 @@ blake3 = "1"
 dirs = "6"
 ely-gpui-component = { path = "vendor/ely-gpui-components" }
 env_logger = "0.11"
-gpui = { package = "gpui-pre", version = "=0.3.8", default-features = false, features = ["stacker"] }
+gpui = { package = "gpui-pre", version = "=0.3.9", default-features = false, features = ["stacker"] }
 hdrhistogram = { version = "7.6", optional = true }
-gpui_platform = { package = "gpui-pre-platform", version = "=0.3.8", features = ["font-kit"] }
+gpui_platform = { package = "gpui-pre-platform", version = "=0.3.9", features = ["font-kit"] }
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp", "gif", "bmp"] }
 log = "0.4"
 rfd = "0.17"
