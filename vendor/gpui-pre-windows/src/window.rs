@@ -940,6 +940,20 @@ impl PlatformWindow for WindowsWindow {
         }
     }
 
+    fn start_window_move(&self) {
+        // 客户端自绘标题栏：普通鼠标事件无法让系统接管拖动，
+        // 这里释放鼠标捕获后转成一次 HTCAPTION 非客户区按下，交给系统移动/贴边。
+        unsafe {
+            ReleaseCapture().log_err();
+            let _ = SendMessageW(
+                self.0.hwnd,
+                WM_NCLBUTTONDOWN,
+                Some(WPARAM(HTCAPTION as usize)),
+                Some(LPARAM(0)),
+            );
+        }
+    }
+
     fn minimize(&self) {
         unsafe { ShowWindowAsync(self.0.hwnd, SW_MINIMIZE).ok().log_err() };
     }

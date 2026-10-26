@@ -11,7 +11,6 @@ use ely_gpui_component::{
     navigation::{Command, CommandPalette},
     overlays::{ConfirmDialog, Lightbox, PromptDialog, Slide},
     primitives::{Icon, IconName, Severity},
-    shell::drag_region,
     theme::{ActiveTheme, ControlSize, IconSize, Mode, Theme},
 };
 use gpui::prelude::*;
@@ -19,8 +18,8 @@ use gpui::{
     AnyElement, App, ClickEvent, ClipboardItem, Context, Entity, FocusHandle, Focusable,
     FontWeight, Hsla, ImageCache, ImageCacheError, ImageCacheItem, IntoElement, KeyBinding,
     Modifiers, MouseButton, ObjectFit, ParentElement, Pixels, Render, RenderImage, Resource, Role,
-    ScrollStrategy, SharedString, Styled, Task, UniformListScrollHandle, WeakEntity, Window,
-    WindowControlArea, div, image_cache, img, px, uniform_list, white,
+    ScrollStrategy, SharedString, Styled, Task, UniformListScrollHandle, WeakEntity, Window, div,
+    image_cache, img, px, uniform_list, white,
 };
 #[cfg(feature = "frame-profiler")]
 use hdrhistogram::Histogram;
@@ -3486,6 +3485,9 @@ impl KanalibApp {
         let search_field = library.then(|| {
             div()
                 .w(search_width)
+                .on_mouse_down(MouseButton::Left, |_, window, _| {
+                    window.prevent_default()
+                })
                 .child(Input::new(search).clearable().least("搜索 / is:fav"))
         });
 
@@ -3562,7 +3564,14 @@ impl KanalibApp {
         }
         right = right.child(window_controls(window, colors));
 
-        drag_region("kanalib-titlebar", window, cx)
+        let drag_pressed = window.use_keyed_state("kanalib-titlebar-drag", cx, |_, _| false);
+        let drag_down = drag_pressed.clone();
+        let drag_move = drag_pressed.clone();
+        let drag_up = drag_pressed.clone();
+        let drag_out = drag_pressed;
+
+        div()
+            .id("kanalib-titlebar")
             .w_full()
             .flex_none()
             .h(px(TITLEBAR_HEIGHT))
@@ -3574,6 +3583,29 @@ impl KanalibApp {
             .bg(colors.bg)
             .border_b_1()
             .border_color(colors.border)
+            .on_mouse_down(MouseButton::Left, move |event, window, cx| {
+                if window.default_prevented() {
+                    return;
+                }
+                if event.click_count == 2 {
+                    window.zoom_window();
+                    drag_down.update(cx, |pressed, _| *pressed = false);
+                    return;
+                }
+                drag_down.update(cx, |pressed, _| *pressed = true);
+            })
+            .on_mouse_move(move |_, window, cx| {
+                if *drag_move.read(cx) {
+                    drag_move.update(cx, |pressed, _| *pressed = false);
+                    window.start_window_move();
+                }
+            })
+            .on_mouse_up(MouseButton::Left, move |_, _, cx| {
+                drag_up.update(cx, |pressed, _| *pressed = false);
+            })
+            .on_mouse_up_out(MouseButton::Left, move |_, _, cx| {
+                drag_out.update(cx, |pressed, _| *pressed = false);
+            })
             .child(left)
             .child(right)
             .into_any_element()
@@ -7403,6 +7435,13 @@ fn dedup_diff(group: &DuplicateGroup, assets: &[&Asset], colors: UiColors) -> An
         .into_any_element()
 }
 
+#[derive(Clone, Copy)]
+enum WindowButtonAction {
+    Minimize,
+    Maximize,
+    Close,
+}
+
 fn window_controls(window: &Window, colors: UiColors) -> impl IntoElement {
     let maximized = window.is_maximized();
     div()
@@ -7413,7 +7452,7 @@ fn window_controls(window: &Window, colors: UiColors) -> impl IntoElement {
         .child(window_control_button(
             "window-min",
             IconName::Minus,
-            WindowControlArea::Min,
+            WindowButtonAction::Minimize,
             false,
             colors,
         ))
@@ -7424,14 +7463,14 @@ fn window_controls(window: &Window, colors: UiColors) -> impl IntoElement {
             } else {
                 IconName::Square
             },
-            WindowControlArea::Max,
+            WindowButtonAction::Maximize,
             false,
             colors,
         ))
         .child(window_control_button(
             "window-close",
             IconName::X,
-            WindowControlArea::Close,
+            WindowButtonAction::Close,
             true,
             colors,
         ))
@@ -7440,30 +7479,35 @@ fn window_controls(window: &Window, colors: UiColors) -> impl IntoElement {
 fn window_control_button(
     id: &'static str,
     icon: IconName,
-    area: WindowControlArea,
+    action: WindowButtonAction,
     close: bool,
     colors: UiColors,
 ) -> impl IntoElement {
     let group = SharedString::from(format!("{id}-hover"));
+    let label = match action {
+        WindowButtonAction::Minimize => "最小化",
+        WindowButtonAction::Maximize => "最大化/还原",
+        WindowButtonAction::Close => "关闭",
+    };
     div()
         .id(id)
         .group(group.clone())
+        .role(Role::Button)
+        .aria_label(SharedString::from(label))
         .flex_none()
         .h_full()
         .w(px(46.))
         .flex()
         .items_center()
         .justify_center()
-        .window_control_area(area)
         .hover(move |style| style.bg(if close { colors.danger } else { colors.hover }))
         .on_mouse_down(MouseButton::Left, |_, window, _| {
             window.prevent_default()
         })
-        .on_click(move |_, window, _| match area {
-            WindowControlArea::Min => window.minimize_window(),
-            WindowControlArea::Max => window.zoom_window(),
-            WindowControlArea::Close => window.remove_window(),
-            WindowControlArea::Drag => {}
+        .on_click(move |_, window, _| match action {
+            WindowButtonAction::Minimize => window.minimize_window(),
+            WindowButtonAction::Maximize => window.zoom_window(),
+            WindowButtonAction::Close => window.remove_window(),
         })
         .child(
             Icon::new(icon)
