@@ -179,10 +179,10 @@ impl RenderOnce for ConfirmDialog {
                     .variant(variant)
                     .on_click(move |_, window, cx| {
                         log::info!("confirm dialog {id:?}: confirmed");
-                        close(window, cx);
                         if let Some(on_confirm) = &on_confirm {
                             on_confirm(window, cx);
                         }
+                        close(window, cx);
                     })
             })
     }

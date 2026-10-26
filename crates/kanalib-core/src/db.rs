@@ -256,6 +256,28 @@ impl Db {
         self.load_library(&[folder.to_string()])
     }
 
+    pub fn asset_paths(&self, folder: &str) -> Result<Vec<PathBuf>> {
+        let mut statement = self.conn.prepare("SELECT path FROM assets WHERE folder = ?1")?;
+        let rows = statement.query_map([folder], |row| row.get::<_, String>(0))?;
+        Ok(rows
+            .collect::<rusqlite::Result<Vec<_>>>()?
+            .into_iter()
+            .map(PathBuf::from)
+            .collect())
+    }
+
+    pub fn asset_paths_by_sha1(&self, folder: &str, sha1: &str) -> Result<Vec<PathBuf>> {
+        let mut statement = self.conn.prepare(
+            "SELECT path FROM assets WHERE folder = ?1 AND sha1 = ?2",
+        )?;
+        let rows = statement.query_map(params![folder, sha1], |row| row.get::<_, String>(0))?;
+        Ok(rows
+            .collect::<rusqlite::Result<Vec<_>>>()?
+            .into_iter()
+            .map(PathBuf::from)
+            .collect())
+    }
+
     pub fn all_thumb_paths(&self) -> Result<HashSet<PathBuf>> {
         let mut statement = self
             .conn
@@ -885,6 +907,79 @@ impl Db {
         self.load_asset(path)
     }
 
+    /// 文件重命名/移动时把原有资产行迁到新路径，保留标签、评分、收藏与人工标签。
+    pub fn move_asset_media(
+        &self,
+        old_path: &Path,
+        new_path: &Path,
+        folder: &str,
+        thumb: Option<&Path>,
+        width: u32,
+        height: u32,
+        bytes: u64,
+        mtime: u64,
+        hashes: &ContentHashes,
+    ) -> Result<Asset> {
+        let old_string = old_path.to_string_lossy().to_string();
+        let new_string = new_path.to_string_lossy().to_string();
+        if old_string == new_string {
+            return self.load_asset(new_path);
+        }
+        let name = new_path
+            .file_name()
+            .map(|value| value.to_string_lossy().to_string())
+            .unwrap_or_else(|| new_string.clone());
+        let thumb_string = thumb
+            .map(|value| value.to_string_lossy().to_string())
+            .unwrap_or_default();
+        let valid_hashes = !hashes.sha1.is_empty() && !hashes.blake3.is_empty();
+        let source_id = self.source_id(folder)?;
+        let tx = self.conn.unchecked_transaction()?;
+        let conflict: Option<i64> = tx
+            .query_row("SELECT id FROM assets WHERE path = ?1", [&new_string], |row| {
+                row.get(0)
+            })
+            .optional()?;
+        if conflict.is_some() {
+            bail!("asset path already exists: {new_string}");
+        }
+        let old_id: Option<i64> = tx
+            .query_row("SELECT id FROM assets WHERE path = ?1", [&old_string], |row| {
+                row.get(0)
+            })
+            .optional()?;
+        let Some(old_id) = old_id else {
+            bail!("asset not found: {old_string}");
+        };
+        tx.execute(
+            "UPDATE assets SET
+                source_id = ?1, path = ?2, folder = ?3, name = ?4, mime = ?5,
+                width = ?6, height = ?7, bytes = ?8, mtime = ?9, thumb = ?10,
+                sha1 = ?11, blake3 = ?12, phash = ?13, damage = ?14,
+                thumb_state = 'done'
+             WHERE id = ?15",
+            params![
+                source_id,
+                new_string,
+                folder,
+                name,
+                mime_for(new_path),
+                width,
+                height,
+                bytes as i64,
+                mtime as i64,
+                thumb_string,
+                valid_hashes.then_some(hashes.sha1.as_str()),
+                valid_hashes.then_some(hashes.blake3.as_str()),
+                (valid_hashes && hashes.decode_ok).then_some(hashes.phash as i64),
+                hashes.decode_error.as_deref(),
+                old_id,
+            ],
+        )?;
+        tx.commit()?;
+        self.load_asset(new_path)
+    }
+
     pub fn search_paths(&self, folder: &str, tokens: &[String]) -> Result<HashSet<PathBuf>> {
         self.search_paths_in(&[folder.to_string()], tokens)
     }
@@ -1425,6 +1520,69 @@ mod tests {
             )
             .unwrap();
         assert_eq!(has_damage, 1);
+    }
+
+    #[test]
+    fn moving_asset_keeps_tags_favorite_and_star() {
+        let root = std::env::temp_dir().join(format!(
+            "kanalib-rename-asset-test-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        let db = Db::open(&root.join("kanalib.db")).unwrap();
+        let old = PathBuf::from("C:\\lib\\old.png");
+        let new = PathBuf::from("C:\\lib\\renamed.png");
+        let hashes = ContentHashes {
+            sha1: "c".repeat(40),
+            blake3: "d".repeat(64),
+            phash: 42,
+            decode_ok: true,
+            decode_error: None,
+        };
+        db.upsert_meta("C:\\lib", &old, None, 10, 20, 100, 10, &hashes, false)
+            .unwrap();
+        let mut asset = db.load_asset(&old).unwrap();
+        asset.tagged = true;
+        asset.group = "角色: 测试".to_string();
+        asset.rating = "S".to_string();
+        asset.tags = vec![crate::model::TagHit {
+            tag: "1girl".to_string(),
+            category: "general".to_string(),
+            score: 0.99,
+            vocab_index: None,
+        }];
+        db.update_tags(&asset).unwrap();
+        db.set_favorite(std::slice::from_ref(&old), true).unwrap();
+        db.set_star(std::slice::from_ref(&old), 4).unwrap();
+        db.add_manual_tags(std::slice::from_ref(&old), "manual_tag", "manual")
+            .unwrap();
+
+        let moved = db
+            .move_asset_media(&old, &new, "C:\\lib", None, 10, 20, 100, 10, &hashes)
+            .unwrap();
+        assert_eq!(moved.path, new);
+        assert!(moved.tagged);
+        assert_eq!(moved.group, "角色: 测试");
+        assert_eq!(moved.rating, "S");
+        assert!(moved.favorite);
+        assert_eq!(moved.star, 4);
+        assert!(moved.tags.iter().any(|tag| tag.tag == "1girl"));
+        assert!(
+            moved
+                .manual_tags
+                .iter()
+                .any(|tag| tag.tag == "manual_tag")
+        );
+        assert!(!db.asset_paths("C:\\lib").unwrap().contains(&old));
+        assert!(
+            db.asset_paths_by_sha1("C:\\lib", &hashes.sha1)
+                .unwrap()
+                .contains(&new)
+        );
+
+        drop(db);
+        fs::remove_dir_all(&root).unwrap();
     }
 
     #[test]

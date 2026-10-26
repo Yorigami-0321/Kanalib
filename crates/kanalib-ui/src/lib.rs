@@ -2087,6 +2087,7 @@ impl Render for KanalibApp {
             saved_searches,
             blocked_tags,
             source_aliases,
+            pending_cleanup,
         ) = {
             let shared = self.state.shared.lock().unwrap();
             let revision = shared.revision;
@@ -2116,6 +2117,7 @@ impl Render for KanalibApp {
                 shared.saved_searches.clone(),
                 shared.blocked_tags.clone(),
                 shared.source_aliases.clone(),
+                shared.pending_cleanup.clone(),
             )
         };
         if let Some(counts) = counts_view {
@@ -2133,6 +2135,26 @@ impl Render for KanalibApp {
         let query_changed = search_text != self.last_search;
         let scan_changed = scanning != self.last_scanning;
         self.last_scanning = scanning;
+        if scan_changed && !scanning && !self.selection.is_empty() {
+            let selected = self.selection.clone();
+            let retained = assets
+                .read()
+                .unwrap()
+                .iter()
+                .filter(|asset| selected.contains(&asset.path))
+                .map(|asset| asset.path.clone())
+                .collect::<HashSet<_>>();
+            if retained.len() != selected.len() {
+                self.selection = Arc::new(retained);
+                if self
+                    .selection_anchor
+                    .as_ref()
+                    .is_some_and(|path| !self.selection.contains(path))
+                {
+                    self.selection_anchor = None;
+                }
+            }
+        }
         if query_changed {
             self.last_search = search_text.clone();
         }
@@ -2765,6 +2787,44 @@ impl Render for KanalibApp {
             })
             .into_any_element()
         });
+        let cleanup_dialog = pending_cleanup.as_ref().map(|pending| {
+            let close = this.clone();
+            let confirm = this.clone();
+            let roots = pending
+                .roots
+                .iter()
+                .map(|root| source_label(root, &source_aliases))
+                .collect::<Vec<_>>()
+                .join("、");
+            let count = pending.paths.len();
+            ConfirmDialog::new(
+                "cleanup-missing-dialog",
+                "移除缺失图片记录？",
+                format!(
+                    "最近一次完整扫描未在磁盘上找到 {count} 张图片。\n来源：{roots}\n\n确认后只会从图库移除这些记录，不会删除磁盘文件。\n如果来源是移动硬盘或网络盘，请先取消并恢复连接。"
+                ),
+                move |_, cx| {
+                    let _ = close.update(cx, |app, cx| {
+                        app.state.cancel_pending_cleanup();
+                        cx.notify();
+                    });
+                },
+            )
+            .confirm("移除记录")
+            .destructive()
+            .on_confirm(move |_, cx| {
+                let _ = confirm.update(cx, |app, cx| {
+                    match app.state.confirm_pending_cleanup() {
+                        Ok(_) => app.clear_multi_selection(),
+                        Err(error) => {
+                            app.state.set_error(format!("清理缺失记录失败：{error:#}"));
+                        }
+                    }
+                    cx.notify();
+                });
+            })
+            .into_any_element()
+        });
         let source_context_menu = self.source_menu.as_ref().map(|state| {
             ContextMenu::new(
                 "source-context-global",
@@ -2778,7 +2838,6 @@ impl Render for KanalibApp {
             &this,
             window,
             cx,
-            &filter,
             &filter_title,
             visible_count,
             &search,
@@ -2813,6 +2872,7 @@ impl Render for KanalibApp {
             .children(rescan_dialog)
             .children(source_rename_dialog)
             .children(source_context_menu)
+            .children(cleanup_dialog)
             .child(ToastViewport::new("kanalib-toasts", &self.toaster))
             .on_action(cx.listener(|this, _: &OpenPalette, _, cx| {
                 let cleanup = if this.palette_open {
@@ -3451,7 +3511,6 @@ impl KanalibApp {
         this: &Entity<Self>,
         window: &mut Window,
         cx: &mut Context<Self>,
-        filter: &Filter,
         filter_title: &str,
         visible: usize,
         search: &Entity<TextInput>,
@@ -3476,20 +3535,9 @@ impl KanalibApp {
         } else {
             px(220.)
         };
-        let this_clear = this.clone();
         let this_palette = this.clone();
         let this_theme = this.clone();
 
-        let clear = (library && *filter != Filter::All).then(|| {
-            IconButton::new("clear-filter", IconName::X)
-                .size(ControlSize::Sm)
-                .tooltip("清除筛选")
-                .on_click(move |_, _, cx| {
-                    let _ = this_clear.update(cx, |app, cx| {
-                        app.set_filter(Filter::All, cx);
-                    });
-                })
-        });
         let palette = library.then(|| {
             IconButton::new("open-palette", IconName::Command)
                 .size(ControlSize::Sm)
@@ -3611,7 +3659,6 @@ impl KanalibApp {
             .gap(px(4.));
         if library {
             controls = controls
-                .children(clear)
                 .children(palette)
                 .children(sort)
                 .children(density)

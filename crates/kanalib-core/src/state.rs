@@ -16,7 +16,8 @@ use crate::dedup::{
 };
 use crate::media;
 use crate::model::{
-    Asset, Filter, SavedSearch, Shared, TagHit, TagSummary, is_image, normalize_tag_name,
+    Asset, Filter, PendingCleanup, SavedSearch, Shared, TagHit, TagSummary, is_image,
+    normalize_tag_name,
 };
 use crate::sidecar::{Sidecar, project_root, repair_file};
 
@@ -327,6 +328,7 @@ impl AppState {
             let mut shared = self.shared.lock().unwrap();
             shared.scanning = true;
             shared.error = None;
+            shared.pending_cleanup = None;
             shared.status = "扫描中...".into();
         }
         let state = self.clone();
@@ -401,6 +403,7 @@ impl AppState {
             let mut shared = self.shared.lock().unwrap();
             shared.scanning = true;
             shared.error = None;
+            shared.pending_cleanup = None;
             shared.status = "扫描中...".into();
         }
         let cancel = Arc::new(AtomicBool::new(false));
@@ -752,6 +755,45 @@ impl AppState {
             total += db.retry_failed(root)?;
         }
         Ok(total)
+    }
+
+    pub fn cancel_pending_cleanup(&self) {
+        let mut shared = self.shared.lock().unwrap();
+        let Some(pending) = shared.pending_cleanup.take() else {
+            return;
+        };
+        shared.error = None;
+        shared.status = format!("已保留 {} 张缺失图片记录", pending.paths.len());
+        shared.revision = shared.revision.wrapping_add(1);
+    }
+
+    /// 用户在弹窗中确认后，移除完整扫描确认缺失的资产记录；不触碰磁盘文件。
+    pub fn confirm_pending_cleanup(&self) -> Result<usize> {
+        let pending = self.shared.lock().unwrap().pending_cleanup.clone();
+        let Some(pending) = pending else {
+            return Ok(0);
+        };
+        let db = Db::open(&self.db_path)?;
+        let paths = pending.paths.iter().cloned().collect::<Vec<_>>();
+        let removed = db.delete_assets(&paths)?;
+        let mut queue = JobCounts::default();
+        for root in &pending.roots {
+            let root = root.to_string_lossy();
+            if let Ok(counts) = db.tag_job_counts(&root) {
+                queue.pending += counts.pending;
+                queue.running += counts.running;
+                queue.error += counts.error;
+            }
+        }
+        let mut shared = self.shared.lock().unwrap();
+        shared.pending_cleanup = None;
+        shared.remove_assets(&pending.paths);
+        shared.refresh_after_removal(&pending.paths);
+        shared.set_queue_counts(queue.pending, queue.running, queue.error);
+        shared.error = None;
+        shared.status = format!("已从图库移除 {} 张缺失图片记录", removed);
+        shared.revision = shared.revision.wrapping_add(1);
+        Ok(removed)
     }
 
     /// 容错重解单张图片：重建预览缓存并用容错模式重新打标，不修改原文件。
@@ -1524,6 +1566,28 @@ fn index(
     result
 }
 
+fn rename_candidate(
+    db: &Db,
+    folder: &str,
+    sha1: &str,
+    new_path: &Path,
+    files: &[PathBuf],
+) -> Result<Option<PathBuf>> {
+    for candidate in db.asset_paths_by_sha1(folder, sha1)? {
+        if candidate != new_path && files.binary_search(&candidate).is_err() {
+            return Ok(Some(candidate));
+        }
+    }
+    Ok(None)
+}
+
+fn append_scan_warning(shared: &mut Shared, message: String) {
+    shared.error = Some(match shared.error.take() {
+        Some(previous) if !previous.is_empty() => format!("{previous}\n{message}"),
+        _ => message,
+    });
+}
+
 fn index_inner(
     state: &Arc<AppState>,
     folder: &Path,
@@ -1535,10 +1599,12 @@ fn index_inner(
     let folder_string = folder.to_string_lossy().to_string();
     let walk_start = Instant::now();
     let mut files = Vec::new();
+    let mut walk_complete = true;
     for entry in WalkDir::new(folder).follow_links(false) {
         let entry = match entry {
             Ok(entry) => entry,
             Err(error) => {
+                walk_complete = false;
                 log::warn!("walk error: {error}");
                 continue;
             }
@@ -1579,6 +1645,7 @@ fn index_inner(
             .map(|duration| duration.as_secs())
             .unwrap_or(0);
         let stored = db.stored_meta(path)?;
+        let existed_before = stored.is_some();
         let stored_media = stored
             .as_ref()
             .filter(|meta| meta.mtime == mtime && meta.bytes == bytes)
@@ -1655,6 +1722,54 @@ fn index_inner(
                 }
             }
         };
+        if !existed_before && walk_complete && !hashes.sha1.is_empty() {
+            match rename_candidate(&db, &folder_string, &hashes.sha1, path, &files) {
+                Ok(Some(old_path)) => {
+                    match db.move_asset_media(
+                        &old_path,
+                        path,
+                        &folder_string,
+                        thumb.as_deref(),
+                        width,
+                        height,
+                        bytes,
+                        mtime,
+                        &hashes,
+                    ) {
+                        Ok(asset) => {
+                            {
+                                let mut shared = state.shared.lock().unwrap();
+                                shared.move_asset(&old_path, asset);
+                                shared.status = format!(
+                                    "已识别重命名 {}/{} · {}",
+                                    index + 1,
+                                    files.len(),
+                                    path.file_name()
+                                        .map(|name| name.to_string_lossy().to_string())
+                                        .unwrap_or_default()
+                                );
+                            }
+                            stats.imported += 1;
+                            log::info!(
+                                "renamed asset: {} -> {}",
+                                old_path.display(),
+                                path.display()
+                            );
+                            continue;
+                        }
+                        Err(error) => {
+                            log::warn!(
+                                "rename adopt {} -> {} failed: {error:#}; falling back to upsert",
+                                old_path.display(),
+                                path.display()
+                            );
+                        }
+                    }
+                }
+                Ok(None) => {}
+                Err(error) => log::warn!("rename lookup {}: {error:#}", path.display()),
+            }
+        }
         let asset = db.upsert_meta(
             &folder_string,
             path,
@@ -1690,6 +1805,74 @@ fn index_inner(
         }
     }
     stats.import_secs = import_start.elapsed().as_secs_f64();
+
+    let folder_label = folder
+        .file_name()
+        .map(|name| name.to_string_lossy().to_string())
+        .unwrap_or_else(|| folder.display().to_string());
+    if !cancel.load(Ordering::SeqCst) {
+        if !walk_complete {
+            let mut shared = state.shared.lock().unwrap();
+            append_scan_warning(
+                &mut shared,
+                format!(
+                    "来源「{folder_label}」未能完整遍历（可能离线或权限不足），已保留原图库记录，未自动移除任何图片。"
+                ),
+            );
+            shared.revision = shared.revision.wrapping_add(1);
+            log::warn!("incomplete walk for {}", folder.display());
+        } else {
+            let db_paths = db.asset_paths(&folder_string)?;
+            let missing = db_paths
+                .iter()
+                .filter(|path| files.binary_search(path).is_err())
+                .cloned()
+                .collect::<Vec<_>>();
+            if !missing.is_empty() {
+                let total = db_paths.len();
+                let missing_count = missing.len();
+                let full_purge = total > 0 && missing_count == total;
+                let large_purge = missing_count >= 10 && missing_count * 2 >= total;
+                if full_purge || large_purge {
+                    let missing_set = missing.into_iter().collect::<HashSet<_>>();
+                    let mut shared = state.shared.lock().unwrap();
+                    let pending = shared.pending_cleanup.get_or_insert_with(|| PendingCleanup {
+                        roots: Vec::new(),
+                        paths: HashSet::new(),
+                    });
+                    if !pending.roots.iter().any(|root| root == folder) {
+                        pending.roots.push(folder.to_path_buf());
+                    }
+                    pending.paths.extend(missing_set);
+                    append_scan_warning(
+                        &mut shared,
+                        format!(
+                            "来源「{folder_label}」有 {missing_count} 张图片不在磁盘上。为避免来源离线或目录不完整导致误删，已保留记录，请确认是否从图库移除。"
+                        ),
+                    );
+                    shared.revision = shared.revision.wrapping_add(1);
+                    log::warn!(
+                        "cleanup deferred for {}: {} missing of {} assets",
+                        folder.display(),
+                        missing_count,
+                        total
+                    );
+                } else {
+                    let missing_set = missing.iter().cloned().collect::<HashSet<_>>();
+                    let removed = db.delete_assets(&missing)?;
+                    let mut shared = state.shared.lock().unwrap();
+                    shared.remove_assets(&missing_set);
+                    shared.status = format!("已移除 {} 张磁盘上已不存在的图片", removed);
+                    shared.revision = shared.revision.wrapping_add(1);
+                    log::info!(
+                        "cleanup: removed {} missing assets under {}",
+                        removed,
+                        folder.display()
+                    );
+                }
+            }
+        }
+    }
 
     {
         let mut shared = state.shared.lock().unwrap();

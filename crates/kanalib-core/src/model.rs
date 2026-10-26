@@ -517,6 +517,13 @@ pub fn normalize_tag_name(value: &str) -> String {
         .to_lowercase()
 }
 
+/// 完整扫描确认磁盘缺失、但数量较大时需要用户确认的清理批次。
+#[derive(Clone, Debug)]
+pub struct PendingCleanup {
+    pub roots: Vec<PathBuf>,
+    pub paths: HashSet<PathBuf>,
+}
+
 #[derive(Debug)]
 pub struct Shared {
     pub roots: Vec<PathBuf>,
@@ -538,6 +545,8 @@ pub struct Shared {
     pub blocked_tags: HashSet<String>,
     /// 来源显示别名；键为根目录，只影响 UI，不改磁盘目录。
     pub source_aliases: HashMap<PathBuf, String>,
+    /// 磁盘上已缺失、等待用户确认是否从图库移除的批量记录。
+    pub pending_cleanup: Option<PendingCleanup>,
 }
 
 impl Shared {
@@ -580,6 +589,7 @@ impl Shared {
             saved_searches: Vec::new(),
             blocked_tags: HashSet::new(),
             source_aliases: HashMap::new(),
+            pending_cleanup: None,
         }
     }
 
@@ -652,6 +662,26 @@ impl Shared {
             assets.push(asset);
         }
         drop(assets);
+        self.revision = self.revision.wrapping_add(1);
+    }
+
+    /// 文件被重命名/移动后，用同一评分与标签替换旧路径，避免重新打标。
+    pub fn move_asset(&mut self, old_path: &Path, asset: Asset) {
+        let new_path = asset.path.clone();
+        {
+            let mut assets = self.assets.write().unwrap();
+            if let Some(index) = assets.iter().position(|item| item.path == old_path) {
+                self.counts.remove(&assets[index]);
+                self.counts.add(&asset);
+                assets[index] = asset;
+            } else {
+                self.counts.add(&asset);
+                assets.push(asset);
+            }
+        }
+        if self.selected.as_deref() == Some(old_path) {
+            self.selected = Some(new_path);
+        }
         self.revision = self.revision.wrapping_add(1);
     }
 }
