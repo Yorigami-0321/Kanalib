@@ -4,7 +4,7 @@ use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 
 use ely_gpui_component::{
-    buttons::{Button, ButtonVariant, IconButton, SegmentedControl},
+    buttons::{Button, ButtonVariant, IconButton},
     feedback::{Toast, ToastViewport, Toaster},
     forms::{Choice, Input, Rating, TagInput, TextInput},
     menus::{ContextMenu, DropdownMenu, Menu, MenuItem},
@@ -290,6 +290,12 @@ impl DedupFilter {
 enum DedupConfirm {
     Group(String),
     Batch,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RescanOrigin {
+    Library,
+    Dedup,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -631,6 +637,7 @@ pub struct KanalibApp {
     dedup_show_all: bool,
     dedup_confirm: Option<DedupConfirm>,
     dedup_notice: Option<String>,
+    rescan_confirm: Option<RescanOrigin>,
     settings_notice: Option<String>,
     refresh_task: Option<Task<()>>,
     thumb_cache: Entity<ThumbCache>,
@@ -763,6 +770,7 @@ impl KanalibApp {
             dedup_show_all: false,
             dedup_confirm: None,
             dedup_notice: None,
+            rescan_confirm: None,
             settings_notice: None,
             refresh_task: None,
             thumb_cache: cx.new(|cx| {
@@ -1030,16 +1038,49 @@ impl KanalibApp {
     }
 
     fn rescan(&mut self, cx: &mut Context<Self>) {
+        self.request_rescan(RescanOrigin::Library, cx);
+    }
+
+    /// 图库重扫会清空相似扫描结果。已有相似组时先确认，避免看起来像“重置”。
+    fn request_rescan(&mut self, origin: RescanOrigin, cx: &mut Context<Self>) {
+        let similar_groups = {
+            let shared = self.state.shared.lock().unwrap();
+            if shared.dedup.similar_scanned {
+                shared.dedup.similar_groups.len()
+            } else {
+                0
+            }
+        };
+        if similar_groups > 0 {
+            self.rescan_confirm = Some(origin);
+        } else {
+            self.perform_rescan(origin, cx);
+        }
+        cx.notify();
+    }
+
+    fn perform_rescan(&mut self, origin: RescanOrigin, cx: &mut Context<Self>) {
+        self.rescan_confirm = None;
         self.state.start_scan();
-        self.last_search.clear();
-        self.search_paths = None;
-        self.screen = Screen::Library;
-        self.dedup_selected = None;
-        self.dedup_confirm = None;
-        self.clear_multi_selection();
-        self.focus_grid_pending = true;
-        self.auto_select_pending = true;
-        self.grid_scroll.scroll_to_item(0, ScrollStrategy::Top);
+        match origin {
+            RescanOrigin::Library => {
+                self.last_search.clear();
+                self.search_paths = None;
+                self.screen = Screen::Library;
+                self.dedup_selected = None;
+                self.dedup_confirm = None;
+                self.clear_multi_selection();
+                self.focus_grid_pending = true;
+                self.auto_select_pending = true;
+                self.grid_scroll.scroll_to_item(0, ScrollStrategy::Top);
+            }
+            RescanOrigin::Dedup => {
+                self.screen = Screen::Duplicates;
+                self.dedup_selected = None;
+                self.dedup_confirm = None;
+                self.dedup_notice = None;
+            }
+        }
         cx.notify();
     }
 
@@ -1996,7 +2037,7 @@ impl Render for KanalibApp {
         let colors = UiColors::from_theme(cx);
         let this = cx.entity();
         let search = window.use_keyed_state("kanalib-search", cx, |window, cx| {
-            TextInput::new(window, cx).placeholder("搜索文件名 / 标签 / is:fav / star:>=4")
+            TextInput::new(window, cx).placeholder("搜索 / 标签 / is:fav")
         });
         if self.search_input.is_none() {
             self.search_input = Some(search.clone());
@@ -2299,6 +2340,13 @@ impl Render for KanalibApp {
             Filter::Source(root) => source_label(root, &source_aliases),
             _ => filter.label(),
         };
+        let dedup_pending_total = dedup_exact_summary.pending
+            + if similar_scanned {
+                dedup_similar_summary.pending
+            } else {
+                0
+            };
+        let dedup_similar_count = dedup_similar_groups.len();
         let sidebar = self.render_sidebar(
             &this,
             &roots,
@@ -2313,10 +2361,7 @@ impl Render for KanalibApp {
             &filter,
             &counts,
             self.screen,
-            self.dedup_mode,
-            dedup_exact_summary.pending,
-            dedup_similar_summary.pending,
-            similar_scanned,
+            dedup_pending_total,
             &saved_searches,
             &blocked_tags,
             &search,
@@ -2414,8 +2459,8 @@ impl Render for KanalibApp {
                     Command::new("goto:fav", "收藏").icon(IconName::Heart),
                     Command::new("goto:failed", "失败").icon(IconName::ImageOff),
                     Command::new("goto:damaged", "损坏的图片").icon(IconName::ImageOff),
-                    Command::new("goto:dup", "重复项").icon(IconName::Copy),
-                    Command::new("goto:similar", "相似图片").icon(IconName::LayoutGrid),
+                    Command::new("goto:dup", "重复项 · 完全重复").icon(IconName::Copy),
+                    Command::new("goto:similar", "重复项 · 相似图片").icon(IconName::LayoutGrid),
                     Command::new("goto:tags", "标签管理").icon(IconName::Tag),
                     Command::new("goto:settings", "设置").icon(IconName::SlidersHorizontal),
                 ],
@@ -2495,7 +2540,7 @@ impl Render for KanalibApp {
             .group(
                 "图库",
                 [
-                    Command::new("scan:rescan", "重新扫描").icon(IconName::RefreshCw),
+                    Command::new("scan:rescan", "重新扫描图库").icon(IconName::RefreshCw),
                     Command::new("scan:retry", "重试失败的打标").icon(IconName::WandSparkles),
                     Command::new("view:folder", "添加文件夹").icon(IconName::FolderOpen),
                 ],
@@ -2697,6 +2742,29 @@ impl Render for KanalibApp {
             })
             .into_any_element()
         });
+        let rescan_dialog = self.rescan_confirm.map(|origin| {
+            let close = this.clone();
+            let confirm = this.clone();
+            ConfirmDialog::new(
+                "rescan-dialog",
+                "重新扫描图库？",
+                format!(
+                    "重新扫描会重新索引图库，并清空当前相似扫描结果。\n当前有 {} 组相似图片结果。",
+                    dedup_similar_count
+                ),
+                move |_, cx| {
+                    let _ = close.update(cx, |app, cx| {
+                        app.rescan_confirm = None;
+                        cx.notify();
+                    });
+                },
+            )
+            .confirm("重新扫描图库")
+            .on_confirm(move |_, cx| {
+                let _ = confirm.update(cx, |app, cx| app.perform_rescan(origin, cx));
+            })
+            .into_any_element()
+        });
         let source_context_menu = self.source_menu.as_ref().map(|state| {
             ContextMenu::new(
                 "source-context-global",
@@ -2714,7 +2782,6 @@ impl Render for KanalibApp {
             &filter_title,
             visible_count,
             &search,
-            scanning,
             colors,
         );
         let shell = div()
@@ -2743,6 +2810,7 @@ impl Render for KanalibApp {
             .children(save_dialog)
             .children(tag_dialog)
             .children(remove_source_dialog)
+            .children(rescan_dialog)
             .children(source_rename_dialog)
             .children(source_context_menu)
             .child(ToastViewport::new("kanalib-toasts", &self.toaster))
@@ -2791,6 +2859,7 @@ impl Render for KanalibApp {
             && self.tag_dialog.is_none()
             && self.source_remove_confirm.is_none()
             && self.source_rename.is_none()
+            && self.rescan_confirm.is_none()
         {
             window.focus(&self.grid_focus, cx);
             self.focus_grid_pending = false;
@@ -2902,10 +2971,7 @@ impl KanalibApp {
         filter: &Filter,
         counts: &Counts,
         screen: Screen,
-        dedup_mode: GroupKind,
         dedup_pending: usize,
-        dedup_similar_pending: usize,
-        dedup_similar_scanned: bool,
         saved_searches: &[SavedSearch],
         blocked_tags: &HashSet<String>,
         search: &Entity<TextInput>,
@@ -3021,21 +3087,8 @@ impl KanalibApp {
             SharedString::from("dedup-entry"),
             "重复项",
             dedup_pending.to_string(),
-            screen == Screen::Duplicates && dedup_mode == GroupKind::Exact,
+            screen == Screen::Duplicates,
             GroupKind::Exact,
-            this_dedup.clone(),
-            colors,
-        ));
-        body = body.child(dedup_row(
-            SharedString::from("dedup-similar"),
-            "相似图片",
-            if dedup_similar_scanned {
-                dedup_similar_pending.to_string()
-            } else {
-                "扫描".to_string()
-            },
-            screen == Screen::Duplicates && dedup_mode == GroupKind::Similar,
-            GroupKind::Similar,
             this_dedup,
             colors,
         ));
@@ -3238,7 +3291,7 @@ impl KanalibApp {
                                 let _ = this_choose.update(cx, |app, cx| app.choose_folder(cx));
                             }),
                     )
-                    .child(Button::new("rescan", "重新扫描").on_click(move |_, _, cx| {
+                    .child(Button::new("rescan", "重新扫描图库").on_click(move |_, _, cx| {
                         let _ = this_rescan.update(cx, |app, cx| app.rescan(cx));
                     }))
                     .children((counts.failed > 0).then(|| {
@@ -3402,20 +3455,34 @@ impl KanalibApp {
         filter_title: &str,
         visible: usize,
         search: &Entity<TextInput>,
-        scanning: bool,
         colors: UiColors,
     ) -> AnyElement {
         let library = self.screen == Screen::Library;
-        let wide = window.viewport_size().width >= px(1180.);
-        let search_width = if wide { px(200.) } else { px(140.) };
+        let width = window.viewport_size().width;
+        let centered_search = library && width >= px(1250.);
+        let compact = width < px(1100.);
+        let search_width = if centered_search {
+            if width >= px(1900.) {
+                px(420.)
+            } else if width >= px(1600.) {
+                px(360.)
+            } else if width >= px(1400.) {
+                px(300.)
+            } else {
+                px(220.)
+            }
+        } else if compact {
+            px(180.)
+        } else {
+            px(220.)
+        };
         let this_clear = this.clone();
-        let this_stop = this.clone();
         let this_palette = this.clone();
-        let this_density = this.clone();
         let this_theme = this.clone();
 
         let clear = (library && *filter != Filter::All).then(|| {
             IconButton::new("clear-filter", IconName::X)
+                .size(ControlSize::Sm)
                 .tooltip("清除筛选")
                 .on_click(move |_, _, cx| {
                     let _ = this_clear.update(cx, |app, cx| {
@@ -3423,19 +3490,9 @@ impl KanalibApp {
                     });
                 })
         });
-        let stop = (library && scanning).then(|| {
-            Button::new("stop-main", "停止")
-                .variant(ButtonVariant::Danger)
-                .size(ControlSize::Sm)
-                .on_click(move |_, _, cx| {
-                    let _ = this_stop.update(cx, |app, cx| {
-                        app.state.stop();
-                        cx.notify();
-                    });
-                })
-        });
         let palette = library.then(|| {
             IconButton::new("open-palette", IconName::Command)
+                .size(ControlSize::Sm)
                 .tooltip("命令面板 (Ctrl+K)")
                 .on_click(move |_, _, cx| {
                     let _ = this_palette.update(cx, |app, cx| {
@@ -3450,16 +3507,12 @@ impl KanalibApp {
                 .variant(ButtonVariant::Ghost)
         });
         let density = library.then(|| {
-            SegmentedControl::new("library-density", self.density.key())
-                .size(ControlSize::Sm)
-                .segment("small", "小", None)
-                .segment("medium", "中", None)
-                .segment("large", "大", None)
-                .on_change(move |value, _, cx| {
-                    let _ = this_density.update(cx, |app, cx| {
-                        app.set_density(DensityPreset::from_key(value.as_ref()), cx)
-                    });
-                })
+            density_control(
+                "library-density",
+                self.density,
+                this.clone(),
+                colors,
+            )
         });
         let theme = IconButton::new(
             "theme-toggle",
@@ -3469,6 +3522,7 @@ impl KanalibApp {
                 IconName::Moon
             },
         )
+        .size(ControlSize::Sm)
         .tooltip(if self.theme_dark {
             "切换到浅色主题"
         } else {
@@ -3491,13 +3545,13 @@ impl KanalibApp {
                 .child(Input::new(search).clearable().least("搜索 / is:fav"))
         });
 
+        let show_brand = !library || !compact;
         let mut left = div()
-            .flex_1()
+            .flex_none()
             .min_w(px(0.))
             .flex()
             .items_center()
             .gap(px(8.));
-        let show_brand = !library || wide;
         if show_brand {
             left = left.child(
                 div()
@@ -3511,24 +3565,29 @@ impl KanalibApp {
             }
         }
         if library {
-            left = left
-                .child(
-                    div()
-                        .flex_1()
-                        .min_w(px(0.))
-                        .truncate()
-                        .text_sm()
-                        .child(filter_title.to_string()),
-                )
-                .child(
-                    div()
-                        .flex_none()
-                        .text_xs()
-                        .text_color(colors.muted)
-                        .child(format!("{visible} 张")),
-                )
-                .children(clear)
-                .children(stop);
+            left = left.child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(10.))
+                    .min_w(px(0.))
+                    .child(
+                        div()
+                            .max_w(px(if compact { 140. } else { 260. }))
+                            .truncate()
+                            .text_sm()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .child(filter_title.to_string()),
+                    )
+                    .child(
+                        div()
+                            .flex_none()
+                            .text_sm()
+                            .font_weight(FontWeight::NORMAL)
+                            .text_color(colors.muted)
+                            .child(format!("{visible} 张")),
+                    ),
+            );
         } else {
             let label = match self.screen {
                 Screen::Tags => "标签管理",
@@ -3545,24 +3604,30 @@ impl KanalibApp {
             );
         }
 
-        let mut right = div()
+        let mut controls = div()
             .flex_none()
-            .h_full()
             .flex()
             .items_center()
             .gap(px(4.));
         if library {
-            right = right
+            controls = controls
+                .children(clear)
                 .children(palette)
                 .children(sort)
                 .children(density)
                 .child(theme)
-                .children(export)
-                .children(search_field);
+                .children(export);
         } else {
-            right = right.child(theme);
+            controls = controls.child(theme);
         }
-        right = right.child(window_controls(window, colors));
+        let right = div()
+            .flex_none()
+            .h_full()
+            .flex()
+            .items_center()
+            .gap(px(6.))
+            .child(controls)
+            .child(window_controls(window, colors));
 
         let drag_pressed = window.use_keyed_state("kanalib-titlebar-drag", cx, |_, _| false);
         let drag_down = drag_pressed.clone();
@@ -3570,8 +3635,9 @@ impl KanalibApp {
         let drag_up = drag_pressed.clone();
         let drag_out = drag_pressed;
 
-        div()
+        let mut bar = div()
             .id("kanalib-titlebar")
+            .relative()
             .w_full()
             .flex_none()
             .h(px(TITLEBAR_HEIGHT))
@@ -3579,7 +3645,7 @@ impl KanalibApp {
             .flex()
             .items_center()
             .justify_between()
-            .gap(px(6.))
+            .gap(px(4.))
             .bg(colors.bg)
             .border_b_1()
             .border_color(colors.border)
@@ -3605,10 +3671,37 @@ impl KanalibApp {
             })
             .on_mouse_up_out(MouseButton::Left, move |_, _, cx| {
                 drag_out.update(cx, |pressed, _| *pressed = false);
-            })
-            .child(left)
-            .child(right)
-            .into_any_element()
+            });
+
+        if centered_search {
+            let search_left = px((width.as_f32() - search_width.as_f32()) / 2.0);
+            bar = bar.child(left).child(right);
+            if let Some(search) = search_field {
+                bar = bar.child(
+                    div()
+                        .absolute()
+                        .top(px(0.))
+                        .left(search_left)
+                        .h_full()
+                        .flex()
+                        .items_center()
+                        .on_mouse_down(MouseButton::Left, |_, window, _| {
+                            window.prevent_default()
+                        })
+                        .child(search),
+                );
+            }
+        } else {
+            bar = bar.child(left).child(div().flex_1().min_w(px(8.)));
+            if let Some(search) = search_field {
+                bar = bar
+                    .child(search)
+                    .child(div().flex_1().min_w(px(8.)));
+            }
+            bar = bar.child(right);
+        }
+
+        bar.into_any_element()
     }
 
     fn render_main(
@@ -3917,12 +4010,19 @@ impl KanalibApp {
             .and_then(|index| groups.get(index))
             .cloned();
 
-        let this_scan = this.clone();
+        let this_rescan = this.clone();
         let this_preselect = this.clone();
         let this_batch = this.clone();
         let this_library = this.clone();
         let this_similar_scan = this.clone();
         let preselect_mode = self.dedup_mode;
+        let similar_tab_label = if similar_scanning {
+            "相似图片 · 扫描中".to_string()
+        } else if similar_scanned {
+            format!("相似图片 {}", similar_summary.total)
+        } else {
+            "相似图片 · 未扫描".to_string()
+        };
         let tabs = div()
             .flex()
             .items_center()
@@ -3938,17 +4038,22 @@ impl KanalibApp {
                 colors,
             ))
             .child(dedup_tab(
-                if similar_scanning {
-                    "相似图片 扫描中".to_string()
-                } else {
-                    format!("相似图片 {}", similar_summary.total)
-                },
+                similar_tab_label,
                 similar_mode,
                 GroupKind::Similar,
                 this.clone(),
                 colors,
             ));
 
+        let more_menu = Menu::new().item(
+            MenuItem::new("重新扫描图库")
+                .disabled(busy)
+                .on_click(move |_, cx| {
+                    let _ = this_rescan.update(cx, |app, cx| {
+                        app.request_rescan(RescanOrigin::Dedup, cx);
+                    });
+                }),
+        );
         let header = div()
             .px(px(16.))
             .py(px(11.))
@@ -4006,28 +4111,18 @@ impl KanalibApp {
                     .flex()
                     .items_center()
                     .gap(px(6.))
-                    .child(
-                        Button::new("dedup-scan", "重新扫描")
-                            .disabled(busy)
-                            .on_click(move |_, _, cx| {
-                                let _ = this_scan.update(cx, |app, cx| {
-                                    app.state.start_scan();
-                                    app.dedup_confirm = None;
-                                    app.dedup_selected = None;
-                                    app.dedup_notice = None;
-                                    cx.notify();
-                                });
-                            }),
-                    )
                     .children(similar_mode.then(|| {
                         Button::new(
                             "dedup-similar-scan",
-                            if similar_scanned {
-                                "重新扫描相似"
+                            if similar_scanning {
+                                "相似扫描中…"
+                            } else if similar_scanned {
+                                "重新扫描相似图片"
                             } else {
                                 "扫描相似图片"
                             },
                         )
+                        .primary()
                         .disabled(busy)
                         .on_click(move |_, _, cx| {
                             let _ = this_similar_scan.update(cx, |app, cx| {
@@ -4066,6 +4161,9 @@ impl KanalibApp {
                                 });
                             })
                     }))
+                    .child(
+                        DropdownMenu::new("dedup-more", "更多", more_menu),
+                    )
                     .child(
                         Button::new("dedup-library", "返回图库").on_click(move |_, _, cx| {
                             let _ = this_library.update(cx, |app, cx| {
@@ -6582,7 +6680,11 @@ fn dedup_row(
         row = row.bg(colors.selection);
     }
     row.on_click(move |_, _, cx| {
-        let _ = this.update(cx, |app, cx| app.open_dedup_mode(mode, cx));
+        let _ = this.update(cx, |app, cx| {
+            if app.screen != Screen::Duplicates {
+                app.open_dedup_mode(mode, cx);
+            }
+        });
     })
     .child(div().text_xs().text_color(colors.fg).child(label))
     .child(
@@ -7433,6 +7535,51 @@ fn dedup_diff(group: &DuplicateGroup, assets: &[&Asset], colors: UiColors) -> An
             },
         ))
         .into_any_element()
+}
+
+fn density_control(
+    id: &'static str,
+    current: DensityPreset,
+    this: Entity<KanalibApp>,
+    colors: UiColors,
+) -> impl IntoElement {
+    let mut group = div()
+        .id(id)
+        .flex_none()
+        .flex()
+        .items_center()
+        .gap(px(1.))
+        .p(px(2.))
+        .rounded(px(7.))
+        .bg(colors.sunken);
+    for (preset, label) in [
+        (DensityPreset::Small, "小"),
+        (DensityPreset::Medium, "中"),
+        (DensityPreset::Large, "大"),
+    ] {
+        let this = this.clone();
+        let active = current == preset;
+        group = group.child(
+            div()
+                .id(SharedString::from(format!("{id}-{}", preset.key())))
+                .flex_none()
+                .px(px(8.))
+                .py(px(2.))
+                .rounded(px(5.))
+                .text_xs()
+                .text_color(if active { colors.fg } else { colors.muted })
+                .when(active, |style| style.bg(colors.surface))
+                .cursor_pointer()
+                .on_mouse_down(MouseButton::Left, |_, window, _| {
+                    window.prevent_default()
+                })
+                .on_click(move |_, _, cx| {
+                    let _ = this.update(cx, |app, cx| app.set_density(preset, cx));
+                })
+                .child(label),
+        );
+    }
+    group
 }
 
 #[derive(Clone, Copy)]
