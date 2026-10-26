@@ -18,7 +18,7 @@ use crate::media;
 use crate::model::{
     Asset, Filter, SavedSearch, Shared, TagHit, TagSummary, is_image, normalize_tag_name,
 };
-use crate::sidecar::{Sidecar, project_root};
+use crate::sidecar::{Sidecar, project_root, repair_file};
 
 #[derive(Clone, Copy, Debug, Default)]
 pub struct TrashSummary {
@@ -754,6 +754,223 @@ impl AppState {
         Ok(total)
     }
 
+    /// 容错重解单张图片：重建预览缓存并用容错模式重新打标，不修改原文件。
+    pub fn repair_asset(self: &Arc<Self>, path: PathBuf) -> Result<()> {
+        {
+            let shared = self.shared.lock().unwrap();
+            if shared.scanning {
+                bail!("图库扫描进行中，完成后再修复");
+            }
+        }
+        let state = self.clone();
+        let label = path
+            .file_name()
+            .map(|name| name.to_string_lossy().to_string())
+            .unwrap_or_else(|| path.display().to_string());
+        {
+            let mut shared = self.shared.lock().unwrap();
+            shared.status = format!("修复中 · {label}");
+            shared.error = None;
+            shared.revision = shared.revision.wrapping_add(1);
+        }
+        let thread_path = path.clone();
+        let spawned = std::thread::Builder::new()
+            .name("kanalib-repair".into())
+            .spawn(move || {
+                if let Err(error) = state.repair_asset_blocking(&thread_path) {
+                    log::warn!("repair {}: {error:#}", thread_path.display());
+                    let mut shared = state.shared.lock().unwrap();
+                    shared.error = Some(format!("修复失败：{error:#}"));
+                    shared.status = format!("修复失败 · {label}");
+                    shared.revision = shared.revision.wrapping_add(1);
+                }
+            });
+        if spawned.is_err() {
+            let mut shared = self.shared.lock().unwrap();
+            shared.error = Some("无法创建修复线程".into());
+            shared.status = "修复失败".into();
+            shared.revision = shared.revision.wrapping_add(1);
+        }
+        Ok(())
+    }
+
+    fn repair_asset_blocking(&self, path: &Path) -> Result<()> {
+        let (mtime, bytes) = {
+            let shared = self.shared.lock().unwrap();
+            let assets = shared.assets.read().unwrap();
+            let asset = assets
+                .iter()
+                .find(|asset| asset.path == path)
+                .with_context(|| format!("资产不存在：{}", path.display()))?;
+            (asset.mtime, asset.bytes)
+        };
+        let db = Db::open(&self.db_path)?;
+        std::fs::create_dir_all(&self.cache_dir)?;
+        let target = thumb_target(path, &self.cache_dir, mtime, bytes);
+        let outcome = repair_file(path, &target, Some(512))
+            .with_context(|| format!("容错解码 {}", path.display()))?;
+        let tile = ensure_tile_thumb(&target);
+        let mut asset = db.update_media(
+            path,
+            Some(&target),
+            outcome.width,
+            outcome.height,
+            outcome.damage.as_deref(),
+        )?;
+        asset.tile_thumb = tile;
+        {
+            let mut shared = self.shared.lock().unwrap();
+            shared.upsert(asset);
+            shared.status = "预览缓存已重建 · 加载打标模型...".into();
+            shared.revision = shared.revision.wrapping_add(1);
+        }
+
+        let (mut sidecar, ready) = match Sidecar::spawn() {
+            Ok(value) => value,
+            Err(error) => {
+                let mut shared = self.shared.lock().unwrap();
+                shared.error = Some(format!("预览已重建，但打标模型加载失败：{error:#}"));
+                shared.status = "预览已重建，打标未完成".into();
+                shared.revision = shared.revision.wrapping_add(1);
+                return Ok(());
+            }
+        };
+        {
+            let mut shared = self.shared.lock().unwrap();
+            shared.sidecar_device = Some(if ready.half {
+                format!("{} · FP16", ready.device)
+            } else {
+                ready.device
+            });
+            shared.status = "预览已重建 · 重新打标...".into();
+            shared.revision = shared.revision.wrapping_add(1);
+        }
+        let item = sidecar
+            .tag(&[path.to_path_buf()])?
+            .into_iter()
+            .next()
+            .context("sidecar 未返回打标结果")?;
+        if item.ok {
+            let updated = {
+                let shared = self.shared.lock().unwrap();
+                let existing = shared
+                    .assets
+                    .read()
+                    .unwrap()
+                    .iter()
+                    .find(|asset| asset.path == path)
+                    .cloned();
+                existing.map(|mut asset| {
+                    asset.width = item.width.unwrap_or(asset.width);
+                    asset.height = item.height.unwrap_or(asset.height);
+                    asset.rating = item.rating.clone().unwrap_or_default();
+                    asset.group = item.group.clone().unwrap_or_else(|| "未分类".to_string());
+                    asset.tags = item.tags.clone().unwrap_or_default();
+                    asset.tagged = true;
+                    asset.tag_attempts = 0;
+                    asset.error = None;
+                    asset.damage = item.damage.clone();
+                    asset
+                })
+            };
+            let Some(asset) = updated else {
+                bail!("资产在修复期间被移除：{}", path.display());
+            };
+            db.update_tags(&asset)?;
+            let damage = asset.damage.clone();
+            let name = asset.title();
+            {
+                let mut shared = self.shared.lock().unwrap();
+                shared.upsert(asset);
+                shared.status = if let Some(damage) = damage {
+                    format!("修复完成（{damage}） · {name}")
+                } else {
+                    format!("修复完成，文件可正常读取 · {name}")
+                };
+                shared.revision = shared.revision.wrapping_add(1);
+            }
+        } else {
+            let error = item
+                .error
+                .clone()
+                .unwrap_or_else(|| "图片解码失败".to_string());
+            if let Some(detail) = &item.error_detail {
+                log::warn!("sidecar detail {}: {detail}", item.path);
+            }
+            let attempts = db.mark_error(path, &error, item.damage.as_deref())?;
+            let updated = {
+                let shared = self.shared.lock().unwrap();
+                let mut asset = shared
+                    .assets
+                    .read()
+                    .unwrap()
+                    .iter()
+                    .find(|asset| asset.path == path)
+                    .cloned();
+                if let Some(asset) = asset.as_mut() {
+                    asset.error = Some(error.clone());
+                    asset.damage = item.damage.clone();
+                    asset.tag_attempts = attempts;
+                }
+                asset
+            };
+            if let Some(asset) = updated {
+                let mut shared = self.shared.lock().unwrap();
+                shared.upsert(asset);
+                shared.error = Some(format!("预览已重建，但仍无法打标：{error}"));
+                shared.status = "修复未完成 · 文件仍不可完整读取".into();
+                shared.revision = shared.revision.wrapping_add(1);
+            }
+        }
+        Ok(())
+    }
+
+    /// 把容错重编码的结果另存为新文件；原文件不会被改写。
+    pub fn export_repaired_copy(self: &Arc<Self>, path: PathBuf, output: PathBuf) -> Result<()> {
+        let state = self.clone();
+        let label = output
+            .file_name()
+            .map(|name| name.to_string_lossy().to_string())
+            .unwrap_or_else(|| output.display().to_string());
+        {
+            let mut shared = self.shared.lock().unwrap();
+            shared.status = format!("正在导出修复副本 · {label}");
+            shared.error = None;
+            shared.revision = shared.revision.wrapping_add(1);
+        }
+        let thread_output = output.clone();
+        let spawned = std::thread::Builder::new()
+            .name("kanalib-repair-export".into())
+            .spawn(move || {
+                match repair_file(&path, &thread_output, None) {
+                    Ok(outcome) => {
+                        let mut shared = state.shared.lock().unwrap();
+                        shared.status = if let Some(damage) = outcome.damage {
+                            format!("已导出修复副本（{damage}） · {}", thread_output.display())
+                        } else {
+                            format!("已导出修复副本 · {}", thread_output.display())
+                        };
+                        shared.error = None;
+                        shared.revision = shared.revision.wrapping_add(1);
+                    }
+                    Err(error) => {
+                        log::warn!("export repair {}: {error:#}", path.display());
+                        let mut shared = state.shared.lock().unwrap();
+                        shared.error = Some(format!("导出修复副本失败：{error:#}"));
+                        shared.status = "导出修复副本失败".into();
+                        shared.revision = shared.revision.wrapping_add(1);
+                    }
+                }
+            });
+        if spawned.is_err() {
+            let mut shared = self.shared.lock().unwrap();
+            shared.error = Some("无法创建导出线程".into());
+            shared.status = "导出修复副本失败".into();
+            shared.revision = shared.revision.wrapping_add(1);
+        }
+        Ok(())
+    }
+
     pub fn set_dedup_keeper(&self, key: &str, path: PathBuf, kind: GroupKind) -> bool {
         let review = {
             let mut shared = self.shared.lock().unwrap();
@@ -1362,6 +1579,15 @@ fn index_inner(
             .map(|duration| duration.as_secs())
             .unwrap_or(0);
         let stored = db.stored_meta(path)?;
+        let stored_media = stored
+            .as_ref()
+            .filter(|meta| meta.mtime == mtime && meta.bytes == bytes)
+            .and_then(|meta| {
+                let thumb = (!meta.thumb.is_empty())
+                    .then(|| PathBuf::from(&meta.thumb))
+                    .filter(|thumb| thumb.exists())?;
+                Some((meta.width, meta.height, thumb))
+            });
         let reset_tag_attempts = stored
             .as_ref()
             .is_none_or(|meta| meta.mtime != mtime || meta.bytes != bytes);
@@ -1404,7 +1630,10 @@ fn index_inner(
                     Err(error) => {
                         stats.hash_errors += 1;
                         log::warn!("hash {}: {error:#}", path.display());
-                        crate::media::ContentHashes::default()
+                        crate::media::ContentHashes {
+                            decode_error: Some("无法读取图片内容".into()),
+                            ..Default::default()
+                        }
                     }
                 };
                 stats.hash_secs += started.elapsed().as_secs_f64();
@@ -1419,7 +1648,11 @@ fn index_inner(
             Err(error) => {
                 stats.thumb_errors += 1;
                 log::warn!("thumbnail {}: {error:#}", path.display());
-                (None, 0, 0)
+                match stored_media {
+                    // 容错修复过的缩略图对 Rust 解码器仍不可读，同文件沿用已有缓存与尺寸。
+                    Some((width, height, thumb)) => (Some(thumb), width, height),
+                    None => (None, 0, 0),
+                }
             }
         };
         let asset = db.upsert_meta(
@@ -1582,6 +1815,9 @@ fn process_tag_queue(
                 handled.insert(job_id);
             }
             if item.ok {
+                if let Some(detail) = &item.error_detail {
+                    log::warn!("sidecar detail {}: {detail}", item.path);
+                }
                 let asset = {
                     let shared = state.shared.lock().unwrap();
                     let existing = shared
@@ -1602,6 +1838,7 @@ fn process_tag_queue(
                         asset.tagged = true;
                         asset.tag_attempts = 0;
                         asset.error = None;
+                        asset.damage = item.damage.clone();
                         asset
                     })
                 };
@@ -1624,7 +1861,10 @@ fn process_tag_queue(
                     .error
                     .clone()
                     .unwrap_or_else(|| "sidecar image error".to_string());
-                let attempts = db.mark_error(&path, &error)?;
+                if let Some(detail) = &item.error_detail {
+                    log::warn!("sidecar detail {}: {detail}", item.path);
+                }
+                let attempts = db.mark_error(&path, &error, item.damage.as_deref())?;
                 if let Some(job_id) = job_id {
                     db.fail_tag_job(job_id, &error)?;
                 }
@@ -1640,6 +1880,7 @@ fn process_tag_queue(
                         .cloned();
                     if let Some(asset) = asset.as_mut() {
                         asset.error = Some(error);
+                        asset.damage = item.damage.clone();
                         asset.tag_attempts = attempts;
                     }
                     asset
@@ -1837,13 +2078,7 @@ fn backfill_tile_thumbs(state: &Arc<AppState>, cancel: &AtomicBool) {
     );
 }
 
-fn ensure_thumb(
-    path: &Path,
-    cache_dir: &Path,
-    mtime: u64,
-    bytes: u64,
-) -> Result<(Option<PathBuf>, u32, u32)> {
-    std::fs::create_dir_all(cache_dir)?;
+fn thumb_target(path: &Path, cache_dir: &Path, mtime: u64, bytes: u64) -> PathBuf {
     let key = format!(
         "{}-{}-{}-{}",
         path.to_string_lossy(),
@@ -1854,7 +2089,17 @@ fn ensure_thumb(
             .unwrap_or_default()
     );
     let hash = blake3::hash(key.as_bytes()).to_hex();
-    let target = cache_dir.join(format!("{}.jpg", &hash.as_str()[..24]));
+    cache_dir.join(format!("{}.jpg", &hash.as_str()[..24]))
+}
+
+fn ensure_thumb(
+    path: &Path,
+    cache_dir: &Path,
+    mtime: u64,
+    bytes: u64,
+) -> Result<(Option<PathBuf>, u32, u32)> {
+    std::fs::create_dir_all(cache_dir)?;
+    let target = thumb_target(path, cache_dir, mtime, bytes);
 
     if target.exists() {
         let (width, height) = image::ImageReader::open(path)?

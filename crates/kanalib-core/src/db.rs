@@ -66,6 +66,7 @@ CREATE TABLE IF NOT EXISTS assets (
     tag_state TEXT NOT NULL DEFAULT '',
     tag_attempts INTEGER NOT NULL DEFAULT 0,
     error TEXT,
+    damage TEXT,
     deleted_at INTEGER,
     UNIQUE(source_id, path)
 );
@@ -207,6 +208,8 @@ impl StoredMeta {
             sha1,
             blake3,
             phash: self.phash?,
+            decode_ok: true,
+            decode_error: None,
         })
     }
 }
@@ -272,7 +275,8 @@ impl Db {
         let placeholders = vec!["?"; folders.len()].join(", ");
         let sql = format!(
             "SELECT path, thumb, width, height, group_name, rating, tags_json, tagged, error,
-                    sha1, blake3, phash, tag_attempts, bytes, mtime, favorite, star, folder
+                    sha1, blake3, phash, tag_attempts, bytes, mtime, favorite, star, folder,
+                    damage
              FROM assets WHERE folder IN ({placeholders})"
         );
         let mut statement = self.conn.prepare(&sql)?;
@@ -338,8 +342,8 @@ impl Db {
         self.conn.execute(
             "INSERT INTO assets(
                 source_id, path, folder, name, media_kind, mime, width, height, bytes, mtime,
-                thumb, sha1, blake3, phash
-             ) VALUES(?1, ?2, ?3, ?4, 'image', ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
+                thumb, sha1, blake3, phash, damage
+             ) VALUES(?1, ?2, ?3, ?4, 'image', ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
              ON CONFLICT(source_id, path) DO UPDATE SET
                 folder = excluded.folder,
                 name = excluded.name,
@@ -353,7 +357,8 @@ impl Db {
                 sha1 = excluded.sha1,
                 blake3 = excluded.blake3,
                 phash = excluded.phash,
-                tag_attempts = CASE WHEN ?14 THEN 0 ELSE tag_attempts END",
+                damage = excluded.damage,
+                tag_attempts = CASE WHEN ?15 THEN 0 ELSE tag_attempts END",
             params![
                 source_id,
                 path_string,
@@ -367,7 +372,8 @@ impl Db {
                 thumb_string,
                 valid_hashes.then_some(hashes.sha1.as_str()),
                 valid_hashes.then_some(hashes.blake3.as_str()),
-                valid_hashes.then_some(hashes.phash as i64),
+                (valid_hashes && hashes.decode_ok).then_some(hashes.phash as i64),
+                hashes.decode_error.as_deref(),
                 reset_tag_attempts,
             ],
         )?;
@@ -388,8 +394,9 @@ impl Db {
         };
         tx.execute(
             "UPDATE assets SET group_name = ?1, rating = ?2, tags_json = ?3,
-                tagged = 1, tag_state = 'done', tag_attempts = 0, error = NULL WHERE id = ?4",
-            params![asset.group, asset.rating, tags_json, asset_id],
+                tagged = 1, tag_state = 'done', tag_attempts = 0, error = NULL,
+                damage = ?5 WHERE id = ?4",
+            params![asset.group, asset.rating, tags_json, asset_id, asset.damage],
         )?;
         tx.execute(
             "DELETE FROM asset_tags WHERE asset_id = ?1 AND origin = 'auto'",
@@ -834,20 +841,48 @@ impl Db {
         Ok(())
     }
 
-    pub fn mark_error(&self, path: &Path, error: &str) -> Result<u32> {
+    pub fn mark_error(&self, path: &Path, error: &str, damage: Option<&str>) -> Result<u32> {
         let attempts: Option<i64> = self
             .conn
             .query_row(
                 "UPDATE assets
                  SET tagged = 0, tag_state = 'error', error = ?1,
+                     damage = COALESCE(?2, damage),
                      tag_attempts = tag_attempts + 1
-                 WHERE path = ?2
+                 WHERE path = ?3
                  RETURNING tag_attempts",
-                params![error, path.to_string_lossy().to_string()],
+                params![error, damage, path.to_string_lossy().to_string()],
                 |row| row.get(0),
             )
             .optional()?;
         Ok(attempts.unwrap_or(0).max(0) as u32)
+    }
+
+    pub fn update_media(
+        &self,
+        path: &Path,
+        thumb: Option<&Path>,
+        width: u32,
+        height: u32,
+        damage: Option<&str>,
+    ) -> Result<Asset> {
+        let thumb = thumb
+            .map(|value| value.to_string_lossy().to_string())
+            .unwrap_or_default();
+        self.conn.execute(
+            "UPDATE assets
+             SET thumb = ?1, width = ?2, height = ?3, damage = ?4,
+                 thumb_state = 'done'
+             WHERE path = ?5",
+            params![
+                thumb,
+                width,
+                height,
+                damage,
+                path.to_string_lossy().to_string()
+            ],
+        )?;
+        self.load_asset(path)
     }
 
     pub fn search_paths(&self, folder: &str, tokens: &[String]) -> Result<HashSet<PathBuf>> {
@@ -947,7 +982,8 @@ impl Db {
         let path_string = path.to_string_lossy().to_string();
         let mut asset = self.conn.query_row(
             "SELECT path, thumb, width, height, group_name, rating, tags_json, tagged, error,
-                    sha1, blake3, phash, tag_attempts, bytes, mtime, favorite, star, folder
+                    sha1, blake3, phash, tag_attempts, bytes, mtime, favorite, star, folder,
+                    damage
              FROM assets WHERE path = ?1",
             [&path_string],
             row_to_asset,
@@ -1039,6 +1075,7 @@ fn row_to_asset(row: &rusqlite::Row<'_>) -> rusqlite::Result<Asset> {
         tagged: tagged != 0,
         tag_attempts: row.get::<_, i64>(12)?.max(0) as u32,
         error: row.get(8)?,
+        damage: row.get(18)?,
         sha1: row.get(9)?,
         blake3: row.get(10)?,
         phash: phash.map(|value| value as u64),
@@ -1205,6 +1242,9 @@ fn ensure_asset_columns(conn: &Connection) -> Result<()> {
     if !columns.iter().any(|column| column == "star") {
         conn.execute_batch("ALTER TABLE assets ADD COLUMN star INTEGER NOT NULL DEFAULT 0;")?;
     }
+    if !columns.iter().any(|column| column == "damage") {
+        conn.execute_batch("ALTER TABLE assets ADD COLUMN damage TEXT;")?;
+    }
     Ok(())
 }
 
@@ -1363,6 +1403,31 @@ mod tests {
     use std::path::{Path, PathBuf};
 
     #[test]
+    fn adds_damage_column_to_existing_assets_table() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE assets (
+                id INTEGER PRIMARY KEY,
+                path TEXT,
+                tag_attempts INTEGER NOT NULL DEFAULT 0,
+                favorite INTEGER NOT NULL DEFAULT 0,
+                star INTEGER NOT NULL DEFAULT 0,
+                tag_state TEXT NOT NULL DEFAULT ''
+            );",
+        )
+        .unwrap();
+        super::ensure_asset_columns(&conn).unwrap();
+        let has_damage: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('assets') WHERE name = 'damage'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(has_damage, 1);
+    }
+
+    #[test]
     fn migrates_legacy_schema_and_searches() {
         let root = std::env::temp_dir().join(format!(
             "kanalib-db-test-{}-{:?}",
@@ -1492,11 +1557,11 @@ mod tests {
             assert!(db.load_saved_searches().unwrap().is_empty());
 
             let attempts = db
-                .mark_error(Path::new("C:\\lib\\other.png"), "boom")
+                .mark_error(Path::new("C:\\lib\\other.png"), "boom", None)
                 .unwrap();
             assert_eq!(attempts, 1);
             let attempts = db
-                .mark_error(Path::new("C:\\lib\\other.png"), "boom")
+                .mark_error(Path::new("C:\\lib\\other.png"), "boom", None)
                 .unwrap();
             assert_eq!(attempts, 2);
             let other = db
@@ -1520,6 +1585,8 @@ mod tests {
                         sha1: "a".repeat(40),
                         blake3: "b".repeat(64),
                         phash: 1,
+                        decode_ok: true,
+                        decode_error: None,
                     },
                     true,
                 )
@@ -1587,6 +1654,8 @@ mod tests {
             sha1: format!("{seed:0<40}"),
             blake3: format!("{seed:0<64}"),
             phash: 1,
+            decode_ok: true,
+            decode_error: None,
         };
         {
             let db = Db::open(&db_path).unwrap();
@@ -1647,6 +1716,8 @@ mod tests {
             sha1: format!("{seed:0<40}"),
             blake3: format!("{seed:0<64}"),
             phash: 7,
+            decode_ok: true,
+            decode_error: None,
         };
         let db = Db::open(&db_path).unwrap();
         let a = db

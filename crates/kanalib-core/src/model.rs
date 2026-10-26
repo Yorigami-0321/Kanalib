@@ -35,6 +35,8 @@ pub struct Asset {
     pub tagged: bool,
     pub tag_attempts: u32,
     pub error: Option<String>,
+    /// 可读的文件级异常（如“文件不完整”）；与打标失败分开，修复后自动清除。
+    pub damage: Option<String>,
     pub sha1: Option<String>,
     pub blake3: Option<String>,
     pub phash: Option<u64>,
@@ -81,6 +83,7 @@ pub struct Counts {
     pub tagged: usize,
     pub untagged: usize,
     pub failed: usize,
+    pub damaged: usize,
     pub favorites: usize,
     pub ratings: Vec<(String, usize)>,
     pub groups: Vec<(String, usize)>,
@@ -94,6 +97,7 @@ pub struct CountAccumulator {
     tagged: usize,
     untagged: usize,
     failed: usize,
+    damaged: usize,
     favorites: usize,
     ratings: HashMap<String, usize>,
     groups: HashMap<String, usize>,
@@ -119,6 +123,9 @@ impl CountAccumulator {
         }
         if asset.error.is_some() {
             self.failed += 1;
+        }
+        if asset.damage.is_some() {
+            self.damaged += 1;
         }
         if asset.favorite {
             self.favorites += 1;
@@ -155,6 +162,9 @@ impl CountAccumulator {
         }
         if asset.error.is_some() {
             self.failed = self.failed.saturating_sub(1);
+        }
+        if asset.damage.is_some() {
+            self.damaged = self.damaged.saturating_sub(1);
         }
         if asset.favorite {
             self.favorites = self.favorites.saturating_sub(1);
@@ -193,6 +203,7 @@ impl CountAccumulator {
             tagged: self.tagged,
             untagged: self.untagged,
             failed: self.failed,
+            damaged: self.damaged,
             favorites: self.favorites,
             ratings: top(&self.ratings, 8),
             groups: top(&self.groups, 12),
@@ -253,6 +264,7 @@ pub enum Filter {
     All,
     Untagged,
     Failed,
+    Damaged,
     Favorites,
     Rating(String),
     Group(String),
@@ -266,6 +278,7 @@ impl Filter {
             Self::All => "全部图片".to_string(),
             Self::Untagged => "未打标".to_string(),
             Self::Failed => "失败".to_string(),
+            Self::Damaged => "损坏".to_string(),
             Self::Favorites => "收藏".to_string(),
             Self::Rating(rating) => format!("评级 {rating}"),
             Self::Group(group) => group.clone(),
@@ -282,6 +295,7 @@ impl Filter {
             Self::All => true,
             Self::Untagged => !asset.tagged,
             Self::Failed => asset.error.is_some(),
+            Self::Damaged => asset.damage.is_some(),
             Self::Favorites => asset.favorite,
             Self::Rating(rating) => asset.rating.eq_ignore_ascii_case(rating),
             Self::Group(group) => &asset.group == group,
@@ -683,6 +697,7 @@ mod tests {
             tagged,
             tag_attempts: 0,
             error: None,
+            damage: None,
             sha1: None,
             blake3: None,
             phash: None,

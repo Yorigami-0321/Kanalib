@@ -170,9 +170,10 @@ fn main() {
                         window_bounds: Some(WindowBounds::Windowed(bounds)),
                         titlebar: Some(TitlebarOptions {
                             title: Some("Kanalib".into()),
-                            appears_transparent: false,
+                            appears_transparent: true,
                             traffic_light_position: None,
                         }),
+                        window_min_size: Some(size(px(900.), px(660.))),
                         ..Default::default()
                     },
                     move |_window, cx| {

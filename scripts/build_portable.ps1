@@ -27,6 +27,7 @@ $required = @(
     $exe,
     (Join-Path $root "runtime/python/python.exe"),
     (Join-Path $root "sidecar/tagger/server.py"),
+    (Join-Path $root "sidecar/tagger/repair.py"),
     (Join-Path $root "dist/models/pixai-tagger-v1.0/model.safetensors"),
     $readme
 )

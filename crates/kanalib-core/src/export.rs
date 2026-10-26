@@ -132,6 +132,7 @@ mod tests {
             tagged: true,
             tag_attempts: 0,
             error: None,
+            damage: None,
             sha1: Some("sha".to_string()),
             blake3: Some("b3".to_string()),
             phash: Some(0x1234),

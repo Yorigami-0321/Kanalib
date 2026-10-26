@@ -800,6 +800,7 @@ mod tests {
             tagged: tags > 0,
             tag_attempts: 0,
             error: None,
+            damage: None,
             sha1: Some(sha1.to_string()),
             blake3: Some("bbb".to_string()),
             phash: Some(phash),

@@ -1,5 +1,6 @@
+use std::fs::OpenOptions;
 use std::io::{BufRead, BufReader, BufWriter, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 
 use anyhow::{bail, Context, Result};
@@ -13,11 +14,30 @@ pub struct TagItem {
     pub path: String,
     pub ok: bool,
     pub error: Option<String>,
+    pub error_detail: Option<String>,
+    pub damage: Option<String>,
     pub width: Option<u32>,
     pub height: Option<u32>,
     pub rating: Option<String>,
     pub group: Option<String>,
     pub tags: Option<Vec<TagHit>>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RepairEnvelope {
+    #[serde(default)]
+    ok: bool,
+    width: Option<u32>,
+    height: Option<u32>,
+    damage: Option<String>,
+    error: Option<String>,
+    error_detail: Option<String>,
+}
+
+pub struct RepairOutcome {
+    pub width: u32,
+    pub height: u32,
+    pub damage: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -111,6 +131,139 @@ fn python_executable(root: &std::path::Path) -> PathBuf {
     PathBuf::from("python")
 }
 
+pub fn sidecar_log_path(root: &Path) -> PathBuf {
+    root.join(".kanalib").join("sidecar.log")
+}
+
+// GUI 父进程没有控制台时，console 子进程会被分配新窗口；stdout 已走管道，
+// 新控制台只剩空白，必须显式禁止，并把 stderr 落盘以便取证。
+fn hide_console(command: &mut Command) {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        command.creation_flags(CREATE_NO_WINDOW);
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = command;
+    }
+}
+
+fn open_sidecar_log(root: &Path) -> Stdio {
+    let path = sidecar_log_path(root);
+    let Some(dir) = path.parent() else {
+        return Stdio::null();
+    };
+    if let Err(error) = std::fs::create_dir_all(dir) {
+        log::warn!("create sidecar log dir {}: {error}", dir.display());
+        return Stdio::null();
+    }
+    match OpenOptions::new().create(true).append(true).open(&path) {
+        Ok(mut file) => {
+            let started = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|elapsed| elapsed.as_secs())
+                .unwrap_or(0);
+            let _ = writeln!(file, "\n=== sidecar spawn (unix {started}) ===");
+            Stdio::from(file)
+        }
+        Err(error) => {
+            log::warn!("open sidecar log {}: {error}", path.display());
+            Stdio::null()
+        }
+    }
+}
+
+fn append_sidecar_log(root: &Path, label: &str, bytes: &[u8]) {
+    let path = sidecar_log_path(root);
+    let Some(dir) = path.parent() else {
+        return;
+    };
+    if std::fs::create_dir_all(dir).is_err() {
+        return;
+    }
+    if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(&path) {
+        let _ = writeln!(file, "{label}");
+        let _ = file.write_all(bytes);
+        let _ = writeln!(file);
+    }
+}
+
+pub fn repair_file(
+    input: &Path,
+    output: &Path,
+    max_size: Option<u32>,
+) -> Result<RepairOutcome> {
+    let root = project_root();
+    let script = root.join("sidecar").join("tagger").join("repair.py");
+    if !script.exists() {
+        bail!("repair script not found: {}", script.display());
+    }
+    let python = python_executable(&root);
+    if python.is_absolute() && !python.exists() {
+        bail!(
+            "python not found: {} (place runtime/python next to the app or set KANALIB_PYTHON)",
+            python.display()
+        );
+    }
+    let mut command = Command::new(&python);
+    command
+        .arg(&script)
+        .arg("--input")
+        .arg(input)
+        .arg("--output")
+        .arg(output)
+        .current_dir(&root)
+        .env("PYTHONDONTWRITEBYTECODE", "1")
+        .env("PYTHONUNBUFFERED", "1")
+        .env("PYTHONUTF8", "1")
+        .env("PYTHONIOENCODING", "utf-8")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    if let Some(size) = max_size {
+        command.arg("--max-size").arg(size.to_string());
+    }
+    hide_console(&mut command);
+    let result = command
+        .output()
+        .with_context(|| format!("run repair for {}", input.display()))?;
+    if !result.stderr.is_empty() {
+        append_sidecar_log(&root, "=== repair stderr ===", &result.stderr);
+    }
+    let stdout = String::from_utf8_lossy(&result.stdout);
+    if stdout.trim().is_empty() {
+        bail!(
+            "repair produced no output (exit {:?}); see {}",
+            result.status.code(),
+            sidecar_log_path(&root).display()
+        );
+    }
+    let envelope: RepairEnvelope =
+        serde_json::from_str(stdout.trim()).context("parse repair output")?;
+    if !envelope.ok {
+        if let Some(detail) = &envelope.error_detail {
+            append_sidecar_log(
+                &root,
+                &format!("repair failed: {}", input.display()),
+                detail.as_bytes(),
+            );
+        }
+        bail!(
+            "{}",
+            envelope
+                .error
+                .unwrap_or_else(|| "图片修复失败".to_string())
+        );
+    }
+    Ok(RepairOutcome {
+        width: envelope.width.unwrap_or(0),
+        height: envelope.height.unwrap_or(0),
+        damage: envelope.damage,
+    })
+}
+
 impl Sidecar {
     pub fn spawn() -> Result<(Self, ReadyInfo)> {
         let root = project_root();
@@ -132,7 +285,9 @@ impl Sidecar {
 
         log::info!("sidecar python: {}", python.display());
         log::info!("sidecar model: {}", model.display());
-        let mut child = Command::new(&python)
+        log::info!("sidecar log: {}", sidecar_log_path(&root).display());
+        let mut command = Command::new(&python);
+        command
             .arg(&script)
             .arg("--model")
             .arg(&model)
@@ -147,7 +302,9 @@ impl Sidecar {
             .env("TRANSFORMERS_OFFLINE", "1")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::inherit())
+            .stderr(open_sidecar_log(&root));
+        hide_console(&mut command);
+        let mut child = command
             .spawn()
             .with_context(|| format!("spawn sidecar with {}", python.display()))?;
 
@@ -250,6 +407,38 @@ mod tests {
             resolve_model_dir(&root),
             root.join("models").join("pixai-tagger-v1.0")
         );
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    #[ignore = "needs the bundled runtime/python"]
+    fn repair_script_reencodes_a_truncated_jpeg() {
+        let workspace = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("..");
+        // SAFETY: this ignored test runs alone and only points project_root at the workspace.
+        unsafe { std::env::set_var("KANALIB_ROOT", workspace) };
+        let root = std::env::temp_dir().join(format!(
+            "kanalib-repair-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        let input = root.join("bad.jpg");
+        let image = image::RgbImage::from_fn(64, 48, |x, y| {
+            image::Rgb([(x % 255) as u8, (y % 255) as u8, 90])
+        });
+        image.save(&input).unwrap();
+        let bytes = fs::read(&input).unwrap();
+        fs::write(&input, &bytes[..bytes.len().saturating_sub(32)]).unwrap();
+
+        let output = root.join("fixed.png");
+        let outcome = super::repair_file(&input, &output, Some(512)).unwrap();
+        assert_eq!((outcome.width, outcome.height), (64, 48));
+        assert!(outcome.damage.is_some());
+        assert!(output.exists());
+
         fs::remove_dir_all(&root).unwrap();
     }
 }

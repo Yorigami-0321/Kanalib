@@ -11,6 +11,7 @@ use ely_gpui_component::{
     navigation::{Command, CommandPalette},
     overlays::{ConfirmDialog, Lightbox, PromptDialog, Slide},
     primitives::{Icon, IconName, Severity},
+    shell::drag_region,
     theme::{ActiveTheme, ControlSize, IconSize, Mode, Theme},
 };
 use gpui::prelude::*;
@@ -18,8 +19,8 @@ use gpui::{
     AnyElement, App, ClickEvent, ClipboardItem, Context, Entity, FocusHandle, Focusable,
     FontWeight, Hsla, ImageCache, ImageCacheError, ImageCacheItem, IntoElement, KeyBinding,
     Modifiers, MouseButton, ObjectFit, ParentElement, Pixels, Render, RenderImage, Resource, Role,
-    ScrollStrategy, SharedString, Styled, Task, UniformListScrollHandle, WeakEntity, Window, div,
-    image_cache, img, px, uniform_list,
+    ScrollStrategy, SharedString, Styled, Task, UniformListScrollHandle, WeakEntity, Window,
+    WindowControlArea, div, image_cache, img, px, uniform_list, white,
 };
 #[cfg(feature = "frame-profiler")]
 use hdrhistogram::Histogram;
@@ -44,6 +45,7 @@ const DEDUP_CARD_WIDTH: f32 = 214.;
 const DEDUP_MAX_VISIBLE: usize = 4;
 const SETTINGS_MAX_WIDTH: f32 = 1080.;
 const TAG_ROW_HEIGHT: f32 = 54.;
+const TITLEBAR_HEIGHT: f32 = 48.;
 
 gpui::actions!(
     kanalib,
@@ -1933,6 +1935,7 @@ impl KanalibApp {
             "goto:all" => self.set_filter(Filter::All, cx),
             "goto:untagged" => self.set_filter(Filter::Untagged, cx),
             "goto:failed" => self.set_filter(Filter::Failed, cx),
+            "goto:damaged" => self.set_filter(Filter::Damaged, cx),
             "goto:fav" => self.set_filter(Filter::Favorites, cx),
             "goto:dup" => self.open_dedup_mode(GroupKind::Exact, cx),
             "goto:similar" => self.open_dedup_mode(GroupKind::Similar, cx),
@@ -2005,7 +2008,6 @@ impl Render for KanalibApp {
         let scale = window.scale_factor();
         let viewport = window.viewport_size();
         let window_width = viewport.width;
-        let window_height = viewport.height;
         let sidebar_width = px(245.);
         let inspector_width = px(310.);
         let mut main_width = window_width - sidebar_width - inspector_width;
@@ -2192,6 +2194,7 @@ impl Render for KanalibApp {
             }
         }
         let visible_indices = self.view.visible_indices.clone();
+        let visible_count = visible_indices.len();
         if self.auto_select_pending {
             self.auto_select_pending = false;
             let selected_visible = selected.as_ref().is_some_and(|path| {
@@ -2364,16 +2367,12 @@ impl Render for KanalibApp {
                 error.as_deref(),
                 scanning,
                 dedup_width,
-                window_height,
                 colors,
             )
             .into_any_element()
         } else {
             self.render_main(
                 &this,
-                &filter,
-                &filter_title,
-                &search,
                 assets,
                 visible_indices,
                 self.selection.clone(),
@@ -2415,6 +2414,7 @@ impl Render for KanalibApp {
                     Command::new("goto:untagged", "未打标").icon(IconName::Sparkles),
                     Command::new("goto:fav", "收藏").icon(IconName::Heart),
                     Command::new("goto:failed", "失败").icon(IconName::ImageOff),
+                    Command::new("goto:damaged", "损坏的图片").icon(IconName::ImageOff),
                     Command::new("goto:dup", "重复项").icon(IconName::Copy),
                     Command::new("goto:similar", "相似图片").icon(IconName::LayoutGrid),
                     Command::new("goto:tags", "标签管理").icon(IconName::Tag),
@@ -2707,17 +2707,38 @@ impl Render for KanalibApp {
             .child(div().size(px(0.)))
             .into_any_element()
         });
+        let titlebar = self.render_titlebar(
+            &this,
+            window,
+            cx,
+            &filter,
+            &filter_title,
+            visible_count,
+            &search,
+            scanning,
+            colors,
+        );
         let shell = div()
             .flex()
-            .flex_row()
+            .flex_col()
+            .relative()
             .w_full()
             .h_full()
             .bg(colors.bg)
             .text_color(colors.fg)
             .font_family(cx.theme().font_family.clone())
-            .child(sidebar)
-            .child(content)
-            .children(inspector)
+            .child(titlebar)
+            .child(
+                div()
+                    .flex_1()
+                    .min_h(px(0.))
+                    .w_full()
+                    .flex()
+                    .flex_row()
+                    .child(sidebar)
+                    .child(content)
+                    .children(inspector),
+            )
             .children(palette)
             .children(lightbox)
             .children(save_dialog)
@@ -2978,6 +2999,18 @@ impl KanalibApp {
                 counts.failed,
                 library && *filter == Filter::Failed,
                 Filter::Failed,
+                state.clone(),
+                this.clone(),
+                colors,
+            ));
+        }
+        if counts.damaged > 0 {
+            body = body.child(filter_row(
+                SharedString::from("filter-damaged"),
+                "损坏".into(),
+                counts.damaged,
+                library && *filter == Filter::Damaged,
+                Filter::Damaged,
                 state.clone(),
                 this.clone(),
                 colors,
@@ -3287,28 +3320,102 @@ impl KanalibApp {
             .child(body)
     }
 
-    fn render_main(
+    fn sort_menu(&self, this: &Entity<Self>) -> Menu {
+        let menu = |this: &Entity<Self>, mode: SortMode| {
+            let this = this.clone();
+            MenuItem::radio(mode.label(), self.sort == mode).on_click(move |_, cx| {
+                let _ = this.update(cx, |app, cx| app.choose_sort_mode(mode, cx));
+            })
+        };
+        let ascending = this.clone();
+        let descending = this.clone();
+        Menu::new()
+            .item(menu(this, SortMode::Name))
+            .item(menu(this, SortMode::Modified))
+            .item(menu(this, SortMode::Size))
+            .item(menu(this, SortMode::Resolution))
+            .item(menu(this, SortMode::Star))
+            .item(menu(this, SortMode::Favorite))
+            .item(menu(this, SortMode::Rating))
+            .separator()
+            .item(MenuItem::radio("升序", self.sort_ascending).on_click(move |_, cx| {
+                let _ = ascending.update(cx, |app, cx| app.set_sort_ascending(true, cx));
+            }))
+            .item(
+                MenuItem::radio("降序", !self.sort_ascending).on_click(move |_, cx| {
+                    let _ = descending.update(cx, |app, cx| app.set_sort_ascending(false, cx));
+                }),
+            )
+    }
+
+    fn export_menu(&self, this: &Entity<Self>) -> Menu {
+        let selected_csv = this.clone();
+        let selected_json = this.clone();
+        let view_csv = this.clone();
+        let view_json = this.clone();
+        Menu::new()
+            .item(
+                MenuItem::new("选中 · CSV")
+                    .icon(IconName::Download)
+                    .on_click(move |_, cx| {
+                        let _ = selected_csv.update(cx, |app, cx| {
+                            app.export_assets(ExportTarget::Selected, ExportFormat::Csv, cx)
+                        });
+                    }),
+            )
+            .item(
+                MenuItem::new("选中 · JSON")
+                    .icon(IconName::Download)
+                    .on_click(move |_, cx| {
+                        let _ = selected_json.update(cx, |app, cx| {
+                            app.export_assets(ExportTarget::Selected, ExportFormat::Json, cx)
+                        });
+                    }),
+            )
+            .separator()
+            .item(
+                MenuItem::new("当前视图 · CSV")
+                    .icon(IconName::Download)
+                    .on_click(move |_, cx| {
+                        let _ = view_csv
+                            .update(cx, |app, cx| {
+                                app.export_assets(ExportTarget::View, ExportFormat::Csv, cx)
+                            });
+                    }),
+            )
+            .item(
+                MenuItem::new("当前视图 · JSON")
+                    .icon(IconName::Download)
+                    .on_click(move |_, cx| {
+                        let _ = view_json.update(cx, |app, cx| {
+                            app.export_assets(ExportTarget::View, ExportFormat::Json, cx)
+                        });
+                    }),
+            )
+    }
+
+    fn render_titlebar(
         &self,
         this: &Entity<Self>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
         filter: &Filter,
         filter_title: &str,
+        visible: usize,
         search: &Entity<TextInput>,
-        assets: Arc<RwLock<Vec<Asset>>>,
-        visible_indices: Arc<Vec<usize>>,
-        selection: Arc<HashSet<PathBuf>>,
-        roots_empty: bool,
-        error: Option<&str>,
         scanning: bool,
-        width: Pixels,
         colors: UiColors,
-    ) -> impl IntoElement {
+    ) -> AnyElement {
+        let library = self.screen == Screen::Library;
+        let wide = window.viewport_size().width >= px(1180.);
+        let search_width = if wide { px(200.) } else { px(140.) };
         let this_clear = this.clone();
         let this_stop = this.clone();
         let this_palette = this.clone();
-        let this_theme = this.clone();
         let this_density = this.clone();
-        let this_sort = this.clone();
-        let clear = (*filter != Filter::All).then(|| {
+        let this_theme = this.clone();
+
+        let clear = (library && *filter != Filter::All).then(|| {
             IconButton::new("clear-filter", IconName::X)
                 .tooltip("清除筛选")
                 .on_click(move |_, _, cx| {
@@ -3317,7 +3424,7 @@ impl KanalibApp {
                     });
                 })
         });
-        let stop = scanning.then(|| {
+        let stop = (library && scanning).then(|| {
             Button::new("stop-main", "停止")
                 .variant(ButtonVariant::Danger)
                 .size(ControlSize::Sm)
@@ -3328,35 +3435,162 @@ impl KanalibApp {
                     });
                 })
         });
-        let sort_menu = {
-            let menu = |this: &Entity<Self>, mode: SortMode| {
-                let this = this.clone();
-                MenuItem::radio(mode.label(), self.sort == mode).on_click(move |_, cx| {
-                    let _ = this.update(cx, |app, cx| app.choose_sort_mode(mode, cx));
+        let palette = library.then(|| {
+            IconButton::new("open-palette", IconName::Command)
+                .tooltip("命令面板 (Ctrl+K)")
+                .on_click(move |_, _, cx| {
+                    let _ = this_palette.update(cx, |app, cx| {
+                        app.palette_open = true;
+                        cx.notify();
+                    });
                 })
+        });
+        let sort = library.then(|| {
+            DropdownMenu::new("library-sort", "排序", self.sort_menu(this))
+                .icon(IconName::ArrowDownUp)
+                .variant(ButtonVariant::Ghost)
+        });
+        let density = library.then(|| {
+            SegmentedControl::new("library-density", self.density.key())
+                .size(ControlSize::Sm)
+                .segment("small", "小", None)
+                .segment("medium", "中", None)
+                .segment("large", "大", None)
+                .on_change(move |value, _, cx| {
+                    let _ = this_density.update(cx, |app, cx| {
+                        app.set_density(DensityPreset::from_key(value.as_ref()), cx)
+                    });
+                })
+        });
+        let theme = IconButton::new(
+            "theme-toggle",
+            if self.theme_dark {
+                IconName::Sun
+            } else {
+                IconName::Moon
+            },
+        )
+        .tooltip(if self.theme_dark {
+            "切换到浅色主题"
+        } else {
+            "切换到深色主题"
+        })
+        .on_click(move |_, _, cx| {
+            let _ = this_theme.update(cx, |app, cx| app.toggle_theme(cx));
+        });
+        let export = library.then(|| {
+            DropdownMenu::new("library-export", "导出", self.export_menu(this))
+                .icon(IconName::Download)
+                .variant(ButtonVariant::Ghost)
+        });
+        let search_field = library.then(|| {
+            div()
+                .w(search_width)
+                .child(Input::new(search).clearable().least("搜索 / is:fav"))
+        });
+
+        let mut left = div()
+            .flex_1()
+            .min_w(px(0.))
+            .flex()
+            .items_center()
+            .gap(px(8.));
+        let show_brand = !library || wide;
+        if show_brand {
+            left = left.child(
+                div()
+                    .flex_none()
+                    .text_sm()
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .child("Kanalib"),
+            );
+            if library {
+                left = left.child(div().flex_none().w(px(1.)).h(px(14.)).bg(colors.border));
+            }
+        }
+        if library {
+            left = left
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w(px(0.))
+                        .truncate()
+                        .text_sm()
+                        .child(filter_title.to_string()),
+                )
+                .child(
+                    div()
+                        .flex_none()
+                        .text_xs()
+                        .text_color(colors.muted)
+                        .child(format!("{visible} 张")),
+                )
+                .children(clear)
+                .children(stop);
+        } else {
+            let label = match self.screen {
+                Screen::Tags => "标签管理",
+                Screen::Settings => "设置",
+                Screen::Duplicates => "重复项",
+                Screen::Library => "",
             };
-            let ascending = this_sort.clone();
-            let descending = this_sort.clone();
-            Menu::new()
-                .item(menu(&this_sort, SortMode::Name))
-                .item(menu(&this_sort, SortMode::Modified))
-                .item(menu(&this_sort, SortMode::Size))
-                .item(menu(&this_sort, SortMode::Resolution))
-                .item(menu(&this_sort, SortMode::Star))
-                .item(menu(&this_sort, SortMode::Favorite))
-                .item(menu(&this_sort, SortMode::Rating))
-                .separator()
-                .item(
-                    MenuItem::radio("升序", self.sort_ascending).on_click(move |_, cx| {
-                        let _ = ascending.update(cx, |app, cx| app.set_sort_ascending(true, cx));
-                    }),
-                )
-                .item(
-                    MenuItem::radio("降序", !self.sort_ascending).on_click(move |_, cx| {
-                        let _ = descending.update(cx, |app, cx| app.set_sort_ascending(false, cx));
-                    }),
-                )
-        };
+            left = left.child(
+                div()
+                    .flex_none()
+                    .text_sm()
+                    .text_color(colors.muted)
+                    .child(label),
+            );
+        }
+
+        let mut right = div()
+            .flex_none()
+            .h_full()
+            .flex()
+            .items_center()
+            .gap(px(4.));
+        if library {
+            right = right
+                .children(palette)
+                .children(sort)
+                .children(density)
+                .child(theme)
+                .children(export)
+                .children(search_field);
+        } else {
+            right = right.child(theme);
+        }
+        right = right.child(window_controls(window, colors));
+
+        drag_region("kanalib-titlebar", window, cx)
+            .w_full()
+            .flex_none()
+            .h(px(TITLEBAR_HEIGHT))
+            .pl(px(12.))
+            .flex()
+            .items_center()
+            .justify_between()
+            .gap(px(6.))
+            .bg(colors.bg)
+            .border_b_1()
+            .border_color(colors.border)
+            .child(left)
+            .child(right)
+            .into_any_element()
+    }
+
+    fn render_main(
+        &self,
+        this: &Entity<Self>,
+        assets: Arc<RwLock<Vec<Asset>>>,
+        visible_indices: Arc<Vec<usize>>,
+        selection: Arc<HashSet<PathBuf>>,
+        roots_empty: bool,
+        error: Option<&str>,
+        scanning: bool,
+        width: Pixels,
+        colors: UiColors,
+    ) -> impl IntoElement {
         let star_menu = {
             let menu_item = |this: &Entity<Self>, star: u8, label: &'static str| {
                 let this = this.clone();
@@ -3365,13 +3599,13 @@ impl KanalibApp {
                 })
             };
             Menu::new()
-                .item(menu_item(&this_sort, 1, "1 星"))
-                .item(menu_item(&this_sort, 2, "2 星"))
-                .item(menu_item(&this_sort, 3, "3 星"))
-                .item(menu_item(&this_sort, 4, "4 星"))
-                .item(menu_item(&this_sort, 5, "5 星"))
+                .item(menu_item(this, 1, "1 星"))
+                .item(menu_item(this, 2, "2 星"))
+                .item(menu_item(this, 3, "3 星"))
+                .item(menu_item(this, 4, "4 星"))
+                .item(menu_item(this, 5, "5 星"))
                 .separator()
-                .item(menu_item(&this_sort, 0, "清除星级"))
+                .item(menu_item(this, 0, "清除星级"))
         };
 
         let tag_menu = {
@@ -3397,58 +3631,7 @@ impl KanalibApp {
                         }),
                 )
         };
-        let export_menu = {
-            let selected_csv = this.clone();
-            let selected_json = this.clone();
-            let view_csv = this.clone();
-            let view_json = this.clone();
-            Menu::new()
-                .item(
-                    MenuItem::new("选中 · CSV")
-                        .icon(IconName::Download)
-                        .on_click(move |_, cx| {
-                            let _ = selected_csv.update(cx, |app, cx| {
-                                app.export_assets(
-                                    ExportTarget::Selected,
-                                    ExportFormat::Csv,
-                                    cx,
-                                )
-                            });
-                        }),
-                )
-                .item(
-                    MenuItem::new("选中 · JSON")
-                        .icon(IconName::Download)
-                        .on_click(move |_, cx| {
-                            let _ = selected_json.update(cx, |app, cx| {
-                                app.export_assets(
-                                    ExportTarget::Selected,
-                                    ExportFormat::Json,
-                                    cx,
-                                )
-                            });
-                        }),
-                )
-                .separator()
-                .item(
-                    MenuItem::new("当前视图 · CSV")
-                        .icon(IconName::Download)
-                        .on_click(move |_, cx| {
-                            let _ = view_csv.update(cx, |app, cx| {
-                                app.export_assets(ExportTarget::View, ExportFormat::Csv, cx)
-                            });
-                        }),
-                )
-                .item(
-                    MenuItem::new("当前视图 · JSON")
-                        .icon(IconName::Download)
-                        .on_click(move |_, cx| {
-                            let _ = view_json.update(cx, |app, cx| {
-                                app.export_assets(ExportTarget::View, ExportFormat::Json, cx)
-                            });
-                        }),
-                )
-        };
+        let export_menu = self.export_menu(this);
         let columns = grid_columns(width.as_f32(), self.density.min_width());
         let tile_width = grid_tile_width(width.as_f32(), columns);
         let image_height = self.density.image_height();
@@ -3630,110 +3813,6 @@ impl KanalibApp {
             .h_full()
             .flex()
             .flex_col()
-            .child(
-                div()
-                    .h(px(58.))
-                    .px(px(16.))
-                    .flex()
-                    .items_center()
-                    .justify_between()
-                    .gap(px(8.))
-                    .border_1()
-                    .border_color(colors.border)
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap(px(8.))
-                            .min_w(px(0.))
-                            .child(
-                                div()
-                                    .flex_1()
-                                    .min_w(px(0.))
-                                    .flex()
-                                    .items_center()
-                                    .gap(px(6.))
-                                    .child(
-                                        div()
-                                            .flex_1()
-                                            .min_w(px(0.))
-                                            .truncate()
-                                            .text_lg()
-                                            .font_weight(FontWeight::SEMIBOLD)
-                                            .child(filter_title.to_string()),
-                                    )
-                                    .child(
-                                        div()
-                                            .flex_none()
-                                            .text_xs()
-                                            .text_color(colors.muted)
-                                            .child(format!("{visible} 张")),
-                                    ),
-                            )
-                            .children(clear),
-                    )
-                    .child(
-                        div()
-                            .flex_none()
-                            .flex()
-                            .items_center()
-                            .gap(px(4.))
-                            .child(
-                                IconButton::new("open-palette", IconName::Command)
-                                    .tooltip("命令面板 (Ctrl+K)")
-                                    .on_click(move |_, _, cx| {
-                                        let _ = this_palette.update(cx, |app, cx| {
-                                            app.palette_open = true;
-                                            cx.notify();
-                                        });
-                                    }),
-                            )
-                            .child(
-                                DropdownMenu::new("library-sort", "排序", sort_menu)
-                                    .icon(IconName::ArrowDownUp)
-                                    .variant(ButtonVariant::Ghost),
-                            )
-                            .child(
-                                SegmentedControl::new("library-density", self.density.key())
-                                    .size(ControlSize::Sm)
-                                    .segment("small", "小", None)
-                                    .segment("medium", "中", None)
-                                    .segment("large", "大", None)
-                                    .on_change(move |value, _, cx| {
-                                        let _ = this_density.update(cx, |app, cx| {
-                                            app.set_density(
-                                                DensityPreset::from_key(value.as_ref()),
-                                                cx,
-                                            )
-                                        });
-                                    }),
-                            )
-                            .child(
-                                IconButton::new(
-                                    "theme-toggle",
-                                    if self.theme_dark {
-                                        IconName::Sun
-                                    } else {
-                                        IconName::Moon
-                                    },
-                                )
-                                .tooltip(if self.theme_dark {
-                                    "切换到浅色主题"
-                                } else {
-                                    "切换到深色主题"
-                                })
-                                .on_click(move |_, _, cx| {
-                                    let _ = this_theme.update(cx, |app, cx| app.toggle_theme(cx));
-                                }),
-                            )
-                            .child(
-                                div()
-                                    .w(px(160.))
-                                    .child(Input::new(search).clearable().least("搜索 / is:fav")),
-                            )
-                            .children(stop),
-                    ),
-            )
             .children(bulk)
             .children(error.map(|message| {
                 div()
@@ -3764,13 +3843,9 @@ impl KanalibApp {
         error: Option<&str>,
         library_scanning: bool,
         width: Pixels,
-        height: Pixels,
         colors: UiColors,
     ) -> impl IntoElement {
         let similar_mode = self.dedup_mode == GroupKind::Similar;
-        let has_banner = error.is_some() || self.dedup_notice.is_some();
-        let chrome = 104. + if similar_mode { 48. } else { 0. } + if has_banner { 30. } else { 0. };
-        let body_height = (height - px(chrome)).max(px(480.));
         let groups = if similar_mode {
             similar_groups
         } else {
@@ -3853,6 +3928,8 @@ impl KanalibApp {
             .border_color(colors.border)
             .child(
                 div()
+                    .flex_1()
+                    .min_w(px(0.))
                     .flex()
                     .flex_col()
                     .gap(px(2.))
@@ -3861,30 +3938,39 @@ impl KanalibApp {
                             .flex()
                             .items_center()
                             .gap(px(8.))
+                            .min_w(px(0.))
                             .child(
                                 div()
+                                    .flex_none()
                                     .text_lg()
                                     .font_weight(FontWeight::SEMIBOLD)
                                     .child("重复项"),
                             )
                             .child(tabs),
                     )
-                    .child(div().text_xs().text_color(colors.muted).child(format!(
-                        "未审 {} 组 · {} 张 · 可释放 {} · {}",
-                        summary.pending,
-                        summary.pending_assets,
-                        format_bytes(summary.pending_bytes),
-                        if library_scanning {
-                            "图库扫描中..."
-                        } else if similar_mode && similar_scanning {
-                            "相似扫描中..."
-                        } else {
-                            status
-                        }
-                    ))),
+                    .child(
+                        div()
+                            .truncate()
+                            .text_xs()
+                            .text_color(colors.muted)
+                            .child(format!(
+                                "未审 {} 组 · {} 张 · 可释放 {} · {}",
+                                summary.pending,
+                                summary.pending_assets,
+                                format_bytes(summary.pending_bytes),
+                                if library_scanning {
+                                    "图库扫描中..."
+                                } else if similar_mode && similar_scanning {
+                                    "相似扫描中..."
+                                } else {
+                                    status
+                                }
+                            )),
+                    ),
             )
             .child(
                 div()
+                    .flex_none()
                     .flex()
                     .items_center()
                     .gap(px(6.))
@@ -4219,8 +4305,7 @@ impl KanalibApp {
             .children(banner)
             .child(
                 div()
-                    .flex_none()
-                    .h(body_height)
+                    .flex_1()
                     .min_h(px(0.))
                     .overflow_hidden()
                     .flex()
@@ -4595,7 +4680,8 @@ impl KanalibApp {
 
         let action_bar = div()
             .flex_none()
-            .h(px(62.))
+            .pt(px(10.))
+            .pb(px(14.))
             .px(px(16.))
             .border_t_1()
             .border_color(colors.border)
@@ -4606,11 +4692,14 @@ impl KanalibApp {
             .gap(px(12.))
             .child(
                 div()
+                    .flex_1()
+                    .min_w(px(0.))
                     .flex()
                     .flex_col()
                     .gap(px(2.))
                     .child(
                         div()
+                            .truncate()
                             .text_xs()
                             .text_color(colors.fg)
                             .child(format!(
@@ -4625,6 +4714,7 @@ impl KanalibApp {
                     )
                     .child(
                         div()
+                            .truncate()
                             .text_xs()
                             .text_color(colors.subtle)
                             .child(if scanning {
@@ -4636,7 +4726,14 @@ impl KanalibApp {
                             }),
                     ),
             )
-            .child(actions);
+            .child(
+                div()
+                    .flex_none()
+                    .flex()
+                    .items_center()
+                    .gap(px(5.))
+                    .child(actions),
+            );
 
         div()
             .relative()
@@ -5072,6 +5169,7 @@ impl KanalibApp {
         width: Pixels,
         colors: UiColors,
     ) -> AnyElement {
+        let page_padding = px(24.);
         let this_back = this.clone();
         let this_add = this.clone();
         let this_refresh_cache = this.clone();
@@ -5109,7 +5207,7 @@ impl KanalibApp {
             .or_else(|| notice.map(|message| (message, colors.muted)))
             .map(|(message, color)| {
                 div()
-                    .px(px(24.))
+                    .px(page_padding)
                     .py(px(8.))
                     .border_b_1()
                     .border_color(colors.border)
@@ -5597,8 +5695,7 @@ impl KanalibApp {
                     .child("相似组不提供批量删除；受保护路径与只读来源不会被移入回收站。"),
             );
 
-        let column_width = (width - px(48.)).min(px(SETTINGS_MAX_WIDTH));
-        let side_padding = px(((width.as_f32() - column_width.as_f32()) / 2.0).max(24.));
+        let column_width = (width - page_padding * 2.).min(px(SETTINGS_MAX_WIDTH));
 
         div()
             .w(width)
@@ -5609,7 +5706,7 @@ impl KanalibApp {
             .child(
                 div()
                     .h(px(58.))
-                    .px(side_padding)
+                    .px(page_padding)
                     .flex()
                     .items_center()
                     .justify_between()
@@ -5649,7 +5746,7 @@ impl KanalibApp {
                     .flex_1()
                     .min_h(px(0.))
                     .overflow_y_scroll()
-                    .px(side_padding)
+                    .px(page_padding)
                     .py(px(24.))
                     .child(
                         div()
@@ -5701,6 +5798,11 @@ impl KanalibApp {
             };
 
             let path = asset.path.clone();
+            let repair_this = this.clone();
+            let repair_path = asset.path.clone();
+            let export_state = state.clone();
+            let export_this = this.clone();
+            let export_path = asset.path.clone();
             let manual_initial = asset
                 .manual_tags
                 .iter()
@@ -6035,6 +6137,100 @@ impl KanalibApp {
                     push_toast(&copy_path_toaster, cx, "已复制文件路径", Severity::Success);
                 });
 
+            let has_issue = asset.error.is_some() || asset.damage.is_some();
+            let issue = has_issue.then(|| {
+                let repair = Button::new("repair-asset", "容错重解")
+                    .size(ControlSize::Sm)
+                    .on_click(move |_, _, cx| {
+                        let path = repair_path.clone();
+                        let _ = repair_this.update(cx, |app, cx| {
+                            if let Err(error) = app.state.repair_asset(path) {
+                                app.state.set_error(format!("修复失败：{error:#}"));
+                            }
+                            cx.notify();
+                        });
+                    });
+                let export = Button::new("export-repair", "导出修复副本…")
+                    .size(ControlSize::Sm)
+                    .on_click(move |_, _, cx| {
+                        let state = export_state.clone();
+                        let path = export_path.clone();
+                        let weak = export_this.downgrade();
+                        cx.spawn(async move |cx| {
+                            let stem = path
+                                .file_stem()
+                                .map(|value| value.to_string_lossy().to_string())
+                                .unwrap_or_else(|| "image".to_string());
+                            let mut dialog = rfd::AsyncFileDialog::new()
+                                .set_title("导出修复副本")
+                                .set_file_name(format!("{stem}-repaired.png"))
+                                .add_filter("PNG 图片", &["png"])
+                                .add_filter("JPEG 图片", &["jpg", "jpeg"]);
+                            if let Some(parent) = path.parent() {
+                                dialog = dialog.set_directory(parent);
+                            }
+                            let Some(handle) = dialog.save_file().await else {
+                                return;
+                            };
+                            let output = handle.path().to_path_buf();
+                            let result = state.export_repaired_copy(path.clone(), output);
+                            let _ = weak.update(cx, |app, cx| {
+                                if let Err(error) = result {
+                                    app.state
+                                        .set_error(format!("导出修复副本失败：{error:#}"));
+                                }
+                                cx.notify();
+                            });
+                        })
+                        .detach();
+                    });
+                let mut panel = div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(6.))
+                    .p(px(8.))
+                    .rounded(px(6.))
+                    .bg(colors.sunken)
+                    .child(
+                        div()
+                            .text_xs()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(colors.subtle)
+                            .child("文件异常"),
+                    );
+                if let Some(damage) = &asset.damage {
+                    panel = panel.child(
+                        div()
+                            .text_xs()
+                            .text_color(colors.warning)
+                            .child(damage.clone()),
+                    );
+                }
+                if let Some(error) = &asset.error {
+                    panel = panel.child(
+                        div()
+                            .text_xs()
+                            .text_color(colors.danger)
+                            .child(format!("打标失败：{}", friendly_media_error(error))),
+                    );
+                }
+                panel
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(colors.subtle)
+                            .child("修复只重建预览并重新打标，不改动原文件；导出会另存为新文件。"),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .flex_wrap()
+                            .gap(px(6.))
+                            .child(repair)
+                            .child(export),
+                    )
+            });
+
             div()
                 .flex()
                 .flex_col()
@@ -6073,21 +6269,20 @@ impl KanalibApp {
                         )),
                 )
                 .child(div().text_xs().text_color(colors.subtle).child(
-                    match (&asset.sha1, &asset.blake3, asset.phash) {
-                        (Some(sha1), Some(blake3), Some(phash)) => format!(
-                            "SHA1 {} · B3 {} · pHash {phash:016x}",
+                    match (&asset.sha1, &asset.blake3) {
+                        (Some(sha1), Some(blake3)) => format!(
+                            "SHA1 {} · B3 {}{}",
                             &sha1[..12.min(sha1.len())],
-                            &blake3[..8.min(blake3.len())]
+                            &blake3[..8.min(blake3.len())],
+                            match asset.phash {
+                                Some(phash) => format!(" · pHash {phash:016x}"),
+                                None => " · pHash 未计算（解码失败）".to_string(),
+                            }
                         ),
                         _ => "内容哈希未计算".to_string(),
                     },
                 ))
-                .children(asset.error.as_ref().map(|message| {
-                    div()
-                        .text_xs()
-                        .text_color(colors.danger)
-                        .child(message.clone())
-                }))
+                .children(issue)
                 .child(
                     div()
                         .flex()
@@ -7208,6 +7403,91 @@ fn dedup_diff(group: &DuplicateGroup, assets: &[&Asset], colors: UiColors) -> An
         .into_any_element()
 }
 
+fn window_controls(window: &Window, colors: UiColors) -> impl IntoElement {
+    let maximized = window.is_maximized();
+    div()
+        .flex_none()
+        .h_full()
+        .flex()
+        .items_center()
+        .child(window_control_button(
+            "window-min",
+            IconName::Minus,
+            WindowControlArea::Min,
+            false,
+            colors,
+        ))
+        .child(window_control_button(
+            "window-max",
+            if maximized {
+                IconName::Copy
+            } else {
+                IconName::Square
+            },
+            WindowControlArea::Max,
+            false,
+            colors,
+        ))
+        .child(window_control_button(
+            "window-close",
+            IconName::X,
+            WindowControlArea::Close,
+            true,
+            colors,
+        ))
+}
+
+fn window_control_button(
+    id: &'static str,
+    icon: IconName,
+    area: WindowControlArea,
+    close: bool,
+    colors: UiColors,
+) -> impl IntoElement {
+    let group = SharedString::from(format!("{id}-hover"));
+    div()
+        .id(id)
+        .group(group.clone())
+        .flex_none()
+        .h_full()
+        .w(px(46.))
+        .flex()
+        .items_center()
+        .justify_center()
+        .window_control_area(area)
+        .hover(move |style| style.bg(if close { colors.danger } else { colors.hover }))
+        .on_mouse_down(MouseButton::Left, |_, window, _| {
+            window.prevent_default()
+        })
+        .on_click(move |_, window, _| match area {
+            WindowControlArea::Min => window.minimize_window(),
+            WindowControlArea::Max => window.zoom_window(),
+            WindowControlArea::Close => window.remove_window(),
+            WindowControlArea::Drag => {}
+        })
+        .child(
+            Icon::new(icon)
+                .size(IconSize::Sm)
+                .color(colors.muted)
+                .group_hover_color(group, if close { white() } else { colors.fg }),
+        )
+}
+
+fn friendly_media_error(message: &str) -> String {
+    let text = message.to_lowercase();
+    if text.contains("truncated") || text.contains("unexpected end of file") {
+        "文件不完整（图片数据被截断）".to_string()
+    } else if text.contains("cannot identify image file")
+        || text.contains("unidentifiedimageerror")
+    {
+        "无法识别的图片，文件可能已损坏".to_string()
+    } else if text.contains("decompression bomb") {
+        "图片尺寸超出安全上限".to_string()
+    } else {
+        message.to_string()
+    }
+}
+
 fn format_bytes(bytes: u64) -> String {
     const KB: f64 = 1024.;
     const MB: f64 = KB * 1024.;
@@ -7278,8 +7558,13 @@ fn tile(
     } else {
         colors.border
     };
-    let error = asset.error.clone();
+    let error = asset
+        .error
+        .clone()
+        .map(|message| friendly_media_error(&message));
     let has_error = error.is_some();
+    let damage = asset.damage.clone();
+    let has_damage = damage.is_some();
     let summary = error.unwrap_or_else(|| asset.summary());
     let title = asset.title();
     let tag_count = asset
@@ -7456,6 +7741,19 @@ fn tile(
                                 .size(IconSize::Sm)
                                 .color(colors.danger),
                         )
+                }))
+                .children(has_damage.then(|| {
+                    div()
+                        .absolute()
+                        .left(px(6.))
+                        .bottom(px(6.))
+                        .px(px(6.))
+                        .py(px(1.))
+                        .rounded(px(4.))
+                        .bg(colors.backdrop)
+                        .text_xs()
+                        .text_color(colors.warning)
+                        .child("损坏")
                 })),
         )
         .child(
@@ -7472,6 +7770,8 @@ fn tile(
                 .text_xs()
                 .text_color(if has_error {
                     colors.danger
+                } else if has_damage {
+                    colors.warning
                 } else {
                     colors.muted
                 })

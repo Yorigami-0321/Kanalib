@@ -14,22 +14,47 @@ os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
 warnings.filterwarnings("ignore")
 
 import torch
-from PIL import Image, ImageOps
+from PIL import Image, ImageFile, ImageOps
 from torchvision.transforms import functional as vF
 from transformers import AutoModel
 
 THRESHOLD_KEYS = ("general", "character", "copyright", "style", "meta", "rating")
 
 
-def load_rgb(path: Path) -> Image.Image:
-    img = Image.open(path)
-    img = ImageOps.exif_transpose(img)
-    if img.mode != "RGB":
-        img = img.convert("RGBA")
-        canvas = Image.new("RGBA", img.size, (255, 255, 255, 255))
-        canvas.alpha_composite(img)
-        img = canvas.convert("RGB")
-    return img
+def classify_error(exc: BaseException) -> tuple[str, str, str]:
+    detail = f"{type(exc).__name__}: {exc}"
+    text = detail.lower()
+    if "truncated" in text or "unexpected end" in text or "eof" in text:
+        return "truncated", "文件不完整（图片数据被截断）", detail
+    if (
+        "cannot identify image file" in text
+        or type(exc).__name__ == "UnidentifiedImageError"
+    ):
+        return "unreadable", "无法识别的图片，文件可能已损坏", detail
+    if "decompression bomb" in text:
+        return "too_large", "图片尺寸超出安全上限", detail
+    if isinstance(exc, FileNotFoundError):
+        return "missing", "文件不存在或已被移动", detail
+    if isinstance(exc, PermissionError):
+        return "denied", "没有读取权限", detail
+    return "decode_failed", "图片解码失败，文件可能已损坏", detail
+
+
+def load_rgb(path: Path, tolerant: bool = False) -> Image.Image:
+    previous = ImageFile.LOAD_TRUNCATED_IMAGES
+    ImageFile.LOAD_TRUNCATED_IMAGES = tolerant
+    try:
+        img = Image.open(path)
+        img.load()
+        img = ImageOps.exif_transpose(img)
+        if img.mode != "RGB":
+            img = img.convert("RGBA")
+            canvas = Image.new("RGBA", img.size, (255, 255, 255, 255))
+            canvas.alpha_composite(img)
+            img = canvas.convert("RGB")
+        return img
+    finally:
+        ImageFile.LOAD_TRUNCATED_IMAGES = previous
 
 
 def preprocess(images: list[Image.Image], size: int) -> torch.Tensor:
@@ -206,25 +231,63 @@ class Tagger:
         loaded: list[tuple[str, Image.Image]] = []
         results: list[dict] = []
         for raw in paths:
+            path = Path(raw)
             try:
-                image = load_rgb(Path(raw))
-                loaded.append((raw, image))
-                results.append(
-                    {
-                        "path": raw,
-                        "ok": True,
-                        "width": image.width,
-                        "height": image.height,
-                    }
+                image = load_rgb(path)
+                damage = None
+            except Exception as strict_exc:
+                code, label, detail = classify_error(strict_exc)
+                print(
+                    f"[tag] strict decode failed for {raw}: {detail}",
+                    file=sys.stderr,
+                    flush=True,
                 )
-            except Exception as exc:
-                results.append(
-                    {
-                        "path": raw,
-                        "ok": False,
-                        "error": f"{type(exc).__name__}: {exc}",
-                    }
+                if code not in ("truncated", "decode_failed"):
+                    results.append(
+                        {
+                            "path": raw,
+                            "ok": False,
+                            "error": label,
+                            "error_detail": detail,
+                            "damage": label,
+                        }
+                    )
+                    continue
+                try:
+                    image = load_rgb(path, tolerant=True)
+                except Exception as tolerant_exc:
+                    _, tolerant_label, tolerant_detail = classify_error(tolerant_exc)
+                    print(
+                        f"[tag] tolerant decode failed for {raw}: {tolerant_detail}",
+                        file=sys.stderr,
+                        flush=True,
+                    )
+                    results.append(
+                        {
+                            "path": raw,
+                            "ok": False,
+                            "error": label,
+                            "error_detail": tolerant_detail,
+                            "damage": label,
+                        }
+                    )
+                    continue
+                damage = f"{label}，已按容错模式读取"
+                print(
+                    f"[tag] tolerant decode accepted {raw}: {detail}",
+                    file=sys.stderr,
+                    flush=True,
                 )
+            loaded.append((raw, image))
+            results.append(
+                {
+                    "path": raw,
+                    "ok": True,
+                    "width": image.width,
+                    "height": image.height,
+                    "damage": damage,
+                }
+            )
         if loaded:
             probs = self._infer([image for _, image in loaded])
             for result, (_, _image), prob in zip(
