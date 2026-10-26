@@ -18,3 +18,10 @@
 /.qoder-credits/
 __pycache__/
 /crates/*/.kanalib/
+
+# 本地待办记录（不入库）
+/docs/pending-issues.local.md
+
+# 外部工具（本地保留，不入库；F-040 实现时再决定 runtime/打包位置）
+/ffmpeg/
+/tools/ffmpeg/

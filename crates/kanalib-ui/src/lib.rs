@@ -1,15 +1,16 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use ely_gpui_component::{
     buttons::{Button, ButtonVariant, IconButton},
     feedback::{Toast, ToastViewport, Toaster},
     forms::{Choice, Input, Rating, TagInput, TextInput},
+    media::ImageViewer,
     menus::{ContextMenu, DropdownMenu, Menu, MenuItem},
     navigation::{Command, CommandPalette},
-    overlays::{ConfirmDialog, Lightbox, PromptDialog, Slide},
+    overlays::{ConfirmDialog, PromptDialog},
     primitives::{Icon, IconName, Severity},
     theme::{ActiveTheme, ControlSize, IconSize, Mode, Theme},
 };
@@ -19,7 +20,7 @@ use gpui::{
     FontWeight, Hsla, ImageCache, ImageCacheError, ImageCacheItem, IntoElement, KeyBinding,
     Modifiers, MouseButton, ObjectFit, ParentElement, Pixels, Render, RenderImage, Resource, Role,
     ScrollStrategy, SharedString, Styled, Task, UniformListScrollHandle, WeakEntity, Window, div,
-    image_cache, img, px, uniform_list, white,
+    black, image_cache, img, px, uniform_list, white,
 };
 #[cfg(feature = "frame-profiler")]
 use hdrhistogram::Histogram;
@@ -29,7 +30,7 @@ use kanalib_core::dedup::{
     similarity_pct_from_distance,
 };
 use kanalib_core::model::{
-    Asset, Counts, Filter, SavedSearch, SearchQuery, TagHit, normalize_tag_name,
+    Asset, Counts, Filter, SavedSearch, SearchQuery, TagHit, TagSummary, normalize_tag_name,
 };
 use kanalib_core::export;
 use kanalib_core::state::{AppState, CacheStats};
@@ -38,6 +39,7 @@ const GRID_GAP: f32 = 12.;
 const GRID_PADDING: f32 = 16.;
 const ROW_PADDING: f32 = 12.;
 const GRID_CONTEXT: &str = "KanalibGrid";
+const VIEWER_CONTEXT: &str = "KanalibViewer";
 const DEDUP_RAIL_WIDTH: f32 = 272.;
 const DEDUP_GROUP_ROW_HEIGHT: f32 = 78.;
 const DEDUP_CARD_WIDTH: f32 = 214.;
@@ -67,6 +69,19 @@ gpui::actions!(
         Rate3,
         Rate4,
         Rate5,
+        ViewIconsXl,
+        ViewIconsLg,
+        ViewIconsMd,
+        ViewIconsSm,
+        ViewList,
+        ViewDetails,
+        ViewTiles,
+        ViewContent,
+        ViewerClose,
+        ViewerPrev,
+        ViewerNext,
+        ViewerFullscreen,
+        ViewerSlideshow,
     ]
 );
 
@@ -75,6 +90,7 @@ enum SortMode {
     #[default]
     Name,
     Modified,
+    Captured,
     Size,
     Resolution,
     Star,
@@ -87,6 +103,7 @@ impl SortMode {
         match self {
             Self::Name => "文件名",
             Self::Modified => "修改时间",
+            Self::Captured => "拍摄时间",
             Self::Size => "文件大小",
             Self::Resolution => "分辨率",
             Self::Star => "星级",
@@ -103,6 +120,7 @@ impl SortMode {
         match self {
             Self::Name => "name",
             Self::Modified => "modified",
+            Self::Captured => "captured",
             Self::Size => "size",
             Self::Resolution => "resolution",
             Self::Star => "star",
@@ -115,6 +133,7 @@ impl SortMode {
         Some(match value {
             "name" => Self::Name,
             "modified" => Self::Modified,
+            "captured" => Self::Captured,
             "size" => Self::Size,
             "resolution" => Self::Resolution,
             "star" => Self::Star,
@@ -126,48 +145,181 @@ impl SortMode {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
-enum DensityPreset {
-    Small,
+enum ViewMode {
+    IconsXl,
+    IconsLg,
+    IconsMd,
+    IconsSm,
+    List,
+    Details,
     #[default]
-    Medium,
-    Large,
+    Tiles,
+    Content,
 }
 
-impl DensityPreset {
+impl ViewMode {
+    const ALL: [ViewMode; 8] = [
+        Self::IconsXl,
+        Self::IconsLg,
+        Self::IconsMd,
+        Self::IconsSm,
+        Self::List,
+        Self::Details,
+        Self::Tiles,
+        Self::Content,
+    ];
+
     fn key(self) -> &'static str {
         match self {
-            Self::Small => "small",
-            Self::Medium => "medium",
-            Self::Large => "large",
+            Self::IconsXl => "icons-xl",
+            Self::IconsLg => "icons-lg",
+            Self::IconsMd => "icons-md",
+            Self::IconsSm => "icons-sm",
+            Self::List => "list",
+            Self::Details => "details",
+            Self::Tiles => "tiles",
+            Self::Content => "content",
         }
     }
 
-    fn from_key(value: &str) -> Self {
-        match value {
-            "small" => Self::Small,
-            "large" => Self::Large,
-            _ => Self::Medium,
+    fn from_key(value: &str) -> Option<Self> {
+        Some(match value {
+            "icons-xl" => Self::IconsXl,
+            "icons-lg" => Self::IconsLg,
+            "icons-md" => Self::IconsMd,
+            "icons-sm" => Self::IconsSm,
+            "list" => Self::List,
+            "details" => Self::Details,
+            "tiles" => Self::Tiles,
+            "content" => Self::Content,
+            _ => return None,
+        })
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::IconsXl => "超大图标",
+            Self::IconsLg => "大图标",
+            Self::IconsMd => "中图标",
+            Self::IconsSm => "小图标",
+            Self::List => "列表",
+            Self::Details => "详细信息",
+            Self::Tiles => "平铺",
+            Self::Content => "内容",
         }
+    }
+
+    fn icon(self) -> IconName {
+        match self {
+            Self::IconsXl => IconName::Image,
+            Self::IconsLg | Self::IconsMd | Self::IconsSm => IconName::LayoutGrid,
+            Self::List => IconName::List,
+            Self::Details => IconName::Table,
+            Self::Tiles => IconName::Rows2,
+            Self::Content => IconName::AlignJustify,
+        }
+    }
+
+    fn shortcut(self) -> &'static str {
+        match self {
+            Self::IconsXl => "ctrl-shift-1",
+            Self::IconsLg => "ctrl-shift-2",
+            Self::IconsMd => "ctrl-shift-3",
+            Self::IconsSm => "ctrl-shift-4",
+            Self::List => "ctrl-shift-5",
+            Self::Details => "ctrl-shift-6",
+            Self::Tiles => "ctrl-shift-7",
+            Self::Content => "ctrl-shift-8",
+        }
+    }
+
+    fn is_grid(self) -> bool {
+        matches!(
+            self,
+            Self::IconsXl | Self::IconsLg | Self::IconsMd | Self::IconsSm | Self::Tiles
+        )
     }
 
     fn min_width(self) -> f32 {
         match self {
-            Self::Small => 128.,
-            Self::Medium => 160.,
-            Self::Large => 224.,
+            Self::IconsXl => 288.,
+            Self::IconsLg => 224.,
+            Self::IconsMd => 160.,
+            Self::IconsSm => 128.,
+            Self::Tiles => 160.,
+            Self::List | Self::Details => 1.,
+            Self::Content => 1.,
         }
     }
 
     fn image_height(self) -> f32 {
         match self {
-            Self::Small => 112.,
-            Self::Medium => 150.,
-            Self::Large => 208.,
+            Self::IconsXl => 268.,
+            Self::IconsLg => 208.,
+            Self::IconsMd => 150.,
+            Self::IconsSm => 112.,
+            Self::Tiles => 150.,
+            Self::List | Self::Details | Self::Content => 0.,
         }
     }
 
-    fn row_height(self) -> f32 {
-        self.image_height() + 98.
+    fn row_height(self, tile_summary: bool) -> f32 {
+        match self {
+            Self::IconsXl
+            | Self::IconsLg
+            | Self::IconsMd
+            | Self::IconsSm => self.image_height() + 48.,
+            Self::Tiles => self.image_height() + if tile_summary { 98. } else { 48. },
+            Self::List | Self::Details => 32.,
+            Self::Content => 84.,
+        }
+    }
+
+    fn prefers_large_thumb(self) -> bool {
+        matches!(self, Self::IconsXl)
+    }
+}
+
+fn resolve_view_mode(saved: Option<&str>, legacy_density: Option<&str>) -> ViewMode {
+    saved
+        .and_then(ViewMode::from_key)
+        .unwrap_or_else(|| match legacy_density {
+            Some("small") => ViewMode::IconsSm,
+            Some("large") => ViewMode::IconsLg,
+            _ => ViewMode::Tiles,
+        })
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+enum PaneMode {
+    #[default]
+    Details,
+    Preview,
+    Hidden,
+}
+
+impl PaneMode {
+    fn key(self) -> &'static str {
+        match self {
+            Self::Details => "details",
+            Self::Preview => "preview",
+            Self::Hidden => "hidden",
+        }
+    }
+
+    fn from_key(value: &str) -> Self {
+        match value {
+            "preview" => Self::Preview,
+            "hidden" => Self::Hidden,
+            _ => Self::Details,
+        }
+    }
+
+    fn width(self) -> f32 {
+        match self {
+            Self::Hidden => 0.,
+            Self::Details | Self::Preview => 310.,
+        }
     }
 }
 
@@ -359,6 +511,7 @@ struct UiColors {
     warning: Hsla,
     warning_subtle: Hsla,
     backdrop: Hsla,
+    on_media: Hsla,
 }
 
 impl UiColors {
@@ -381,6 +534,7 @@ impl UiColors {
             warning: colors.warning,
             warning_subtle: colors.warning_subtle,
             backdrop: colors.backdrop,
+            on_media: colors.on_media,
         }
     }
 }
@@ -391,6 +545,13 @@ const IMAGE_CACHE_LIMIT: usize = 128;
 
 fn clamp_cache_limit(limit: usize) -> usize {
     limit.max(1)
+}
+
+fn wall_millis() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis() as u64)
+        .unwrap_or(0)
 }
 
 /// 返回需要逐出的 key：按最近使用排序取最旧的，直到长度回到上限，且不动 `keep`。
@@ -428,29 +589,243 @@ pub struct ThumbCache {
     entries: HashMap<Resource, (ThumbEntry, u64)>,
     clock: u64,
     limit: usize,
+    cache_dir: PathBuf,
+    db_path: PathBuf,
+    access_path: PathBuf,
+    access: HashMap<PathBuf, u64>,
+    access_dirty: usize,
+    last_access_flush: Instant,
+    hits: u64,
+    misses: u64,
     /// 取证档：按 Arc 指针登记每个交出的解码图，dump 时统计仍存活的 RenderImage 数。
     #[cfg(feature = "frame-profiler")]
     watch: HashMap<usize, std::sync::Weak<RenderImage>>,
     entity: WeakEntity<ThumbCache>,
 }
 
+#[derive(Clone, Debug, Default)]
+pub struct CacheCleanup {
+    pub before_bytes: u64,
+    pub after_bytes: u64,
+    pub budget_bytes: u64,
+    pub removed_files: usize,
+    pub removed_bytes: u64,
+    pub removed_groups: usize,
+    pub protected_groups: usize,
+    pub failed_files: usize,
+}
+
 impl ThumbCache {
-    fn with_limit(limit: usize, cx: &mut Context<Self>) -> Self {
+    fn with_limit(
+        limit: usize,
+        cache_dir: PathBuf,
+        db_path: PathBuf,
+        access_path: PathBuf,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let access = std::fs::read(&access_path)
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<HashMap<String, u64>>(&bytes).ok())
+            .map(|map| {
+                map.into_iter()
+                    .map(|(path, used)| (PathBuf::from(path), used))
+                    .collect()
+            })
+            .unwrap_or_default();
         Self {
             entries: HashMap::new(),
             clock: 0,
             limit: clamp_cache_limit(limit),
+            cache_dir,
+            db_path,
+            access_path,
+            access,
+            access_dirty: 0,
+            last_access_flush: Instant::now(),
+            hits: 0,
+            misses: 0,
             #[cfg(feature = "frame-profiler")]
             watch: HashMap::new(),
             entity: cx.entity().downgrade(),
         }
     }
 
+    fn flush_access_if_due(&mut self, cx: &mut Context<Self>) {
+        if self.access_dirty == 0 {
+            return;
+        }
+        if self.access_dirty < 512 && self.last_access_flush.elapsed() < Duration::from_secs(30) {
+            return;
+        }
+        self.flush_access(cx);
+    }
+
+    fn flush_access(&mut self, cx: &mut Context<Self>) {
+        if self.access_dirty == 0 {
+            return;
+        }
+        self.access_dirty = 0;
+        self.last_access_flush = Instant::now();
+        let snapshot = self
+            .access
+            .iter()
+            .filter_map(|(path, used)| {
+                path.to_str()
+                    .map(|path| (path.to_string(), *used))
+            })
+            .collect::<HashMap<_, _>>();
+        let Ok(json) = serde_json::to_vec(&snapshot) else {
+            return;
+        };
+        let path = self.access_path.clone();
+        if let Some(parent) = path.parent()
+            && let Err(error) = std::fs::create_dir_all(parent)
+        {
+            log::warn!("create thumb access dir {}: {error}", parent.display());
+            return;
+        }
+        cx.background_executor()
+            .spawn(async move {
+                if let Err(error) = std::fs::write(&path, json) {
+                    log::warn!("write thumb access {}: {error}", path.display());
+                }
+            })
+            .detach();
+    }
+
+    fn access_stats(&self) -> (u64, u64) {
+        (self.hits, self.misses)
+    }
+
+    /// 按磁盘预算淘汰最少使用的缩略图组；当前解码/可见图与最近访问的组不动。
+    fn cleanup_to_budget(&mut self, budget_bytes: u64, cx: &mut Context<Self>) -> CacheCleanup {
+        let mut report = CacheCleanup {
+            budget_bytes,
+            ..Default::default()
+        };
+        let entries = match std::fs::read_dir(&self.cache_dir) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return report,
+            Err(error) => {
+                log::warn!("read thumb cache {}: {error}", self.cache_dir.display());
+                return report;
+            }
+        };
+        struct Group {
+            files: Vec<(PathBuf, u64)>,
+            bytes: u64,
+            last_used: u64,
+        }
+        let mut groups: HashMap<String, Group> = HashMap::new();
+        let now = wall_millis();
+        for entry in entries {
+            let Ok(entry) = entry else {
+                continue;
+            };
+            let path = entry.path();
+            if !path.is_file() {
+                continue;
+            }
+            let size = entry.metadata().map(|meta| meta.len()).unwrap_or(0);
+            let name = path
+                .file_name()
+                .map(|name| name.to_string_lossy().to_string())
+                .unwrap_or_default();
+            let key = name
+                .strip_suffix("-t256.jpg")
+                .unwrap_or(name.as_str())
+                .to_string();
+            let modified = entry
+                .metadata()
+                .ok()
+                .and_then(|meta| meta.modified().ok())
+                .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
+                .map(|duration| duration.as_millis() as u64)
+                .unwrap_or(0);
+            let last_used = modified.max(self.access.get(&path).copied().unwrap_or(0));
+            let group = groups.entry(key).or_insert(Group {
+                files: Vec::new(),
+                bytes: 0,
+                last_used,
+            });
+            group.files.push((path, size));
+            group.bytes += size;
+            group.last_used = group.last_used.max(last_used);
+        }
+        report.before_bytes = groups.values().map(|group| group.bytes).sum();
+        report.after_bytes = report.before_bytes;
+        if report.before_bytes <= budget_bytes {
+            return report;
+        }
+        let protected = self
+            .entries
+            .keys()
+            .filter_map(|resource| match resource {
+                Resource::Path(path) => Some(PathBuf::from(path.as_ref())),
+                _ => None,
+            })
+            .collect::<HashSet<_>>();
+        let recently_used = now.saturating_sub(5 * 60 * 1000);
+        let target = budget_bytes - budget_bytes / 20;
+        let mut ordered = groups.into_iter().collect::<Vec<_>>();
+        ordered.sort_by_key(|(_, group)| group.last_used);
+        for (_, group) in ordered {
+            if report.after_bytes <= target {
+                break;
+            }
+            let recently_accessed = group.files.iter().any(|(path, _)| {
+                self.access
+                    .get(path)
+                    .is_some_and(|used| *used >= recently_used)
+            });
+            let is_protected = recently_accessed
+                || group
+                    .files
+                    .iter()
+                    .any(|(path, _)| protected.contains(path));
+            if is_protected {
+                report.protected_groups += 1;
+                continue;
+            }
+            let mut group_removed = 0usize;
+            for (path, size) in &group.files {
+                match std::fs::remove_file(path) {
+                    Ok(()) => {
+                        self.access.remove(path);
+                        report.after_bytes = report.after_bytes.saturating_sub(*size);
+                        report.removed_bytes += size;
+                        report.removed_files += 1;
+                        group_removed += 1;
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                        self.access.remove(path);
+                        report.after_bytes = report.after_bytes.saturating_sub(*size);
+                        report.removed_bytes += size;
+                        report.removed_files += 1;
+                        group_removed += 1;
+                    }
+                    Err(error) => {
+                        report.failed_files += 1;
+                        log::warn!("remove thumb {}: {error}", path.display());
+                    }
+                }
+            }
+            if group_removed > 0 {
+                report.removed_groups += 1;
+                self.access_dirty += group_removed;
+            }
+        }
+        self.flush_access(cx);
+        report
+    }
+
     fn spawn_decode(&self, resource: Resource, cx: &mut App) {
         let key = resource.clone();
+        let db_path = self.db_path.clone();
+        let cache_dir = self.cache_dir.clone();
         let task = cx
             .background_executor()
-            .spawn(async move { decode_thumb(&resource) });
+            .spawn(async move { decode_thumb(&resource, &db_path, &cache_dir) });
         let weak = self.entity.clone();
         cx.spawn(async move |cx| {
             let result = task.await;
@@ -495,12 +870,21 @@ impl ThumbCache {
 }
 
 /// 与 gpui 的 ImageAssetLoader 对齐：解码为 BGRA 单帧。
-fn decode_thumb(resource: &Resource) -> Result<Arc<RenderImage>, ImageCacheError> {
+fn decode_thumb(
+    resource: &Resource,
+    db_path: &Path,
+    cache_dir: &Path,
+) -> Result<Arc<RenderImage>, ImageCacheError> {
     let Resource::Path(path) = resource else {
         return Err(ImageCacheError::Asset(
             "thumb cache only decodes file resources".into(),
         ));
     };
+    if !path.exists()
+        && !kanalib_core::state::rebuild_missing_thumb(db_path, cache_dir, path.as_ref())
+    {
+        log::warn!("thumb missing and could not rebuild: {}", path.display());
+    }
     let bytes =
         std::fs::read(path.as_ref()).map_err(|error| ImageCacheError::Io(Arc::new(error)))?;
     let image =
@@ -527,12 +911,19 @@ impl ImageCache for ThumbCache {
     ) -> Option<Result<Arc<RenderImage>, ImageCacheError>> {
         self.clock += 1;
         let clock = self.clock;
+        if let Resource::Path(path) = resource {
+            self.access
+                .insert(PathBuf::from(path.as_ref()), wall_millis());
+            self.access_dirty += 1;
+        }
         if let Some((entry, used)) = self.entries.get_mut(resource) {
+            self.hits += 1;
             *used = clock;
             if let ThumbEntry::Gpui(item) = entry {
                 let _ = item.use_image(window);
             }
         } else {
+            self.misses += 1;
             match resource {
                 Resource::Path(_) => {
                     self.entries
@@ -623,7 +1014,16 @@ pub struct KanalibApp {
     dedup_scroll: UniformListScrollHandle,
     tag_scroll: UniformListScrollHandle,
     tag_list: Vec<kanalib_core::model::TagSummary>,
+    tag_vocab: Vec<kanalib_core::model::TagSummary>,
+    tag_vocab_revision: u64,
+    tag_pane_category: String,
+    tag_pane_expanded: bool,
+    tag_pane_sort_name: bool,
+    tag_suggestions: Vec<(String, usize)>,
     cache_stats: Option<CacheStats>,
+    thumb_budget_gb: u64,
+    cache_last_cleanup: Option<String>,
+    cache_budget_checked: bool,
     last_search: String,
     search_paths: Option<Arc<HashSet<PathBuf>>>,
     last_scanning: bool,
@@ -641,16 +1041,27 @@ pub struct KanalibApp {
     settings_notice: Option<String>,
     refresh_task: Option<Task<()>>,
     thumb_cache: Entity<ThumbCache>,
+    cache_task: Option<Task<()>>,
     scroll_task: Option<Task<()>>,
     similar_task: Option<Task<()>>,
     grid_focus: FocusHandle,
+    viewer_focus: FocusHandle,
     focus_grid_pending: bool,
+    focus_viewer_pending: bool,
+    viewer_slideshow: bool,
+    viewer_original: bool,
+    slideshow_task: Option<Task<()>>,
     auto_select_pending: bool,
     selection: Arc<HashSet<PathBuf>>,
     selection_anchor: Option<PathBuf>,
     sort: SortMode,
     sort_ascending: bool,
-    density: DensityPreset,
+    view_mode: ViewMode,
+    pane_mode: PaneMode,
+    show_sidebar: bool,
+    show_extensions: bool,
+    show_tile_summary: bool,
+    pending_scroll_position: Option<usize>,
     search_input: Option<Entity<TextInput>>,
     palette_open: bool,
     lightbox_slides: Vec<(PathBuf, SharedString)>,
@@ -660,6 +1071,10 @@ pub struct KanalibApp {
     tag_dialog: Option<TagDialogMode>,
     tag_dialog_epoch: u64,
     tag_dialog_paths: Vec<PathBuf>,
+    tag_rename: Option<String>,
+    tag_rename_epoch: u64,
+    tag_merge: Option<String>,
+    tag_merge_epoch: u64,
     source_remove_confirm: Option<PathBuf>,
     source_rename: Option<PathBuf>,
     source_rename_epoch: u64,
@@ -725,6 +1140,20 @@ impl KanalibApp {
             KeyBinding::new("5", Rate5, Some(GRID_CONTEXT)),
             KeyBinding::new("ctrl-a", SelectAllVisible, Some(GRID_CONTEXT)),
             KeyBinding::new("escape", ClearSelection, Some(GRID_CONTEXT)),
+            KeyBinding::new("ctrl-shift-1", ViewIconsXl, None),
+            KeyBinding::new("ctrl-shift-2", ViewIconsLg, None),
+            KeyBinding::new("ctrl-shift-3", ViewIconsMd, None),
+            KeyBinding::new("ctrl-shift-4", ViewIconsSm, None),
+            KeyBinding::new("ctrl-shift-5", ViewList, None),
+            KeyBinding::new("ctrl-shift-6", ViewDetails, None),
+            KeyBinding::new("ctrl-shift-7", ViewTiles, None),
+            KeyBinding::new("ctrl-shift-8", ViewContent, None),
+            KeyBinding::new("escape", ViewerClose, Some(VIEWER_CONTEXT)),
+            KeyBinding::new("left", ViewerPrev, Some(VIEWER_CONTEXT)),
+            KeyBinding::new("right", ViewerNext, Some(VIEWER_CONTEXT)),
+            KeyBinding::new("f", ViewerFullscreen, Some(VIEWER_CONTEXT)),
+            KeyBinding::new("s", ViewerSlideshow, Some(VIEWER_CONTEXT)),
+            KeyBinding::new("space", ViewerSlideshow, Some(VIEWER_CONTEXT)),
         ]);
         let state = AppState::new(folder);
         let initial_selected = state.shared.lock().unwrap().selected.clone();
@@ -736,10 +1165,31 @@ impl KanalibApp {
             .setting("ui.sort_ascending")
             .map(|value| value == "true")
             .unwrap_or_else(|| sort.default_ascending());
-        let density = state
-            .setting("ui.density")
-            .map(|value| DensityPreset::from_key(&value))
+        let view_mode = resolve_view_mode(
+            state.setting("ui.view_mode").as_deref(),
+            state.setting("ui.density").as_deref(),
+        );
+        let pane_mode = state
+            .setting("ui.pane_mode")
+            .map(|value| PaneMode::from_key(&value))
             .unwrap_or_default();
+        let show_sidebar = state
+            .setting("ui.show_sidebar")
+            .map(|value| value != "false")
+            .unwrap_or(true);
+        let show_extensions = state
+            .setting("ui.show_extensions")
+            .map(|value| value != "false")
+            .unwrap_or(true);
+        let show_tile_summary = state
+            .setting("ui.show_tile_summary")
+            .map(|value| value != "false")
+            .unwrap_or(true);
+        let thumb_budget_gb = state
+            .setting("cache.thumb_budget_gb")
+            .and_then(|value| value.parse::<u64>().ok())
+            .map(|value| value.clamp(1, 1000))
+            .unwrap_or(10);
         let theme_dark = state
             .setting("ui.theme")
             .map(|value| value == "dark")
@@ -750,13 +1200,28 @@ impl KanalibApp {
                 cx,
             );
         }
+        let cache_dir = state.cache_dir();
+        let db_path = state.db_path();
+        let access_path = db_path
+            .parent()
+            .map(|dir| dir.join("thumb_access.json"))
+            .unwrap_or_else(|| cache_dir.join("thumb_access.json"));
         Self {
             state,
             grid_scroll: UniformListScrollHandle::new(),
             dedup_scroll: UniformListScrollHandle::new(),
             tag_scroll: UniformListScrollHandle::new(),
             tag_list: Vec::new(),
+            tag_vocab: Vec::new(),
+            tag_vocab_revision: 0,
+            tag_pane_category: "general".into(),
+            tag_pane_expanded: false,
+            tag_pane_sort_name: false,
+            tag_suggestions: Vec::new(),
             cache_stats: None,
+            thumb_budget_gb,
+            cache_last_cleanup: None,
+            cache_budget_checked: false,
             last_search: String::new(),
             search_paths: None,
             last_scanning: false,
@@ -773,25 +1238,39 @@ impl KanalibApp {
             rescan_confirm: None,
             settings_notice: None,
             refresh_task: None,
+            cache_task: None,
             thumb_cache: cx.new(|cx| {
                 ThumbCache::with_limit(
                     std::env::var("KANALIB_IMAGE_CACHE")
                         .ok()
                         .and_then(|value| value.parse::<usize>().ok())
                         .unwrap_or(IMAGE_CACHE_LIMIT),
+                    cache_dir,
+                    db_path,
+                    access_path,
                     cx,
                 )
             }),
             scroll_task: None,
             similar_task: None,
             grid_focus: cx.focus_handle(),
+            viewer_focus: cx.focus_handle(),
             focus_grid_pending: true,
+            focus_viewer_pending: false,
+            viewer_slideshow: false,
+            viewer_original: false,
+            slideshow_task: None,
             auto_select_pending: false,
             selection: Arc::new(initial_selected.iter().cloned().collect()),
             selection_anchor: initial_selected,
             sort,
             sort_ascending,
-            density,
+            view_mode,
+            pane_mode,
+            show_sidebar,
+            show_extensions,
+            show_tile_summary,
+            pending_scroll_position: None,
             search_input: None,
             palette_open: false,
             lightbox_slides: Vec::new(),
@@ -801,6 +1280,10 @@ impl KanalibApp {
             tag_dialog: None,
             tag_dialog_epoch: 0,
             tag_dialog_paths: Vec::new(),
+            tag_rename: None,
+            tag_rename_epoch: 0,
+            tag_merge: None,
+            tag_merge_epoch: 0,
             source_remove_confirm: None,
             source_rename: None,
             source_rename_epoch: 0,
@@ -840,6 +1323,20 @@ impl KanalibApp {
                         break;
                     }
                 }
+            }
+        }));
+        let weak = cx.entity().downgrade();
+        self.cache_task = Some(cx.spawn(async move |_, cx| loop {
+            cx.background_executor()
+                .timer(Duration::from_secs(600))
+                .await;
+            if weak
+                .update(cx, |app, cx| {
+                    app.run_cache_budget_cleanup(false, cx);
+                })
+                .is_err()
+            {
+                break;
             }
         }));
         if std::env::var_os("KANALIB_UI_SCROLL_TEST").is_some() {
@@ -1178,6 +1675,66 @@ impl KanalibApp {
         cx.notify();
     }
 
+    fn set_thumb_budget(&mut self, gb: u64, cx: &mut Context<Self>) {
+        self.thumb_budget_gb = gb.clamp(1, 1000);
+        self.persist_setting("cache.thumb_budget_gb", self.thumb_budget_gb.to_string());
+        cx.notify();
+    }
+
+    fn run_cache_budget_cleanup(
+        &mut self,
+        manual: bool,
+        cx: &mut Context<Self>,
+    ) -> Option<CacheCleanup> {
+        if self.state.shared.lock().unwrap().scanning {
+            if manual {
+                push_toast(
+                    &self.toaster,
+                    cx,
+                    "扫描进行中，完成后再清理缓存",
+                    Severity::Warning,
+                );
+            }
+            return None;
+        }
+        let budget = self.thumb_budget_gb.saturating_mul(1024 * 1024 * 1024);
+        let report = self
+            .thumb_cache
+            .update(cx, |cache, cx| cache.cleanup_to_budget(budget, cx));
+        self.cache_last_cleanup = Some(format!(
+            "最近清理 {} 个文件 · {} · 剩余 {} / 预算 {}",
+            report.removed_files,
+            format_bytes(report.removed_bytes),
+            format_bytes(report.after_bytes),
+            format_bytes(report.budget_bytes)
+        ));
+        if report.removed_files > 0 && let Ok(stats) = self.state.cache_stats() {
+            self.cache_stats = Some(stats);
+        }
+        if manual {
+            push_toast(
+                &self.toaster,
+                cx,
+                if report.removed_files == 0 {
+                    format!(
+                        "缓存未超预算 · {} / {}",
+                        format_bytes(report.after_bytes),
+                        format_bytes(report.budget_bytes)
+                    )
+                } else {
+                    format!(
+                        "已淘汰 {} 个缩略图 · {}",
+                        report.removed_files,
+                        format_bytes(report.removed_bytes)
+                    )
+                },
+                Severity::Success,
+            );
+            cx.notify();
+        }
+        Some(report)
+    }
+
     fn remove_source(&mut self, root: PathBuf, cx: &mut Context<Self>) {
         match self.state.remove_root(&root) {
             Ok(removed) => {
@@ -1286,6 +1843,93 @@ impl KanalibApp {
                 &self.toaster,
                 cx,
                 format!("更新屏蔽失败：{error:#}"),
+                Severity::Danger,
+            ),
+        }
+        cx.notify();
+    }
+
+    /// 全词表补全：前缀命中优先，其次使用次数；输入法/中文直接按子串匹配。
+    fn update_tag_suggestions(&mut self, query: &str) {
+        let needle = query.trim().to_lowercase();
+        if needle.is_empty() {
+            self.tag_suggestions.clear();
+            return;
+        }
+        let mut matches = self
+            .tag_vocab
+            .iter()
+            .filter(|tag| tag.name.to_lowercase().contains(&needle))
+            .map(|tag| (tag.name.clone(), tag.count))
+            .collect::<Vec<_>>();
+        matches.sort_by(|(a_name, a_count), (b_name, b_count)| {
+            let a_prefix = a_name.to_lowercase().starts_with(&needle);
+            let b_prefix = b_name.to_lowercase().starts_with(&needle);
+            b_prefix
+                .cmp(&a_prefix)
+                .then_with(|| b_count.cmp(a_count))
+                .then_with(|| a_name.cmp(b_name))
+        });
+        matches.truncate(50);
+        self.tag_suggestions = matches;
+    }
+
+    fn open_tag_rename(&mut self, name: String, cx: &mut Context<Self>) {
+        self.tag_rename = Some(name);
+        self.tag_rename_epoch = self.tag_rename_epoch.wrapping_add(1);
+        cx.notify();
+    }
+
+    fn open_tag_merge(&mut self, name: String, cx: &mut Context<Self>) {
+        self.tag_merge = Some(name);
+        self.tag_merge_epoch = self.tag_merge_epoch.wrapping_add(1);
+        cx.notify();
+    }
+
+    fn apply_tag_rename(&mut self, new_name: &str, cx: &mut Context<Self>) {
+        let Some(old) = self.tag_rename.clone() else {
+            return;
+        };
+        match self.state.rename_tag(&old, new_name) {
+            Ok(affected) => {
+                self.tag_rename = None;
+                push_toast(
+                    &self.toaster,
+                    cx,
+                    format!("已重命名标签 · 影响 {affected} 张"),
+                    Severity::Success,
+                );
+                self.refresh_tag_manager(cx);
+            }
+            Err(error) => push_toast(
+                &self.toaster,
+                cx,
+                format!("重命名标签失败：{error:#}"),
+                Severity::Danger,
+            ),
+        }
+        cx.notify();
+    }
+
+    fn apply_tag_merge(&mut self, target: &str, cx: &mut Context<Self>) {
+        let Some(source) = self.tag_merge.clone() else {
+            return;
+        };
+        match self.state.merge_tags(&source, target) {
+            Ok(affected) => {
+                self.tag_merge = None;
+                push_toast(
+                    &self.toaster,
+                    cx,
+                    format!("已合并标签 · 影响 {affected} 张"),
+                    Severity::Success,
+                );
+                self.refresh_tag_manager(cx);
+            }
+            Err(error) => push_toast(
+                &self.toaster,
+                cx,
+                format!("合并标签失败：{error:#}"),
                 Severity::Danger,
             ),
         }
@@ -1833,7 +2477,124 @@ impl KanalibApp {
             }
             self.lightbox_slides = slides;
             self.lightbox_at = Some(at);
+            self.focus_viewer_pending = true;
+            self.viewer_slideshow = false;
+            self.viewer_original = false;
+            self.slideshow_task = None;
         }
+    }
+
+    fn remove_viewer_asset(&self, path: &Path, cx: &mut App) {
+        let thumb = {
+            let shared = self.state.shared.lock().unwrap();
+            let assets = shared.assets.read().unwrap();
+            assets
+                .iter()
+                .find(|asset| asset.path == path)
+                .and_then(|asset| asset.thumb.clone().or_else(|| asset.tile_thumb.clone()))
+        };
+        for resource in std::iter::once(path.to_path_buf()).chain(thumb) {
+            let resource = Resource::from(resource);
+            cx.remove_asset::<gpui::ImageAssetLoader>(&resource);
+            cx.remove_asset::<gpui::ImgResourceLoader>(&resource);
+        }
+    }
+
+    fn close_viewer(&mut self, cx: &mut Context<Self>) {
+        let paths = self.take_lightbox_cleanup();
+        self.viewer_slideshow = false;
+        self.slideshow_task = None;
+        self.focus_grid_pending = true;
+        for path in paths {
+            self.remove_viewer_asset(&path, cx);
+        }
+        cx.notify();
+    }
+
+    fn set_viewer_at(&mut self, at: usize, cx: &mut Context<Self>) {
+        let count = self.lightbox_slides.len();
+        if count == 0 || at >= count {
+            return;
+        }
+        let previous = self
+            .lightbox_at
+            .and_then(|previous| self.lightbox_slides.get(previous))
+            .map(|(path, _)| path.clone());
+        self.lightbox_at = Some(at);
+        if let Some((path, _)) = self.lightbox_slides.get(at) {
+            let path = path.clone();
+            self.lightbox_viewed.insert(path.clone());
+            self.selection = Arc::new(HashSet::from([path.clone()]));
+            self.selection_anchor = Some(path.clone());
+            self.state.select(Some(path));
+        }
+        if let Some(previous) = previous
+            && self
+                .lightbox_at
+                .and_then(|at| self.lightbox_slides.get(at))
+                .is_none_or(|(path, _)| path != &previous)
+        {
+            self.remove_viewer_asset(&previous, cx);
+        }
+        cx.notify();
+    }
+
+    fn step_viewer(&mut self, delta: isize, wrap: bool, cx: &mut Context<Self>) {
+        let count = self.lightbox_slides.len();
+        if count == 0 {
+            return;
+        }
+        let current = self.lightbox_at.unwrap_or(0) as isize;
+        let target = if wrap {
+            (current + delta).rem_euclid(count as isize) as usize
+        } else {
+            (current + delta).clamp(0, count as isize - 1) as usize
+        };
+        if Some(target) != self.lightbox_at {
+            self.set_viewer_at(target, cx);
+        }
+    }
+
+    fn toggle_viewer_source(&mut self, cx: &mut Context<Self>) {
+        self.viewer_original = !self.viewer_original;
+        if let Some(path) = self
+            .lightbox_at
+            .and_then(|at| self.lightbox_slides.get(at))
+            .map(|(path, _)| path.clone())
+        {
+            self.remove_viewer_asset(&path, cx);
+        }
+        cx.notify();
+    }
+
+    fn toggle_viewer_slideshow(&mut self, cx: &mut Context<Self>) {
+        if self.viewer_slideshow {
+            self.viewer_slideshow = false;
+            self.slideshow_task = None;
+            cx.notify();
+            return;
+        }
+        if self.lightbox_at.is_none() {
+            return;
+        }
+        self.viewer_slideshow = true;
+        let weak = cx.entity().downgrade();
+        self.slideshow_task = Some(cx.spawn(async move |_, cx| loop {
+            cx.background_executor()
+                .timer(Duration::from_secs(3))
+                .await;
+            let keep = weak.update(cx, |app, cx| {
+                if !app.viewer_slideshow || app.lightbox_at.is_none() {
+                    return false;
+                }
+                app.step_viewer(1, true, cx);
+                true
+            });
+            if !matches!(keep, Ok(true)) {
+                break;
+            }
+        }));
+        cx.notify();
     }
 
     fn open_quick_view(&mut self, cx: &mut Context<Self>) {
@@ -1895,10 +2656,74 @@ impl KanalibApp {
         cx.notify();
     }
 
-    fn set_density(&mut self, density: DensityPreset, cx: &mut Context<Self>) {
-        self.density = density;
-        self.persist_setting("ui.density", density.key());
+    fn selected_visible_position(&self) -> usize {
+        let shared = self.state.shared.lock().unwrap();
+        let selected = shared.selected.as_ref();
+        let assets = shared.assets.read().unwrap();
+        selected
+            .and_then(|path| {
+                self.view
+                    .visible_indices
+                    .iter()
+                    .position(|&index| assets.get(index).is_some_and(|asset| &asset.path == path))
+            })
+            .unwrap_or(0)
+    }
+
+    /// 切视图/窗格/侧栏后行索引会变，记下选中项在可见列表中的位置，等新布局算出行号再滚动。
+    fn anchor_scroll(&mut self) {
+        self.pending_scroll_position = Some(self.selected_visible_position());
+    }
+
+    fn set_view_mode(&mut self, mode: ViewMode, cx: &mut Context<Self>) {
+        if self.screen != Screen::Library || self.view_mode == mode {
+            return;
+        }
+        self.anchor_scroll();
+        self.view_mode = mode;
+        self.persist_setting("ui.view_mode", mode.key());
         self.focus_grid_pending = true;
+        cx.notify();
+    }
+
+    fn set_pane_mode(&mut self, mode: PaneMode, cx: &mut Context<Self>) {
+        if self.pane_mode == mode {
+            return;
+        }
+        self.anchor_scroll();
+        self.pane_mode = mode;
+        self.persist_setting("ui.pane_mode", mode.key());
+        self.focus_grid_pending = true;
+        cx.notify();
+    }
+
+    fn toggle_pane_mode(&mut self, mode: PaneMode, cx: &mut Context<Self>) {
+        let next = if self.pane_mode == mode && mode != PaneMode::Hidden {
+            PaneMode::Hidden
+        } else {
+            mode
+        };
+        self.set_pane_mode(next, cx);
+    }
+
+    fn set_show_sidebar(&mut self, show: bool, cx: &mut Context<Self>) {
+        self.anchor_scroll();
+        self.show_sidebar = show;
+        self.persist_setting("ui.show_sidebar", show.to_string());
+        self.focus_grid_pending = true;
+        cx.notify();
+    }
+
+    fn set_show_extensions(&mut self, show: bool, cx: &mut Context<Self>) {
+        self.show_extensions = show;
+        self.persist_setting("ui.show_extensions", show.to_string());
+        cx.notify();
+    }
+
+    fn set_show_tile_summary(&mut self, show: bool, cx: &mut Context<Self>) {
+        self.anchor_scroll();
+        self.show_tile_summary = show;
+        self.persist_setting("ui.show_tile_summary", show.to_string());
         cx.notify();
     }
 
@@ -1989,9 +2814,20 @@ impl KanalibApp {
                 cx.notify();
             }
             "view:theme" => self.toggle_theme(cx),
-            "view:small" => self.set_density(DensityPreset::Small, cx),
-            "view:medium" => self.set_density(DensityPreset::Medium, cx),
-            "view:large" => self.set_density(DensityPreset::Large, cx),
+            "view:xl" => self.set_view_mode(ViewMode::IconsXl, cx),
+            "view:lg" => self.set_view_mode(ViewMode::IconsLg, cx),
+            "view:md" => self.set_view_mode(ViewMode::IconsMd, cx),
+            "view:sm" => self.set_view_mode(ViewMode::IconsSm, cx),
+            "view:list" => self.set_view_mode(ViewMode::List, cx),
+            "view:details" => self.set_view_mode(ViewMode::Details, cx),
+            "view:tiles" => self.set_view_mode(ViewMode::Tiles, cx),
+            "view:content" => self.set_view_mode(ViewMode::Content, cx),
+            "pane:details" => self.toggle_pane_mode(PaneMode::Details, cx),
+            "pane:preview" => self.toggle_pane_mode(PaneMode::Preview, cx),
+            "pane:hidden" => self.set_pane_mode(PaneMode::Hidden, cx),
+            "view:sidebar" => self.set_show_sidebar(!self.show_sidebar, cx),
+            "view:extensions" => self.set_show_extensions(!self.show_extensions, cx),
+            "view:tile-summary" => self.set_show_tile_summary(!self.show_tile_summary, cx),
             "view:folder" => self.choose_folder(cx),
             "scan:rescan" => self.rescan(cx),
             "scan:retry" => self.retry_failed(cx),
@@ -2018,6 +2854,7 @@ impl KanalibApp {
             "export:view-json" => self.export_assets(ExportTarget::View, ExportFormat::Json, cx),
             "sort:name" => self.choose_sort_mode(SortMode::Name, cx),
             "sort:modified" => self.choose_sort_mode(SortMode::Modified, cx),
+            "sort:captured" => self.choose_sort_mode(SortMode::Captured, cx),
             "sort:size" => self.choose_sort_mode(SortMode::Size, cx),
             "sort:resolution" => self.choose_sort_mode(SortMode::Resolution, cx),
             "sort:star" => self.choose_sort_mode(SortMode::Star, cx),
@@ -2037,19 +2874,22 @@ impl Render for KanalibApp {
         let colors = UiColors::from_theme(cx);
         let this = cx.entity();
         let search = window.use_keyed_state("kanalib-search", cx, |window, cx| {
-            TextInput::new(window, cx).placeholder("搜索 / 标签 / is:fav")
+            TextInput::new(window, cx).placeholder("搜索 / tag: / character: / size:>10mb")
         });
         if self.search_input.is_none() {
             self.search_input = Some(search.clone());
         }
         let search_text = search.read(cx).text().to_string();
-        let search_query = SearchQuery::parse(&search_text);
+        let mut search_query = SearchQuery::parse(&search_text);
+        let tag_aliases = self.state.shared.lock().unwrap().tag_aliases.clone();
+        search_query.resolve_tag_aliases(&tag_aliases);
+        let search_warnings = search_query.warnings().to_vec();
         // gpui-pre 的 viewport_size 自 0.3.x 起就是逻辑像素，不能再按 DPI 除一次。
         let scale = window.scale_factor();
         let viewport = window.viewport_size();
         let window_width = viewport.width;
-        let sidebar_width = px(245.);
-        let inspector_width = px(310.);
+        let sidebar_width = if self.show_sidebar { px(245.) } else { px(0.) };
+        let inspector_width = px(self.pane_mode.width());
         let mut main_width = window_width - sidebar_width - inspector_width;
         if main_width < px(360.) {
             main_width = px(360.);
@@ -2132,6 +2972,15 @@ impl Render for KanalibApp {
             self.view.counts_revision = revision;
         }
         let counts = self.view.counts.clone();
+        if !scanning && self.tag_vocab_revision != revision {
+            match self.state.tag_vocabulary() {
+                Ok(vocabulary) => {
+                    self.tag_vocab = vocabulary;
+                    self.tag_vocab_revision = revision;
+                }
+                Err(error) => log::warn!("tag vocabulary: {error:#}"),
+            }
+        }
         let query_changed = search_text != self.last_search;
         let scan_changed = scanning != self.last_scanning;
         self.last_scanning = scanning;
@@ -2154,6 +3003,12 @@ impl Render for KanalibApp {
                     self.selection_anchor = None;
                 }
             }
+        }
+        self.thumb_cache
+            .update(cx, |cache, cx| cache.flush_access_if_due(cx));
+        if !scanning && (scan_changed || !self.cache_budget_checked) {
+            self.cache_budget_checked = true;
+            self.run_cache_budget_cleanup(false, cx);
         }
         if query_changed {
             self.last_search = search_text.clone();
@@ -2221,6 +3076,7 @@ impl Render for KanalibApp {
                             let asset = &assets[index];
                             let primary = match mode {
                                 SortMode::Modified => asset.mtime,
+                                SortMode::Captured => asset.taken_or_modified(),
                                 SortMode::Size => asset.bytes,
                                 SortMode::Resolution => asset.width as u64 * asset.height as u64,
                                 SortMode::Star => asset.star as u64,
@@ -2345,9 +3201,31 @@ impl Render for KanalibApp {
                 self.frame_probe = None;
             }
         }
-        let columns = grid_columns(main_width.as_f32(), self.density.min_width());
-        self.grid_rows = visible_indices.len().div_ceil(columns);
+        let columns = if self.view_mode.is_grid() {
+            grid_columns(main_width.as_f32(), self.view_mode.min_width())
+        } else {
+            1
+        };
+        let row_count = if self.view_mode.is_grid() {
+            visible_indices.len().div_ceil(columns)
+        } else {
+            visible_indices.len()
+        };
+        self.grid_rows = row_count;
         self.grid_columns = columns;
+        if let Some(position) = self.pending_scroll_position.take() {
+            if row_count > 0 {
+                let row = if self.view_mode.is_grid() {
+                    (position / columns.max(1)).min(row_count - 1)
+                } else {
+                    position.min(row_count - 1)
+                };
+                self.grid_scroll
+                    .scroll_to_item(row, ScrollStrategy::Nearest);
+            } else {
+                self.grid_scroll.scroll_to_item(0, ScrollStrategy::Top);
+            }
+        }
         let selected_asset = {
             let assets = assets.read().unwrap();
             selected.as_ref().and_then(|path| {
@@ -2369,26 +3247,39 @@ impl Render for KanalibApp {
                 0
             };
         let dedup_similar_count = dedup_similar_groups.len();
-        let sidebar = self.render_sidebar(
-            &this,
-            &roots,
-            &source_aliases,
-            &status,
-            error.as_deref(),
-            scanning,
-            device.as_deref(),
-            queue_pending,
-            queue_running,
-            queue_error,
-            &filter,
-            &counts,
-            self.screen,
-            dedup_pending_total,
-            &saved_searches,
-            &blocked_tags,
-            &search,
-            colors,
-        );
+        let tag_search = window.use_keyed_state("kanalib-sidebar-tag-search", cx, |window, cx| {
+            TextInput::new(window, cx).placeholder("搜索标签")
+        });
+        let tag_query = tag_search.read(cx).text().to_string();
+        let sidebar: AnyElement = if self.show_sidebar {
+            self.render_sidebar(
+                &this,
+                &roots,
+                &source_aliases,
+                &status,
+                error.as_deref(),
+                scanning,
+                device.as_deref(),
+                queue_pending,
+                queue_running,
+                queue_error,
+                &filter,
+                &counts,
+                self.screen,
+                dedup_pending_total,
+                &saved_searches,
+                &blocked_tags,
+                &self.tag_vocab,
+                &tag_search,
+                &tag_query,
+                &search,
+                colors,
+            )
+            .into_any_element()
+        } else {
+            div().flex_none().into_any_element()
+        };
+        let (cache_hits, cache_misses) = self.thumb_cache.read(cx).access_stats();
         let content: AnyElement = if self.screen == Screen::Tags {
             let tags_width = (window_width - sidebar_width).max(px(640.));
             self.render_tags(
@@ -2413,6 +3304,8 @@ impl Render for KanalibApp {
                 queue_error,
                 &status,
                 error.as_deref(),
+                cache_hits,
+                cache_misses,
                 settings_width,
                 colors,
             )
@@ -2444,24 +3337,37 @@ impl Render for KanalibApp {
                 self.selection.clone(),
                 roots.is_empty(),
                 error.as_deref(),
+                &search_warnings,
                 scanning,
                 main_width,
                 colors,
             )
             .into_any_element()
         };
-        let inspector = (self.screen == Screen::Library).then(|| {
-            self.render_inspector(
-                &this,
-                selected_asset.as_ref(),
-                &counts,
-                &blocked_tags,
-                &source_aliases,
-                inspector_width,
-                colors,
-            )
-            .into_any_element()
-        });
+        let inspector = (self.screen == Screen::Library && self.pane_mode != PaneMode::Hidden)
+            .then(|| {
+                match self.pane_mode {
+                    PaneMode::Preview => self
+                        .render_preview_inspector(
+                            &this,
+                            selected_asset.as_ref(),
+                            &source_aliases,
+                            inspector_width,
+                            colors,
+                        )
+                        .into_any_element(),
+                    PaneMode::Details | PaneMode::Hidden => self
+                        .render_inspector(
+                            &this,
+                            selected_asset.as_ref(),
+                            &blocked_tags,
+                            &source_aliases,
+                            inspector_width,
+                            colors,
+                        )
+                        .into_any_element(),
+                }
+            });
 
         let palette = self.palette_open.then(|| {
             let close = this.clone();
@@ -2500,9 +3406,37 @@ impl Render for KanalibApp {
                         .icon(IconName::X)
                         .keys("escape"),
                     Command::new("view:save", "保存当前视图为智能集合").icon(IconName::Plus),
-                    Command::new("view:small", "缩略图 · 小").icon(IconName::LayoutGrid),
-                    Command::new("view:medium", "缩略图 · 中").icon(IconName::LayoutGrid),
-                    Command::new("view:large", "缩略图 · 大").icon(IconName::LayoutGrid),
+                    Command::new("view:xl", "查看 · 超大图标")
+                        .icon(IconName::Image)
+                        .keys("ctrl-shift-1"),
+                    Command::new("view:lg", "查看 · 大图标")
+                        .icon(IconName::LayoutGrid)
+                        .keys("ctrl-shift-2"),
+                    Command::new("view:md", "查看 · 中图标")
+                        .icon(IconName::LayoutGrid)
+                        .keys("ctrl-shift-3"),
+                    Command::new("view:sm", "查看 · 小图标")
+                        .icon(IconName::LayoutGrid)
+                        .keys("ctrl-shift-4"),
+                    Command::new("view:list", "查看 · 列表")
+                        .icon(IconName::List)
+                        .keys("ctrl-shift-5"),
+                    Command::new("view:details", "查看 · 详细信息")
+                        .icon(IconName::Table)
+                        .keys("ctrl-shift-6"),
+                    Command::new("view:tiles", "查看 · 平铺")
+                        .icon(IconName::Rows2)
+                        .keys("ctrl-shift-7"),
+                    Command::new("view:content", "查看 · 内容")
+                        .icon(IconName::AlignJustify)
+                        .keys("ctrl-shift-8"),
+                    Command::new("pane:details", "窗格 · 详细信息").icon(IconName::PanelRight),
+                    Command::new("pane:preview", "窗格 · 预览").icon(IconName::Image),
+                    Command::new("pane:hidden", "窗格 · 隐藏").icon(IconName::EyeOff),
+                    Command::new("view:sidebar", "显示/隐藏侧栏").icon(IconName::PanelLeft),
+                    Command::new("view:extensions", "显示/隐藏文件扩展名").icon(IconName::FileType),
+                    Command::new("view:tile-summary", "平铺显示/隐藏标签摘要")
+                        .icon(IconName::Tag),
                     Command::new(
                         "view:theme",
                         if dark {
@@ -2551,6 +3485,7 @@ impl Render for KanalibApp {
                 [
                     Command::new("sort:name", "按文件名排序").icon(IconName::ArrowDownUp),
                     Command::new("sort:modified", "按修改时间排序").icon(IconName::Clock),
+                    Command::new("sort:captured", "按拍摄时间排序").icon(IconName::Camera),
                     Command::new("sort:size", "按文件大小排序").icon(IconName::FileImage),
                     Command::new("sort:resolution", "按分辨率排序").icon(IconName::Maximize2),
                     Command::new("sort:star", "按星级排序").icon(IconName::Star),
@@ -2572,57 +3507,9 @@ impl Render for KanalibApp {
             })
             .into_any_element()
         });
-        let lightbox = self.lightbox_at.and_then(|at| {
-            if self.lightbox_slides.is_empty() {
-                return None;
-            }
-            let slides = self
-                .lightbox_slides
-                .iter()
-                .map(|(path, caption)| Slide::new(path.clone(), caption.clone()))
-                .collect::<Vec<_>>();
-            let close = this.downgrade();
-            let step = this.downgrade();
-            Some(
-                Lightbox::new("kanalib-lightbox", slides, at, move |_, cx| {
-                    let paths = close
-                        .update(cx, |app, cx| {
-                            let paths = app.take_lightbox_cleanup();
-                            app.focus_grid_pending = true;
-                            cx.notify();
-                            paths
-                        })
-                        .unwrap_or_default();
-                    for path in paths {
-                        cx.remove_asset::<gpui::ImgResourceLoader>(&Resource::from(path));
-                    }
-                })
-                .on_step(move |to, _, cx| {
-                    let previous = step
-                        .update(cx, |app, cx| {
-                            let previous = app.lightbox_at.and_then(|at| {
-                                app.lightbox_slides.get(at).map(|(path, _)| path.clone())
-                            });
-                            app.lightbox_at = Some(to);
-                            if let Some((path, _)) = app.lightbox_slides.get(to) {
-                                let path = path.clone();
-                                app.lightbox_viewed.insert(path.clone());
-                                app.selection = Arc::new(HashSet::from([path.clone()]));
-                                app.selection_anchor = Some(path.clone());
-                                app.state.select(Some(path));
-                            }
-                            cx.notify();
-                            previous
-                        })
-                        .ok()
-                        .flatten();
-                    if let Some(previous) = previous {
-                        cx.remove_asset::<gpui::ImgResourceLoader>(&Resource::from(previous));
-                    }
-                })
-                .into_any_element(),
-            )
-        });
+        let viewer = self
+            .lightbox_at
+            .and_then(|at| self.render_viewer(&this, at, colors));
         let save_dialog = self.save_search_open.then(|| {
             let field = window.use_keyed_state("kanalib-save-search", cx, |window, cx| {
                 TextInput::new(window, cx).placeholder("智能集合名称")
@@ -2702,6 +3589,101 @@ impl Render for KanalibApp {
             })
             .on_submit(move |text, _, cx| {
                 let _ = submit.update(cx, |app, cx| app.apply_tag_dialog(text, cx));
+            })
+            .into_any_element()
+        });
+        let tag_rename_dialog = self.tag_rename.clone().map(|name| {
+            let epoch = self.tag_rename_epoch;
+            let initial = name.clone();
+            let field_holder = window.use_keyed_state(
+                SharedString::from(format!("kanalib-tag-rename-{epoch}")),
+                cx,
+                move |window, cx| {
+                    let input = cx.new(|cx| TextInput::new(window, cx).placeholder("新标签名"));
+                    let value = initial.clone();
+                    input.update(cx, |input, cx| input.set_text(value, cx));
+                    input
+                },
+            );
+            let field = field_holder.read(cx).clone();
+            let close = this.clone();
+            let submit = this.clone();
+            let count = self
+                .tag_vocab
+                .iter()
+                .find(|tag| tag.name == name)
+                .map(|tag| tag.count)
+                .unwrap_or(0);
+            PromptDialog::new(
+                SharedString::from(format!("kanalib-tag-rename-dialog-{epoch}")),
+                "重命名标签",
+                &field,
+                move |_, cx| {
+                    let _ = close.update(cx, |app, cx| {
+                        app.tag_rename = None;
+                        cx.notify();
+                    });
+                },
+            )
+            .label(format!(
+                "#{name} 影响 {count} 张图片；旧名会保留为别名，仍可搜索。"
+            ))
+            .submit("重命名")
+            .check(|text| {
+                if normalize_tag_name(text).is_empty() {
+                    Err("标签名不能为空".into())
+                } else {
+                    Ok(())
+                }
+            })
+            .on_submit(move |text, _, cx| {
+                let _ = submit.update(cx, |app, cx| app.apply_tag_rename(text, cx));
+            })
+            .into_any_element()
+        });
+        let tag_merge_dialog = self.tag_merge.clone().map(|source| {
+            let epoch = self.tag_merge_epoch;
+            let field = window.use_keyed_state(
+                SharedString::from(format!("kanalib-tag-merge-{epoch}")),
+                cx,
+                |window, cx| TextInput::new(window, cx).placeholder("目标标签名（已有或新建）"),
+            );
+            let close = this.clone();
+            let submit = this.clone();
+            let count = self
+                .tag_vocab
+                .iter()
+                .find(|tag| tag.name == source)
+                .map(|tag| tag.count)
+                .unwrap_or(0);
+            let check_source = source.clone();
+            PromptDialog::new(
+                SharedString::from(format!("kanalib-tag-merge-dialog-{epoch}")),
+                "合并标签",
+                &field,
+                move |_, cx| {
+                    let _ = close.update(cx, |app, cx| {
+                        app.tag_merge = None;
+                        cx.notify();
+                    });
+                },
+            )
+            .label(format!(
+                "将 #{source}（{count} 张）合并到目标标签；来源名会保留为别名，手工/自动标记一并合并。"
+            ))
+            .submit("合并")
+            .check(move |text| {
+                let name = normalize_tag_name(text);
+                if name.is_empty() {
+                    Err("目标标签名不能为空".into())
+                } else if name == normalize_tag_name(&check_source) {
+                    Err("目标和来源相同".into())
+                } else {
+                    Ok(())
+                }
+            })
+            .on_submit(move |text, _, cx| {
+                let _ = submit.update(cx, |app, cx| app.apply_tag_merge(text, cx));
             })
             .into_any_element()
         });
@@ -2865,9 +3847,11 @@ impl Render for KanalibApp {
                     .children(inspector),
             )
             .children(palette)
-            .children(lightbox)
+            .children(viewer)
             .children(save_dialog)
             .children(tag_dialog)
+            .children(tag_rename_dialog)
+            .children(tag_merge_dialog)
             .children(remove_source_dialog)
             .children(rescan_dialog)
             .children(source_rename_dialog)
@@ -2875,15 +3859,10 @@ impl Render for KanalibApp {
             .children(cleanup_dialog)
             .child(ToastViewport::new("kanalib-toasts", &self.toaster))
             .on_action(cx.listener(|this, _: &OpenPalette, _, cx| {
-                let cleanup = if this.palette_open {
-                    Vec::new()
-                } else {
-                    this.take_lightbox_cleanup()
-                };
-                this.palette_open = !this.palette_open;
-                for path in cleanup {
-                    cx.remove_asset::<gpui::ImgResourceLoader>(&Resource::from(path));
+                if !this.palette_open && this.lightbox_at.is_some() {
+                    this.close_viewer(cx);
                 }
+                this.palette_open = !this.palette_open;
                 cx.notify();
             }))
             .on_action(cx.listener(|this, _: &FocusSearch, window, cx| {
@@ -2910,13 +3889,43 @@ impl Render for KanalibApp {
             .on_action(cx.listener(|this, _: &Rate2, _, cx| this.apply_star(2, cx)))
             .on_action(cx.listener(|this, _: &Rate3, _, cx| this.apply_star(3, cx)))
             .on_action(cx.listener(|this, _: &Rate4, _, cx| this.apply_star(4, cx)))
-            .on_action(cx.listener(|this, _: &Rate5, _, cx| this.apply_star(5, cx)));
+            .on_action(cx.listener(|this, _: &Rate5, _, cx| this.apply_star(5, cx)))
+            .on_action(cx.listener(|this, _: &ViewIconsXl, _, cx| {
+                this.set_view_mode(ViewMode::IconsXl, cx)
+            }))
+            .on_action(cx.listener(|this, _: &ViewIconsLg, _, cx| {
+                this.set_view_mode(ViewMode::IconsLg, cx)
+            }))
+            .on_action(cx.listener(|this, _: &ViewIconsMd, _, cx| {
+                this.set_view_mode(ViewMode::IconsMd, cx)
+            }))
+            .on_action(cx.listener(|this, _: &ViewIconsSm, _, cx| {
+                this.set_view_mode(ViewMode::IconsSm, cx)
+            }))
+            .on_action(cx.listener(|this, _: &ViewList, _, cx| {
+                this.set_view_mode(ViewMode::List, cx)
+            }))
+            .on_action(cx.listener(|this, _: &ViewDetails, _, cx| {
+                this.set_view_mode(ViewMode::Details, cx)
+            }))
+            .on_action(cx.listener(|this, _: &ViewTiles, _, cx| {
+                this.set_view_mode(ViewMode::Tiles, cx)
+            }))
+            .on_action(cx.listener(|this, _: &ViewContent, _, cx| {
+                this.set_view_mode(ViewMode::Content, cx)
+            }));
+        if self.focus_viewer_pending && self.lightbox_at.is_some() {
+            window.focus(&self.viewer_focus, cx);
+            self.focus_viewer_pending = false;
+        }
         if self.focus_grid_pending
             && self.screen == Screen::Library
             && !self.palette_open
             && self.lightbox_at.is_none()
             && !self.save_search_open
             && self.tag_dialog.is_none()
+            && self.tag_rename.is_none()
+            && self.tag_merge.is_none()
             && self.source_remove_confirm.is_none()
             && self.source_rename.is_none()
             && self.rescan_confirm.is_none()
@@ -3034,6 +4043,9 @@ impl KanalibApp {
         dedup_pending: usize,
         saved_searches: &[SavedSearch],
         blocked_tags: &HashSet<String>,
+        tag_vocab: &[TagSummary],
+        tag_search: &Entity<TextInput>,
+        tag_query: &str,
         search: &Entity<TextInput>,
         colors: UiColors,
     ) -> impl IntoElement + use<> {
@@ -3293,24 +4305,200 @@ impl KanalibApp {
             }
         }
 
-        if !counts.tags.is_empty() {
-            body = body.child(section("常用标签", colors));
-            for (tag, count) in counts
-                .tags
-                .iter()
-                .filter(|(tag, _)| !blocked_tags.contains(tag))
-            {
-                body = body.child(filter_row(
-                    SharedString::from(format!("filter-tag-{tag}")),
-                    format!("#{tag}"),
-                    *count,
-                    library && filter == &Filter::Tag(tag.clone()),
-                    Filter::Tag(tag.clone()),
-                    state.clone(),
-                    this.clone(),
-                    colors,
-                ));
+        let this_tag_sort = this.clone();
+        body = body.child(
+            div()
+                .flex()
+                .items_center()
+                .justify_between()
+                .px(px(8.))
+                .pt(px(10.))
+                .pb(px(4.))
+                .child(
+                    div()
+                        .text_xs()
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(colors.subtle)
+                        .child("标签"),
+                )
+                .child(
+                    IconButton::new("tag-pane-sort", IconName::ArrowDownUp)
+                        .size(ControlSize::Sm)
+                        .tooltip(if self.tag_pane_sort_name {
+                            "按使用次数排序"
+                        } else {
+                            "按名称排序"
+                        })
+                        .on_click(move |_, _, cx| {
+                            let _ = this_tag_sort.update(cx, |app, cx| {
+                                app.tag_pane_sort_name = !app.tag_pane_sort_name;
+                                cx.notify();
+                            });
+                        }),
+                ),
+        );
+        body = body.child(
+            div()
+                .px(px(8.))
+                .pb(px(4.))
+                .child(Input::new(tag_search).clearable().least("搜索标签")),
+        );
+        let mut category_chips = div()
+            .flex()
+            .flex_wrap()
+            .gap(px(3.))
+            .px(px(8.))
+            .pb(px(4.));
+        for (key, label) in [
+            ("general", "通用"),
+            ("character", "角色"),
+            ("copyright", "作品"),
+            ("style", "风格"),
+            ("meta", "元数据"),
+            ("manual", "手工"),
+        ] {
+            let this = this.clone();
+            let active = self.tag_pane_category == key;
+            category_chips = category_chips.child(
+                div()
+                    .id(SharedString::from(format!("tag-category-{key}")))
+                    .px(px(6.))
+                    .py(px(2.))
+                    .rounded(px(4.))
+                    .text_xs()
+                    .cursor_pointer()
+                    .text_color(if active { colors.fg } else { colors.muted })
+                    .when(active, |chip| chip.bg(colors.selection))
+                    .hover(move |chip| chip.bg(colors.hover))
+                    .on_click(move |_, _, cx| {
+                        let _ = this.update(cx, |app, cx| {
+                            app.tag_pane_category = key.to_string();
+                            app.tag_pane_expanded = false;
+                            cx.notify();
+                        });
+                    })
+                    .child(label),
+            );
+        }
+        body = body.child(category_chips);
+
+        let needle = tag_query.trim().to_lowercase();
+        let mut pane_tags = tag_vocab
+            .iter()
+            .filter(|tag| {
+                tag.count > 0
+                    && tag.category == self.tag_pane_category
+                    && !blocked_tags.contains(&tag.name)
+                    && (needle.is_empty() || tag.name.to_lowercase().contains(&needle))
+            })
+            .collect::<Vec<_>>();
+        if self.tag_pane_sort_name {
+            pane_tags.sort_by(|a, b| a.name.cmp(&b.name));
+        } else {
+            pane_tags.sort_by(|a, b| b.count.cmp(&a.count).then_with(|| a.name.cmp(&b.name)));
+        }
+        let total = pane_tags.len();
+        let limit = if self.tag_pane_expanded { 200 } else { 10 };
+        pane_tags.truncate(limit);
+        if pane_tags.is_empty() {
+            body = body.child(
+                div()
+                    .px(px(8.))
+                    .pb(px(4.))
+                    .text_xs()
+                    .text_color(colors.subtle)
+                    .child(if needle.is_empty() {
+                        "这个类别还没有标签"
+                    } else {
+                        "没有匹配的标签"
+                    }),
+            );
+        }
+        for tag in pane_tags {
+            let name = tag.name.clone();
+            let display_name = name.clone();
+            let count = tag.count;
+            let active = library && filter == &Filter::Tag(name.clone());
+            let this_click = this.clone();
+            let state_click = state.clone();
+            let search_click = search.clone();
+            let mut row = div()
+                .id(SharedString::from(format!("filter-tag-{name}")))
+                .role(Role::Button)
+                .aria_label(SharedString::from(format!("#{name}")))
+                .flex()
+                .items_center()
+                .justify_between()
+                .px(px(8.))
+                .py(px(5.))
+                .rounded(px(5.))
+                .cursor_pointer()
+                .hover(move |row| row.bg(colors.hover));
+            if active {
+                row = row.bg(colors.selection);
             }
+            body = body.child(
+                row.on_click(move |event, _, cx| {
+                    let modifiers = match event {
+                        ClickEvent::Mouse(event) => event.down.modifiers,
+                        ClickEvent::Keyboard(_) | ClickEvent::Touch(_) => Modifiers::default(),
+                    };
+                    if modifiers.secondary() || modifiers.shift {
+                        let current = search_click.read(cx).text().to_string();
+                        let next = if current.trim().is_empty() {
+                            format!("tag:{name}")
+                        } else {
+                            format!("{current} tag:{name}")
+                        };
+                        search_click.update(cx, |input, cx| input.set_text(next, cx));
+                    } else {
+                        state_click.set_filter(Filter::Tag(name.clone()));
+                    }
+                    let _ = this_click.update(cx, |app, cx| {
+                        app.screen = Screen::Library;
+                        app.dedup_confirm = None;
+                        cx.notify();
+                    });
+                })
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w(px(0.))
+                        .truncate()
+                        .text_xs()
+                        .text_color(colors.fg)
+                        .child(format!("#{display_name}")),
+                )
+                .child(
+                    div()
+                        .flex_none()
+                        .text_xs()
+                        .text_color(colors.subtle)
+                        .child(count.to_string()),
+                ),
+            );
+        }
+        if total > limit {
+            let this_more = this.clone();
+            body = body.child(
+                div().px(px(8.)).pb(px(4.)).child(
+                    Button::new(
+                        "tag-pane-more",
+                        if self.tag_pane_expanded {
+                            "收起".to_string()
+                        } else {
+                            format!("查看更多（{total}）")
+                        },
+                    )
+                    .size(ControlSize::Sm)
+                    .on_click(move |_, _, cx| {
+                        let _ = this_more.update(cx, |app, cx| {
+                            app.tag_pane_expanded = !app.tag_pane_expanded;
+                            cx.notify();
+                        });
+                    }),
+                ),
+            );
         }
 
         div()
@@ -3444,6 +4632,7 @@ impl KanalibApp {
         Menu::new()
             .item(menu(this, SortMode::Name))
             .item(menu(this, SortMode::Modified))
+            .item(menu(this, SortMode::Captured))
             .item(menu(this, SortMode::Size))
             .item(menu(this, SortMode::Resolution))
             .item(menu(this, SortMode::Star))
@@ -3458,6 +4647,79 @@ impl KanalibApp {
                     let _ = descending.update(cx, |app, cx| app.set_sort_ascending(false, cx));
                 }),
             )
+    }
+
+    fn display_menu(&self, this: &Entity<Self>) -> Menu {
+        let sidebar = this.clone();
+        let extensions = this.clone();
+        let summary = this.clone();
+        Menu::new()
+            .item(
+                MenuItem::check("侧栏", self.show_sidebar)
+                    .icon(IconName::PanelLeft)
+                    .on_click(move |_, cx| {
+                        let _ = sidebar.update(cx, |app, cx| {
+                            app.set_show_sidebar(!app.show_sidebar, cx)
+                        });
+                    }),
+            )
+            .item(
+                MenuItem::check("显示文件扩展名", self.show_extensions)
+                    .icon(IconName::FileType)
+                    .on_click(move |_, cx| {
+                        let _ = extensions.update(cx, |app, cx| {
+                            app.set_show_extensions(!app.show_extensions, cx)
+                        });
+                    }),
+            )
+            .item(
+                MenuItem::check("平铺显示标签摘要", self.show_tile_summary)
+                    .icon(IconName::Tag)
+                    .on_click(move |_, cx| {
+                        let _ = summary.update(cx, |app, cx| {
+                            app.set_show_tile_summary(!app.show_tile_summary, cx)
+                        });
+                    }),
+            )
+    }
+
+    fn view_menu(&self, this: &Entity<Self>) -> Menu {
+        let mut menu = Menu::new();
+        for mode in ViewMode::ALL {
+            let this = this.clone();
+            menu = menu.item(
+                MenuItem::radio(mode.label(), self.view_mode == mode)
+                    .icon(mode.icon())
+                    .keys(mode.shortcut())
+                    .on_click(move |_, cx| {
+                        let _ = this.update(cx, |app, cx| app.set_view_mode(mode, cx));
+                    }),
+            );
+        }
+        let details = this.clone();
+        let preview = this.clone();
+        let display = self.display_menu(this);
+        menu.separator()
+            .item(
+                MenuItem::radio("详细信息窗格", self.pane_mode == PaneMode::Details)
+                    .icon(IconName::PanelRight)
+                    .on_click(move |_, cx| {
+                        let _ = details.update(cx, |app, cx| {
+                            app.toggle_pane_mode(PaneMode::Details, cx)
+                        });
+                    }),
+            )
+            .item(
+                MenuItem::radio("预览窗格", self.pane_mode == PaneMode::Preview)
+                    .icon(IconName::Image)
+                    .on_click(move |_, cx| {
+                        let _ = preview.update(cx, |app, cx| {
+                            app.toggle_pane_mode(PaneMode::Preview, cx)
+                        });
+                    }),
+            )
+            .separator()
+            .item(MenuItem::submenu("显示", display))
     }
 
     fn export_menu(&self, this: &Entity<Self>) -> Menu {
@@ -3554,13 +4816,10 @@ impl KanalibApp {
                 .icon(IconName::ArrowDownUp)
                 .variant(ButtonVariant::Ghost)
         });
-        let density = library.then(|| {
-            density_control(
-                "library-density",
-                self.density,
-                this.clone(),
-                colors,
-            )
+        let view = library.then(|| {
+            DropdownMenu::new("library-view", "查看", self.view_menu(this))
+                .icon(IconName::LayoutGrid)
+                .variant(ButtonVariant::Ghost)
         });
         let theme = IconButton::new(
             "theme-toggle",
@@ -3590,7 +4849,11 @@ impl KanalibApp {
                 .on_mouse_down(MouseButton::Left, |_, window, _| {
                     window.prevent_default()
                 })
-                .child(Input::new(search).clearable().least("搜索 / is:fav"))
+                .child(
+                    Input::new(search)
+                        .clearable()
+                        .least("搜索 / tag: / character: / size:>10mb"),
+                )
         });
 
         let show_brand = !library || !compact;
@@ -3661,7 +4924,7 @@ impl KanalibApp {
             controls = controls
                 .children(palette)
                 .children(sort)
-                .children(density)
+                .children(view)
                 .child(theme)
                 .children(export);
         } else {
@@ -3751,6 +5014,220 @@ impl KanalibApp {
         bar.into_any_element()
     }
 
+    fn render_viewer(
+        &self,
+        this: &Entity<Self>,
+        at: usize,
+        colors: UiColors,
+    ) -> Option<AnyElement> {
+        let (path, caption) = self.lightbox_slides.get(at)?.clone();
+        let source = if self.viewer_original {
+            path.clone()
+        } else {
+            let shared = self.state.shared.lock().unwrap();
+            let assets = shared.assets.read().unwrap();
+            assets
+                .iter()
+                .find(|asset| asset.path == path)
+                .and_then(|asset| asset.thumb.clone().or_else(|| asset.tile_thumb.clone()))
+                .unwrap_or_else(|| path.clone())
+        };
+        let count = self.lightbox_slides.len();
+        let title = path
+            .file_name()
+            .map(|name| name.to_string_lossy().to_string())
+            .unwrap_or_else(|| path.display().to_string());
+        let close = this.clone();
+        let prev = this.clone();
+        let next = this.clone();
+        let slideshow = this.clone();
+        let prev_disabled = at == 0;
+        let next_disabled = at + 1 >= count;
+        let slideshow_active = self.viewer_slideshow;
+        let overlay = div()
+            .id("kanalib-viewer-overlay")
+            .absolute()
+            .top(px(0.))
+            .left(px(0.))
+            .size_full()
+            .occlude()
+            .flex()
+            .flex_col()
+            .bg(black())
+            .text_color(colors.on_media)
+            .key_context(VIEWER_CONTEXT)
+            .track_focus(&self.viewer_focus)
+            .on_action(move |_: &ViewerClose, _, cx| {
+                let _ = close.update(cx, |app, cx| app.close_viewer(cx));
+            })
+            .on_action(move |_: &ViewerPrev, _, cx| {
+                let _ = prev.update(cx, |app, cx| app.step_viewer(-1, false, cx));
+            })
+            .on_action(move |_: &ViewerNext, _, cx| {
+                let _ = next.update(cx, |app, cx| app.step_viewer(1, false, cx));
+            })
+            .on_action(move |_: &ViewerFullscreen, window, _| {
+                window.toggle_fullscreen();
+            })
+            .on_action(move |_: &ViewerSlideshow, _, cx| {
+                let _ = slideshow.update(cx, |app, cx| app.toggle_viewer_slideshow(cx));
+            });
+        let close_button = this.clone();
+        let slideshow_button = this.clone();
+        let source_button = this.clone();
+        let prev_button = this.clone();
+        let next_button = this.clone();
+        Some(
+            overlay
+                .child(
+                    div()
+                        .flex_none()
+                        .h(px(52.))
+                        .px(px(16.))
+                        .flex()
+                        .items_center()
+                        .justify_between()
+                        .gap(px(8.))
+                        .child(
+                            div()
+                                .min_w(px(0.))
+                                .truncate()
+                                .text_sm()
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .child(title),
+                        )
+                        .child(
+                            div()
+                                .flex_none()
+                                .flex()
+                                .items_center()
+                                .gap(px(8.))
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(colors.on_media.opacity(0.65))
+                                        .child(format!("{} / {count}", at + 1)),
+                                )
+                                .child(
+                                    Button::new(
+                                        "viewer-source",
+                                        if self.viewer_original {
+                                            "预览"
+                                        } else {
+                                            "原图"
+                                        },
+                                    )
+                                    .size(ControlSize::Sm)
+                                    .on_click(move |_, _, cx| {
+                                        let _ = source_button.update(cx, |app, cx| {
+                                            app.toggle_viewer_source(cx)
+                                        });
+                                    }),
+                                )
+                                .child(
+                                    IconButton::new("viewer-slideshow", if slideshow_active {
+                                        IconName::Pause
+                                    } else {
+                                        IconName::Play
+                                    })
+                                    .size(ControlSize::Sm)
+                                    .tooltip(if slideshow_active {
+                                        "暂停幻灯片 (S)"
+                                    } else {
+                                        "幻灯片 (S)"
+                                    })
+                                    .on_click(move |_, _, cx| {
+                                        let _ = slideshow_button.update(cx, |app, cx| {
+                                            app.toggle_viewer_slideshow(cx)
+                                        });
+                                    }),
+                                )
+                                .child(
+                                    IconButton::new("viewer-fullscreen", IconName::Fullscreen)
+                                        .size(ControlSize::Sm)
+                                        .tooltip("全屏 (F)")
+                                        .on_click(move |_, window, _| {
+                                            window.toggle_fullscreen();
+                                        }),
+                                )
+                                .child(
+                                    IconButton::new("viewer-close", IconName::X)
+                                        .size(ControlSize::Sm)
+                                        .tooltip("关闭 (Esc)")
+                                        .on_click(move |_, _, cx| {
+                                            let _ = close_button
+                                                .update(cx, |app, cx| app.close_viewer(cx));
+                                        }),
+                                ),
+                        ),
+                )
+                .child(
+                    div()
+                        .flex_1()
+                        .min_h(px(0.))
+                        .w_full()
+                        .px(px(16.))
+                        .child(ImageViewer::new("kanalib-viewer", source)),
+                )
+                .child(
+                    div()
+                        .flex_none()
+                        .px(px(16.))
+                        .py(px(10.))
+                        .flex()
+                        .items_center()
+                        .justify_between()
+                        .gap(px(10.))
+                        .child(
+                            div()
+                                .min_w(px(0.))
+                                .flex()
+                                .items_center()
+                                .gap(px(8.))
+                                .child(
+                                    IconButton::new("viewer-prev", IconName::ChevronLeft)
+                                        .size(ControlSize::Sm)
+                                        .tooltip("上一张 (←)")
+                                        .disabled(prev_disabled)
+                                        .on_click(move |_, _, cx| {
+                                            let _ = prev_button.update(cx, |app, cx| {
+                                                app.step_viewer(-1, false, cx)
+                                            });
+                                        }),
+                                )
+                                .child(
+                                    IconButton::new("viewer-next", IconName::ChevronRight)
+                                        .size(ControlSize::Sm)
+                                        .tooltip("下一张 (→)")
+                                        .disabled(next_disabled)
+                                        .on_click(move |_, _, cx| {
+                                            let _ = next_button.update(cx, |app, cx| {
+                                                app.step_viewer(1, false, cx)
+                                            });
+                                        }),
+                                )
+                                .child(
+                                    div()
+                                        .truncate()
+                                        .text_xs()
+                                        .text_color(colors.on_media.opacity(0.8))
+                                        .child(caption),
+                                ),
+                        )
+                        .child(
+                            div()
+                                .flex_none()
+                                .text_xs()
+                                .text_color(colors.on_media.opacity(0.55))
+                                .child(
+                                    "← → 切图 · +/- 缩放 · Ctrl+滚轮缩放 · 拖拽平移 · R 旋转 · F 全屏 · S 幻灯片",
+                                ),
+                        ),
+                )
+                .into_any_element(),
+        )
+    }
+
     fn render_main(
         &self,
         this: &Entity<Self>,
@@ -3759,6 +5236,7 @@ impl KanalibApp {
         selection: Arc<HashSet<PathBuf>>,
         roots_empty: bool,
         error: Option<&str>,
+        search_warnings: &[String],
         scanning: bool,
         width: Pixels,
         colors: UiColors,
@@ -3804,14 +5282,29 @@ impl KanalibApp {
                 )
         };
         let export_menu = self.export_menu(this);
-        let columns = grid_columns(width.as_f32(), self.density.min_width());
+        let is_grid = self.view_mode.is_grid();
+        let columns = if is_grid {
+            grid_columns(width.as_f32(), self.view_mode.min_width())
+        } else {
+            1
+        };
         let tile_width = grid_tile_width(width.as_f32(), columns);
-        let image_height = self.density.image_height();
-        let row_height = self.density.row_height();
+        let image_height = self.view_mode.image_height();
+        let row_height = self.view_mode.row_height(self.show_tile_summary);
         let visible = visible_indices.len();
-        let row_count = visible.div_ceil(columns);
+        let row_count = if is_grid {
+            visible.div_ceil(columns)
+        } else {
+            visible
+        };
         let assets_for_list = assets;
         let rows_for_list = visible_indices;
+        let detail_columns = detail_columns(width.as_f32());
+        let view_mode = self.view_mode;
+        let show_extensions = self.show_extensions;
+        let show_summary = self.view_mode == ViewMode::Tiles && self.show_tile_summary;
+        let sort_mode = self.sort;
+        let sort_ascending = self.sort_ascending;
         let grid: AnyElement = if rows_for_list.is_empty() {
             div()
                 .flex_1()
@@ -3832,11 +5325,12 @@ impl KanalibApp {
                         }),
                 )
                 .into_any_element()
-        } else {
+        } else if is_grid {
             let this_for_list = this.clone();
             let thumb_cache_for_list = self.thumb_cache.clone();
             let focus_for_list = self.grid_focus.clone();
             let selection_for_list = selection.clone();
+            let prefer_large = self.view_mode.prefers_large_thumb();
             uniform_list("asset-grid", row_count, move |range, _, _| {
                 let Ok(assets) = assets_for_list.read() else {
                     return Vec::new();
@@ -3865,6 +5359,9 @@ impl KanalibApp {
                                 image_height,
                                 focus_for_list.clone(),
                                 colors,
+                                show_summary,
+                                prefer_large,
+                                show_extensions,
                             ));
                         }
                         line
@@ -3876,6 +5373,82 @@ impl KanalibApp {
             .w_full()
             .min_h(px(0.))
             .into_any_element()
+        } else {
+            let this_for_list = this.clone();
+            let thumb_cache_for_list = self.thumb_cache.clone();
+            let focus_for_list = self.grid_focus.clone();
+            let selection_for_list = selection.clone();
+            let list_id = match view_mode {
+                ViewMode::Details => "asset-details",
+                ViewMode::Content => "asset-content",
+                _ => "asset-list",
+            };
+            let list = uniform_list(list_id, row_count, move |range, _, _| {
+                let Ok(assets) = assets_for_list.read() else {
+                    return Vec::new();
+                };
+                range
+                    .map(|position| {
+                        let asset = &assets[rows_for_list[position]];
+                        let is_selected = selection_for_list.contains(&asset.path);
+                        let content = match view_mode {
+                            ViewMode::Details => details_row_content(
+                                asset,
+                                detail_columns,
+                                show_extensions,
+                                &thumb_cache_for_list,
+                                colors,
+                            ),
+                            ViewMode::Content => content_row_content(
+                                asset,
+                                show_extensions,
+                                &thumb_cache_for_list,
+                                colors,
+                            ),
+                            _ => list_row_content(
+                                asset,
+                                show_extensions,
+                                &thumb_cache_for_list,
+                                colors,
+                            ),
+                        };
+                        asset_row_shell(
+                            asset,
+                            is_selected,
+                            this_for_list.clone(),
+                            focus_for_list.clone(),
+                            colors,
+                            row_height,
+                            view_mode == ViewMode::Details,
+                            content,
+                        )
+                        .into_any_element()
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .track_scroll(&self.grid_scroll)
+            .flex_1()
+            .w_full()
+            .min_h(px(0.));
+            if view_mode == ViewMode::Details {
+                div()
+                    .flex_1()
+                    .min_h(px(0.))
+                    .w_full()
+                    .flex()
+                    .flex_col()
+                    .child(details_header(
+                        this.clone(),
+                        detail_columns,
+                        sort_mode,
+                        sort_ascending,
+                        colors,
+                    ))
+                    .child(list)
+                    .into_any_element()
+            } else {
+                list.into_any_element()
+            }
         };
         let grid_area = div()
             .id("library-grid")
@@ -3996,6 +5569,17 @@ impl KanalibApp {
                     .text_xs()
                     .text_color(colors.danger)
                     .child(message.to_string())
+            }))
+            .children((!search_warnings.is_empty()).then(|| {
+                div()
+                    .mx(px(16.))
+                    .mt(px(10.))
+                    .p(px(8.))
+                    .rounded(px(6.))
+                    .bg(colors.sunken)
+                    .text_xs()
+                    .text_color(colors.warning)
+                    .child(format!("搜索条件提示：{}", search_warnings.join("；")))
             }))
             .child(grid_area)
     }
@@ -5189,7 +6773,11 @@ impl KanalibApp {
                         let blocked_row = blocked.contains(&tag.name);
                         let name = tag.name.clone();
                         let block_name = tag.name.clone();
+                        let rename_name = tag.name.clone();
+                        let merge_name = tag.name.clone();
                         let this_block = this_list.clone();
+                        let this_rename = this_list.clone();
+                        let this_merge = this_list.clone();
                         div()
                             .w_full()
                             .h(px(TAG_ROW_HEIGHT))
@@ -5234,20 +6822,59 @@ impl KanalibApp {
                                     ),
                             )
                             .child(
-                                Button::new(
-                                    SharedString::from(format!("block-tag-{}", block_name)),
-                                    if blocked_row { "取消屏蔽" } else { "屏蔽" },
-                                )
-                                .size(ControlSize::Sm)
-                                .on_click(move |_, _, cx| {
-                                    let _ = this_block.update(cx, |app, cx| {
-                                        app.set_tag_blocked(
-                                            block_name.clone(),
-                                            !blocked_row,
-                                            cx,
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap(px(4.))
+                                    .child(
+                                        IconButton::new(
+                                            SharedString::from(format!(
+                                                "rename-tag-{rename_name}"
+                                            )),
+                                            IconName::Pencil,
                                         )
-                                    });
-                                }),
+                                        .size(ControlSize::Sm)
+                                        .tooltip("重命名")
+                                        .on_click(move |_, _, cx| {
+                                            let _ = this_rename.update(cx, |app, cx| {
+                                                app.open_tag_rename(rename_name.clone(), cx)
+                                            });
+                                        }),
+                                    )
+                                    .child(
+                                        IconButton::new(
+                                            SharedString::from(format!(
+                                                "merge-tag-{merge_name}"
+                                            )),
+                                            IconName::Merge,
+                                        )
+                                        .size(ControlSize::Sm)
+                                        .tooltip("合并到其他标签")
+                                        .on_click(move |_, _, cx| {
+                                            let _ = this_merge.update(cx, |app, cx| {
+                                                app.open_tag_merge(merge_name.clone(), cx)
+                                            });
+                                        }),
+                                    )
+                                    .child(
+                                        Button::new(
+                                            SharedString::from(format!(
+                                                "block-tag-{}",
+                                                block_name
+                                            )),
+                                            if blocked_row { "取消屏蔽" } else { "屏蔽" },
+                                        )
+                                        .size(ControlSize::Sm)
+                                        .on_click(move |_, _, cx| {
+                                            let _ = this_block.update(cx, |app, cx| {
+                                                app.set_tag_blocked(
+                                                    block_name.clone(),
+                                                    !blocked_row,
+                                                    cx,
+                                                )
+                                            });
+                                        }),
+                                    ),
                             )
                     })
                     .collect::<Vec<_>>()
@@ -5343,6 +6970,8 @@ impl KanalibApp {
         queue_error: usize,
         status: &str,
         error: Option<&str>,
+        cache_hits: u64,
+        cache_misses: u64,
         width: Pixels,
         colors: UiColors,
     ) -> AnyElement {
@@ -5351,7 +6980,17 @@ impl KanalibApp {
         let this_add = this.clone();
         let this_refresh_cache = this.clone();
         let this_cleanup_cache = this.clone();
+        let this_budget_less = this.clone();
+        let this_budget_more = this.clone();
+        let this_budget_cleanup = this.clone();
         let cache_stats = self.cache_stats.clone();
+        let thumb_budget_gb = self.thumb_budget_gb;
+        let cache_last_cleanup = self.cache_last_cleanup.clone();
+        let cache_hit_rate = if cache_hits + cache_misses == 0 {
+            0.0
+        } else {
+            cache_hits as f64 * 100.0 / (cache_hits + cache_misses) as f64
+        };
         let db_path = self.state.db_path();
         let cache_dir = self.state.cache_dir();
         let db_bytes = std::fs::metadata(&db_path)
@@ -5734,7 +7373,75 @@ impl KanalibApp {
                 div()
                     .text_xs()
                     .text_color(colors.subtle)
-                    .child("只清理没有任何资产引用的缩略图；缓存预算淘汰暂未启用。"),
+                    .child("超过磁盘预算时淘汰最少使用的缩略图组；当前可见页与最近访问的图不会被删，缺失的缓存会在滚动时按需重建。"),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_wrap()
+                    .items_center()
+                    .gap(px(6.))
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(colors.muted)
+                            .child("磁盘预算"),
+                    )
+                    .child(
+                        Button::new("thumb-budget-less", "−")
+                            .size(ControlSize::Sm)
+                            .disabled(thumb_budget_gb <= 1)
+                            .on_click(move |_, _, cx| {
+                                let _ = this_budget_less.update(cx, |app, cx| {
+                                    let value = app.thumb_budget_gb.saturating_sub(1);
+                                    app.set_thumb_budget(value, cx);
+                                });
+                            }),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(colors.fg)
+                            .child(format!("{thumb_budget_gb} GB")),
+                    )
+                    .child(
+                        Button::new("thumb-budget-more", "+")
+                            .size(ControlSize::Sm)
+                            .disabled(thumb_budget_gb >= 1000)
+                            .on_click(move |_, _, cx| {
+                                let _ = this_budget_more.update(cx, |app, cx| {
+                                    let value = app.thumb_budget_gb.saturating_add(1);
+                                    app.set_thumb_budget(value, cx);
+                                });
+                            }),
+                    )
+                    .child(
+                        Button::new("thumb-budget-cleanup", "清理到预算")
+                            .size(ControlSize::Sm)
+                            .on_click(move |_, _, cx| {
+                                let _ = this_budget_cleanup.update(cx, |app, cx| {
+                                    app.run_cache_budget_cleanup(true, cx);
+                                });
+                            }),
+                    ),
+            )
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(colors.subtle)
+                    .child(format!(
+                        "内存缩略图命中率 {cache_hit_rate:.1}% · {} 次命中 / {} 次未命中",
+                        cache_hits, cache_misses
+                    )),
+            )
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(colors.subtle)
+                    .child(
+                        cache_last_cleanup
+                            .unwrap_or_else(|| "尚未执行预算淘汰".to_string()),
+                    ),
             )
             .child(
                 div()
@@ -5798,6 +7505,7 @@ impl KanalibApp {
             ("F", "切换收藏"),
             ("1–5 / 0", "设置 / 清除星级"),
             ("Ctrl+A", "全选当前可见"),
+            ("Ctrl+Shift+1–8", "切换 8 种视图"),
             ("Esc", "清空选择"),
             ("双击 / 右键", "快速查看 / 上下文菜单"),
         ] {
@@ -5943,11 +7651,158 @@ impl KanalibApp {
             .into_any_element()
     }
 
+    fn render_preview_inspector(
+        &self,
+        this: &Entity<Self>,
+        selected: Option<&Asset>,
+        source_aliases: &HashMap<PathBuf, String>,
+        width: Pixels,
+        colors: UiColors,
+    ) -> impl IntoElement {
+        let content: AnyElement = if let Some(asset) = selected {
+            let preview: AnyElement = match asset.thumb.as_ref().or(Some(&asset.path)) {
+                Some(path) => img(path.clone())
+                    .image_cache(&self.thumb_cache)
+                    .w_full()
+                    .max_h(px(420.))
+                    .object_fit(ObjectFit::Contain)
+                    .into_any_element(),
+                None => div()
+                    .h(px(240.))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .text_xs()
+                    .text_color(colors.subtle)
+                    .child("无预览")
+                    .into_any_element(),
+            };
+            let this_quick = this.clone();
+            let path_for_open = asset.path.clone();
+            let favorite = asset.favorite;
+            let star = asset.star;
+            let rating = asset.rating.to_uppercase();
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(8.))
+                .child(preview)
+                .child(
+                    div()
+                        .text_sm()
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .child(asset.title()),
+                )
+                .child(div().text_xs().text_color(colors.muted).child(format!(
+                    "{} × {} · {}",
+                    asset.width,
+                    asset.height,
+                    format_bytes(asset.bytes)
+                )))
+                .child(
+                    div()
+                        .truncate()
+                        .text_xs()
+                        .text_color(colors.subtle)
+                        .child(format!(
+                            "来源 · {}",
+                            source_label(&asset.library_root, source_aliases)
+                        )),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(8.))
+                        .text_xs()
+                        .text_color(colors.subtle)
+                        .children(favorite.then(|| {
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap(px(3.))
+                                .child(
+                                    Icon::new(IconName::Heart)
+                                        .size(IconSize::Xs)
+                                        .color(colors.danger),
+                                )
+                                .child("收藏")
+                        }))
+                        .child(if star > 0 {
+                            format!("★ {star}")
+                        } else {
+                            "未设星级".to_string()
+                        })
+                        .child(if rating.is_empty() {
+                            "未评级".to_string()
+                        } else {
+                            format!("评级 {rating}")
+                        }),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(6.))
+                        .child(
+                            Button::new("preview-quick-view", "快速查看")
+                                .size(ControlSize::Sm)
+                                .icon(IconName::Maximize2)
+                                .on_click(move |_, _, cx| {
+                                    let _ =
+                                        this_quick.update(cx, |app, cx| app.open_quick_view(cx));
+                                }),
+                        )
+                        .child(
+                            Button::new("preview-open-file", "打开文件")
+                                .size(ControlSize::Sm)
+                                .on_click(move |_, _, _| open_path(&path_for_open)),
+                        ),
+                )
+                .into_any_element()
+        } else {
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(6.))
+                .text_sm()
+                .text_color(colors.muted)
+                .child("选择一张图片")
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(colors.subtle)
+                        .child("预览窗格只显示大图与基础信息。"),
+                )
+                .into_any_element()
+        };
+
+        div()
+            .w(width)
+            .flex_none()
+            .h_full()
+            .bg(colors.surface)
+            .border_1()
+            .border_color(colors.border)
+            .p(px(14.))
+            .flex()
+            .flex_col()
+            .gap(px(8.))
+            .id("preview-inspector-scroll")
+            .overflow_y_scroll()
+            .child(
+                div()
+                    .text_sm()
+                    .font_weight(FontWeight::BOLD)
+                    .child("预览"),
+            )
+            .child(content)
+    }
+
     fn render_inspector(
         &self,
         this: &Entity<Self>,
         selected: Option<&Asset>,
-        counts: &Counts,
         blocked_tags: &HashSet<String>,
         source_aliases: &HashMap<PathBuf, String>,
         width: Pixels,
@@ -5990,36 +7845,49 @@ impl KanalibApp {
                 .iter()
                 .map(|tag| SharedString::from(tag.tag.clone()))
                 .collect::<Vec<_>>();
-            let mut suggestion_names = counts
-                .tags
-                .iter()
-                .filter(|(name, _)| !blocked_tags.contains(name))
-                .take(40)
-                .map(|(name, _)| name.clone())
-                .collect::<Vec<_>>();
-            for tag in asset.all_tags() {
-                if !suggestion_names
+            let mut suggestion_entries = if self.tag_suggestions.is_empty() {
+                let mut entries = self
+                    .tag_vocab
                     .iter()
-                    .any(|name| name.eq_ignore_ascii_case(&tag.tag))
-                {
-                    suggestion_names.push(tag.tag.clone());
+                    .filter(|tag| tag.count > 0 && !blocked_tags.contains(&tag.name))
+                    .take(40)
+                    .map(|tag| (tag.name.clone(), tag.count))
+                    .collect::<Vec<_>>();
+                for tag in asset.all_tags() {
+                    if !entries
+                        .iter()
+                        .any(|(name, _)| name.eq_ignore_ascii_case(&tag.tag))
+                    {
+                        entries.push((tag.tag.clone(), 0));
+                    }
                 }
-            }
-            let suggestions = suggestion_names
+                entries
+            } else {
+                self.tag_suggestions.clone()
+            };
+            suggestion_entries.truncate(60);
+            let suggestions = suggestion_entries
                 .into_iter()
-                .map(|name| Choice::new(name.clone(), name))
+                .map(|(name, _)| Choice::new(name.clone(), name))
                 .collect::<Vec<_>>();
             let manual_state = state.clone();
             let manual_this = this.clone();
             let manual_toaster = self.toaster.clone();
             let manual_path = path.clone();
+            let typing_this = this.clone();
             let manual_input = TagInput::new(
                 SharedString::from(format!("manual-tags-{}", path.display())),
                 manual_names,
             )
-            .placeholder("添加标签，回车确认")
+            .placeholder("添加标签，输入以补全全部词表")
             .check(|value| !normalize_tag_name(value).is_empty())
             .suggestions(suggestions)
+            .on_typing(move |typed, _, cx| {
+                let _ = typing_this.update(cx, |app, cx| {
+                    app.update_tag_suggestions(&typed);
+                    cx.notify();
+                });
+            })
             .on_change(move |next, _, cx| {
                 let next_set = next
                     .iter()
@@ -6445,6 +8313,7 @@ impl KanalibApp {
                             source_label(&asset.library_root, source_aliases)
                         )),
                 )
+                .children(exif_panel(asset, colors))
                 .child(div().text_xs().text_color(colors.subtle).child(
                     match (&asset.sha1, &asset.blake3) {
                         (Some(sha1), Some(blake3)) => format!(
@@ -7584,49 +9453,559 @@ fn dedup_diff(group: &DuplicateGroup, assets: &[&Asset], colors: UiColors) -> An
         .into_any_element()
 }
 
-fn density_control(
-    id: &'static str,
-    current: DensityPreset,
+#[derive(Clone, Copy)]
+struct DetailColumns {
+    resolution: bool,
+    size: bool,
+    modified: bool,
+    rating: bool,
+    star: bool,
+}
+
+fn detail_columns(width: f32) -> DetailColumns {
+    if width >= 820. {
+        DetailColumns {
+            resolution: true,
+            size: true,
+            modified: true,
+            rating: true,
+            star: true,
+        }
+    } else if width >= 680. {
+        DetailColumns {
+            resolution: true,
+            size: true,
+            modified: true,
+            rating: true,
+            star: false,
+        }
+    } else if width >= 600. {
+        DetailColumns {
+            resolution: true,
+            size: true,
+            modified: true,
+            rating: false,
+            star: false,
+        }
+    } else {
+        DetailColumns {
+            resolution: false,
+            size: true,
+            modified: true,
+            rating: false,
+            star: false,
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum CellAlign {
+    Left,
+    Right,
+    Center,
+}
+
+fn detail_header_cell(
+    label: &'static str,
+    width: Option<f32>,
+    align: CellAlign,
+    mode: SortMode,
+    sort: SortMode,
+    ascending: bool,
     this: Entity<KanalibApp>,
     colors: UiColors,
 ) -> impl IntoElement {
-    let mut group = div()
-        .id(id)
-        .flex_none()
+    let active = sort == mode;
+    let mut cell = div()
+        .h_full()
         .flex()
         .items_center()
-        .gap(px(1.))
-        .p(px(2.))
-        .rounded(px(7.))
-        .bg(colors.sunken);
-    for (preset, label) in [
-        (DensityPreset::Small, "小"),
-        (DensityPreset::Medium, "中"),
-        (DensityPreset::Large, "大"),
-    ] {
-        let this = this.clone();
-        let active = current == preset;
-        group = group.child(
-            div()
-                .id(SharedString::from(format!("{id}-{}", preset.key())))
-                .flex_none()
-                .px(px(8.))
-                .py(px(2.))
-                .rounded(px(5.))
-                .text_xs()
-                .text_color(if active { colors.fg } else { colors.muted })
-                .when(active, |style| style.bg(colors.surface))
-                .cursor_pointer()
-                .on_mouse_down(MouseButton::Left, |_, window, _| {
-                    window.prevent_default()
-                })
-                .on_click(move |_, _, cx| {
-                    let _ = this.update(cx, |app, cx| app.set_density(preset, cx));
-                })
-                .child(label),
-        );
+        .gap(px(2.))
+        .text_xs()
+        .text_color(if active { colors.fg } else { colors.subtle })
+        .cursor_pointer();
+    cell = match width {
+        Some(width) => {
+            let cell = cell.w(px(width)).flex_none();
+            match align {
+                CellAlign::Left => cell,
+                CellAlign::Right => cell.justify_end(),
+                CellAlign::Center => cell.justify_center(),
+            }
+        }
+        None => cell.flex_1().min_w(px(180.)),
+    };
+    cell.id(label)
+        .on_click(move |_, _, cx| {
+        let _ = this.update(cx, |app, cx| {
+            if app.sort == mode {
+                app.set_sort_ascending(!app.sort_ascending, cx);
+            } else {
+                app.choose_sort_mode(mode, cx);
+            }
+        });
+    })
+    .child(label)
+    .children(active.then(|| {
+        Icon::new(if ascending {
+            IconName::ArrowUp
+        } else {
+            IconName::ArrowDown
+        })
+        .size(IconSize::Xs)
+        .color(colors.subtle)
+    }))
+}
+
+fn details_header(
+    this: Entity<KanalibApp>,
+    columns: DetailColumns,
+    sort: SortMode,
+    ascending: bool,
+    colors: UiColors,
+) -> impl IntoElement {
+    div()
+        .h(px(30.))
+        .flex_none()
+        .w_full()
+        .flex()
+        .items_center()
+        .gap(px(8.))
+        .px(px(GRID_PADDING))
+        .border_b_1()
+        .border_color(colors.border)
+        .bg(colors.surface)
+        .child(detail_header_cell(
+            "名称",
+            None,
+            CellAlign::Left,
+            SortMode::Name,
+            sort,
+            ascending,
+            this.clone(),
+            colors,
+        ))
+        .children(columns.resolution.then(|| {
+            detail_header_cell(
+                "尺寸",
+                Some(110.),
+                CellAlign::Left,
+                SortMode::Resolution,
+                sort,
+                ascending,
+                this.clone(),
+                colors,
+            )
+        }))
+        .children(columns.size.then(|| {
+            detail_header_cell(
+                "大小",
+                Some(90.),
+                CellAlign::Right,
+                SortMode::Size,
+                sort,
+                ascending,
+                this.clone(),
+                colors,
+            )
+        }))
+        .children(columns.modified.then(|| {
+            detail_header_cell(
+                "修改时间",
+                Some(120.),
+                CellAlign::Left,
+                SortMode::Modified,
+                sort,
+                ascending,
+                this.clone(),
+                colors,
+            )
+        }))
+        .children(columns.rating.then(|| {
+            detail_header_cell(
+                "评级",
+                Some(64.),
+                CellAlign::Center,
+                SortMode::Rating,
+                sort,
+                ascending,
+                this.clone(),
+                colors,
+            )
+        }))
+        .children(columns.star.then(|| {
+            detail_header_cell(
+                "星级",
+                Some(64.),
+                CellAlign::Center,
+                SortMode::Star,
+                sort,
+                ascending,
+                this.clone(),
+                colors,
+            )
+        }))
+}
+
+fn row_thumb(
+    asset: &Asset,
+    thumb_cache: &Entity<ThumbCache>,
+    width: f32,
+    height: f32,
+    colors: UiColors,
+) -> AnyElement {
+    let thumb = asset.tile_thumb.clone().or_else(|| asset.thumb.clone());
+    match thumb {
+        Some(path) => img(path)
+            .image_cache(thumb_cache)
+            .w(px(width))
+            .h(px(height))
+            .flex_none()
+            .rounded(px(4.))
+            .object_fit(ObjectFit::Cover)
+            .into_any_element(),
+        None => div()
+            .w(px(width))
+            .h(px(height))
+            .flex_none()
+            .rounded(px(4.))
+            .bg(colors.sunken)
+            .into_any_element(),
     }
-    group
+}
+
+fn asset_row_shell(
+    asset: &Asset,
+    selected: bool,
+    this: Entity<KanalibApp>,
+    focus: FocusHandle,
+    colors: UiColors,
+    height: f32,
+    divider: bool,
+    content: AnyElement,
+) -> impl IntoElement {
+    let path = asset.path.clone();
+    let title = asset.title();
+    let menu = asset_context_menu(asset, &this);
+    let this_click = this.clone();
+    let path_click = path.clone();
+    let focus_click = focus.clone();
+    let this_right = this.clone();
+    let path_right = path.clone();
+    let focus_right = focus.clone();
+    div()
+        .id(SharedString::from(format!("asset-row-{}", path.display())))
+        .role(Role::Button)
+        .aria_label(title)
+        .w_full()
+        .h(px(height))
+        .flex()
+        .items_center()
+        .px(px(GRID_PADDING))
+        .cursor_pointer()
+        .when(divider, |row| {
+            row.border_b_1().border_color(colors.border)
+        })
+        .hover(move |style| style.bg(colors.hover))
+        .when(selected, |row| row.bg(colors.selection))
+        .on_click(move |event, window, cx| {
+            window.focus(&focus_click, cx);
+            let (modifiers, click_count) = match event {
+                ClickEvent::Mouse(event) => (event.down.modifiers, event.down.click_count),
+                ClickEvent::Keyboard(_) | ClickEvent::Touch(_) => (Modifiers::default(), 1),
+            };
+            let path = path_click.clone();
+            let _ = this_click.update(cx, |app, cx| {
+                app.handle_tile_click(path, modifiers, click_count, cx)
+            });
+        })
+        .on_mouse_down(MouseButton::Right, move |_, window, cx| {
+            window.focus(&focus_right, cx);
+            let _ = this_right.update(cx, |app, cx| {
+                app.select_single_path(path_right.clone(), cx);
+            });
+        })
+        .child(
+            ContextMenu::new(
+                SharedString::from(format!("row-context-{}", path.display())),
+                menu,
+            )
+            .w_full()
+            .child(div().w_full().child(content)),
+        )
+}
+
+fn row_meta(asset: &Asset) -> String {
+    let rating = asset.rating.to_uppercase();
+    let star = asset.star;
+    let tag_count = asset
+        .all_tags()
+        .filter(|tag| matches!(tag.category.as_str(), "general" | "manual"))
+        .count();
+    let rating = if rating.is_empty() {
+        "未评级".to_string()
+    } else {
+        format!("评级 {rating}")
+    };
+    let star = if star > 0 {
+        format!(" · ★ {star}")
+    } else {
+        String::new()
+    };
+    format!("{rating}{star} · {tag_count} 标签")
+}
+
+fn list_row_content(
+    asset: &Asset,
+    show_extensions: bool,
+    thumb_cache: &Entity<ThumbCache>,
+    colors: UiColors,
+) -> AnyElement {
+    let title = display_name(asset, show_extensions);
+    let favorite = asset.favorite;
+    let damaged = asset.damage.is_some();
+    div()
+        .w_full()
+        .flex()
+        .items_center()
+        .gap(px(8.))
+        .child(row_thumb(asset, thumb_cache, 24., 24., colors))
+        .child(
+            div()
+                .flex_1()
+                .min_w(px(0.))
+                .truncate()
+                .text_xs()
+                .text_color(colors.fg)
+                .child(title),
+        )
+        .children(favorite.then(|| {
+            Icon::new(IconName::Heart)
+                .size(IconSize::Xs)
+                .color(colors.danger)
+        }))
+        .children(damaged.then(|| {
+            div()
+                .flex_none()
+                .px(px(4.))
+                .rounded(px(3.))
+                .text_xs()
+                .text_color(colors.warning)
+                .child("损坏")
+        }))
+        .child(
+            div()
+                .flex_none()
+                .text_xs()
+                .text_color(colors.subtle)
+                .child(row_meta(asset)),
+        )
+        .into_any_element()
+}
+
+fn details_row_content(
+    asset: &Asset,
+    columns: DetailColumns,
+    show_extensions: bool,
+    thumb_cache: &Entity<ThumbCache>,
+    colors: UiColors,
+) -> AnyElement {
+    let title = display_name(asset, show_extensions);
+    let favorite = asset.favorite;
+    let damaged = asset.damage.is_some();
+    let rating = asset.rating.to_uppercase();
+    let star = asset.star;
+    div()
+        .w_full()
+        .flex()
+        .items_center()
+        .gap(px(8.))
+        .child(
+            div()
+                .flex_1()
+                .min_w(px(0.))
+                .flex()
+                .items_center()
+                .gap(px(6.))
+                .child(row_thumb(asset, thumb_cache, 20., 20., colors))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w(px(0.))
+                        .truncate()
+                        .text_xs()
+                        .text_color(colors.fg)
+                        .child(title),
+                )
+                .children(favorite.then(|| {
+                    Icon::new(IconName::Heart)
+                        .size(IconSize::Xs)
+                        .color(colors.danger)
+                }))
+                .children(damaged.then(|| {
+                    div()
+                        .flex_none()
+                        .text_xs()
+                        .text_color(colors.warning)
+                        .child("损坏")
+                })),
+        )
+        .children(columns.resolution.then(|| {
+            div()
+                .w(px(110.))
+                .flex_none()
+                .truncate()
+                .text_xs()
+                .text_color(colors.muted)
+                .child(format!("{} × {}", asset.width, asset.height))
+        }))
+        .children(columns.size.then(|| {
+            div()
+                .w(px(90.))
+                .flex_none()
+                .flex()
+                .justify_end()
+                .text_xs()
+                .text_color(colors.muted)
+                .child(format_bytes(asset.bytes))
+        }))
+        .children(columns.modified.then(|| {
+            div()
+                .w(px(120.))
+                .flex_none()
+                .text_xs()
+                .text_color(colors.muted)
+                .child(format_date(asset.mtime))
+        }))
+        .children(columns.rating.then(|| {
+            div()
+                .w(px(64.))
+                .flex_none()
+                .flex()
+                .justify_center()
+                .text_xs()
+                .text_color(colors.muted)
+                .child(if rating.is_empty() {
+                    "—".to_string()
+                } else {
+                    rating.clone()
+                })
+        }))
+        .children(columns.star.then(|| {
+            div()
+                .w(px(64.))
+                .flex_none()
+                .flex()
+                .justify_center()
+                .text_xs()
+                .text_color(colors.muted)
+                .child(if star > 0 {
+                    format!("★ {star}")
+                } else {
+                    "—".to_string()
+                })
+        }))
+        .into_any_element()
+}
+
+fn content_row_content(
+    asset: &Asset,
+    show_extensions: bool,
+    thumb_cache: &Entity<ThumbCache>,
+    colors: UiColors,
+) -> AnyElement {
+    let title = display_name(asset, show_extensions);
+    let error = asset.error.clone().map(|value| friendly_media_error(&value));
+    let summary = error
+        .clone()
+        .or_else(|| asset.damage.clone())
+        .unwrap_or_else(|| asset.summary());
+    let summary_color = if error.is_some() {
+        colors.danger
+    } else if asset.damage.is_some() {
+        colors.warning
+    } else {
+        colors.muted
+    };
+    let rating = asset.rating.to_uppercase();
+    let star = asset.star;
+    let tag_count = asset
+        .all_tags()
+        .filter(|tag| matches!(tag.category.as_str(), "general" | "manual"))
+        .count();
+    div()
+        .w_full()
+        .flex()
+        .items_center()
+        .gap(px(10.))
+        .child(row_thumb(asset, thumb_cache, 96., 64., colors))
+        .child(
+            div()
+                .flex_1()
+                .min_w(px(0.))
+                .flex()
+                .flex_col()
+                .gap(px(2.))
+                .child(
+                    div()
+                        .truncate()
+                        .text_xs()
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(colors.fg)
+                        .child(title),
+                )
+                .child(
+                    div()
+                        .truncate()
+                        .text_xs()
+                        .text_color(colors.muted)
+                        .child(format!(
+                            "{} × {} · {} · {}",
+                            asset.width,
+                            asset.height,
+                            format_bytes(asset.bytes),
+                            format_date(asset.mtime)
+                        )),
+                )
+                .child(
+                    div()
+                        .truncate()
+                        .text_xs()
+                        .text_color(summary_color)
+                        .child(summary),
+                ),
+        )
+        .child(
+            div()
+                .flex_none()
+                .flex()
+                .flex_col()
+                .items_end()
+                .gap(px(4.))
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(colors.subtle)
+                        .child(if rating.is_empty() {
+                            if star > 0 {
+                                format!("★ {star}")
+                            } else {
+                                "未评级".to_string()
+                            }
+                        } else if star > 0 {
+                            format!("评级 {rating} · ★ {star}")
+                        } else {
+                            format!("评级 {rating}")
+                        }),
+                )
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(colors.subtle)
+                        .child(format!("{tag_count} 标签")),
+                ),
+        )
+        .into_any_element()
 }
 
 #[derive(Clone, Copy)]
@@ -7762,57 +10141,89 @@ fn format_date(seconds: u64) -> String {
     format!("{year:04}-{month:02}-{day:02}")
 }
 
-fn tile(
-    asset: Asset,
-    selected: bool,
-    this: Entity<KanalibApp>,
-    thumb_cache: Entity<ThumbCache>,
-    width: f32,
-    image_height: f32,
-    focus: FocusHandle,
-    colors: UiColors,
-) -> impl IntoElement {
-    let path = asset.path.clone();
-    let thumb = asset.tile_thumb.clone().or_else(|| asset.thumb.clone());
-    let media: AnyElement = if let Some(thumb) = thumb {
-        img(thumb)
-            .image_cache(&thumb_cache)
-            .size_full()
-            .object_fit(ObjectFit::Cover)
-            .into_any_element()
-    } else {
-        div()
-            .size_full()
-            .flex()
-            .items_center()
-            .justify_center()
-            .text_xs()
-            .text_color(colors.subtle)
-            .child("…")
-            .into_any_element()
-    };
-    let border = if selected {
-        colors.accent
-    } else {
-        colors.border
-    };
-    let error = asset
-        .error
-        .clone()
-        .map(|message| friendly_media_error(&message));
-    let has_error = error.is_some();
-    let damage = asset.damage.clone();
-    let has_damage = damage.is_some();
-    let summary = error.unwrap_or_else(|| asset.summary());
-    let title = asset.title();
-    let tag_count = asset
-        .all_tags()
-        .filter(|tag| matches!(tag.category.as_str(), "general" | "manual"))
-        .count();
-    let rating = asset.rating.to_uppercase();
-    let favorite = asset.favorite;
-    let star = asset.star;
+fn display_name(asset: &Asset, show_extensions: bool) -> String {
+    if show_extensions {
+        return asset.title();
+    }
+    asset
+        .path
+        .file_stem()
+        .map(|stem| stem.to_string_lossy().to_string())
+        .unwrap_or_else(|| asset.title())
+}
 
+fn exif_panel(asset: &Asset, colors: UiColors) -> Option<AnyElement> {
+    let meta = serde_json::from_str::<kanalib_core::media::ExifData>(&asset.metadata_json).ok()?;
+    if meta.is_empty() && asset.captured_at.is_none() {
+        return None;
+    }
+    let mut rows: Vec<(&'static str, String)> = Vec::new();
+    if let Some(captured) = asset.captured_at {
+        rows.push(("拍摄时间", format_date(captured)));
+    }
+    if !meta.camera.is_empty() {
+        rows.push(("相机", meta.camera));
+    }
+    if !meta.lens.is_empty() {
+        rows.push(("镜头", meta.lens));
+    }
+    let exposure = [
+        (!meta.iso.is_empty()).then(|| format!("ISO {}", meta.iso.trim())),
+        (!meta.aperture.is_empty()).then(|| meta.aperture.trim().to_string()),
+        (!meta.shutter.is_empty()).then(|| meta.shutter.trim().to_string()),
+        (!meta.focal_length.is_empty()).then(|| meta.focal_length.trim().to_string()),
+    ]
+    .into_iter()
+    .flatten()
+    .collect::<Vec<_>>()
+    .join(" · ");
+    if !exposure.is_empty() {
+        rows.push(("曝光", exposure));
+    }
+    Some(
+        div()
+            .p(px(8.))
+            .rounded(px(6.))
+            .bg(colors.sunken)
+            .flex()
+            .flex_col()
+            .gap(px(2.))
+            .child(
+                div()
+                    .text_xs()
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(colors.subtle)
+                    .child("拍摄信息"),
+            )
+            .children(rows.into_iter().map(|(label, value)| {
+                div()
+                    .flex()
+                    .items_start()
+                    .gap(px(8.))
+                    .child(
+                        div()
+                            .w(px(48.))
+                            .flex_none()
+                            .text_xs()
+                            .text_color(colors.subtle)
+                            .child(label),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w(px(0.))
+                            .text_xs()
+                            .text_color(colors.fg)
+                            .child(value),
+                    )
+            }))
+            .into_any_element(),
+    )
+}
+
+fn asset_context_menu(asset: &Asset, this: &Entity<KanalibApp>) -> Menu {
+    let path = asset.path.clone();
+    let favorite = asset.favorite;
     let star_menu = {
         let mut menu = Menu::new();
         for (value, label) in [
@@ -7841,72 +10252,129 @@ fn tile(
                 });
             }))
     };
-    let menu = {
-        let quick_this = this.clone();
-        let quick_path = path.clone();
-        let favorite_this = this.clone();
-        let favorite_path = path.clone();
-        let prompt_this = this.clone();
-        let prompt_path = path.clone();
-        let paths_this = this.clone();
-        let paths_path = path.clone();
-        let open_file = path.clone();
-        let reveal_file = path.clone();
-        Menu::new()
-            .item(
-                MenuItem::new("快速查看")
-                    .icon(IconName::Maximize2)
-                    .on_click(move |_, cx| {
-                        let _ = quick_this.update(cx, |app, cx| {
-                            app.select_single_path(quick_path.clone(), cx);
-                            app.open_quick_view(cx);
-                        });
-                    }),
-            )
-            .item(
-                MenuItem::new(if favorite { "取消收藏" } else { "收藏" })
-                    .icon(IconName::Heart)
-                    .on_click(move |_, cx| {
-                        let _ = favorite_this.update(cx, |app, cx| {
-                            app.select_single_path(favorite_path.clone(), cx);
-                            app.toggle_favorite(cx);
-                        });
-                    }),
-            )
-            .item(MenuItem::submenu("星级", star_menu))
-            .separator()
-            .item(
-                MenuItem::new("复制 Prompt")
-                    .icon(IconName::ClipboardCheck)
-                    .on_click(move |_, cx| {
-                        let _ = prompt_this.update(cx, |app, cx| {
-                            app.select_single_path(prompt_path.clone(), cx);
-                            app.copy_selected_prompt(cx);
-                        });
-                    }),
-            )
-            .item(
-                MenuItem::new("复制路径")
-                    .icon(IconName::Copy)
-                    .on_click(move |_, cx| {
-                        let _ = paths_this.update(cx, |app, cx| {
-                            app.select_single_path(paths_path.clone(), cx);
-                            app.copy_selected_paths(cx);
-                        });
-                    }),
-            )
-            .separator()
-            .item(
-                MenuItem::new("打开文件")
-                    .icon(IconName::Image)
-                    .on_click(move |_, _| open_path(&open_file)),
-            )
-            .item(
-                MenuItem::new("在资源管理器中显示")
-                    .icon(IconName::FolderOpen)
-                    .on_click(move |_, _| reveal_path(&reveal_file)),
-            )
+    let quick_this = this.clone();
+    let quick_path = path.clone();
+    let favorite_this = this.clone();
+    let favorite_path = path.clone();
+    let prompt_this = this.clone();
+    let prompt_path = path.clone();
+    let paths_this = this.clone();
+    let paths_path = path.clone();
+    let open_file = path.clone();
+    let reveal_file = path.clone();
+    Menu::new()
+        .item(
+            MenuItem::new("快速查看")
+                .icon(IconName::Maximize2)
+                .on_click(move |_, cx| {
+                    let _ = quick_this.update(cx, |app, cx| {
+                        app.select_single_path(quick_path.clone(), cx);
+                        app.open_quick_view(cx);
+                    });
+                }),
+        )
+        .item(
+            MenuItem::new(if favorite { "取消收藏" } else { "收藏" })
+                .icon(IconName::Heart)
+                .on_click(move |_, cx| {
+                    let _ = favorite_this.update(cx, |app, cx| {
+                        app.select_single_path(favorite_path.clone(), cx);
+                        app.toggle_favorite(cx);
+                    });
+                }),
+        )
+        .item(MenuItem::submenu("星级", star_menu))
+        .separator()
+        .item(
+            MenuItem::new("复制 Prompt")
+                .icon(IconName::ClipboardCheck)
+                .on_click(move |_, cx| {
+                    let _ = prompt_this.update(cx, |app, cx| {
+                        app.select_single_path(prompt_path.clone(), cx);
+                        app.copy_selected_prompt(cx);
+                    });
+                }),
+        )
+        .item(
+            MenuItem::new("复制路径")
+                .icon(IconName::Copy)
+                .on_click(move |_, cx| {
+                    let _ = paths_this.update(cx, |app, cx| {
+                        app.select_single_path(paths_path.clone(), cx);
+                        app.copy_selected_paths(cx);
+                    });
+                }),
+        )
+        .separator()
+        .item(
+            MenuItem::new("打开文件")
+                .icon(IconName::Image)
+                .on_click(move |_, _| open_path(&open_file)),
+        )
+        .item(
+            MenuItem::new("在资源管理器中显示")
+                .icon(IconName::FolderOpen)
+                .on_click(move |_, _| reveal_path(&reveal_file)),
+        )
+}
+
+fn tile(
+    asset: Asset,
+    selected: bool,
+    this: Entity<KanalibApp>,
+    thumb_cache: Entity<ThumbCache>,
+    width: f32,
+    image_height: f32,
+    focus: FocusHandle,
+    colors: UiColors,
+    show_summary: bool,
+    prefer_large: bool,
+    show_extensions: bool,
+) -> impl IntoElement {
+    let path = asset.path.clone();
+    let thumb = if prefer_large {
+        asset.thumb.clone().or_else(|| asset.tile_thumb.clone())
+    } else {
+        asset.tile_thumb.clone().or_else(|| asset.thumb.clone())
     };
+    let media: AnyElement = if let Some(thumb) = thumb {
+        img(thumb)
+            .image_cache(&thumb_cache)
+            .size_full()
+            .object_fit(ObjectFit::Cover)
+            .into_any_element()
+    } else {
+        div()
+            .size_full()
+            .flex()
+            .items_center()
+            .justify_center()
+            .text_xs()
+            .text_color(colors.subtle)
+            .child("…")
+            .into_any_element()
+    };
+    let border = if selected {
+        colors.accent
+    } else {
+        colors.border
+    };
+    let error = asset
+        .error
+        .clone()
+        .map(|message| friendly_media_error(&message));
+    let has_error = error.is_some();
+    let has_damage = asset.damage.is_some();
+    let summary = error.unwrap_or_else(|| asset.summary());
+    let title = display_name(&asset, show_extensions);
+    let tag_count = asset
+        .all_tags()
+        .filter(|tag| matches!(tag.category.as_str(), "general" | "manual"))
+        .count();
+    let rating = asset.rating.to_uppercase();
+    let favorite = asset.favorite;
+    let star = asset.star;
+    let menu = asset_context_menu(&asset, &this);
     let this_click = this.clone();
     let path_click = path.clone();
     let focus_click = focus.clone();
@@ -7914,7 +10382,7 @@ fn tile(
     let path_right = path.clone();
     let focus_right = focus.clone();
 
-    let tile = div()
+    let mut tile = div()
         .id(SharedString::from(format!("tile-{}", asset.path.display())))
         .role(Role::Button)
         .aria_label(title.clone())
@@ -8001,48 +10469,51 @@ fn tile(
                 .font_weight(FontWeight::SEMIBOLD)
                 .text_color(colors.fg)
                 .child(title),
-        )
-        .child(
-            div()
-                .truncate()
-                .text_xs()
-                .text_color(if has_error {
-                    colors.danger
-                } else if has_damage {
-                    colors.warning
-                } else {
-                    colors.muted
-                })
-                .child(summary),
-        )
-        .child(
-            div()
-                .flex()
-                .items_center()
-                .justify_between()
-                .child(
-                    div()
-                        .text_xs()
-                        .text_color(colors.subtle)
-                        .child(if rating.is_empty() {
-                            if star > 0 {
-                                format!("★ {star}")
-                            } else {
-                                "未评级".to_string()
-                            }
-                        } else if star > 0 {
-                            format!("评级 {rating} · ★ {star}")
-                        } else {
-                            format!("评级 {rating}")
-                        }),
-                )
-                .child(
-                    div()
-                        .text_xs()
-                        .text_color(colors.subtle)
-                        .child(format!("{tag_count} 标签")),
-                ),
         );
+    if show_summary {
+        tile = tile
+            .child(
+                div()
+                    .truncate()
+                    .text_xs()
+                    .text_color(if has_error {
+                        colors.danger
+                    } else if has_damage {
+                        colors.warning
+                    } else {
+                        colors.muted
+                    })
+                    .child(summary),
+            )
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(colors.subtle)
+                            .child(if rating.is_empty() {
+                                if star > 0 {
+                                    format!("★ {star}")
+                                } else {
+                                    "未评级".to_string()
+                                }
+                            } else if star > 0 {
+                                format!("评级 {rating} · ★ {star}")
+                            } else {
+                                format!("评级 {rating}")
+                            }),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(colors.subtle)
+                            .child(format!("{tag_count} 标签")),
+                    ),
+            );
+    }
 
     div()
         .flex_none()
@@ -8117,6 +10588,39 @@ mod tests {
     fn image_cache_limit_is_at_least_one() {
         assert_eq!(clamp_cache_limit(0), 1);
         assert_eq!(clamp_cache_limit(128), 128);
+    }
+
+    #[test]
+    fn view_mode_keys_round_trip() {
+        for mode in super::ViewMode::ALL {
+            assert_eq!(super::ViewMode::from_key(mode.key()), Some(mode));
+        }
+        assert_eq!(super::ViewMode::from_key("unknown"), None);
+    }
+
+    #[test]
+    fn view_mode_migrates_legacy_density() {
+        use super::{ViewMode, resolve_view_mode};
+        assert_eq!(resolve_view_mode(None, Some("small")), ViewMode::IconsSm);
+        assert_eq!(resolve_view_mode(None, Some("medium")), ViewMode::Tiles);
+        assert_eq!(resolve_view_mode(None, Some("large")), ViewMode::IconsLg);
+        assert_eq!(resolve_view_mode(None, None), ViewMode::Tiles);
+        assert_eq!(
+            resolve_view_mode(Some("details"), Some("large")),
+            ViewMode::Details
+        );
+    }
+
+    #[test]
+    fn detail_columns_hide_from_narrow_to_wide() {
+        let all = super::detail_columns(900.);
+        assert!(all.resolution && all.size && all.modified && all.rating && all.star);
+        let no_star = super::detail_columns(700.);
+        assert!(no_star.rating && !no_star.star);
+        let no_rating = super::detail_columns(640.);
+        assert!(!no_rating.rating && !no_rating.star);
+        let no_resolution = super::detail_columns(560.);
+        assert!(!no_resolution.resolution && no_resolution.size && no_resolution.modified);
     }
 
     /// 手动取证：解码 300 张 t256 后立即丢弃，观察 256K 档是否有泄漏。

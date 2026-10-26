@@ -42,6 +42,10 @@ pub struct Asset {
     pub phash: Option<u64>,
     pub bytes: u64,
     pub mtime: u64,
+    /// EXIF 拍摄时间（UTC 秒）；缺失时回退 `mtime`（见 `taken_or_modified`）。
+    pub captured_at: Option<u64>,
+    /// 原始 EXIF 摘要 JSON；检查器按需反序列化，避免为每张图常驻结构体。
+    pub metadata_json: String,
 }
 
 impl Asset {
@@ -61,6 +65,10 @@ impl Asset {
             .filter(|tag| matches!(tag.category.as_str(), "general" | "manual"))
             .take(count)
             .collect()
+    }
+
+    pub fn taken_or_modified(&self) -> u64 {
+        self.captured_at.unwrap_or(self.mtime)
     }
 
     pub fn summary(&self) -> String {
@@ -305,20 +313,182 @@ impl Filter {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum NumOp {
+    Eq,
+    Gt,
+    Ge,
+    Lt,
+    Le,
+}
+
+#[derive(Clone, Copy, Debug)]
+enum NumField {
+    Size,
+    Width,
+    Height,
+    Ratio,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct NumericFilter {
+    field: NumField,
+    op: NumOp,
+    value: f64,
+}
+
+#[derive(Clone, Debug)]
+struct DateFilter {
+    op: NumOp,
+    year: i32,
+    month: u8,
+    day: Option<u8>,
+}
+
+#[derive(Clone, Debug)]
+struct ScopedTag {
+    category: String,
+    value: String,
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct SearchQuery {
     free: Vec<String>,
+    exclude_free: Vec<String>,
     tags: Vec<String>,
     exclude_tags: Vec<String>,
+    scoped_tags: Vec<ScopedTag>,
+    exclude_scoped_tags: Vec<ScopedTag>,
+    groups: Vec<String>,
+    exclude_groups: Vec<String>,
+    names: Vec<String>,
+    exclude_names: Vec<String>,
+    paths: Vec<String>,
+    exclude_paths: Vec<String>,
     rating: Option<String>,
     exclude_rating: Option<String>,
     tagged: Option<bool>,
     favorite: Option<bool>,
+    failed: Option<bool>,
+    damaged: Option<bool>,
     star: Option<u8>,
     star_min: Option<u8>,
+    star_max: Option<u8>,
     exclude_star: Option<u8>,
+    numeric: Vec<NumericFilter>,
+    exclude_numeric: Vec<NumericFilter>,
+    dates: Vec<DateFilter>,
+    exclude_dates: Vec<DateFilter>,
     duplicates_only: bool,
     impossible: bool,
+    warnings: Vec<String>,
+}
+
+fn parse_comparison(value: &str) -> (NumOp, &str) {
+    for (prefix, op) in [
+        (">=", NumOp::Ge),
+        ("<=", NumOp::Le),
+        (">", NumOp::Gt),
+        ("<", NumOp::Lt),
+        ("=", NumOp::Eq),
+    ] {
+        if let Some(rest) = value.strip_prefix(prefix) {
+            return (op, rest.trim());
+        }
+    }
+    (NumOp::Eq, value.trim())
+}
+
+fn parse_size_value(value: &str) -> Option<f64> {
+    let lower = value.trim().to_ascii_lowercase();
+    let (number, factor) = if let Some(rest) = lower.strip_suffix("gb") {
+        (rest, 1024.0 * 1024.0 * 1024.0)
+    } else if let Some(rest) = lower.strip_suffix("mb") {
+        (rest, 1024.0 * 1024.0)
+    } else if let Some(rest) = lower.strip_suffix("kb") {
+        (rest, 1024.0)
+    } else if let Some(rest) = lower.strip_suffix('b') {
+        (rest, 1.0)
+    } else {
+        (lower.as_str(), 1.0)
+    };
+    number.trim().parse::<f64>().ok().map(|value| value * factor)
+}
+
+fn parse_date_filter(value: &str) -> Option<DateFilter> {
+    let (op, value) = parse_comparison(value);
+    let mut parts = value.split('-');
+    let year = parts.next()?.parse::<i32>().ok()?;
+    let month = parts
+        .next()
+        .map(|value| value.parse::<u8>().ok())
+        .unwrap_or(Some(1))?;
+    let day = parts.next().map(|value| value.parse::<u8>().ok()).flatten();
+    if !(1..=12).contains(&month) || day.is_some_and(|day| !(1..=31).contains(&day)) {
+        return None;
+    }
+    Some(DateFilter {
+        op,
+        year,
+        month,
+        day,
+    })
+}
+
+fn date_parts(seconds: u64) -> (i32, u8, u8) {
+    let days = (seconds / 86_400) as i64;
+    let z = days + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+    let mut year = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = mp + if mp < 10 { 3 } else { -9 };
+    if month <= 2 {
+        year += 1;
+    }
+    (year as i32, month as u8, day as u8)
+}
+
+fn compare_numbers(op: NumOp, actual: f64, target: f64) -> bool {
+    match op {
+        NumOp::Eq => (actual - target).abs() < f64::EPSILON,
+        NumOp::Gt => actual > target,
+        NumOp::Ge => actual >= target,
+        NumOp::Lt => actual < target,
+        NumOp::Le => actual <= target,
+    }
+}
+
+fn compare_date(op: NumOp, actual: (i32, u8, u8), filter: &DateFilter) -> bool {
+    let target = (filter.year, filter.month, filter.day.unwrap_or(1));
+    match op {
+        NumOp::Eq => {
+            if filter.day.is_some() {
+                actual == target
+            } else {
+                actual.0 == filter.year && actual.1 == filter.month
+            }
+        }
+        NumOp::Gt => actual > target,
+        NumOp::Ge => actual >= target,
+        NumOp::Lt => actual < target,
+        NumOp::Le => actual <= target,
+    }
+}
+
+fn scoped_category(prefix: &str) -> Option<&'static str> {
+    Some(match prefix {
+        "general" => "general",
+        "character" => "character",
+        "copyright" => "copyright",
+        "style" => "style",
+        "meta" => "meta",
+        "manual" => "manual",
+        _ => return None,
+    })
 }
 
 impl SearchQuery {
@@ -329,14 +499,62 @@ impl SearchQuery {
                 Some(rest) => (true, rest),
                 None => (false, raw),
             };
+            if token.is_empty() {
+                continue;
+            }
             let lower = token.to_ascii_lowercase();
-            if lower.starts_with("tag:") {
+            let (prefix, value) = token
+                .split_once(':')
+                .map(|(prefix, value)| (prefix.to_ascii_lowercase(), value.trim()))
+                .unwrap_or_default();
+            if let Some(category) = scoped_category(&prefix) {
+                if value.is_empty() {
+                    query.warnings.push(format!("条件缺少值：{token}"));
+                } else {
+                    let scoped = ScopedTag {
+                        category: category.to_string(),
+                        value: value.trim_start_matches('#').to_string(),
+                    };
+                    if negated {
+                        query.exclude_scoped_tags.push(scoped);
+                    } else {
+                        query.scoped_tags.push(scoped);
+                    }
+                }
+            } else if lower.starts_with("tag:") {
                 let value = token[4..].trim_start_matches('#').trim();
                 if !value.is_empty() {
                     if negated {
                         query.exclude_tags.push(value.to_string());
                     } else {
                         query.tags.push(value.to_string());
+                    }
+                }
+            } else if lower.starts_with("group:") {
+                let value = token[6..].trim();
+                if !value.is_empty() {
+                    if negated {
+                        query.exclude_groups.push(value.to_string());
+                    } else {
+                        query.groups.push(value.to_string());
+                    }
+                }
+            } else if lower.starts_with("name:") {
+                let value = token[5..].trim();
+                if !value.is_empty() {
+                    if negated {
+                        query.exclude_names.push(value.to_lowercase());
+                    } else {
+                        query.names.push(value.to_lowercase());
+                    }
+                }
+            } else if lower.starts_with("path:") {
+                let value = token[5..].trim();
+                if !value.is_empty() {
+                    if negated {
+                        query.exclude_paths.push(value.to_lowercase());
+                    } else {
+                        query.paths.push(value.to_lowercase());
                     }
                 }
             } else if lower.starts_with("rating:") {
@@ -355,25 +573,78 @@ impl SearchQuery {
                     ("fav", _) | ("favorite", _) | ("favourite", _) => {
                         query.favorite = Some(!negated)
                     }
-                    _ => {}
+                    ("failed", _) => query.failed = Some(!negated),
+                    ("damaged", _) => query.damaged = Some(!negated),
+                    (value, _) => query.warnings.push(format!("未知状态：is:{value}")),
                 }
             } else if lower.starts_with("star:") {
-                let value = token[5..].trim();
-                if let Some(min) = value.strip_prefix(">=") {
-                    if let Ok(min) = min.trim().parse::<u8>() {
-                        query.star_min = Some(min.min(5));
+                let (op, value) = parse_comparison(&token[5..]);
+                let Ok(star) = value.parse::<u8>() else {
+                    query.warnings.push(format!("无法解析星级：{token}"));
+                    continue;
+                };
+                let star = star.min(5);
+                if negated {
+                    match op {
+                        NumOp::Ge => query.star_max = Some(star.saturating_sub(1)),
+                        NumOp::Gt => query.star_max = Some(star),
+                        NumOp::Le => query.star_min = Some(star + 1),
+                        NumOp::Lt => query.star_min = Some(star),
+                        NumOp::Eq => query.exclude_star = Some(star),
                     }
-                } else if let Ok(star) = value.parse::<u8>() {
-                    let star = star.min(5);
-                    if negated {
-                        query.exclude_star = Some(star);
-                    } else {
-                        query.star = Some(star);
+                } else {
+                    match op {
+                        NumOp::Eq => query.star = Some(star),
+                        NumOp::Ge => query.star_min = Some(star),
+                        NumOp::Gt => query.star_min = Some((star + 1).min(5)),
+                        NumOp::Le => query.star_max = Some(star),
+                        NumOp::Lt => query.star_max = Some(star.saturating_sub(1)),
                     }
+                }
+            } else if lower.starts_with("size:")
+                || lower.starts_with("width:")
+                || lower.starts_with("height:")
+                || lower.starts_with("ratio:")
+            {
+                let (field, raw_value) = if lower.starts_with("size:") {
+                    (NumField::Size, &token[5..])
+                } else if lower.starts_with("width:") {
+                    (NumField::Width, &token[6..])
+                } else if lower.starts_with("height:") {
+                    (NumField::Height, &token[7..])
+                } else {
+                    (NumField::Ratio, &token[6..])
+                };
+                let (op, value) = parse_comparison(raw_value);
+                let parsed = if matches!(field, NumField::Size) {
+                    parse_size_value(value)
+                } else {
+                    value.parse::<f64>().ok()
+                };
+                let Some(value) = parsed else {
+                    query.warnings.push(format!("无法解析数值：{token}"));
+                    continue;
+                };
+                let filter = NumericFilter { field, op, value };
+                if negated {
+                    query.exclude_numeric.push(filter);
+                } else {
+                    query.numeric.push(filter);
+                }
+            } else if lower.starts_with("date:") {
+                let Some(filter) = parse_date_filter(&token[5..]) else {
+                    query.warnings.push(format!("无法解析日期：{token}"));
+                    continue;
+                };
+                if negated {
+                    query.exclude_dates.push(filter);
+                } else {
+                    query.dates.push(filter);
                 }
             } else if lower.starts_with("source:") {
                 if lower[7..].trim() != "local" {
                     query.impossible = true;
+                    query.warnings.push(format!("暂不支持远程来源：{token}"));
                 }
             } else if lower.starts_with("dup:") {
                 if !negated && lower[4..].trim() == "true" {
@@ -384,7 +655,24 @@ impl SearchQuery {
                 if !value.is_empty() {
                     query.tags.push(value.to_string());
                 }
-            } else if !negated {
+            } else if let Some((unknown, _)) = token.split_once(':')
+                && !unknown.is_empty()
+                && unknown.len() <= 20
+                && unknown
+                    .chars()
+                    .all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
+            {
+                query
+                    .warnings
+                    .push(format!("未知搜索条件：{token}（按自由文本处理）"));
+                if negated {
+                    query.exclude_free.push(token.to_string());
+                } else {
+                    query.free.push(token.to_string());
+                }
+            } else if negated {
+                query.exclude_free.push(token.to_string());
+            } else {
                 query.free.push(token.to_string());
             }
         }
@@ -393,6 +681,31 @@ impl SearchQuery {
 
     pub fn free_text(&self) -> String {
         self.free.join(" ")
+    }
+
+    pub fn warnings(&self) -> &[String] {
+        &self.warnings
+    }
+
+    /// 把标签筛选里的旧名/合并名替换成规范名；自由文本靠 FTS 的别名并集处理。
+    pub fn resolve_tag_aliases(&mut self, aliases: &HashMap<String, String>) {
+        if aliases.is_empty() {
+            return;
+        }
+        for tag in self.tags.iter_mut().chain(self.exclude_tags.iter_mut()) {
+            if let Some(canonical) = aliases.get(tag.as_str()) {
+                *tag = canonical.clone();
+            }
+        }
+        for tag in self
+            .scoped_tags
+            .iter_mut()
+            .chain(self.exclude_scoped_tags.iter_mut())
+        {
+            if let Some(canonical) = aliases.get(tag.value.as_str()) {
+                tag.value = canonical.clone();
+            }
+        }
     }
 
     pub fn matches(
@@ -432,6 +745,16 @@ impl SearchQuery {
                 return false;
             }
         }
+        if let Some(failed) = self.failed {
+            if asset.error.is_some() != failed {
+                return false;
+            }
+        }
+        if let Some(damaged) = self.damaged {
+            if asset.damage.is_some() != damaged {
+                return false;
+            }
+        }
         if let Some(star) = self.star {
             if asset.star != star {
                 return false;
@@ -442,8 +765,100 @@ impl SearchQuery {
                 return false;
             }
         }
+        if let Some(max) = self.star_max {
+            if asset.star > max {
+                return false;
+            }
+        }
         if let Some(star) = self.exclude_star {
             if asset.star == star {
+                return false;
+            }
+        }
+        for scoped in &self.scoped_tags {
+            if !asset.all_tags().any(|hit| {
+                hit.category.eq_ignore_ascii_case(&scoped.category)
+                    && hit.tag.to_lowercase().contains(&scoped.value.to_lowercase())
+            }) {
+                return false;
+            }
+        }
+        for scoped in &self.exclude_scoped_tags {
+            if asset.all_tags().any(|hit| {
+                hit.category.eq_ignore_ascii_case(&scoped.category)
+                    && hit.tag.to_lowercase().contains(&scoped.value.to_lowercase())
+            }) {
+                return false;
+            }
+        }
+        for group in &self.groups {
+            if !asset.group.to_lowercase().contains(&group.to_lowercase()) {
+                return false;
+            }
+        }
+        for group in &self.exclude_groups {
+            if asset.group.to_lowercase().contains(&group.to_lowercase()) {
+                return false;
+            }
+        }
+        for name in &self.names {
+            if !asset.title().to_lowercase().contains(name) {
+                return false;
+            }
+        }
+        for name in &self.exclude_names {
+            if asset.title().to_lowercase().contains(name) {
+                return false;
+            }
+        }
+        let asset_path = asset.path.to_string_lossy().to_lowercase();
+        for path in &self.paths {
+            if !asset_path.contains(path) {
+                return false;
+            }
+        }
+        for path in &self.exclude_paths {
+            if asset_path.contains(path) {
+                return false;
+            }
+        }
+        for filter in &self.numeric {
+            let actual = match filter.field {
+                NumField::Size => asset.bytes as f64,
+                NumField::Width => asset.width as f64,
+                NumField::Height => asset.height as f64,
+                NumField::Ratio => {
+                    if asset.height == 0 {
+                        return false;
+                    }
+                    asset.width as f64 / asset.height as f64
+                }
+            };
+            if !compare_numbers(filter.op, actual, filter.value) {
+                return false;
+            }
+        }
+        for filter in &self.exclude_numeric {
+            let actual = match filter.field {
+                NumField::Size => Some(asset.bytes as f64),
+                NumField::Width => Some(asset.width as f64),
+                NumField::Height => Some(asset.height as f64),
+                NumField::Ratio => {
+                    (asset.height > 0).then(|| asset.width as f64 / asset.height as f64)
+                }
+            };
+            if actual.is_some_and(|actual| compare_numbers(filter.op, actual, filter.value)) {
+                return false;
+            }
+        }
+        let captured = date_parts(asset.taken_or_modified());
+        for filter in &self.dates {
+            if !compare_date(filter.op, captured, filter) {
+                return false;
+            }
+        }
+        for filter in &self.exclude_dates {
+            if compare_date(filter.op, captured, filter) {
                 return false;
             }
         }
@@ -484,6 +899,24 @@ impl SearchQuery {
                     if !haystack.contains(&token.to_lowercase()) {
                         return false;
                     }
+                }
+            }
+        }
+        if !self.exclude_free.is_empty() {
+            let tags = asset
+                .all_tags()
+                .map(|hit| hit.tag.to_lowercase())
+                .collect::<Vec<_>>()
+                .join(" ");
+            let haystack = format!(
+                "{} {} {}",
+                asset.title().to_lowercase(),
+                asset.path.to_string_lossy().to_lowercase(),
+                tags
+            );
+            for token in &self.exclude_free {
+                if haystack.contains(&token.to_lowercase()) {
+                    return false;
                 }
             }
         }
@@ -543,6 +976,8 @@ pub struct Shared {
     pub saved_searches: Vec<SavedSearch>,
     /// 只影响侧栏标签面的显示，不修改资产标签本身。
     pub blocked_tags: HashSet<String>,
+    /// 旧标签名/合并名 → 规范标签名；搜索与筛选会在内存里先映射一次。
+    pub tag_aliases: HashMap<String, String>,
     /// 来源显示别名；键为根目录，只影响 UI，不改磁盘目录。
     pub source_aliases: HashMap<PathBuf, String>,
     /// 磁盘上已缺失、等待用户确认是否从图库移除的批量记录。
@@ -588,6 +1023,7 @@ impl Shared {
             dedup,
             saved_searches: Vec::new(),
             blocked_tags: HashSet::new(),
+            tag_aliases: HashMap::new(),
             source_aliases: HashMap::new(),
             pending_cleanup: None,
         }
@@ -733,6 +1169,8 @@ mod tests {
             phash: None,
             bytes: 0,
             mtime: 0,
+            captured_at: None,
+            metadata_json: String::new(),
         }
     }
 
@@ -823,6 +1261,46 @@ mod tests {
         let query = SearchQuery::parse("tag:custom_tag");
         assert!(query.matches(&a, None, None));
         assert_eq!(a.top_tags(2).len(), 2);
+    }
+
+    #[test]
+    fn extended_search_syntax_filters_categories_status_numbers_and_dates() {
+        let mut a = asset(
+            "a.png",
+            true,
+            "g",
+            "作品: 崩坏",
+            vec![
+                tag("clara", "character"),
+                tag("honkai:_star_rail", "copyright"),
+                tag("1girl", "general"),
+            ],
+        );
+        a.bytes = 12 * 1024 * 1024;
+        a.width = 4000;
+        a.height = 3000;
+        a.star = 4;
+        a.favorite = true;
+        a.mtime = 1_792_065_600;
+        a.damage = Some("truncated".into());
+
+        let query = SearchQuery::parse(
+            "character:clara copyright:honkai group:崩坏 is:fav star:>=3 size:>10mb width:>=4000 ratio:>1.3 date:2026-10",
+        );
+        assert!(query.matches(&a, None, None), "{:?}", query.warnings());
+        assert!(query.warnings().is_empty());
+        assert!(SearchQuery::parse("is:damaged").matches(&a, None, None));
+        assert!(!SearchQuery::parse("is:failed").matches(&a, None, None));
+        assert!(!SearchQuery::parse("size:<10mb").matches(&a, None, None));
+        assert!(!SearchQuery::parse("date:2026-09").matches(&a, None, None));
+        assert!(SearchQuery::parse("date:>=2026-10-01 date:<=2026-10-31").matches(&a, None, None));
+        assert!(!SearchQuery::parse("-clara").matches(&a, None, None));
+        assert!(SearchQuery::parse("-nothere").matches(&a, None, None));
+        assert!(SearchQuery::parse("star:<=4").matches(&a, None, None));
+        assert!(!SearchQuery::parse("-star:>=4").matches(&a, None, None));
+        assert!(!SearchQuery::parse("character:clara -copyright:star_rail").matches(&a, None, None));
+        assert!(!SearchQuery::parse("foo:bar").warnings().is_empty());
+        assert!(!SearchQuery::parse("date:2026-13").warnings().is_empty());
     }
 
     #[test]

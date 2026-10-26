@@ -11,7 +11,7 @@ use crate::dedup::{DuplicateReview, ReviewState};
 use crate::media::ContentHashes;
 use crate::model::{Asset, Filter, SavedSearch, TagHit, TagSummary, normalize_tag_name};
 
-const SCHEMA_VERSION: i64 = 5;
+const SCHEMA_VERSION: i64 = 7;
 
 #[derive(Clone, Copy, Debug, Default)]
 pub struct JobCounts {
@@ -62,6 +62,7 @@ CREATE TABLE IF NOT EXISTS assets (
     tagged INTEGER NOT NULL DEFAULT 0,
     favorite INTEGER NOT NULL DEFAULT 0,
     metadata_json TEXT NOT NULL DEFAULT '{}',
+    exif_state TEXT NOT NULL DEFAULT '',
     thumb_state TEXT NOT NULL DEFAULT '',
     tag_state TEXT NOT NULL DEFAULT '',
     tag_attempts INTEGER NOT NULL DEFAULT 0,
@@ -81,7 +82,8 @@ CREATE TABLE IF NOT EXISTS tags (
     vocab_index INTEGER,
     threshold_override REAL,
     parent_id INTEGER REFERENCES tags(id) ON DELETE SET NULL,
-    color TEXT
+    color TEXT,
+    alias_of INTEGER
 );
 CREATE TABLE IF NOT EXISTS asset_tags (
     asset_id INTEGER NOT NULL REFERENCES assets(id) ON DELETE CASCADE,
@@ -168,6 +170,14 @@ CREATE INDEX IF NOT EXISTS idx_jobs_state_kind ON jobs(kind, state, priority);
 "#;
 
 #[derive(Clone, Debug)]
+pub struct ThumbSource {
+    pub path: PathBuf,
+    pub mtime: u64,
+    pub bytes: u64,
+    pub orientation: u8,
+}
+
+#[derive(Clone, Debug)]
 pub struct StoredMeta {
     pub mtime: u64,
     pub bytes: u64,
@@ -177,6 +187,9 @@ pub struct StoredMeta {
     pub width: u32,
     pub height: u32,
     pub thumb: String,
+    pub captured_at: Option<u64>,
+    pub metadata_json: String,
+    pub exif_state: String,
 }
 
 impl StoredMeta {
@@ -248,6 +261,8 @@ impl Db {
         conn.pragma_update(None, "foreign_keys", "ON")?;
         migrate(&conn)?;
         ensure_asset_columns(&conn)?;
+        ensure_tag_columns(&conn)?;
+        ensure_thumb_sources(&conn)?;
         conn.execute_batch("CREATE INDEX IF NOT EXISTS idx_assets_path ON assets(path);")?;
         Ok(Self { conn })
     }
@@ -298,7 +313,7 @@ impl Db {
         let sql = format!(
             "SELECT path, thumb, width, height, group_name, rating, tags_json, tagged, error,
                     sha1, blake3, phash, tag_attempts, bytes, mtime, favorite, star, folder,
-                    damage
+                    damage, captured_at, metadata_json
              FROM assets WHERE folder IN ({placeholders})"
         );
         let mut statement = self.conn.prepare(&sql)?;
@@ -318,7 +333,8 @@ impl Db {
         let path = path.to_string_lossy().to_string();
         self.conn
             .query_row(
-                "SELECT mtime, bytes, sha1, blake3, phash, width, height, thumb
+                "SELECT mtime, bytes, sha1, blake3, phash, width, height, thumb,
+                        captured_at, metadata_json, exif_state
                  FROM assets WHERE path = ?1",
                 [&path],
                 |row| {
@@ -332,6 +348,11 @@ impl Db {
                         width: row.get::<_, i64>(5)?.max(0) as u32,
                         height: row.get::<_, i64>(6)?.max(0) as u32,
                         thumb: row.get(7)?,
+                        captured_at: row
+                            .get::<_, Option<i64>>(8)?
+                            .map(|value| value.max(0) as u64),
+                        metadata_json: row.get(9)?,
+                        exif_state: row.get(10)?,
                     })
                 },
             )
@@ -491,7 +512,7 @@ impl Db {
                 params![name, category],
             )?;
             let tag_id: i64 = tx.query_row(
-                "SELECT id FROM tags WHERE name = ?1",
+                "SELECT COALESCE(alias_of, id) FROM tags WHERE name = ?1",
                 [name.as_str()],
                 |row| row.get(0),
             )?;
@@ -529,7 +550,7 @@ impl Db {
             };
             let tag_id: Option<i64> = tx
                 .query_row(
-                    "SELECT id FROM tags WHERE name = ?1",
+                    "SELECT COALESCE(alias_of, id) FROM tags WHERE name = ?1",
                     [name.as_str()],
                     |row| row.get(0),
                 )
@@ -553,6 +574,33 @@ impl Db {
 
     pub fn list_tags(&self, folder: &str) -> Result<Vec<TagSummary>> {
         self.list_tags_in(&[folder.to_string()])
+    }
+
+    /// 全词表（含尚未使用的标签）；类别来自模型词表或首次使用时的打标结果。
+    pub fn list_tag_names(&self) -> Result<Vec<(String, String)>> {
+        let mut statement = self
+            .conn
+            .prepare("SELECT name, category FROM tags WHERE alias_of IS NULL ORDER BY name")?;
+        let rows = statement.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    pub fn import_vocabulary(&self, entries: &[(String, String, u32)]) -> Result<usize> {
+        if entries.is_empty() {
+            return Ok(0);
+        }
+        let tx = self.conn.unchecked_transaction()?;
+        let mut inserted = 0;
+        {
+            let mut statement = tx.prepare(
+                "INSERT OR IGNORE INTO tags(name, category, vocab_index) VALUES(?1, ?2, ?3)",
+            )?;
+            for (name, category, index) in entries {
+                inserted += statement.execute(params![name, category, *index as i64])?;
+            }
+        }
+        tx.commit()?;
+        Ok(inserted)
     }
 
     pub fn list_tags_in(&self, folders: &[String]) -> Result<Vec<TagSummary>> {
@@ -583,6 +631,149 @@ impl Db {
             },
         )?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    pub fn load_tag_aliases(&self) -> Result<HashMap<String, String>> {
+        let mut statement = self.conn.prepare(
+            "SELECT alias.name, canonical.name
+             FROM tags alias
+             JOIN tags canonical ON canonical.id = alias.alias_of
+             ORDER BY alias.name",
+        )?;
+        let rows = statement.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?;
+        Ok(rows.collect::<rusqlite::Result<HashMap<_, _>>>()?)
+    }
+
+    /// 重命名标签；旧名保留为别名，已打标资产与 FTS 一起更新。
+    pub fn rename_tag(&self, old: &str, new: &str) -> Result<usize> {
+        let old = normalize_tag_name(old);
+        let new = normalize_tag_name(new);
+        if old.is_empty() || new.is_empty() {
+            bail!("标签名不能为空");
+        }
+        if old == new {
+            return Ok(0);
+        }
+        let source: Option<(i64, Option<i64>, String)> = self
+            .conn
+            .query_row(
+                "SELECT id, alias_of, category FROM tags WHERE name = ?1",
+                [&old],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .optional()?;
+        let Some((source_id, alias_of, category)) = source else {
+            bail!("标签不存在: {old}");
+        };
+        if alias_of.is_some() {
+            bail!("「{old}」是别名，请对原标签操作");
+        }
+        let target: Option<i64> = self
+            .conn
+            .query_row(
+                "SELECT COALESCE(alias_of, id) FROM tags WHERE name = ?1",
+                [&new],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if let Some(target_id) = target
+            && target_id != source_id
+        {
+            return self.merge_tags(&old, &new);
+        }
+        let affected = tag_asset_ids(&self.conn, source_id)?;
+        let tx = self.conn.unchecked_transaction()?;
+        tx.execute(
+            "DELETE FROM tags WHERE name = ?1 AND alias_of = ?2 AND id <> ?2",
+            params![new, source_id],
+        )?;
+        tx.execute(
+            "UPDATE tags SET name = ?1, alias_of = NULL WHERE id = ?2",
+            params![new, source_id],
+        )?;
+        tx.execute(
+            "INSERT OR IGNORE INTO tags(name, category, alias_of) VALUES(?1, ?2, ?3)",
+            params![old, category, source_id],
+        )?;
+        for asset_id in &affected {
+            refresh_auto_tags_json(&tx, *asset_id)?;
+            refresh_tags_text(&tx, *asset_id)?;
+        }
+        tx.commit()?;
+        Ok(affected.len())
+    }
+
+    /// 合并两个标签；来源名保留为别名，来源的手工/自动标记并入目标。
+    pub fn merge_tags(&self, source: &str, target: &str) -> Result<usize> {
+        let source = normalize_tag_name(source);
+        let target = normalize_tag_name(target);
+        if source.is_empty() || target.is_empty() {
+            bail!("标签名不能为空");
+        }
+        if source == target {
+            return Ok(0);
+        }
+        let source_row: Option<(i64, String)> = self
+            .conn
+            .query_row(
+                "SELECT COALESCE(alias_of, id), category FROM tags WHERE name = ?1",
+                [&source],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+        let Some((source_id, source_category)) = source_row else {
+            bail!("标签不存在: {source}");
+        };
+        let target_id: Option<i64> = self
+            .conn
+            .query_row(
+                "SELECT COALESCE(alias_of, id) FROM tags WHERE name = ?1",
+                [&target],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if target_id == Some(source_id) {
+            return Ok(0);
+        }
+        let tx = self.conn.unchecked_transaction()?;
+        let target_id = match target_id {
+            Some(id) => id,
+            None => {
+                tx.execute(
+                    "INSERT INTO tags(name, category) VALUES(?1, ?2)",
+                    params![target, source_category],
+                )?;
+                tx.last_insert_rowid()
+            }
+        };
+        let affected = tag_asset_ids(&tx, source_id)?;
+        tx.execute(
+            "INSERT INTO asset_tags(asset_id, tag_id, confidence, origin)
+             SELECT asset_id, ?1, confidence, origin FROM asset_tags WHERE tag_id = ?2
+             ON CONFLICT(asset_id, tag_id, origin) DO UPDATE SET
+                confidence = MAX(confidence, excluded.confidence)",
+            params![target_id, source_id],
+        )?;
+        tx.execute("DELETE FROM asset_tags WHERE tag_id = ?1", [source_id])?;
+        tx.execute(
+            "UPDATE tags SET alias_of = NULL WHERE id = ?1",
+            [target_id],
+        )?;
+        // 别名保持一层：之前指向来源的旧名直接改指目标，避免链式查找。
+        tx.execute(
+            "UPDATE tags SET alias_of = ?1 WHERE alias_of = ?2",
+            [target_id, source_id],
+        )?;
+        tx.execute(
+            "UPDATE tags SET alias_of = ?1 WHERE id = ?2",
+            [target_id, source_id],
+        )?;
+        for asset_id in &affected {
+            refresh_auto_tags_json(&tx, *asset_id)?;
+            refresh_tags_text(&tx, *asset_id)?;
+        }
+        tx.commit()?;
+        Ok(affected.len())
     }
 
     pub fn load_saved_searches(&self) -> Result<Vec<SavedSearch>> {
@@ -907,6 +1098,72 @@ impl Db {
         self.load_asset(path)
     }
 
+    pub fn set_exif(
+        &self,
+        path: &Path,
+        captured_at: Option<u64>,
+        metadata_json: &str,
+    ) -> Result<()> {
+        self.conn.execute(
+            "UPDATE assets SET captured_at = ?1, metadata_json = ?2, exif_state = 'done'
+             WHERE path = ?3",
+            params![
+                captured_at.map(|value| value as i64),
+                metadata_json,
+                path.to_string_lossy().to_string()
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn record_thumb_source(
+        &self,
+        thumb: &Path,
+        source: &Path,
+        mtime: u64,
+        bytes: u64,
+        orientation: u8,
+    ) -> Result<()> {
+        if thumb.as_os_str().is_empty() {
+            return Ok(());
+        }
+        self.conn.execute(
+            "INSERT INTO thumb_sources(thumb, source, mtime, bytes, orientation)
+             VALUES(?1, ?2, ?3, ?4, ?5)
+             ON CONFLICT(thumb) DO UPDATE SET
+                source = excluded.source,
+                mtime = excluded.mtime,
+                bytes = excluded.bytes,
+                orientation = excluded.orientation",
+            params![
+                thumb.to_string_lossy().to_string(),
+                source.to_string_lossy().to_string(),
+                mtime as i64,
+                bytes as i64,
+                orientation as i64
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn thumb_source(&self, thumb: &Path) -> Result<Option<ThumbSource>> {
+        self.conn
+            .query_row(
+                "SELECT source, mtime, bytes, orientation FROM thumb_sources WHERE thumb = ?1",
+                [thumb.to_string_lossy().to_string()],
+                |row| {
+                    Ok(ThumbSource {
+                        path: PathBuf::from(row.get::<_, String>(0)?),
+                        mtime: row.get::<_, i64>(1)?.max(0) as u64,
+                        bytes: row.get::<_, i64>(2)?.max(0) as u64,
+                        orientation: row.get::<_, i64>(3)?.clamp(1, 8) as u8,
+                    })
+                },
+            )
+            .optional()
+            .map_err(Into::into)
+    }
+
     /// 文件重命名/移动时把原有资产行迁到新路径，保留标签、评分、收藏与人工标签。
     pub fn move_asset_media(
         &self,
@@ -1053,7 +1310,9 @@ impl Db {
     pub fn tags_missing_vocab(&self) -> Result<Vec<String>> {
         let mut statement = self
             .conn
-            .prepare("SELECT name FROM tags WHERE vocab_index IS NULL ORDER BY name")?;
+            .prepare(
+                "SELECT name FROM tags WHERE vocab_index IS NULL AND alias_of IS NULL ORDER BY name",
+            )?;
         let rows = statement.query_map([], |row| row.get::<_, String>(0))?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
@@ -1078,7 +1337,7 @@ impl Db {
         let mut asset = self.conn.query_row(
             "SELECT path, thumb, width, height, group_name, rating, tags_json, tagged, error,
                     sha1, blake3, phash, tag_attempts, bytes, mtime, favorite, star, folder,
-                    damage
+                    damage, captured_at, metadata_json
              FROM assets WHERE path = ?1",
             [&path_string],
             row_to_asset,
@@ -1176,6 +1435,10 @@ fn row_to_asset(row: &rusqlite::Row<'_>) -> rusqlite::Result<Asset> {
         phash: phash.map(|value| value as u64),
         bytes: row.get::<_, i64>(13)?.max(0) as u64,
         mtime: row.get::<_, i64>(14)?.max(0) as u64,
+        captured_at: row
+            .get::<_, Option<i64>>(19)?
+            .map(|value| value.max(0) as u64),
+        metadata_json: row.get(20)?,
     })
 }
 
@@ -1193,10 +1456,17 @@ fn manual_tag_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<(PathBuf, TagHit)
 
 fn refresh_tags_text(conn: &Connection, asset_id: i64) -> Result<()> {
     let mut statement = conn.prepare(
-        "SELECT DISTINCT t.name
-         FROM asset_tags at JOIN tags t ON t.id = at.tag_id
-         WHERE at.asset_id = ?1
-         ORDER BY t.name",
+        "SELECT name FROM (
+             SELECT DISTINCT t.name
+             FROM asset_tags at JOIN tags t ON t.id = at.tag_id
+             WHERE at.asset_id = ?1
+             UNION
+             SELECT DISTINCT alias.name
+             FROM asset_tags at
+             JOIN tags t ON t.id = at.tag_id
+             JOIN tags alias ON alias.alias_of = t.id
+             WHERE at.asset_id = ?1
+         ) ORDER BY name",
     )?;
     let rows = statement.query_map([asset_id], |row| row.get::<_, String>(0))?;
     let tags_text = rows.collect::<rusqlite::Result<Vec<_>>>()?.join(" ");
@@ -1205,6 +1475,13 @@ fn refresh_tags_text(conn: &Connection, asset_id: i64) -> Result<()> {
         params![tags_text, asset_id],
     )?;
     Ok(())
+}
+
+fn tag_asset_ids(conn: &Connection, tag_id: i64) -> Result<Vec<i64>> {
+    let mut statement =
+        conn.prepare("SELECT DISTINCT asset_id FROM asset_tags WHERE tag_id = ?1 ORDER BY asset_id")?;
+    let rows = statement.query_map([tag_id], |row| row.get::<_, i64>(0))?;
+    Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
 }
 
 fn refresh_auto_tags_json(conn: &Connection, asset_id: i64) -> Result<()> {
@@ -1231,11 +1508,32 @@ fn refresh_auto_tags_json(conn: &Connection, asset_id: i64) -> Result<()> {
 }
 
 fn upsert_tag(conn: &Connection, tag: &TagHit) -> Result<i64> {
+    let existing: Option<(i64, Option<i64>)> = conn
+        .query_row(
+            "SELECT id, alias_of FROM tags WHERE name = ?1",
+            [&tag.tag],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()?;
+    if let Some((id, alias_of)) = existing {
+        // 旧名/被合并名只作为别名的入口，不再把资产挂到已合并的标签上。
+        if let Some(canonical) = alias_of {
+            return Ok(canonical);
+        }
+        conn.execute(
+            "UPDATE tags SET category = ?1,
+                vocab_index = COALESCE(?2, vocab_index)
+             WHERE id = ?3",
+            params![
+                tag.category,
+                tag.vocab_index.map(|value| value as i64),
+                id
+            ],
+        )?;
+        return Ok(id);
+    }
     conn.execute(
-        "INSERT INTO tags(name, category, vocab_index) VALUES(?1, ?2, ?3)
-         ON CONFLICT(name) DO UPDATE SET
-            category = excluded.category,
-            vocab_index = COALESCE(excluded.vocab_index, tags.vocab_index)",
+        "INSERT INTO tags(name, category, vocab_index) VALUES(?1, ?2, ?3)",
         params![
             tag.tag,
             tag.category,
@@ -1339,6 +1637,56 @@ fn ensure_asset_columns(conn: &Connection) -> Result<()> {
     }
     if !columns.iter().any(|column| column == "damage") {
         conn.execute_batch("ALTER TABLE assets ADD COLUMN damage TEXT;")?;
+    }
+    if !columns.iter().any(|column| column == "exif_state") {
+        conn.execute_batch("ALTER TABLE assets ADD COLUMN exif_state TEXT NOT NULL DEFAULT '';")?;
+    }
+    if !columns.iter().any(|column| column == "captured_at") {
+        conn.execute_batch("ALTER TABLE assets ADD COLUMN captured_at INTEGER;")?;
+    }
+    if !columns.iter().any(|column| column == "metadata_json") {
+        conn.execute_batch("ALTER TABLE assets ADD COLUMN metadata_json TEXT NOT NULL DEFAULT '{}';")?;
+    }
+    conn.execute_batch(
+        "CREATE INDEX IF NOT EXISTS idx_assets_captured_at ON assets(captured_at);",
+    )?;
+    Ok(())
+}
+
+fn ensure_tag_columns(conn: &Connection) -> Result<()> {
+    let mut statement = conn.prepare("PRAGMA table_info(tags)")?;
+    let columns = statement
+        .query_map([], |row| row.get::<_, String>(1))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    drop(statement);
+    if !columns.iter().any(|column| column == "alias_of") {
+        conn.execute_batch("ALTER TABLE tags ADD COLUMN alias_of INTEGER;")?;
+    }
+    conn.execute_batch(
+        "CREATE INDEX IF NOT EXISTS idx_tags_alias_of ON tags(alias_of);",
+    )?;
+    Ok(())
+}
+
+/// 缩略图缓存淘汰后，用这张表把丢失的 512 档从原图按需重建。
+fn ensure_thumb_sources(conn: &Connection) -> Result<()> {
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS thumb_sources (
+            thumb TEXT PRIMARY KEY,
+            source TEXT NOT NULL,
+            mtime INTEGER NOT NULL DEFAULT 0,
+            bytes INTEGER NOT NULL DEFAULT 0,
+            orientation INTEGER NOT NULL DEFAULT 1
+        );",
+    )?;
+    let count: i64 = conn.query_row("SELECT COUNT(*) FROM thumb_sources", [], |row| row.get(0))?;
+    if count == 0 {
+        conn.execute_batch(
+            "INSERT OR IGNORE INTO thumb_sources(thumb, source, mtime, bytes, orientation)
+             SELECT thumb, path, mtime, bytes,
+                    COALESCE(CAST(json_extract(metadata_json, '$.orientation') AS INTEGER), 1)
+             FROM assets WHERE thumb <> '';",
+        )?;
     }
     Ok(())
 }
@@ -1586,6 +1934,86 @@ mod tests {
     }
 
     #[test]
+    fn renaming_and_merging_tags_keep_aliases_and_fts() {
+        let root = std::env::temp_dir().join(format!(
+            "kanalib-tag-alias-test-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        let db = Db::open(&root.join("kanalib.db")).unwrap();
+        let path = PathBuf::from("C:\\lib\\a.png");
+        let hashes = ContentHashes {
+            sha1: "a".repeat(40),
+            blake3: "b".repeat(64),
+            phash: 7,
+            decode_ok: true,
+            decode_error: None,
+        };
+        db.upsert_meta("C:\\lib", &path, None, 10, 20, 100, 10, &hashes, false)
+            .unwrap();
+        let mut asset = db.load_asset(&path).unwrap();
+        asset.tagged = true;
+        asset.tags = vec![
+            crate::model::TagHit {
+                tag: "1girl".into(),
+                category: "general".into(),
+                score: 0.9,
+                vocab_index: None,
+            },
+            crate::model::TagHit {
+                tag: "long_hair".into(),
+                category: "general".into(),
+                score: 0.8,
+                vocab_index: None,
+            },
+        ];
+        db.update_tags(&asset).unwrap();
+        db.add_manual_tags(std::slice::from_ref(&path), "manual_tag", "manual")
+            .unwrap();
+
+        assert_eq!(db.rename_tag("long_hair", "longhair").unwrap(), 1);
+        let asset = db.load_asset(&path).unwrap();
+        assert!(asset.tags.iter().any(|tag| tag.tag == "longhair"));
+        assert!(!asset.tags.iter().any(|tag| tag.tag == "long_hair"));
+        assert_eq!(
+            db.load_tag_aliases().unwrap().get("long_hair"),
+            Some(&"longhair".to_string())
+        );
+        assert!(
+            !db.search_paths_in(&["C:\\lib".into()], &["long_hair".into()])
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            !db.search_paths_in(&["C:\\lib".into()], &["longhair".into()])
+                .unwrap()
+                .is_empty()
+        );
+
+        assert_eq!(db.merge_tags("longhair", "1girl").unwrap(), 1);
+        let asset = db.load_asset(&path).unwrap();
+        assert!(asset.tags.iter().any(|tag| tag.tag == "1girl"));
+        assert!(!asset.tags.iter().any(|tag| tag.tag == "longhair"));
+        assert!(
+            asset
+                .manual_tags
+                .iter()
+                .any(|tag| tag.tag == "manual_tag")
+        );
+        let aliases = db.load_tag_aliases().unwrap();
+        assert_eq!(aliases.get("longhair"), Some(&"1girl".to_string()));
+        assert_eq!(aliases.get("long_hair"), Some(&"1girl".to_string()));
+        assert!(
+            !db.search_paths_in(&["C:\\lib".into()], &["long_hair".into()])
+                .unwrap()
+                .is_empty()
+        );
+        drop(db);
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
     fn migrates_legacy_schema_and_searches() {
         let root = std::env::temp_dir().join(format!(
             "kanalib-db-test-{}-{:?}",
@@ -1790,7 +2218,7 @@ mod tests {
             let version: i64 = conn
                 .query_row("PRAGMA user_version", [], |row| row.get(0))
                 .unwrap();
-            assert_eq!(version, 5);
+            assert_eq!(version, super::SCHEMA_VERSION);
         }
         assert!(fs::read_dir(&root).unwrap().any(|entry| {
             entry

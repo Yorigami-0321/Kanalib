@@ -806,6 +806,8 @@ mod tests {
             phash: Some(phash),
             bytes,
             mtime,
+            captured_at: None,
+            metadata_json: String::new(),
         }
     }
 

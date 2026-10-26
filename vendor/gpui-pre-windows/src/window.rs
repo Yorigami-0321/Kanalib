@@ -943,14 +943,17 @@ impl PlatformWindow for WindowsWindow {
     fn start_window_move(&self) {
         // 客户端自绘标题栏：普通鼠标事件无法让系统接管拖动，
         // 这里释放鼠标捕获后转成一次 HTCAPTION 非客户区按下，交给系统移动/贴边。
+        // 必须投递而不是 SendMessage：同步进入移动循环时 gpui 的 App 仍被输入分发借用，
+        // 循环里的 WM_TIMER 会执行 runnable 并再次 update，触发 RefCell already borrowed。
         unsafe {
             ReleaseCapture().log_err();
-            let _ = SendMessageW(
-                self.0.hwnd,
+            PostMessageW(
+                Some(self.0.hwnd),
                 WM_NCLBUTTONDOWN,
-                Some(WPARAM(HTCAPTION as usize)),
-                Some(LPARAM(0)),
-            );
+                WPARAM(HTCAPTION as usize),
+                LPARAM(0),
+            )
+            .log_err();
         }
     }
 

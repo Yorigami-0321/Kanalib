@@ -3,8 +3,167 @@ use std::io::{BufReader, Read};
 use std::path::Path;
 
 use anyhow::{Context, Result};
+use exif::{In, Tag};
 use image::{imageops::FilterType, DynamicImage};
+use serde::{Deserialize, Serialize};
 use sha1::{Digest, Sha1};
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ExifData {
+    #[serde(default)]
+    pub camera: String,
+    #[serde(default)]
+    pub lens: String,
+    #[serde(default)]
+    pub iso: String,
+    #[serde(default)]
+    pub aperture: String,
+    #[serde(default)]
+    pub shutter: String,
+    #[serde(default)]
+    pub focal_length: String,
+    #[serde(default = "default_orientation")]
+    pub orientation: u8,
+}
+
+fn default_orientation() -> u8 {
+    1
+}
+
+impl Default for ExifData {
+    fn default() -> Self {
+        Self {
+            camera: String::new(),
+            lens: String::new(),
+            iso: String::new(),
+            aperture: String::new(),
+            shutter: String::new(),
+            focal_length: String::new(),
+            orientation: 1,
+        }
+    }
+}
+
+impl ExifData {
+    pub fn is_empty(&self) -> bool {
+        self.camera.is_empty()
+            && self.lens.is_empty()
+            && self.iso.is_empty()
+            && self.aperture.is_empty()
+            && self.shutter.is_empty()
+            && self.focal_length.is_empty()
+    }
+}
+
+fn exif_field(exif: &exif::Exif, tag: Tag) -> Option<&exif::Field> {
+    exif.get_field(tag, In::PRIMARY)
+        .or_else(|| exif.fields().find(|field| field.tag == tag))
+}
+
+fn exif_text(exif: &exif::Exif, tag: Tag) -> Option<String> {
+    let field = exif_field(exif, tag)?;
+    let text = field.display_value().to_string();
+    let text = text.trim().trim_matches('"').trim();
+    (!text.is_empty()).then(|| text.to_string())
+}
+
+fn exif_ascii(exif: &exif::Exif, tag: Tag) -> Option<String> {
+    let field = exif_field(exif, tag)?;
+    let exif::Value::Ascii(values) = &field.value else {
+        return exif_text(exif, tag);
+    };
+    let bytes = values.first()?;
+    let text = String::from_utf8_lossy(bytes);
+    let text = text.trim_matches('\0').trim();
+    (!text.is_empty()).then(|| text.to_string())
+}
+
+fn days_from_civil(year: i64, month: i64, day: i64) -> i64 {
+    let year = if month <= 2 { year - 1 } else { year };
+    let era = if year >= 0 { year } else { year - 399 } / 400;
+    let yoe = year - era * 400;
+    let mp = (month + 9) % 12;
+    let doy = (153 * mp + 2) / 5 + day - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    era * 146_097 + doe - 719_468
+}
+
+fn parse_offset(text: &str) -> Option<i64> {
+    let text = text.trim();
+    let (sign, rest) = match text.as_bytes().first()? {
+        b'+' => (1, &text[1..]),
+        b'-' => (-1, &text[1..]),
+        _ => return None,
+    };
+    let digits = rest.replace(':', "");
+    let hours = digits.get(0..2)?.parse::<i64>().ok()?;
+    let minutes = digits.get(2..4).unwrap_or("00").parse::<i64>().ok()?;
+    Some(sign * (hours * 3600 + minutes * 60))
+}
+
+pub fn parse_exif_datetime(text: &str, offset: Option<&str>) -> Option<u64> {
+    let text = text.trim();
+    let (date, time) = text.split_once(' ')?;
+    let mut date = date.split(':');
+    let year = date.next()?.parse::<i64>().ok()?;
+    let month = date.next()?.parse::<i64>().ok()?;
+    let day = date.next()?.parse::<i64>().ok()?;
+    let mut time = time.split(':');
+    let hour = time.next()?.parse::<i64>().ok()?;
+    let minute = time.next()?.parse::<i64>().ok()?;
+    let second = time
+        .next()
+        .and_then(|value| value.parse::<i64>().ok())
+        .unwrap_or(0);
+    let days = days_from_civil(year, month, day);
+    let mut seconds = days * 86_400 + hour * 3600 + minute * 60 + second;
+    if let Some(offset) = offset.and_then(parse_offset) {
+        seconds -= offset;
+    }
+    Some(seconds.max(0) as u64)
+}
+
+/// 尽力读取 EXIF；不支持的格式或损坏文件返回默认值，不影响入库。
+pub fn read_exif(path: &Path) -> (ExifData, Option<u64>) {
+    let file = match File::open(path) {
+        Ok(file) => file,
+        Err(_) => return (ExifData::default(), None),
+    };
+    let exif = match exif::Reader::new().read_from_container(&mut BufReader::new(file)) {
+        Ok(exif) => exif,
+        Err(_) => return (ExifData::default(), None),
+    };
+    let orientation = exif_field(&exif, Tag::Orientation)
+        .and_then(|field| field.value.get_uint(0))
+        .map(|value| value.clamp(1, 8) as u8)
+        .unwrap_or(1);
+    let make = exif_ascii(&exif, Tag::Make).unwrap_or_default();
+    let model = exif_ascii(&exif, Tag::Model).unwrap_or_default();
+    let camera = match (make.trim(), model.trim()) {
+        (make, model) if make.is_empty() => model.to_string(),
+        (make, model) if model.is_empty() || model.starts_with(make) => make.to_string(),
+        (make, model) => format!("{make} {model}"),
+    };
+    let date = exif_ascii(&exif, Tag::DateTimeOriginal)
+        .or_else(|| exif_ascii(&exif, Tag::DateTimeDigitized))
+        .or_else(|| exif_ascii(&exif, Tag::DateTime));
+    let offset = exif_ascii(&exif, Tag::OffsetTimeOriginal);
+    let captured_at = date
+        .as_deref()
+        .and_then(|value| parse_exif_datetime(value, offset.as_deref()));
+    (
+        ExifData {
+            camera,
+            lens: exif_ascii(&exif, Tag::LensModel).unwrap_or_default(),
+            iso: exif_text(&exif, Tag::PhotographicSensitivity).unwrap_or_default(),
+            aperture: exif_text(&exif, Tag::FNumber).unwrap_or_default(),
+            shutter: exif_text(&exif, Tag::ExposureTime).unwrap_or_default(),
+            focal_length: exif_text(&exif, Tag::FocalLength).unwrap_or_default(),
+            orientation,
+        },
+        captured_at,
+    )
+}
 
 #[derive(Clone, Debug, Default)]
 pub struct ContentHashes {
@@ -148,6 +307,30 @@ mod tests {
         let c = perceptual_hash(&DynamicImage::ImageLuma8(inverted));
         assert_eq!(a, b);
         assert_ne!(a, c);
+    }
+
+    #[test]
+    fn exif_datetime_parses_offsets() {
+        assert_eq!(
+            super::parse_exif_datetime("2026:10:15 12:00:00", None),
+            Some(1_792_065_600)
+        );
+        assert_eq!(
+            super::parse_exif_datetime("2026:10:15 12:00:00", Some("+08:00")),
+            Some(1_792_036_800)
+        );
+        assert_eq!(
+            super::parse_exif_datetime("2026:10:15 12:00:00", Some("-05:00")),
+            Some(1_792_083_600)
+        );
+        assert_eq!(super::parse_exif_datetime("not a date", None), None);
+    }
+
+    #[test]
+    fn exif_defaults_deserialize_from_empty_metadata() {
+        let data: super::ExifData = serde_json::from_str("{}").unwrap();
+        assert_eq!(data.orientation, 1);
+        assert!(data.is_empty());
     }
 
     #[test]

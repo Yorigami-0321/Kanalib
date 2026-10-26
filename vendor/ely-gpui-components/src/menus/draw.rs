@@ -28,11 +28,16 @@ fn row(item: &MenuItem, ix: usize, current: bool, cx: &App) -> Stateful<Div> {
     } else {
         colors.fg
     };
+    // 选中态独占一个指示槽；带图标的 radio/check 再补一个图标槽，避免二者互相挤掉。
+    let indicator = matches!(item.kind, Kind::Check(_) | Kind::Radio(_));
     let (lead, lead_color) = match &item.kind {
         Kind::Check(true) => (Some(IconName::Check), fg),
         Kind::Radio(true) => (Some(IconName::Dot), fg),
+        Kind::Check(false) | Kind::Radio(false) => (None, fg),
         _ => (item.icon, if item.disabled { fg } else { colors.fg_muted }),
     };
+    let trailing_icon = indicator.then_some(item.icon).flatten();
+    let indicator_color = if item.disabled { fg } else { colors.fg };
     div()
         .id(("row", ix))
         .relative()
@@ -56,6 +61,17 @@ fn row(item: &MenuItem, ix: usize, current: bool, cx: &App) -> Stateful<Div> {
                     slot.child(Icon::new(icon).size(IconSize::Sm).color(lead_color))
                 }),
         )
+        .when_some(trailing_icon, |row, icon| {
+            row.child(
+                div()
+                    .flex()
+                    .flex_none()
+                    .items_center()
+                    .justify_center()
+                    .size(theme.icon_size(IconSize::Sm))
+                    .child(Icon::new(icon).size(IconSize::Sm).color(indicator_color)),
+            )
+        })
         .child(
             div()
                 .flex_1()

@@ -16,8 +16,8 @@ use crate::dedup::{
 };
 use crate::media;
 use crate::model::{
-    Asset, Filter, PendingCleanup, SavedSearch, Shared, TagHit, TagSummary, is_image,
-    normalize_tag_name,
+    Asset, CountAccumulator, Filter, PendingCleanup, SavedSearch, Shared, TagHit, TagSummary,
+    is_image, normalize_tag_name,
 };
 use crate::sidecar::{Sidecar, project_root, repair_file};
 
@@ -64,6 +64,9 @@ impl AppState {
             blocked_tags,
         ) = match Db::open(&db_path) {
                 Ok(db) => {
+                    if let Err(error) = import_vocabulary(&db) {
+                        log::warn!("vocab import: {error:#}");
+                    }
                     if let Err(error) = backfill_vocab(&db) {
                         log::warn!("vocab backfill: {error:#}");
                     }
@@ -176,6 +179,10 @@ impl AppState {
         let mut shared = Shared::new(roots, assets, reviews, similar_threshold, protected_paths);
         shared.saved_searches = saved_searches;
         shared.blocked_tags = blocked_tags.into_iter().collect();
+        shared.tag_aliases = Db::open(&db_path)
+            .ok()
+            .and_then(|db| db.load_tag_aliases().ok())
+            .unwrap_or_default();
         shared.source_aliases = Db::open(&db_path)
             .ok()
             .and_then(|db| db.setting("library.source_aliases").ok().flatten())
@@ -422,7 +429,12 @@ impl AppState {
     }
 
     pub fn set_filter(&self, filter: Filter) {
-        self.shared.lock().unwrap().filter = filter;
+        let mut shared = self.shared.lock().unwrap();
+        let resolved = match &filter {
+            Filter::Tag(name) => shared.tag_aliases.get(name).cloned().map(Filter::Tag),
+            _ => None,
+        };
+        shared.filter = resolved.unwrap_or(filter);
     }
 
     pub fn select(&self, path: Option<PathBuf>) {
@@ -625,6 +637,42 @@ impl AppState {
         Db::open(&self.db_path)?.list_tags_in(&roots)
     }
 
+    /// 全词表 + 当前图库用量；未使用的标签保留 0 次，供补全使用。
+    pub fn tag_vocabulary(&self) -> Result<Vec<TagSummary>> {
+        let roots = self
+            .shared
+            .lock()
+            .unwrap()
+            .roots
+            .iter()
+            .map(|root| root.to_string_lossy().to_string())
+            .collect::<Vec<_>>();
+        let db = Db::open(&self.db_path)?;
+        let used = db.list_tags_in(&roots)?;
+        let names = db.list_tag_names()?;
+        let mut used = used
+            .into_iter()
+            .map(|tag| (tag.name.clone(), tag))
+            .collect::<HashMap<_, _>>();
+        let mut vocabulary = names
+            .into_iter()
+            .map(|(name, category)| {
+                used.remove(&name).unwrap_or(TagSummary {
+                    name,
+                    category,
+                    count: 0,
+                    manual_count: 0,
+                })
+            })
+            .collect::<Vec<_>>();
+        vocabulary.sort_by(|a, b| {
+            b.count
+                .cmp(&a.count)
+                .then_with(|| a.name.cmp(&b.name))
+        });
+        Ok(vocabulary)
+    }
+
     pub fn set_source_alias(&self, root: &Path, alias: &str) -> Result<()> {
         let root = absolute(root.to_path_buf());
         let alias = alias.trim();
@@ -693,6 +741,49 @@ impl AppState {
         };
         shared.error = None;
         Ok(())
+    }
+
+    fn reload_after_tag_change(&self, status: String) -> Result<()> {
+        let roots = self
+            .shared
+            .lock()
+            .unwrap()
+            .roots
+            .iter()
+            .map(|root| root.to_string_lossy().to_string())
+            .collect::<Vec<_>>();
+        let db = Db::open(&self.db_path)?;
+        let assets = load_tile_thumbs(db.load_library(&roots)?);
+        let aliases = db.load_tag_aliases()?;
+        let mut shared = self.shared.lock().unwrap();
+        let target = shared.assets.clone();
+        *target.write().unwrap() = assets;
+        {
+            let assets = target.read().unwrap();
+            shared.counts = CountAccumulator::from_assets(&assets);
+            shared.dedup.rebuild(&assets);
+        }
+        shared.tag_aliases = aliases;
+        shared.revision = shared.revision.wrapping_add(1);
+        shared.status = status;
+        shared.error = None;
+        Ok(())
+    }
+
+    pub fn rename_tag(&self, old: &str, new: &str) -> Result<usize> {
+        let affected = Db::open(&self.db_path)?.rename_tag(old, new)?;
+        self.reload_after_tag_change(format!(
+            "已重命名标签 #{old} → #{new} · 影响 {affected} 张"
+        ))?;
+        Ok(affected)
+    }
+
+    pub fn merge_tags(&self, source: &str, target: &str) -> Result<usize> {
+        let affected = Db::open(&self.db_path)?.merge_tags(source, target)?;
+        self.reload_after_tag_change(format!(
+            "已合并标签 #{source} → #{target} · 影响 {affected} 张"
+        ))?;
+        Ok(affected)
     }
 
     pub fn save_saved_search(
@@ -848,7 +939,7 @@ impl AppState {
         };
         let db = Db::open(&self.db_path)?;
         std::fs::create_dir_all(&self.cache_dir)?;
-        let target = thumb_target(path, &self.cache_dir, mtime, bytes);
+        let target = thumb_target(path, &self.cache_dir, mtime, bytes, 1);
         let outcome = repair_file(path, &target, Some(512))
             .with_context(|| format!("容错解码 {}", path.display()))?;
         let tile = ensure_tile_thumb(&target);
@@ -859,6 +950,7 @@ impl AppState {
             outcome.height,
             outcome.damage.as_deref(),
         )?;
+        db.record_thumb_source(&target, path, mtime, bytes, 1)?;
         asset.tile_thumb = tile;
         {
             let mut shared = self.shared.lock().unwrap();
@@ -1658,9 +1750,13 @@ fn index_inner(
         let reset_tag_attempts = stored
             .as_ref()
             .is_none_or(|meta| meta.mtime != mtime || meta.bytes != bytes);
+        let exif_done = stored
+            .as_ref()
+            .is_some_and(|meta| meta.exif_state == "done");
         if stored
             .as_ref()
             .is_some_and(|meta| meta.is_unchanged(mtime, bytes))
+            && exif_done
         {
             stats.unchanged += 1;
             stats.imported += 1;
@@ -1670,7 +1766,9 @@ fn index_inner(
             }
             continue;
         }
-        let hashes = stored.and_then(|meta| meta.content_if_current(mtime, bytes));
+        let hashes = stored
+            .as_ref()
+            .and_then(|meta| meta.content_if_current(mtime, bytes));
         let hashes = match hashes {
             Some(hashes) => {
                 stats.hashes_reused += 1;
@@ -1707,8 +1805,16 @@ fn index_inner(
                 hashes
             }
         };
+        let (exif, captured_at) = media::read_exif(path);
+        let metadata_json = serde_json::to_string(&exif).unwrap_or_else(|_| "{}".to_string());
         let thumb_started = Instant::now();
-        let thumbnail = ensure_thumb(path, &state.cache_dir, mtime, bytes);
+        let thumbnail = ensure_thumb(
+            path,
+            &state.cache_dir,
+            mtime,
+            bytes,
+            exif.orientation,
+        );
         stats.thumb_secs += thumb_started.elapsed().as_secs_f64();
         let (thumb, width, height) = match thumbnail {
             Ok(value) => value,
@@ -1736,7 +1842,19 @@ fn index_inner(
                         mtime,
                         &hashes,
                     ) {
-                        Ok(asset) => {
+                        Ok(mut asset) => {
+                            db.set_exif(path, captured_at, &metadata_json)?;
+                            if let Some(thumb) = thumb.as_deref() {
+                                db.record_thumb_source(
+                                    thumb,
+                                    path,
+                                    mtime,
+                                    bytes,
+                                    exif.orientation,
+                                )?;
+                            }
+                            asset.captured_at = captured_at;
+                            asset.metadata_json = metadata_json;
                             {
                                 let mut shared = state.shared.lock().unwrap();
                                 shared.move_asset(&old_path, asset);
@@ -1770,7 +1888,7 @@ fn index_inner(
                 Err(error) => log::warn!("rename lookup {}: {error:#}", path.display()),
             }
         }
-        let asset = db.upsert_meta(
+        let mut asset = db.upsert_meta(
             &folder_string,
             path,
             thumb.as_deref(),
@@ -1781,6 +1899,12 @@ fn index_inner(
             &hashes,
             reset_tag_attempts,
         )?;
+        db.set_exif(path, captured_at, &metadata_json)?;
+        if let Some(thumb) = thumb.as_deref() {
+            db.record_thumb_source(thumb, path, mtime, bytes, exif.orientation)?;
+        }
+        asset.captured_at = captured_at;
+        asset.metadata_json = metadata_json;
         {
             let mut shared = state.shared.lock().unwrap();
             shared.upsert(asset);
@@ -2126,6 +2250,53 @@ fn process_tag_queue(
 #[derive(Deserialize)]
 struct ModelConfig {
     tags: Vec<String>,
+    #[serde(default)]
+    tags_split: Vec<(String, usize)>,
+}
+
+/// 把模型词表灌进 tags 表，补全与类别筛选才能在未打标的标签上工作。
+fn import_vocabulary(db: &Db) -> Result<()> {
+    let config_path = crate::sidecar::model_dir().join("config.json");
+    let bytes =
+        std::fs::read(&config_path).with_context(|| format!("read {}", config_path.display()))?;
+    let config: ModelConfig = serde_json::from_slice(&bytes)
+        .with_context(|| format!("parse {}", config_path.display()))?;
+    let marker = format!(
+        "{}:{}",
+        config.tags.len(),
+        config
+            .tags_split
+            .iter()
+            .map(|(category, count)| format!("{category}-{count}"))
+            .collect::<Vec<_>>()
+            .join(",")
+    );
+    if db.setting("tags.vocab_marker").ok().flatten().as_deref() == Some(marker.as_str()) {
+        return Ok(());
+    }
+    let mut categories = vec![String::new(); config.tags.len()];
+    let mut start = 0;
+    for (category, count) in &config.tags_split {
+        let end = (start + count).min(categories.len());
+        for slot in &mut categories[start..end] {
+            *slot = category.clone();
+        }
+        start = end;
+    }
+    let entries = config
+        .tags
+        .iter()
+        .enumerate()
+        .map(|(index, name)| (name.clone(), categories[index].clone(), index as u32))
+        .collect::<Vec<_>>();
+    let inserted = db.import_vocabulary(&entries)?;
+    db.set_setting("tags.vocab_marker", &marker)?;
+    log::info!(
+        "imported vocabulary: {} tags, {} new",
+        entries.len(),
+        inserted
+    );
+    Ok(())
 }
 
 fn backfill_vocab(db: &Db) -> Result<()> {
@@ -2195,6 +2366,64 @@ fn tile_thumb_path(thumb: &Path) -> PathBuf {
 }
 
 /// 从已有的 512 档再缩到 256；失败时返回 None，网格回退 512 档。
+/// 缓存预算淘汰删掉缩略图后，下一次滚动到该图时按需重建。
+pub fn rebuild_missing_thumb(db_path: &Path, cache_dir: &Path, thumb_path: &Path) -> bool {
+    if thumb_path.exists() {
+        return true;
+    }
+    let Some(name) = thumb_path
+        .file_name()
+        .map(|name| name.to_string_lossy().to_string())
+    else {
+        return false;
+    };
+    if let Some(stem) = name.strip_suffix("-t256.jpg") {
+        let base = thumb_path.with_file_name(format!("{stem}.jpg"));
+        if base.exists() {
+            return ensure_tile_thumb(&base).is_some();
+        }
+        let Ok(db) = Db::open(db_path) else {
+            return false;
+        };
+        let Ok(Some(source)) = db.thumb_source(&base) else {
+            return false;
+        };
+        let Ok((Some(generated), _, _)) = ensure_thumb(
+            &source.path,
+            cache_dir,
+            source.mtime,
+            source.bytes,
+            source.orientation,
+        ) else {
+            return false;
+        };
+        if generated != base {
+            let _ = std::fs::copy(&generated, &base);
+        }
+        return ensure_tile_thumb(&base).is_some();
+    }
+    let Ok(db) = Db::open(db_path) else {
+        return false;
+    };
+    let Ok(Some(source)) = db.thumb_source(thumb_path) else {
+        return false;
+    };
+    let Ok((Some(generated), _, _)) = ensure_thumb(
+        &source.path,
+        cache_dir,
+        source.mtime,
+        source.bytes,
+        source.orientation,
+    ) else {
+        return false;
+    };
+    if generated != thumb_path {
+        let _ = std::fs::copy(&generated, thumb_path);
+    }
+    let _ = ensure_tile_thumb(thumb_path);
+    true
+}
+
 fn ensure_tile_thumb(thumb: &Path) -> Option<PathBuf> {
     let target = tile_thumb_path(thumb);
     if target.exists() {
@@ -2261,8 +2490,14 @@ fn backfill_tile_thumbs(state: &Arc<AppState>, cancel: &AtomicBool) {
     );
 }
 
-fn thumb_target(path: &Path, cache_dir: &Path, mtime: u64, bytes: u64) -> PathBuf {
-    let key = format!(
+fn thumb_target(
+    path: &Path,
+    cache_dir: &Path,
+    mtime: u64,
+    bytes: u64,
+    orientation: u8,
+) -> PathBuf {
+    let mut key = format!(
         "{}-{}-{}-{}",
         path.to_string_lossy(),
         mtime,
@@ -2271,6 +2506,10 @@ fn thumb_target(path: &Path, cache_dir: &Path, mtime: u64, bytes: u64) -> PathBu
             .map(|ext| ext.to_string_lossy())
             .unwrap_or_default()
     );
+    // 方向 1 沿用旧键，升级后无需为绝大多数照片重做缩略图。
+    if orientation != 1 {
+        key.push_str(&format!("-o{orientation}"));
+    }
     let hash = blake3::hash(key.as_bytes()).to_hex();
     cache_dir.join(format!("{}.jpg", &hash.as_str()[..24]))
 }
@@ -2280,22 +2519,29 @@ fn ensure_thumb(
     cache_dir: &Path,
     mtime: u64,
     bytes: u64,
+    orientation: u8,
 ) -> Result<(Option<PathBuf>, u32, u32)> {
     std::fs::create_dir_all(cache_dir)?;
-    let target = thumb_target(path, cache_dir, mtime, bytes);
+    let target = thumb_target(path, cache_dir, mtime, bytes, orientation);
 
     if target.exists() {
-        let (width, height) = image::ImageReader::open(path)?
+        let (mut width, mut height) = image::ImageReader::open(path)?
             .with_guessed_format()?
             .into_dimensions()
             .context("read image dimensions")?;
+        if (5..=8).contains(&orientation) {
+            std::mem::swap(&mut width, &mut height);
+        }
         return Ok((Some(target), width, height));
     }
 
-    let image = image::ImageReader::open(path)?
+    let mut image = image::ImageReader::open(path)?
         .with_guessed_format()?
         .decode()
         .with_context(|| format!("decode {}", path.display()))?;
+    if let Some(orientation) = image::metadata::Orientation::from_exif(orientation) {
+        image.apply_orientation(orientation);
+    }
     let (width, height) = (image.width(), image.height());
     let rgba = image.thumbnail(512, 512).to_rgba8();
     let (thumb_width, thumb_height) = rgba.dimensions();
@@ -2311,4 +2557,91 @@ fn ensure_thumb(
     }
     image::DynamicImage::ImageRgb8(rgb).save_with_format(&target, ImageFormat::Jpeg)?;
     Ok((Some(target), width, height))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn temp_dir(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "kanalib-state-{tag}-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn evicted_thumbs_rebuild_from_source_mapping() {
+        let dir = temp_dir("thumb-rebuild");
+        let cache = dir.join("thumbs");
+        let source = dir.join("a.png");
+        image::RgbImage::from_pixel(64, 32, image::Rgb([20, 40, 80]))
+            .save(&source)
+            .unwrap();
+        let db_path = dir.join("kanalib.db");
+        let db = Db::open(&db_path).unwrap();
+        let (thumb, width, height) = ensure_thumb(&source, &cache, 1, 123, 1).unwrap();
+        assert_eq!((width, height), (64, 32));
+        let thumb = thumb.unwrap();
+        db.record_thumb_source(&thumb, &source, 1, 123, 1)
+            .unwrap();
+        let tile = ensure_tile_thumb(&thumb).unwrap();
+
+        std::fs::remove_file(&tile).unwrap();
+        assert!(rebuild_missing_thumb(&db_path, &cache, &tile));
+        assert!(tile.exists());
+
+        std::fs::remove_file(&thumb).unwrap();
+        assert!(rebuild_missing_thumb(&db_path, &cache, &thumb));
+        assert!(thumb.exists());
+
+        drop(db);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    fn exif_orientation_jpeg(path: &Path, orientation: u8) {
+        image::RgbImage::from_pixel(20, 10, image::Rgb([200, 100, 50]))
+            .save(path)
+            .unwrap();
+        let jpeg = std::fs::read(path).unwrap();
+        let mut tiff = Vec::new();
+        tiff.extend(b"II*\0");
+        tiff.extend(8u32.to_le_bytes());
+        tiff.extend(1u16.to_le_bytes());
+        tiff.extend(0x0112u16.to_le_bytes());
+        tiff.extend(3u16.to_le_bytes());
+        tiff.extend(1u32.to_le_bytes());
+        tiff.extend((orientation as u16).to_le_bytes());
+        tiff.extend([0u8, 0u8]);
+        tiff.extend(0u32.to_le_bytes());
+        let payload = [b"Exif\0\0".as_slice(), tiff.as_slice()].concat();
+        let mut app1 = vec![0xFF, 0xE1];
+        app1.extend(((payload.len() + 2) as u16).to_be_bytes());
+        app1.extend(payload);
+        let mut output = Vec::with_capacity(jpeg.len() + app1.len());
+        output.extend(&jpeg[..2]);
+        output.extend(app1);
+        output.extend(&jpeg[2..]);
+        std::fs::write(path, output).unwrap();
+    }
+
+    #[test]
+    fn exif_orientation_rotates_thumbnail_and_swaps_dimensions() {
+        let dir = temp_dir("exif-orientation");
+        let cache = dir.join("thumbs");
+        let source = dir.join("rotated.jpg");
+        exif_orientation_jpeg(&source, 6);
+        let bytes = std::fs::metadata(&source).unwrap().len();
+        let (exif, captured_at) = media::read_exif(&source);
+        assert_eq!(exif.orientation, 6);
+        assert!(captured_at.is_none());
+        let (_thumb, width, height) = ensure_thumb(&source, &cache, 1, bytes, exif.orientation)
+            .unwrap();
+        assert_eq!((width, height), (10, 20));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 }

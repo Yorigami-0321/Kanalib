@@ -138,6 +138,8 @@ mod tests {
             phash: Some(0x1234),
             bytes: 300,
             mtime: 400,
+            captured_at: None,
+            metadata_json: String::new(),
         }
     }
 
