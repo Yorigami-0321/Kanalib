@@ -980,6 +980,10 @@ pub struct Shared {
     pub tag_aliases: HashMap<String, String>,
     /// 来源显示别名；键为根目录，只影响 UI，不改磁盘目录。
     pub source_aliases: HashMap<PathBuf, String>,
+    /// 各来源最近一次扫描的运行时状态；键为绝对根目录，不落库。
+    pub source_statuses: HashMap<PathBuf, SourceScanStatus>,
+    /// 来源级扫描排除规则；键为绝对根目录，与 settings 的 `scan.filters` 同步。
+    pub scan_filters: HashMap<PathBuf, ScanFilterConfig>,
     /// 磁盘上已缺失、等待用户确认是否从图库移除的批量记录。
     pub pending_cleanup: Option<PendingCleanup>,
 }
@@ -1003,6 +1007,19 @@ impl Shared {
         };
         let selected = assets.first().map(|asset| asset.path.clone());
         let counts = CountAccumulator::from_assets(&assets);
+        let source_statuses = roots
+            .iter()
+            .map(|root| {
+                (
+                    root.clone(),
+                    SourceScanStatus {
+                        root: root.clone(),
+                        online: root.is_dir(),
+                        ..SourceScanStatus::default()
+                    },
+                )
+            })
+            .collect();
         let mut dedup = DedupState::with_reviews_and_threshold(reviews, similar_threshold);
         dedup.set_protected_paths(protected_paths);
         dedup.rebuild(&assets);
@@ -1025,8 +1042,62 @@ impl Shared {
             blocked_tags: HashSet::new(),
             tag_aliases: HashMap::new(),
             source_aliases: HashMap::new(),
+            source_statuses,
+            scan_filters: HashMap::new(),
             pending_cleanup: None,
         }
+    }
+
+    /// 单个来源的运行时状态；未初始化时返回 None。
+    pub fn source_status(&self, root: &Path) -> Option<&SourceScanStatus> {
+        self.source_statuses.get(root)
+    }
+
+    /// 取或创建来源状态；调用方应先确保 root 在 `roots` 中。
+    pub fn source_status_mut(&mut self, root: &Path) -> &mut SourceScanStatus {
+        let root = root.to_path_buf();
+        self.source_statuses
+            .entry(root.clone())
+            .or_insert_with(|| SourceScanStatus {
+                root: root.clone(),
+                online: root.is_dir(),
+                ..SourceScanStatus::default()
+            })
+    }
+
+    pub fn set_source_status(&mut self, status: SourceScanStatus) {
+        self.source_statuses.insert(status.root.clone(), status);
+    }
+
+    /// 刷新所有来源的在线状态与资产数，并按根目录排序返回快照。
+    pub fn refresh_source_statuses(&mut self) -> Vec<SourceScanStatus> {
+        let mut counts: HashMap<PathBuf, usize> = HashMap::new();
+        {
+            let assets = self.assets.read().unwrap();
+            for asset in assets.iter() {
+                *counts.entry(asset.library_root.clone()).or_default() += 1;
+            }
+        }
+        self.source_statuses
+            .retain(|root, _| self.roots.contains(root));
+        let roots = self.roots.clone();
+        for root in roots {
+            let online = root.is_dir();
+            let asset_count = counts.get(&root).copied().unwrap_or(0);
+            let status = self
+                .source_statuses
+                .entry(root.clone())
+                .or_insert_with(|| SourceScanStatus {
+                    root: root.clone(),
+                    ..SourceScanStatus::default()
+                });
+            status.root = root;
+            status.online = online;
+            status.asset_count = asset_count;
+        }
+        let mut list = self.source_statuses.values().cloned().collect::<Vec<_>>();
+        list.sort_by(|a, b| a.root.cmp(&b.root));
+        list
     }
 
     pub fn set_queue_counts(&mut self, pending: usize, running: usize, error: usize) {
@@ -1224,7 +1295,7 @@ pub struct BackupReport {
 }
 
 /// 扫描排除规则；按来源根目录序列化为 JSON 存于 settings。
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ScanFilterConfig {
     /// 排除 glob（相对来源根目录）；如 `**/.git/**`、`*_cache`。
@@ -1235,6 +1306,18 @@ pub struct ScanFilterConfig {
     pub min_bytes: Option<u64>,
     /// 大于该字节数的文件跳过；None 不限制。
     pub max_bytes: Option<u64>,
+}
+
+impl Default for ScanFilterConfig {
+    /// 默认保持改造前的扫描语义：包含隐藏文件、不限制大小、无排除 glob。
+    fn default() -> Self {
+        Self {
+            exclude_globs: Vec::new(),
+            include_hidden: true,
+            min_bytes: None,
+            max_bytes: None,
+        }
+    }
 }
 
 impl ScanFilterConfig {

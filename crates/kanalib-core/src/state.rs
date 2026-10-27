@@ -2,13 +2,12 @@ use std::collections::{HashMap, HashSet};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
-use std::time::{Instant, UNIX_EPOCH};
+use std::sync::{Arc, Mutex, Weak};
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, bail};
 use image::{ImageFormat, Rgb, RgbImage};
 use serde::Deserialize;
-use walkdir::WalkDir;
 
 use crate::db::{Db, JobCounts, StoredMeta};
 use crate::dedup::{
@@ -17,10 +16,12 @@ use crate::dedup::{
 use crate::ffmpeg::{self, ThumbJob};
 use crate::media;
 use crate::model::{
-    Asset, CountAccumulator, Filter, PendingCleanup, SavedSearch, Shared, TagHit, TagSummary,
-    is_image, normalize_tag_name,
+    Asset, CountAccumulator, Filter, PendingCleanup, SavedSearch, ScanCounts, ScanFilterConfig,
+    Shared, SourceScanStatus, TagHit, TagSummary, normalize_tag_name,
 };
+use crate::scan_filter::{self, ScanFilterPreview};
 use crate::sidecar::{Sidecar, project_root, repair_file};
+use crate::watch;
 
 #[derive(Clone, Copy, Debug, Default)]
 pub struct TrashSummary {
@@ -42,14 +43,26 @@ pub struct AppState {
     pub shared: Mutex<Shared>,
     cancel: Mutex<Option<Arc<AtomicBool>>>,
     similar_scan_id: Mutex<u64>,
+    /// 每个来源一个防抖监听器；清空即停止监听。
+    watchers: Mutex<HashMap<PathBuf, watch::WatchHandle>>,
+    /// 自身弱引用；`add_roots`/`remove_root` 只有 `&self`，启动监听时需要升级为 Arc。
+    self_ref: Mutex<Weak<AppState>>,
+    /// 是否允许启动文件监听（headless / KANALIB_DISABLE_WATCH 或测试时为 false）。
+    watch_allowed: bool,
     db_path: PathBuf,
     cache_dir: PathBuf,
 }
 
 impl AppState {
     pub fn new(folder: Option<PathBuf>) -> Arc<Self> {
-        let root = project_root();
-        let data_dir = root.join(".kanalib");
+        let watch_allowed = std::env::var_os("KANALIB_HEADLESS").is_none()
+            && std::env::var_os("KANALIB_DISABLE_WATCH").is_none();
+        Self::open(project_root(), folder, watch_allowed)
+    }
+
+    /// 打开指定数据根目录；测试与 headless 复用同一套初始化逻辑。
+    fn open(data_root: PathBuf, folder: Option<PathBuf>, watch_allowed: bool) -> Arc<Self> {
+        let data_dir = data_root.join(".kanalib");
         let db_path = data_dir.join("kanalib.db");
         let cache_dir = data_dir.join("thumbs");
         let _ = std::fs::create_dir_all(&cache_dir);
@@ -192,18 +205,36 @@ impl AppState {
             .into_iter()
             .map(|(path, alias)| (absolute(PathBuf::from(path)), alias))
             .collect();
+        shared.scan_filters = Db::open(&db_path)
+            .ok()
+            .and_then(|db| scan_filter::load_filters(&db).ok())
+            .unwrap_or_default();
         shared.set_queue_counts(
             queue_counts.pending,
             queue_counts.running,
             queue_counts.error,
         );
-        Arc::new(Self {
+        let state = Arc::new(Self {
             shared: Mutex::new(shared),
             cancel: Mutex::new(None),
             similar_scan_id: Mutex::new(0),
+            watchers: Mutex::new(HashMap::new()),
+            self_ref: Mutex::new(Weak::new()),
+            watch_allowed,
             db_path,
             cache_dir,
-        })
+        });
+        *state.self_ref.lock().unwrap() = Arc::downgrade(&state);
+        if watch_allowed {
+            state.start_watching();
+        }
+        state
+    }
+
+    /// 测试用：隔离数据根目录，不启动文件监听。
+    #[cfg(test)]
+    pub(crate) fn open_for_test(data_root: PathBuf, folder: Option<PathBuf>) -> Arc<Self> {
+        Self::open(data_root, folder, false)
     }
 
     pub fn add_roots(&self, paths: Vec<PathBuf>) -> Result<usize> {
@@ -230,11 +261,26 @@ impl AppState {
             roots
         };
         self.save_roots(&roots)?;
-        let mut shared = self.shared.lock().unwrap();
-        shared.roots = roots;
-        shared.revision = shared.revision.wrapping_add(1);
-        shared.status = format!("已添加 {} 个来源", added.len());
-        shared.error = None;
+        {
+            let mut shared = self.shared.lock().unwrap();
+            shared.roots = roots;
+            for root in &added {
+                let online = root.is_dir();
+                shared
+                    .source_statuses
+                    .entry(root.clone())
+                    .or_insert_with(|| SourceScanStatus {
+                        root: root.clone(),
+                        online,
+                        ..SourceScanStatus::default()
+                    })
+                    .online = online;
+            }
+            shared.revision = shared.revision.wrapping_add(1);
+            shared.status = format!("已添加 {} 个来源", added.len());
+            shared.error = None;
+        }
+        self.start_watching();
         Ok(added.len())
     }
 
@@ -270,6 +316,15 @@ impl AppState {
                 }
             }
         }
+        let filters = {
+            let shared = self.shared.lock().unwrap();
+            let mut filters = shared.scan_filters.clone();
+            filters.remove(&root);
+            filters
+        };
+        if let Err(error) = scan_filter::save_filters(&Db::open(&self.db_path)?, &filters) {
+            log::warn!("save scan filters after removing root: {error:#}");
+        }
         let removed = {
             let mut shared = self.shared.lock().unwrap();
             shared.roots = roots;
@@ -278,6 +333,8 @@ impl AppState {
             }
             let removed = shared.remove_assets(&removed_paths);
             shared.refresh_after_removal(&removed_paths);
+            shared.source_statuses.remove(&root);
+            shared.scan_filters = filters;
             shared.set_queue_counts(
                 queue_counts.pending,
                 queue_counts.running,
@@ -292,6 +349,7 @@ impl AppState {
             removed
         };
         self.bump_similar_scan_id();
+        self.start_watching();
         Ok(removed)
     }
 
@@ -427,6 +485,244 @@ impl AppState {
             shared.status = "索引失败".into();
         }
         result
+    }
+
+    /// 各来源最近扫描状态快照（按根目录排序，在线状态实时刷新）。
+    pub fn source_statuses(&self) -> Vec<SourceScanStatus> {
+        self.shared.lock().unwrap().refresh_source_statuses()
+    }
+
+    /// 读取来源排除规则；未配置时返回默认（包含隐藏文件、无排除 glob）。
+    pub fn scan_filter(&self, root: &Path) -> ScanFilterConfig {
+        let root = absolute(root.to_path_buf());
+        self.shared
+            .lock()
+            .unwrap()
+            .scan_filters
+            .get(&root)
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    /// 保存来源排除规则；非法 glob 直接报错，不写入 settings。
+    pub fn set_scan_filter(&self, root: &Path, config: ScanFilterConfig) -> Result<()> {
+        let root = absolute(root.to_path_buf());
+        scan_filter::CompiledScanFilter::new(&root, &config)?;
+        let mut filters = {
+            let shared = self.shared.lock().unwrap();
+            if !shared.roots.contains(&root) {
+                bail!("来源不存在: {}", root.display());
+            }
+            shared.scan_filters.clone()
+        };
+        if config.is_active() {
+            filters.insert(root.clone(), config);
+        } else {
+            filters.remove(&root);
+        }
+        scan_filter::save_filters(&Db::open(&self.db_path)?, &filters)?;
+        let mut shared = self.shared.lock().unwrap();
+        shared.scan_filters = filters;
+        shared.revision = shared.revision.wrapping_add(1);
+        shared.status = format!("已更新来源排除规则 · {}", root.display());
+        shared.error = None;
+        Ok(())
+    }
+
+    /// 预览规则会命中的图片数与被排除样例；供来源设置 UI 使用。
+    pub fn preview_scan_filter(
+        &self,
+        root: &Path,
+        config: &ScanFilterConfig,
+    ) -> Result<ScanFilterPreview> {
+        let root = absolute(root.to_path_buf());
+        {
+            let shared = self.shared.lock().unwrap();
+            if !shared.roots.contains(&root) {
+                bail!("来源不存在: {}", root.display());
+            }
+        }
+        scan_filter::preview_scan_filter(&root, config)
+    }
+
+    /// 重新扫描单个来源；扫描进行中拒绝。来源离线时只标记错误，不触发清理。
+    ///
+    /// 同一入口供来源右键菜单与监听事件风暴回退使用。
+    pub fn rescan_root(self: &Arc<Self>, root: PathBuf) -> Result<()> {
+        let skip_tag = std::env::var_os("KANALIB_SKIP_TAG").is_some();
+        self.start_rescan(root, skip_tag)
+    }
+
+    fn start_rescan(self: &Arc<Self>, root: PathBuf, skip_tag: bool) -> Result<()> {
+        let root = absolute(root);
+        self.prepare_rescan(&root)?;
+        let state = self.clone();
+        let thread_root = root.clone();
+        let spawned = std::thread::Builder::new()
+            .name("kanalib-rescan".into())
+            .spawn(move || {
+                if let Err(error) = state.run_rescan(&thread_root, skip_tag) {
+                    log::warn!("rescan {}: {error:#}", thread_root.display());
+                }
+            });
+        if spawned.is_err() {
+            let mut shared = self.shared.lock().unwrap();
+            shared.scanning = false;
+            shared.error = Some("无法创建重扫线程".into());
+            shared.status = "重扫失败".into();
+            shared.revision = shared.revision.wrapping_add(1);
+            bail!("无法创建重扫线程");
+        }
+        Ok(())
+    }
+
+    fn prepare_rescan(&self, root: &Path) -> Result<()> {
+        {
+            let shared = self.shared.lock().unwrap();
+            if !shared.roots.iter().any(|item| item == root) {
+                bail!("来源不存在: {}", root.display());
+            }
+            if shared.scanning {
+                bail!("扫描进行中，请完成后再重新扫描来源");
+            }
+        }
+        if !root.is_dir() {
+            let mut shared = self.shared.lock().unwrap();
+            let status = shared.source_status_mut(root);
+            status.online = false;
+            status.error = Some(format!("来源不可访问：{}", root.display()));
+            shared.error = Some(format!("来源离线，已保留图库记录：{}", root.display()));
+            shared.status = format!("来源离线 · {}", root.display());
+            shared.revision = shared.revision.wrapping_add(1);
+            bail!("来源不可访问: {}", root.display());
+        }
+        let mut shared = self.shared.lock().unwrap();
+        if shared.scanning {
+            bail!("扫描进行中，请完成后再重新扫描来源");
+        }
+        shared.scanning = true;
+        shared.error = None;
+        shared.status = format!(
+            "重新扫描来源 · {}",
+            root.file_name()
+                .map(|name| name.to_string_lossy().to_string())
+                .unwrap_or_else(|| root.display().to_string())
+        );
+        let status = shared.source_status_mut(root);
+        status.online = true;
+        status.error = None;
+        shared.revision = shared.revision.wrapping_add(1);
+        Ok(())
+    }
+
+    fn run_rescan(self: &Arc<Self>, root: &Path, skip_tag: bool) -> Result<()> {
+        let cancel = Arc::new(AtomicBool::new(false));
+        *self.cancel.lock().unwrap() = Some(cancel.clone());
+        let result = scan_one_root(self, root, &cancel, skip_tag, 1, 1);
+        let mut queue = JobCounts::default();
+        if let Ok(db) = Db::open(&self.db_path)
+            && let Ok(counts) = db.tag_job_counts(&root.to_string_lossy())
+        {
+            queue = counts;
+        }
+        let mut shared = self.shared.lock().unwrap();
+        shared.refresh_dedup();
+        shared.set_queue_counts(queue.pending, queue.running, queue.error);
+        shared.scanning = false;
+        match &result {
+            Ok(_) => {
+                shared.status = format!(
+                    "来源扫描完成 · {} · {} 张图片",
+                    root.file_name()
+                        .map(|name| name.to_string_lossy().to_string())
+                        .unwrap_or_else(|| root.display().to_string()),
+                    shared.counts.total()
+                );
+            }
+            Err(error) => {
+                shared.error = Some(format!("{error:#}"));
+                shared.status = "来源扫描失败".into();
+            }
+        }
+        shared.revision = shared.revision.wrapping_add(1);
+        result.map(|_| ())
+    }
+
+    /// 启动（或重启）所有来源的文件监听；headless/禁用时为空操作。
+    pub fn start_watching(&self) {
+        if !self.watch_allowed {
+            return;
+        }
+        let Some(state) = self.self_ref.lock().unwrap().clone().upgrade() else {
+            return;
+        };
+        let roots = self.shared.lock().unwrap().roots.clone();
+        // 先把旧监听器移到临时表：重建成功后统一替换，单个来源失败时保留其旧监听器。
+        let mut previous = std::mem::take(&mut *self.watchers.lock().unwrap());
+        let mut handles = HashMap::new();
+        for root in roots {
+            match watch::spawn(&state, root.clone()) {
+                Ok(handle) => {
+                    handles.insert(root, handle);
+                }
+                Err(error) => {
+                    log::warn!("watch {}: {error:#}", root.display());
+                    if let Some(handle) = previous.remove(&root) {
+                        handles.insert(root, handle);
+                        continue;
+                    }
+                    let mut shared = self.shared.lock().unwrap();
+                    let status = shared.source_status_mut(&root);
+                    status.online = root.is_dir();
+                    status.error =
+                        Some(format!("无法监听来源：{error:#}；请手动重新扫描"));
+                    shared.status = format!("文件监听失败 · {}", root.display());
+                    shared.revision = shared.revision.wrapping_add(1);
+                }
+            }
+        }
+        let mut watchers = self.watchers.lock().unwrap();
+        *watchers = handles;
+    }
+
+    /// 停止所有来源监听；监听线程由 `Debouncer` drop 干净退出。
+    pub fn stop_watching(&self) {
+        self.watchers.lock().unwrap().clear();
+    }
+
+    pub(crate) fn is_scanning(&self) -> bool {
+        self.shared.lock().unwrap().scanning
+    }
+
+    /// 监听线程的增量单文件索引入口；复用批处理已打开的数据库连接。
+    pub(crate) fn watch_index_file(
+        self: &Arc<Self>,
+        db: &Db,
+        root: &Path,
+        path: &Path,
+    ) -> Result<FileIndexOutcome> {
+        let folder = root.to_string_lossy();
+        index_file(
+            self,
+            db,
+            root,
+            &folder,
+            path,
+            RenamePolicy::MissingOnDisk,
+            None,
+            None,
+        )
+    }
+
+    #[cfg(test)]
+    pub(crate) fn rescan_root_blocking(
+        self: &Arc<Self>,
+        root: PathBuf,
+        skip_tag: bool,
+    ) -> Result<()> {
+        let root = absolute(root);
+        self.prepare_rescan(&root)?;
+        self.run_rescan(&root, skip_tag)
     }
 
     pub fn set_filter(&self, filter: Filter) {
@@ -1564,6 +1860,9 @@ struct ScanStats {
     files: usize,
     imported: usize,
     unchanged: usize,
+    updated: usize,
+    removed: usize,
+    metadata_errors: usize,
     hashes_reused: usize,
     hashes_computed: usize,
     hash_errors: usize,
@@ -1572,6 +1871,9 @@ struct ScanStats {
     tagged: usize,
     tag_errors: usize,
     skipped_tagging: bool,
+    walk_complete: bool,
+    root_accessible: bool,
+    cancelled: bool,
     walk_secs: f64,
     import_secs: f64,
     hash_secs: f64,
@@ -1585,11 +1887,31 @@ struct ScanStats {
     total_secs: f64,
 }
 
+impl ScanStats {
+    fn failed(&self) -> usize {
+        self.metadata_errors + self.hash_errors + self.thumb_errors + self.tag_errors
+    }
+
+    fn scan_counts(&self) -> ScanCounts {
+        ScanCounts {
+            discovered: self.files,
+            // `imported` 同时统计未变化文件，扣除后才是真正新增/迁入数。
+            imported: self.imported.saturating_sub(self.unchanged),
+            updated: self.updated,
+            removed: self.removed,
+            failed: self.failed(),
+        }
+    }
+}
+
 fn log_scan_metrics(stats: &ScanStats) {
     let json = serde_json::json!({
         "files": stats.files,
         "imported": stats.imported,
         "unchanged": stats.unchanged,
+        "updated": stats.updated,
+        "removed": stats.removed,
+        "metadata_errors": stats.metadata_errors,
         "hashes_reused": stats.hashes_reused,
         "hashes_computed": stats.hashes_computed,
         "hash_errors": stats.hash_errors,
@@ -1598,6 +1920,9 @@ fn log_scan_metrics(stats: &ScanStats) {
         "tagged": stats.tagged,
         "tag_errors": stats.tag_errors,
         "skipped_tagging": stats.skipped_tagging,
+        "walk_complete": stats.walk_complete,
+        "root_accessible": stats.root_accessible,
+        "cancelled": stats.cancelled,
         "walk_secs": stats.walk_secs,
         "import_secs": stats.import_secs,
         "hash_secs": stats.hash_secs,
@@ -1635,22 +1960,106 @@ fn scan_roots(
         if cancel.load(Ordering::SeqCst) {
             break;
         }
-        {
-            let mut shared = state.shared.lock().unwrap();
-            shared.scanning = true;
-            shared.status = format!(
-                "扫描来源 {}/{} · {}",
-                position + 1,
-                roots.len(),
+        scan_one_root(state, root, cancel, skip_tag, position + 1, roots.len())?;
+    }
+    Ok(())
+}
+
+/// 扫描单个来源，并在结束后写回该来源的运行时状态。
+fn scan_one_root(
+    state: &Arc<AppState>,
+    root: &Path,
+    cancel: &Arc<AtomicBool>,
+    skip_tag: bool,
+    position: usize,
+    total: usize,
+) -> Result<ScanStats> {
+    {
+        let mut shared = state.shared.lock().unwrap();
+        shared.scanning = true;
+        shared.status = if total > 1 {
+            format!(
+                "扫描来源 {position}/{total} · {}",
                 root.file_name()
                     .map(|name| name.to_string_lossy().to_string())
                     .unwrap_or_else(|| root.display().to_string())
-            );
-            shared.revision = shared.revision.wrapping_add(1);
+            )
+        } else {
+            format!(
+                "扫描来源 · {}",
+                root.file_name()
+                    .map(|name| name.to_string_lossy().to_string())
+                    .unwrap_or_else(|| root.display().to_string())
+            )
+        };
+        let online = root.is_dir();
+        let status = shared.source_status_mut(root);
+        status.root = root.to_path_buf();
+        status.online = online;
+        if online {
+            status.error = None;
+        } else {
+            status.error = Some(format!("来源不可访问：{}", root.display()));
         }
-        index(state, root, cancel, skip_tag)?;
+        shared.revision = shared.revision.wrapping_add(1);
     }
-    Ok(())
+    let result = index(state, root, cancel, skip_tag);
+    match &result {
+        Ok(stats) => record_source_scan(state, root, stats, cancel),
+        Err(error) => record_source_error(state, root, format!("{error:#}")),
+    }
+    result
+}
+
+fn record_source_scan(
+    state: &Arc<AppState>,
+    root: &Path,
+    stats: &ScanStats,
+    cancel: &AtomicBool,
+) {
+    let mut shared = state.shared.lock().unwrap();
+    let asset_count = {
+        let assets = shared.assets.read().unwrap();
+        assets
+            .iter()
+            .filter(|asset| asset.library_root == root)
+            .count()
+    };
+    let status = shared.source_status_mut(root);
+    status.root = root.to_path_buf();
+    status.asset_count = asset_count;
+    status.online = stats.root_accessible && root.is_dir();
+    if !stats.root_accessible {
+        status.online = false;
+        if status.error.is_none() {
+            status.error = Some(format!("来源不可访问，已保留图库记录：{}", root.display()));
+        }
+    } else if !stats.walk_complete {
+        status.error = Some(format!(
+            "来源未能完整遍历（可能离线或权限不足），已保留图库记录：{}",
+            root.display()
+        ));
+    } else {
+        status.error = None;
+    }
+    if stats.root_accessible {
+        status.counts = stats.scan_counts();
+        if stats.walk_complete && !stats.cancelled && !cancel.load(Ordering::SeqCst) {
+            status.last_scan = Some(unix_now());
+        }
+    }
+    shared.revision = shared.revision.wrapping_add(1);
+}
+
+fn record_source_error(state: &Arc<AppState>, root: &Path, message: String) {
+    let mut shared = state.shared.lock().unwrap();
+    let online = root.is_dir();
+    let status = shared.source_status_mut(root);
+    status.root = root.to_path_buf();
+    status.online = online;
+    status.error = Some(message.clone());
+    shared.error = Some(message);
+    shared.revision = shared.revision.wrapping_add(1);
 }
 
 fn index(
@@ -1658,13 +2067,13 @@ fn index(
     folder: &Path,
     cancel: &Arc<AtomicBool>,
     skip_tag: bool,
-) -> Result<()> {
+) -> Result<ScanStats> {
     let start = Instant::now();
     let mut stats = ScanStats::default();
     let result = index_inner(state, folder, cancel, skip_tag, &mut stats);
     stats.total_secs = start.elapsed().as_secs_f64();
     log_scan_metrics(&stats);
-    result
+    result.map(|()| stats)
 }
 
 fn rename_candidate(
@@ -1680,6 +2089,35 @@ fn rename_candidate(
         }
     }
     Ok(None)
+}
+
+/// 监听增量用：同 SHA1 且磁盘上已消失的旧资产视为重命名来源。
+fn rename_candidate_missing(
+    db: &Db,
+    folder: &str,
+    sha1: &str,
+    new_path: &Path,
+) -> Result<Option<PathBuf>> {
+    for candidate in db.asset_paths_by_sha1(folder, sha1)? {
+        if candidate != new_path && definitely_missing(&candidate) {
+            return Ok(Some(candidate));
+        }
+    }
+    Ok(None)
+}
+
+fn definitely_missing(path: &Path) -> bool {
+    match std::fs::symlink_metadata(path) {
+        Err(error) => error.kind() == std::io::ErrorKind::NotFound,
+        Ok(_) => false,
+    }
+}
+
+fn unix_now() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .unwrap_or(0)
 }
 
 fn stored_orientation(meta: &StoredMeta) -> u8 {
@@ -1792,241 +2230,89 @@ fn index_inner(
 ) -> Result<()> {
     let db = Db::open(&state.db_path)?;
     let folder_string = folder.to_string_lossy().to_string();
-    let walk_start = Instant::now();
-    let mut files = Vec::new();
-    let mut walk_complete = true;
-    for entry in WalkDir::new(folder).follow_links(false) {
-        let entry = match entry {
-            Ok(entry) => entry,
-            Err(error) => {
-                walk_complete = false;
-                log::warn!("walk error: {error}");
-                continue;
-            }
-        };
-        if entry.file_type().is_file() && is_image(entry.path()) {
-            files.push(entry.path().to_path_buf());
-        }
+    // 来源离线或权限不足时直接返回：不改图库、不触发缺失清理。
+    let accessible = folder.is_dir() && std::fs::read_dir(folder).is_ok();
+    stats.root_accessible = accessible;
+    if !accessible {
+        stats.walk_complete = false;
+        let mut shared = state.shared.lock().unwrap();
+        let status = shared.source_status_mut(folder);
+        status.root = folder.to_path_buf();
+        status.online = false;
+        status.error = Some(format!("来源不可访问：{}", folder.display()));
+        shared.revision = shared.revision.wrapping_add(1);
+        log::warn!("source inaccessible: {}", folder.display());
+        return Ok(());
     }
-    files.sort();
+
+    let walk_start = Instant::now();
+    let config = state.scan_filter(folder);
+    let walk = scan_filter::collect_images(folder, &config)?;
+    let files = walk.files;
+    let mut walk_complete = walk.walk_complete;
     stats.files = files.len();
     stats.walk_secs = walk_start.elapsed().as_secs_f64();
+    stats.walk_complete = walk_complete;
     {
         let mut shared = state.shared.lock().unwrap();
         shared.status = format!("发现 {} 张图片，生成缩略图...", files.len());
     }
     let mut prefetched_exif = prefetch_thumbnails(state, &db, &files, cancel, stats);
 
+    let rename_policy = if walk_complete {
+        RenamePolicy::Scan(&files)
+    } else {
+        // 遍历不完整时不做重命名对账，避免把仍存在的旧记录误判为已迁移。
+        RenamePolicy::Disabled
+    };
     let import_start = Instant::now();
     for (index, path) in files.iter().enumerate() {
         if cancel.load(Ordering::SeqCst) {
+            stats.cancelled = true;
             stats.import_secs = import_start.elapsed().as_secs_f64();
             let mut shared = state.shared.lock().unwrap();
             shared.status = "已停止".into();
             shared.scanning = false;
             return Ok(());
         }
-        let metadata = match std::fs::metadata(path) {
-            Ok(metadata) => metadata,
+        let outcome = match index_file(
+            state,
+            &db,
+            folder,
+            &folder_string,
+            path,
+            rename_policy,
+            Some((index + 1, files.len())),
+            prefetched_exif.remove(path),
+        ) {
+            Ok(outcome) => outcome,
             Err(error) => {
-                log::warn!("metadata {}: {error}", path.display());
+                stats.metadata_errors += 1;
+                log::warn!("index {}: {error:#}", path.display());
                 continue;
             }
         };
-        let bytes = metadata.len();
-        let mtime = metadata
-            .modified()
-            .ok()
-            .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
-            .map(|duration| duration.as_secs())
-            .unwrap_or(0);
-        let stored = db.stored_meta(path)?;
-        let existed_before = stored.is_some();
-        let stored_media = stored
-            .as_ref()
-            .filter(|meta| meta.mtime == mtime && meta.bytes == bytes)
-            .and_then(|meta| {
-                let thumb = (!meta.thumb.is_empty())
-                    .then(|| PathBuf::from(&meta.thumb))
-                    .filter(|thumb| thumb.exists())?;
-                Some((meta.width, meta.height, thumb))
-            });
-        let reset_tag_attempts = stored
-            .as_ref()
-            .is_none_or(|meta| meta.mtime != mtime || meta.bytes != bytes);
-        let exif_done = stored
-            .as_ref()
-            .is_some_and(|meta| meta.exif_state == "done");
-        let cache_current = stored.as_ref().is_some_and(|meta| {
-            thumb_cache_current(meta, path, &state.cache_dir, mtime, bytes)
-        });
-        if stored
-            .as_ref()
-            .is_some_and(|meta| meta.is_unchanged(mtime, bytes))
-            && exif_done
-            && cache_current
-        {
-            stats.unchanged += 1;
-            stats.imported += 1;
-            if stats.unchanged % 500 == 0 {
-                let mut shared = state.shared.lock().unwrap();
-                shared.status = format!("校验 {}/{}", index + 1, files.len());
-            }
-            continue;
-        }
-        let hashes = stored
-            .as_ref()
-            .and_then(|meta| meta.content_if_current(mtime, bytes));
-        let hashes = match hashes {
-            Some(hashes) => {
-                stats.hashes_reused += 1;
-                hashes
-            }
-            None => {
-                {
+        stats.hashes_reused += outcome.hash_reused as usize;
+        stats.hashes_computed += outcome.hash_computed as usize;
+        stats.hash_errors += outcome.hash_failed as usize;
+        stats.thumb_errors += outcome.thumb_failed as usize;
+        stats.hash_secs += outcome.hash_secs;
+        stats.thumb_secs += outcome.thumb_secs;
+        match outcome.kind {
+            IndexedFile::Unchanged => {
+                stats.unchanged += 1;
+                stats.imported += 1;
+                if stats.unchanged % 500 == 0 {
                     let mut shared = state.shared.lock().unwrap();
-                    shared.status = format!(
-                        "哈希 {}/{} · {}",
-                        index + 1,
-                        files.len(),
-                        path.file_name()
-                            .map(|name| name.to_string_lossy().to_string())
-                            .unwrap_or_default()
-                    );
-                }
-                let started = Instant::now();
-                let hashes = match media::hash_file(path) {
-                    Ok(hashes) => {
-                        stats.hashes_computed += 1;
-                        hashes
-                    }
-                    Err(error) => {
-                        stats.hash_errors += 1;
-                        log::warn!("hash {}: {error:#}", path.display());
-                        crate::media::ContentHashes {
-                            decode_error: Some("无法读取图片内容".into()),
-                            ..Default::default()
-                        }
-                    }
-                };
-                stats.hash_secs += started.elapsed().as_secs_f64();
-                hashes
-            }
-        };
-        let (exif, captured_at) = prefetched_exif
-            .remove(path)
-            .unwrap_or_else(|| media::read_exif(path));
-        let metadata_json = serde_json::to_string(&exif).unwrap_or_else(|_| "{}".to_string());
-        let thumb_started = Instant::now();
-        let thumbnail = ensure_thumb(
-            path,
-            &state.cache_dir,
-            mtime,
-            bytes,
-            exif.orientation,
-        );
-        stats.thumb_secs += thumb_started.elapsed().as_secs_f64();
-        let (thumb, width, height) = match thumbnail {
-            Ok(value) => value,
-            Err(error) => {
-                stats.thumb_errors += 1;
-                log::warn!("thumbnail {}: {error:#}", path.display());
-                match stored_media {
-                    // 容错修复过的缩略图对 Rust 解码器仍不可读，同文件沿用已有缓存与尺寸。
-                    Some((width, height, thumb)) => (Some(thumb), width, height),
-                    None => (None, 0, 0),
+                    shared.status = format!("校验 {}/{}", index + 1, files.len());
                 }
             }
-        };
-        if !existed_before && walk_complete && !hashes.sha1.is_empty() {
-            match rename_candidate(&db, &folder_string, &hashes.sha1, path, &files) {
-                Ok(Some(old_path)) => {
-                    match db.move_asset_media(
-                        &old_path,
-                        path,
-                        &folder_string,
-                        thumb.as_deref(),
-                        width,
-                        height,
-                        bytes,
-                        mtime,
-                        &hashes,
-                    ) {
-                        Ok(mut asset) => {
-                            db.set_exif(path, captured_at, &metadata_json)?;
-                            if let Some(thumb) = thumb.as_deref() {
-                                db.record_thumb_source(
-                                    thumb,
-                                    path,
-                                    mtime,
-                                    bytes,
-                                    exif.orientation,
-                                )?;
-                            }
-                            asset.captured_at = captured_at;
-                            asset.metadata_json = metadata_json;
-                            {
-                                let mut shared = state.shared.lock().unwrap();
-                                shared.move_asset(&old_path, asset);
-                                shared.status = format!(
-                                    "已识别重命名 {}/{} · {}",
-                                    index + 1,
-                                    files.len(),
-                                    path.file_name()
-                                        .map(|name| name.to_string_lossy().to_string())
-                                        .unwrap_or_default()
-                                );
-                            }
-                            stats.imported += 1;
-                            log::info!(
-                                "renamed asset: {} -> {}",
-                                old_path.display(),
-                                path.display()
-                            );
-                            continue;
-                        }
-                        Err(error) => {
-                            log::warn!(
-                                "rename adopt {} -> {} failed: {error:#}; falling back to upsert",
-                                old_path.display(),
-                                path.display()
-                            );
-                        }
-                    }
-                }
-                Ok(None) => {}
-                Err(error) => log::warn!("rename lookup {}: {error:#}", path.display()),
+            IndexedFile::Imported | IndexedFile::Renamed => stats.imported += 1,
+            IndexedFile::Updated => {
+                stats.imported += 1;
+                stats.updated += 1;
             }
         }
-        let mut asset = db.upsert_meta(
-            &folder_string,
-            path,
-            thumb.as_deref(),
-            width,
-            height,
-            bytes,
-            mtime,
-            &hashes,
-            reset_tag_attempts,
-        )?;
-        db.set_exif(path, captured_at, &metadata_json)?;
-        if let Some(thumb) = thumb.as_deref() {
-            db.record_thumb_source(thumb, path, mtime, bytes, exif.orientation)?;
-        }
-        asset.captured_at = captured_at;
-        asset.metadata_json = metadata_json;
-        {
-            let mut shared = state.shared.lock().unwrap();
-            shared.upsert(asset);
-            shared.status = format!(
-                "缩略图 {}/{} · 已打标 {}/{}",
-                index + 1,
-                files.len(),
-                shared.counts.tagged_count(),
-                shared.counts.total()
-            );
-        }
-        stats.imported += 1;
         if stats.imported % 1000 == 0 {
             log::info!(
                 "index progress: imported={} unchanged={} elapsed={:.2}s hash={:.2}s thumb={:.2}s",
@@ -2044,9 +2330,21 @@ fn index_inner(
         .file_name()
         .map(|name| name.to_string_lossy().to_string())
         .unwrap_or_else(|| folder.display().to_string());
+    // 扫描结束时再次确认来源可访问；网络盘/移动盘在遍历后掉线时不得清理。
+    let root_accessible = folder.is_dir() && std::fs::read_dir(folder).is_ok();
+    if !root_accessible {
+        walk_complete = false;
+    }
+    stats.walk_complete = walk_complete;
     if !cancel.load(Ordering::SeqCst) {
         if !walk_complete {
             let mut shared = state.shared.lock().unwrap();
+            let status = shared.source_status_mut(folder);
+            status.online = root_accessible;
+            status.error = Some(format!(
+                "来源未能完整遍历（可能离线或权限不足），已保留图库记录：{}",
+                folder.display()
+            ));
             append_scan_warning(
                 &mut shared,
                 format!(
@@ -2057,9 +2355,10 @@ fn index_inner(
             log::warn!("incomplete walk for {}", folder.display());
         } else {
             let db_paths = db.asset_paths(&folder_string)?;
+            // 只清理“确实不在磁盘上”的记录；被排除规则过滤但仍存在的文件保留记录。
             let missing = db_paths
                 .iter()
-                .filter(|path| files.binary_search(path).is_err())
+                .filter(|path| files.binary_search(path).is_err() && definitely_missing(path))
                 .cloned()
                 .collect::<Vec<_>>();
             if !missing.is_empty() {
@@ -2094,6 +2393,7 @@ fn index_inner(
                 } else {
                     let missing_set = missing.iter().cloned().collect::<HashSet<_>>();
                     let removed = db.delete_assets(&missing)?;
+                    stats.removed += removed;
                     let mut shared = state.shared.lock().unwrap();
                     shared.remove_assets(&missing_set);
                     shared.status = format!("已移除 {} 张磁盘上已不存在的图片", removed);
@@ -2178,6 +2478,249 @@ fn index_inner(
         queue.pending,
     )?;
     Ok(())
+}
+
+/// 单文件索引结果；全量扫描与监听增量共用。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum IndexedFile {
+    #[default]
+    Unchanged,
+    Imported,
+    Updated,
+    Renamed,
+}
+
+#[derive(Clone, Copy, Debug)]
+enum RenamePolicy<'a> {
+    /// 遍历不完整或调用方不允许重命名对账。
+    Disabled,
+    /// 全量扫描：候选旧路径不在本次遍历结果中。
+    Scan(&'a [PathBuf]),
+    /// 监听增量：候选旧路径在磁盘上已消失。
+    MissingOnDisk,
+}
+
+#[derive(Debug, Default)]
+pub(crate) struct FileIndexOutcome {
+    pub(crate) kind: IndexedFile,
+    pub(crate) renamed_from: Option<PathBuf>,
+    pub(crate) hash_failed: bool,
+    pub(crate) thumb_failed: bool,
+    hash_reused: bool,
+    hash_computed: bool,
+    hash_secs: f64,
+    thumb_secs: f64,
+}
+
+/// 从 `index_inner` 抽取的单文件索引：hash/EXIF/缩略图/upsert，可选重命名恢复。
+fn index_file(
+    state: &Arc<AppState>,
+    db: &Db,
+    _folder: &Path,
+    folder_string: &str,
+    path: &Path,
+    rename: RenamePolicy<'_>,
+    progress: Option<(usize, usize)>,
+    prefetched_exif: Option<(media::ExifData, Option<u64>)>,
+) -> Result<FileIndexOutcome> {
+    let name = path
+        .file_name()
+        .map(|name| name.to_string_lossy().to_string())
+        .unwrap_or_default();
+    let metadata =
+        std::fs::metadata(path).with_context(|| format!("读取文件信息 {}", path.display()))?;
+    let bytes = metadata.len();
+    let mtime = metadata
+        .modified()
+        .ok()
+        .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
+        .map(|duration| duration.as_secs())
+        .unwrap_or(0);
+    let stored = db.stored_meta(path)?;
+    let existed_before = stored.is_some();
+    let stored_media = stored
+        .as_ref()
+        .filter(|meta| meta.mtime == mtime && meta.bytes == bytes)
+        .and_then(|meta| {
+            let thumb = (!meta.thumb.is_empty())
+                .then(|| PathBuf::from(&meta.thumb))
+                .filter(|thumb| thumb.exists())?;
+            Some((meta.width, meta.height, thumb))
+        });
+    let reset_tag_attempts = stored
+        .as_ref()
+        .is_none_or(|meta| meta.mtime != mtime || meta.bytes != bytes);
+    let exif_done = stored
+        .as_ref()
+        .is_some_and(|meta| meta.exif_state == "done");
+    let cache_current = stored.as_ref().is_some_and(|meta| {
+        thumb_cache_current(meta, path, &state.cache_dir, mtime, bytes)
+    });
+    if stored
+        .as_ref()
+        .is_some_and(|meta| meta.is_unchanged(mtime, bytes))
+        && exif_done
+        && cache_current
+    {
+        return Ok(FileIndexOutcome::default());
+    }
+
+    let mut outcome = FileIndexOutcome::default();
+    let hashes = stored
+        .as_ref()
+        .and_then(|meta| meta.content_if_current(mtime, bytes));
+    let hashes = match hashes {
+        Some(hashes) => {
+            outcome.hash_reused = true;
+            hashes
+        }
+        None => {
+            {
+                let mut shared = state.shared.lock().unwrap();
+                shared.status = match progress {
+                    Some((done, total)) => format!("哈希 {done}/{total} · {name}"),
+                    None => format!("监听 · 索引 {name}"),
+                };
+            }
+            let started = Instant::now();
+            let hashes = match media::hash_file(path) {
+                Ok(hashes) => {
+                    outcome.hash_computed = true;
+                    hashes
+                }
+                Err(error) => {
+                    outcome.hash_failed = true;
+                    log::warn!("hash {}: {error:#}", path.display());
+                    crate::media::ContentHashes {
+                        decode_error: Some("无法读取图片内容".into()),
+                        ..Default::default()
+                    }
+                }
+            };
+            outcome.hash_secs = started.elapsed().as_secs_f64();
+            hashes
+        }
+    };
+    let (exif, captured_at) = prefetched_exif.unwrap_or_else(|| media::read_exif(path));
+    let metadata_json = serde_json::to_string(&exif).unwrap_or_else(|_| "{}".to_string());
+    let thumb_started = Instant::now();
+    let thumbnail = ensure_thumb(path, &state.cache_dir, mtime, bytes, exif.orientation);
+    outcome.thumb_secs = thumb_started.elapsed().as_secs_f64();
+    let (thumb, width, height) = match thumbnail {
+        Ok(value) => value,
+        Err(error) => {
+            outcome.thumb_failed = true;
+            log::warn!("thumbnail {}: {error:#}", path.display());
+            match stored_media {
+                // 容错修复过的缩略图对 Rust 解码器仍不可读，同文件沿用已有缓存与尺寸。
+                Some((width, height, thumb)) => (Some(thumb), width, height),
+                None => (None, 0, 0),
+            }
+        }
+    };
+    if !existed_before && !hashes.sha1.is_empty() {
+        let candidate = match rename {
+            RenamePolicy::Disabled => None,
+            RenamePolicy::Scan(files) => {
+                match rename_candidate(db, &folder_string, &hashes.sha1, path, files) {
+                    Ok(candidate) => candidate,
+                    Err(error) => {
+                        log::warn!("rename lookup {}: {error:#}", path.display());
+                        None
+                    }
+                }
+            }
+            RenamePolicy::MissingOnDisk => {
+                match rename_candidate_missing(db, &folder_string, &hashes.sha1, path) {
+                    Ok(candidate) => candidate,
+                    Err(error) => {
+                        log::warn!("rename lookup {}: {error:#}", path.display());
+                        None
+                    }
+                }
+            }
+        };
+        if let Some(old_path) = candidate {
+            match db.move_asset_media(
+                &old_path,
+                path,
+                &folder_string,
+                thumb.as_deref(),
+                width,
+                height,
+                bytes,
+                mtime,
+                &hashes,
+            ) {
+                Ok(mut asset) => {
+                    db.set_exif(path, captured_at, &metadata_json)?;
+                    if let Some(thumb) = thumb.as_deref() {
+                        db.record_thumb_source(thumb, path, mtime, bytes, exif.orientation)?;
+                    }
+                    asset.captured_at = captured_at;
+                    asset.metadata_json = metadata_json;
+                    {
+                        let mut shared = state.shared.lock().unwrap();
+                        shared.move_asset(&old_path, asset);
+                        shared.status = match progress {
+                            Some((done, total)) => format!("已识别重命名 {done}/{total} · {name}"),
+                            None => format!("监听 · 已识别重命名 {name}"),
+                        };
+                    }
+                    log::info!(
+                        "renamed asset: {} -> {}",
+                        old_path.display(),
+                        path.display()
+                    );
+                    outcome.kind = IndexedFile::Renamed;
+                    outcome.renamed_from = Some(old_path);
+                    return Ok(outcome);
+                }
+                Err(error) => {
+                    log::warn!(
+                        "rename adopt {} -> {} failed: {error:#}; falling back to upsert",
+                        old_path.display(),
+                        path.display()
+                    );
+                }
+            }
+        }
+    }
+    let mut asset = db.upsert_meta(
+        &folder_string,
+        path,
+        thumb.as_deref(),
+        width,
+        height,
+        bytes,
+        mtime,
+        &hashes,
+        reset_tag_attempts,
+    )?;
+    db.set_exif(path, captured_at, &metadata_json)?;
+    if let Some(thumb) = thumb.as_deref() {
+        db.record_thumb_source(thumb, path, mtime, bytes, exif.orientation)?;
+    }
+    asset.captured_at = captured_at;
+    asset.metadata_json = metadata_json;
+    {
+        let mut shared = state.shared.lock().unwrap();
+        shared.upsert(asset);
+        shared.status = match progress {
+            Some((done, total)) => format!(
+                "缩略图 {done}/{total} · 已打标 {}/{}",
+                shared.counts.tagged_count(),
+                shared.counts.total()
+            ),
+            None => format!("监听 · 已索引 {name}"),
+        };
+    }
+    outcome.kind = if existed_before {
+        IndexedFile::Updated
+    } else {
+        IndexedFile::Imported
+    };
+    Ok(outcome)
 }
 
 fn process_tag_queue(
@@ -2768,5 +3311,198 @@ mod tests {
             .unwrap();
         assert_eq!((width, height), (10, 20));
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    fn write_test_image(path: &Path, color: [u8; 3]) {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
+        image::RgbImage::from_pixel(4, 4, image::Rgb(color))
+            .save(path)
+            .unwrap();
+    }
+
+    fn test_state(tag: &str) -> (PathBuf, PathBuf, Arc<AppState>) {
+        let base = temp_dir(tag);
+        let lib = base.join("lib");
+        std::fs::create_dir_all(&lib).unwrap();
+        let state = AppState::open_for_test(base.join("data"), Some(lib.clone()));
+        (base, lib, state)
+    }
+
+    #[test]
+    fn rescan_root_tracks_status_and_removes_confirmed_missing() {
+        let (base, lib, state) = test_state("rescan-status");
+        for index in 0..3u8 {
+            write_test_image(&lib.join(format!("{index}.png")), [index, 0, 0]);
+        }
+        state.rescan_root_blocking(lib.clone(), true).unwrap();
+
+        let statuses = state.source_statuses();
+        assert_eq!(statuses.len(), 1);
+        assert_eq!(statuses[0].root, lib);
+        assert_eq!(statuses[0].asset_count, 3);
+        assert_eq!(statuses[0].counts.discovered, 3);
+        assert_eq!(statuses[0].counts.imported, 3);
+        assert_eq!(statuses[0].counts.updated, 0);
+        assert!(statuses[0].online);
+        assert!(statuses[0].last_scan.is_some());
+        assert!(statuses[0].error.is_none());
+        assert_eq!(state.shared.lock().unwrap().counts.total(), 3);
+
+        std::fs::remove_file(lib.join("1.png")).unwrap();
+        state.rescan_root_blocking(lib.clone(), true).unwrap();
+
+        let statuses = state.source_statuses();
+        assert_eq!(statuses[0].asset_count, 2);
+        assert_eq!(statuses[0].counts.discovered, 2);
+        assert_eq!(statuses[0].counts.removed, 1);
+        assert_eq!(state.shared.lock().unwrap().counts.total(), 2);
+        std::fs::remove_dir_all(&base).unwrap();
+    }
+
+    #[test]
+    fn rescan_root_preserves_tags_across_rename() {
+        let (base, lib, state) = test_state("rescan-rename");
+        let old = lib.join("old.png");
+        write_test_image(&old, [10, 20, 30]);
+        state.rescan_root_blocking(lib.clone(), true).unwrap();
+        state.add_tags(std::slice::from_ref(&old), "keepme").unwrap();
+
+        let new = lib.join("new.png");
+        std::fs::rename(&old, &new).unwrap();
+        state.rescan_root_blocking(lib.clone(), true).unwrap();
+
+        let shared = state.shared.lock().unwrap();
+        let assets = shared.assets.read().unwrap();
+        assert_eq!(assets.len(), 1);
+        assert_eq!(assets[0].path, new);
+        assert!(
+            assets[0]
+                .all_tags()
+                .any(|tag| tag.tag == "keepme" && tag.category == "manual")
+        );
+        drop(assets);
+        drop(shared);
+        assert_eq!(state.source_statuses()[0].asset_count, 1);
+        std::fs::remove_dir_all(&base).unwrap();
+    }
+
+    #[test]
+    fn offline_source_rescan_keeps_records_and_marks_error() {
+        let (base, lib, state) = test_state("offline");
+        write_test_image(&lib.join("a.png"), [1, 2, 3]);
+        state.rescan_root_blocking(lib.clone(), true).unwrap();
+
+        std::fs::rename(&lib, base.join("offline")).unwrap();
+        let error = state.rescan_root(lib.clone()).unwrap_err();
+        assert!(format!("{error:#}").contains("不可访问"));
+
+        let statuses = state.source_statuses();
+        assert_eq!(statuses.len(), 1);
+        assert!(!statuses[0].online);
+        assert!(statuses[0].error.is_some());
+        assert_eq!(statuses[0].asset_count, 1);
+        assert_eq!(state.shared.lock().unwrap().counts.total(), 1);
+        std::fs::remove_dir_all(&base).unwrap();
+    }
+
+    #[test]
+    fn scan_filter_excludes_previews_persists_and_rescans() {
+        let (base, lib, state) = test_state("scan-filter");
+        write_test_image(&lib.join("keep.png"), [1, 2, 3]);
+        write_test_image(&lib.join("cache").join("skip.png"), [4, 5, 6]);
+
+        let config = ScanFilterConfig {
+            exclude_globs: vec!["cache/**".into()],
+            ..ScanFilterConfig::default()
+        };
+        let preview = state.preview_scan_filter(&lib, &config).unwrap();
+        assert_eq!((preview.matched, preview.excluded), (1, 1));
+        assert_eq!(preview.sample_excluded.len(), 1);
+
+        state.set_scan_filter(&lib, config.clone()).unwrap();
+        assert_eq!(state.scan_filter(&lib), config);
+        let saved = state.setting("scan.filters").unwrap();
+        assert!(saved.contains("cache/**"));
+
+        state.scan_blocking(true).unwrap();
+        assert_eq!(state.source_statuses()[0].asset_count, 1);
+        assert_eq!(state.shared.lock().unwrap().counts.total(), 1);
+
+        state
+            .set_scan_filter(&lib, ScanFilterConfig::default())
+            .unwrap();
+        assert_eq!(state.scan_filter(&lib), ScanFilterConfig::default());
+        state.scan_blocking(true).unwrap();
+        assert_eq!(state.source_statuses()[0].asset_count, 2);
+        assert_eq!(state.shared.lock().unwrap().counts.total(), 2);
+
+        let invalid = ScanFilterConfig {
+            exclude_globs: vec!["[".into()],
+            ..ScanFilterConfig::default()
+        };
+        assert!(state.set_scan_filter(&lib, invalid).is_err());
+        assert_eq!(state.scan_filter(&lib), ScanFilterConfig::default());
+        std::fs::remove_dir_all(&base).unwrap();
+    }
+
+    #[test]
+    fn watch_batch_adds_removes_and_restores_rename_tags() {
+        let (base, lib, state) = test_state("watch-batch");
+        let old = lib.join("a.png");
+        write_test_image(&old, [1, 1, 1]);
+        state.rescan_root_blocking(lib.clone(), true).unwrap();
+        state.add_tags(std::slice::from_ref(&old), "keepme").unwrap();
+
+        // 重命名：只把新路径交给监听批处理，靠 SHA1 + 磁盘缺失恢复标签。
+        let renamed = lib.join("b.png");
+        std::fs::rename(&old, &renamed).unwrap();
+        crate::watch::handle_watch_batch(&state, &lib, vec![renamed.clone()]);
+        {
+            let shared = state.shared.lock().unwrap();
+            let assets = shared.assets.read().unwrap();
+            assert_eq!(assets.len(), 1);
+            assert_eq!(assets[0].path, renamed);
+            assert!(
+                assets[0]
+                    .all_tags()
+                    .any(|tag| tag.tag == "keepme" && tag.category == "manual")
+            );
+        }
+
+        // 新增
+        let added = lib.join("c.png");
+        write_test_image(&added, [9, 9, 9]);
+        crate::watch::handle_watch_batch(&state, &lib, vec![added.clone()]);
+        assert!(
+            state
+                .shared
+                .lock()
+                .unwrap()
+                .assets
+                .read()
+                .unwrap()
+                .iter()
+                .any(|asset| asset.path == added)
+        );
+
+        // 删除：确认缺失后只移除 DB/内存记录。
+        std::fs::remove_file(&added).unwrap();
+        crate::watch::handle_watch_batch(&state, &lib, vec![added.clone()]);
+        assert!(
+            !state
+                .shared
+                .lock()
+                .unwrap()
+                .assets
+                .read()
+                .unwrap()
+                .iter()
+                .any(|asset| asset.path == added)
+        );
+        assert_eq!(state.source_statuses()[0].asset_count, 1);
+        assert!(base.join("lib").join("b.png").exists());
+        std::fs::remove_dir_all(&base).unwrap();
     }
 }
