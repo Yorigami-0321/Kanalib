@@ -647,6 +647,12 @@ impl AppState {
             }
         }
         shared.revision = shared.revision.wrapping_add(1);
+        let succeeded = result.is_ok();
+        drop(shared);
+        // 手动重扫成功后恢复该来源的监听；离线/失败时保留原状态，等下次重扫。
+        if succeeded && root.is_dir() {
+            self.start_watching();
+        }
         result.map(|_| ())
     }
 
