@@ -22,7 +22,7 @@
 
 ### 任务 A：F-021/024/023 打标质量与队列（核心线，Round 2 唯一 schema owner）
 
-- **文件**：`db.rs`（schema v7 迁移）、`model.rs`（候选/阈值/队列状态）、`state.rs`（打标队列与重打标）、`sidecar/tagger/server.py`、测试；不碰 `lib.rs`。
+- **文件**：`db.rs`（schema v8 迁移；当前为 v7）、`model.rs`（候选/阈值/队列状态）、`state.rs`（打标队列与重打标）、`sidecar/tagger/server.py`、测试；不碰 `lib.rs`。
 - **内容**：
   - F-021：general/character/copyright/style/meta/rating 分类阈值 + 单标签覆盖；sidecar 返回阈值下 top-K 候选；存 `asset_scores`/候选表；低置信度审核 API；改阈值不重跑模型。
   - F-024：按选中/当前视图重打标；保留 manual tags；阈值重算优先用候选，缺失才调模型。
@@ -54,7 +54,7 @@
 - **文件**：`db.rs` 搜索查询/索引、必要时 `state.rs` 搜索入口；不碰 `lib.rs`。
 - **内容**：保持 FTS5，不引入 Tantivy；为评级/星级/收藏/来源/时间加索引；筛选/排序下推 SQL；keyset/分页；短词回退策略；提供 10 万基准脚本/指标。
 - **不做**：UI 防抖/懒加载/可见索引缓存（D2）。
-- **验收**：10 万查询 p50/p95 较 284ms 明显下降，目标 p95 <150ms；结果与现有内存过滤逐条一致；无 schema 冲突（等待 A 的 v7）。
+- **验收**：10 万查询 p50/p95 较 284ms 明显下降，目标 p95 <150ms；结果与现有内存过滤逐条一致；无 schema 冲突（等待 A 的 v8）。
 - **冲突**：`db.rs` 在 A 之后合；不要改 UI。
 
 ### 任务 D2：第二轮 UI 集成（唯一 UI 车道，D1 后）
@@ -75,7 +75,7 @@
 ## 合并顺序与禁止事项
 
 1. 任务 0（D 收尾）先合；Wave 1 的 A/C 可在 D 收尾期间并行，但都不得改 `lib.rs`。
-2. A 先合 schema v7；B 在 A 之后合；C 只改媒体函数并 rebase。
+2. A 先合 schema v8；B 在 A 之后合；C 只改媒体函数并 rebase。
 3. D2 在 D1 与 A/B/C API 稳定后合；D2 独占 UI。
 4. 本轮禁止：改 `db.rs` schema 的第二个任务、改 sidecar 协议的第二个人、多个代理同时改 `lib.rs`、启动 F-003/004/005/013/014/035 的实现。
 5. 交付附：改动文件、接口签名、迁移/备份、测试命令/结果、未完成边界；UI 附截图。
