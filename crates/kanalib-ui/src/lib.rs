@@ -7853,6 +7853,27 @@ impl KanalibApp {
                     .text_color(colors.muted)
                     .child(cache_summary),
             )
+            .child({
+                let (label, color) = match kanalib_core::ffmpeg::status() {
+                    Some(build) if build.license == kanalib_core::ffmpeg::License::Gpl => (
+                        format!(
+                            "FFmpeg · {} · GPL · 仅限本机使用，勿随包分发",
+                            build.version
+                        ),
+                        colors.warning,
+                    ),
+                    Some(build) => (
+                        format!(
+                            "FFmpeg · {} · {}",
+                            build.version,
+                            build.license.label()
+                        ),
+                        colors.muted,
+                    ),
+                    None => ("FFmpeg · 未找到 · 使用内置解码回退".to_string(), colors.subtle),
+                };
+                div().text_xs().text_color(color).child(label)
+            })
             .child(
                 div()
                     .text_xs()

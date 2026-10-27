@@ -10,10 +10,11 @@ use image::{ImageFormat, Rgb, RgbImage};
 use serde::Deserialize;
 use walkdir::WalkDir;
 
-use crate::db::{Db, JobCounts};
+use crate::db::{Db, JobCounts, StoredMeta};
 use crate::dedup::{
     DEFAULT_SIMILAR_THRESHOLD, DuplicateReview, GroupKind, ReviewState, is_protected,
 };
+use crate::ffmpeg::{self, ThumbJob};
 use crate::media;
 use crate::model::{
     Asset, CountAccumulator, Filter, PendingCleanup, SavedSearch, Shared, TagHit, TagSummary,
@@ -1574,6 +1575,10 @@ struct ScanStats {
     walk_secs: f64,
     import_secs: f64,
     hash_secs: f64,
+    thumb_prefetch_jobs: usize,
+    thumb_prefetch_generated: usize,
+    thumb_prefetch_failed: usize,
+    thumb_prefetch_secs: f64,
     thumb_secs: f64,
     tag_load_secs: f64,
     tag_secs: f64,
@@ -1596,6 +1601,10 @@ fn log_scan_metrics(stats: &ScanStats) {
         "walk_secs": stats.walk_secs,
         "import_secs": stats.import_secs,
         "hash_secs": stats.hash_secs,
+        "thumb_prefetch_jobs": stats.thumb_prefetch_jobs,
+        "thumb_prefetch_generated": stats.thumb_prefetch_generated,
+        "thumb_prefetch_failed": stats.thumb_prefetch_failed,
+        "thumb_prefetch_secs": stats.thumb_prefetch_secs,
         "thumb_secs": stats.thumb_secs,
         "tag_load_secs": stats.tag_load_secs,
         "tag_secs": stats.tag_secs,
@@ -1673,6 +1682,100 @@ fn rename_candidate(
     Ok(None)
 }
 
+fn stored_orientation(meta: &StoredMeta) -> u8 {
+    serde_json::from_str::<media::ExifData>(&meta.metadata_json)
+        .map(|exif| exif.orientation)
+        .unwrap_or(1)
+        .clamp(1, 8)
+}
+
+fn thumb_cache_current(
+    meta: &StoredMeta,
+    path: &Path,
+    cache_dir: &Path,
+    mtime: u64,
+    bytes: u64,
+) -> bool {
+    let expected = thumb_target(path, cache_dir, mtime, bytes, stored_orientation(meta));
+    let stored = Path::new(&meta.thumb);
+    stored == expected && stored.exists()
+}
+
+fn prefetch_thumbnails(
+    state: &Arc<AppState>,
+    db: &Db,
+    files: &[PathBuf],
+    cancel: &AtomicBool,
+    stats: &mut ScanStats,
+) -> HashMap<PathBuf, (media::ExifData, Option<u64>)> {
+    let mut cached_exif = HashMap::new();
+    if !ffmpeg::available() {
+        return cached_exif;
+    }
+    let started = Instant::now();
+    let mut jobs = Vec::new();
+    for (index, path) in files.iter().enumerate() {
+        if cancel.load(Ordering::SeqCst) {
+            break;
+        }
+        if index % 1000 == 0 {
+            let mut shared = state.shared.lock().unwrap();
+            shared.status = format!("检查缩略图 {}/{}", index + 1, files.len());
+        }
+        let Ok(metadata) = std::fs::metadata(path) else {
+            continue;
+        };
+        let bytes = metadata.len();
+        let mtime = metadata
+            .modified()
+            .ok()
+            .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
+            .map(|duration| duration.as_secs())
+            .unwrap_or(0);
+        let stored = db.stored_meta(path).ok().flatten();
+        if stored.as_ref().is_some_and(|meta| {
+            meta.is_unchanged(mtime, bytes)
+                && meta.exif_state == "done"
+                && thumb_cache_current(meta, path, &state.cache_dir, mtime, bytes)
+        }) {
+            continue;
+        }
+        let (exif, captured_at) = media::read_exif(path);
+        let target = thumb_target(path, &state.cache_dir, mtime, bytes, exif.orientation);
+        if !target.exists() {
+            jobs.push(ThumbJob {
+                source: path.clone(),
+                target,
+                alpha: ffmpeg::alpha_source(path),
+            });
+        }
+        cached_exif.insert(path.clone(), (exif, captured_at));
+    }
+    stats.thumb_prefetch_jobs = jobs.len();
+    if jobs.is_empty() {
+        stats.thumb_prefetch_secs = started.elapsed().as_secs_f64();
+        return cached_exif;
+    }
+    let total = jobs.len();
+    let progress = |done: usize, total: usize| {
+        let mut shared = state.shared.lock().unwrap();
+        shared.status = format!("预生成缩略图 {done}/{total}");
+    };
+    let outcome = ffmpeg::generate_thumbnails(&jobs, cancel, &progress);
+    stats.thumb_prefetch_generated = outcome.generated;
+    stats.thumb_prefetch_failed = outcome.failed;
+    stats.thumb_prefetch_secs = started.elapsed().as_secs_f64();
+    log::info!(
+        "thumb prefetch: jobs={} generated={} failed={} batches={} secs={:.2}",
+        total,
+        outcome.generated,
+        outcome.failed,
+        outcome.batches,
+        stats.thumb_prefetch_secs
+    );
+    cached_exif
+}
+
 fn append_scan_warning(shared: &mut Shared, message: String) {
     shared.error = Some(match shared.error.take() {
         Some(previous) if !previous.is_empty() => format!("{previous}\n{message}"),
@@ -1712,6 +1815,7 @@ fn index_inner(
         let mut shared = state.shared.lock().unwrap();
         shared.status = format!("发现 {} 张图片，生成缩略图...", files.len());
     }
+    let mut prefetched_exif = prefetch_thumbnails(state, &db, &files, cancel, stats);
 
     let import_start = Instant::now();
     for (index, path) in files.iter().enumerate() {
@@ -1753,10 +1857,14 @@ fn index_inner(
         let exif_done = stored
             .as_ref()
             .is_some_and(|meta| meta.exif_state == "done");
+        let cache_current = stored.as_ref().is_some_and(|meta| {
+            thumb_cache_current(meta, path, &state.cache_dir, mtime, bytes)
+        });
         if stored
             .as_ref()
             .is_some_and(|meta| meta.is_unchanged(mtime, bytes))
             && exif_done
+            && cache_current
         {
             stats.unchanged += 1;
             stats.imported += 1;
@@ -1805,7 +1913,9 @@ fn index_inner(
                 hashes
             }
         };
-        let (exif, captured_at) = media::read_exif(path);
+        let (exif, captured_at) = prefetched_exif
+            .remove(path)
+            .unwrap_or_else(|| media::read_exif(path));
         let metadata_json = serde_json::to_string(&exif).unwrap_or_else(|_| "{}".to_string());
         let thumb_started = Instant::now();
         let thumbnail = ensure_thumb(
@@ -2498,7 +2608,7 @@ fn thumb_target(
     orientation: u8,
 ) -> PathBuf {
     let mut key = format!(
-        "{}-{}-{}-{}",
+        "v3-{}-{}-{}-{}",
         path.to_string_lossy(),
         mtime,
         bytes,
@@ -2525,14 +2635,29 @@ fn ensure_thumb(
     let target = thumb_target(path, cache_dir, mtime, bytes, orientation);
 
     if target.exists() {
-        let (mut width, mut height) = image::ImageReader::open(path)?
-            .with_guessed_format()?
-            .into_dimensions()
-            .context("read image dimensions")?;
-        if (5..=8).contains(&orientation) {
-            std::mem::swap(&mut width, &mut height);
+        let cached = image::ImageReader::open(&target)
+            .ok()
+            .and_then(|reader| reader.with_guessed_format().ok())
+            .and_then(|reader| reader.into_dimensions().ok())
+            .filter(|(width, height)| *width > 0 && *height > 0);
+        if let Some((thumb_width, thumb_height)) = cached {
+            match image::ImageReader::open(path)
+                .ok()
+                .and_then(|reader| reader.with_guessed_format().ok())
+                .and_then(|reader| reader.into_dimensions().ok())
+            {
+                Some((mut width, mut height)) => {
+                    if (5..=8).contains(&orientation) {
+                        std::mem::swap(&mut width, &mut height);
+                    }
+                    return Ok((Some(target), width, height));
+                }
+                // FFmpeg can decode formats the image crate only writes; the
+                // generated cache is already rotated and sized.
+                None => return Ok((Some(target), thumb_width, thumb_height)),
+            }
         }
-        return Ok((Some(target), width, height));
+        let _ = std::fs::remove_file(&target);
     }
 
     let mut image = image::ImageReader::open(path)?

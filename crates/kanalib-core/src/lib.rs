@@ -1,6 +1,7 @@
 pub mod db;
 pub mod dedup;
 pub mod export;
+pub mod ffmpeg;
 pub mod media;
 pub mod model;
 pub mod sidecar;
