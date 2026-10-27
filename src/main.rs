@@ -12,40 +12,16 @@ use ely_gpui_component::{
     theme::{Mode, Theme},
 };
 use gpui::{App, AppContext as _, Bounds, TitlebarOptions, WindowBounds, WindowOptions, px, size};
-use kanalib_core::{sidecar, state};
+use kanalib_core::state;
 use kanalib_ui::KanalibApp;
 
-fn init_logging() {
-    let log_path = std::env::var_os("KANALIB_LOG_FILE")
-        .map(PathBuf::from)
-        .or_else(|| {
-            if std::env::var_os("KANALIB_HEADLESS").is_some() {
-                let dir = sidecar::project_root().join(".kanalib");
-                std::fs::create_dir_all(&dir).ok()?;
-                Some(dir.join("headless.log"))
-            } else {
-                None
-            }
-        });
-    let mut builder =
-        env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"));
-    if let Some(path) = log_path {
-        match std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&path)
-        {
-            Ok(file) => {
-                builder.target(env_logger::Target::Pipe(Box::new(file)));
-            }
-            Err(error) => eprintln!("open log file {}: {error}", path.display()),
-        }
-    }
-    builder.init();
-}
+mod logging;
 
 fn main() {
-    init_logging();
+    let log_path = logging::init();
+    if let Some(path) = &log_path {
+        log::info!("Kanalib starting; log file: {}", path.display());
+    }
     #[cfg(feature = "frame-profiler")]
     kanalib_core::alloc_stats::spawn_logger();
     let folder = std::env::args()

@@ -1,6 +1,7 @@
 pub mod backup;
 pub mod db;
 pub mod dedup;
+pub mod diagnostics;
 pub mod export;
 pub mod ffmpeg;
 pub mod media;

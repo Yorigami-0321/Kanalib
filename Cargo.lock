@@ -3362,7 +3362,6 @@ name = "kanalib"
 version = "0.1.0"
 dependencies = [
  "ely-gpui-component",
- "env_logger",
  "flexi_logger",
  "gpui-pre",
  "gpui-pre-platform",
