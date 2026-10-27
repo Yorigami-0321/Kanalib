@@ -32,8 +32,11 @@ use kanalib_core::dedup::{
     similarity_pct_from_distance,
 };
 use kanalib_core::model::{
-    Asset, Counts, Filter, SavedSearch, SearchQuery, TagHit, TagSummary, normalize_tag_name,
+    Asset, Counts, DiagnosticSnapshot, Filter, SavedSearch, ScanFilterConfig, SearchQuery,
+    SourceScanStatus, TagHit, TagSummary, normalize_tag_name,
 };
+use kanalib_core::backup;
+use kanalib_core::diagnostics::{self, DiagnosticsContext};
 use kanalib_core::export;
 use kanalib_core::state::{AppState, CacheStats};
 
@@ -1042,6 +1045,10 @@ pub struct KanalibApp {
     dedup_notice: Option<String>,
     rescan_confirm: Option<RescanOrigin>,
     settings_notice: Option<String>,
+    source_statuses: Vec<SourceScanStatus>,
+    last_backup: Option<String>,
+    backup_running: bool,
+    diagnostic_snapshot: Option<DiagnosticSnapshot>,
     refresh_task: Option<Task<()>>,
     thumb_cache: Entity<ThumbCache>,
     cache_task: Option<Task<()>>,
@@ -1216,6 +1223,7 @@ impl KanalibApp {
         }
         let cache_dir = state.cache_dir();
         let db_path = state.db_path();
+        let source_statuses = state.source_statuses();
         let access_path = db_path
             .parent()
             .map(|dir| dir.join("thumb_access.json"))
@@ -1251,6 +1259,10 @@ impl KanalibApp {
             dedup_notice: None,
             rescan_confirm: None,
             settings_notice: None,
+            source_statuses,
+            last_backup: None,
+            backup_running: false,
+            diagnostic_snapshot: None,
             refresh_task: None,
             cache_task: None,
             thumb_cache: cx.new(|cx| {
@@ -1316,6 +1328,10 @@ impl KanalibApp {
     }
 
     pub fn start(&mut self, cx: &mut Context<Self>) {
+        self.sync_source_statuses();
+        if self.screen == Screen::Settings {
+            self.refresh_diagnostics();
+        }
         let weak = cx.entity().downgrade();
         self.refresh_task = Some(cx.spawn(async move |_, cx| {
             let mut last_status = String::new();
@@ -1333,10 +1349,20 @@ impl KanalibApp {
                     break;
                 };
                 if status != last_status || scanning != last_scanning || revision != last_revision {
+                    let scan_finished = last_scanning && !scanning;
                     last_status = status;
                     last_scanning = scanning;
                     last_revision = revision;
-                    if weak.update(cx, |_, cx| cx.notify()).is_err() {
+                    if weak
+                        .update(cx, |app, cx| {
+                            app.sync_source_statuses();
+                            if scan_finished && app.screen == Screen::Settings {
+                                app.refresh_diagnostics();
+                            }
+                            cx.notify();
+                        })
+                        .is_err()
+                    {
                         break;
                     }
                 }
@@ -1644,6 +1670,8 @@ impl KanalibApp {
         self.dedup_confirm = None;
         self.settings_notice = None;
         self.refresh_cache_stats(cx);
+        self.sync_source_statuses();
+        self.refresh_diagnostics();
     }
 
     fn refresh_cache_stats(&mut self, cx: &mut Context<Self>) {
@@ -1658,6 +1686,183 @@ impl KanalibApp {
                     Severity::Danger,
                 );
             }
+        }
+        cx.notify();
+    }
+
+    /// 数据目录（数据库所在目录）。
+    fn data_dir(&self) -> PathBuf {
+        let db_path = self.state.db_path();
+        db_path
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or(db_path)
+    }
+
+    /// 从核心状态同步来源扫描快照；不额外遍历资产，供每帧布局读取。
+    fn sync_source_statuses(&mut self) {
+        let mut statuses = {
+            let shared = self.state.shared.lock().unwrap();
+            shared
+                .source_statuses
+                .values()
+                .cloned()
+                .collect::<Vec<_>>()
+        };
+        statuses.sort_by(|left, right| left.root.cmp(&right.root));
+        self.source_statuses = statuses;
+    }
+
+    /// 采集只读诊断快照；包含资产/队列/来源/错误/日志路径。
+    fn refresh_diagnostics(&mut self) {
+        let db_path = self.state.db_path();
+        let Some(data_dir) = db_path.parent().map(Path::to_path_buf) else {
+            return;
+        };
+        let (asset_count, queue_pending, queue_running, queue_error, last_error, sidecar_device) = {
+            let shared = self.state.shared.lock().unwrap();
+            (
+                shared.counts.total(),
+                shared.queue_pending,
+                shared.queue_running,
+                shared.queue_error,
+                shared.error.clone(),
+                shared.sidecar_device.clone(),
+            )
+        };
+        let log_path = std::env::var_os("KANALIB_LOG_FILE").map(PathBuf::from);
+        let context = DiagnosticsContext {
+            asset_count: Some(asset_count),
+            queue_pending: Some(queue_pending),
+            queue_running: Some(queue_running),
+            queue_error: Some(queue_error),
+            sources: self.state.source_statuses(),
+            last_scan: None,
+            last_error,
+            sidecar_device,
+            log_path,
+        };
+        match diagnostics::collect(&data_dir, context) {
+            Ok(snapshot) => self.diagnostic_snapshot = Some(snapshot),
+            Err(error) => log::warn!("diagnostics: {error:#}"),
+        }
+        self.sync_source_statuses();
+    }
+
+    /// 单来源重扫入口：右键菜单与设置页“重扫”按钮共用。
+    fn rescan_source(&mut self, root: PathBuf, cx: &mut Context<Self>) {
+        match self.state.rescan_root(root.clone()) {
+            Ok(()) => {
+                self.settings_notice = Some("已开始重新扫描…".to_string());
+            }
+            Err(error) => {
+                let message = format!("重新扫描失败：{error:#}");
+                self.settings_notice = Some(message.clone());
+                push_toast(&self.toaster, cx, message, Severity::Danger);
+            }
+        }
+        self.source_menu = None;
+        cx.notify();
+    }
+
+    /// 立即备份数据库；阻塞的备份在后台执行器上跑，不占 UI 线程。
+    fn start_backup(&mut self, cx: &mut Context<Self>) {
+        if self.backup_running {
+            return;
+        }
+        if self.state.shared.lock().unwrap().scanning {
+            self.settings_notice = Some("图库正在扫描，完成后再备份。".to_string());
+            push_toast(
+                &self.toaster,
+                cx,
+                "扫描进行中，完成后再备份",
+                Severity::Warning,
+            );
+            cx.notify();
+            return;
+        }
+        let data_dir = self.data_dir();
+        let db_path = self.state.db_path();
+        self.backup_running = true;
+        self.settings_notice = Some("正在备份数据库…".to_string());
+        let task = cx.background_executor().spawn(async move {
+            backup::ensure_backups_dir(&data_dir)?;
+            let destination = backup::default_backup_path(&data_dir);
+            backup::backup_database(&db_path, &destination, false)
+        });
+        let weak = cx.entity().downgrade();
+        cx.spawn(async move |_, cx| {
+            let result = task.await;
+            let _ = weak.update(cx, |app, cx| {
+                app.backup_running = false;
+                match result {
+                    Ok(report) => {
+                        let mut summary = format!(
+                            "最近备份：{} · {} · 耗时 {} ms · 完整性 {}",
+                            report.destination.display(),
+                            format_bytes(report.bytes),
+                            report.elapsed_ms,
+                            if report.integrity_ok { "通过" } else { "异常" }
+                        );
+                        if !report.warnings.is_empty() {
+                            summary.push_str(&format!(
+                                " · 警告：{}",
+                                report.warnings.join("；")
+                            ));
+                        }
+                        app.last_backup = Some(summary);
+                        app.settings_notice = Some(format!(
+                            "备份完成：{}",
+                            report.destination.display()
+                        ));
+                        app.refresh_diagnostics();
+                    }
+                    Err(error) => {
+                        app.last_backup = Some(format!("最近备份失败：{error:#}"));
+                        app.settings_notice = Some(format!("备份失败：{error:#}"));
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+        cx.notify();
+    }
+
+    fn open_backups_dir(&mut self, cx: &mut Context<Self>) {
+        let data_dir = self.data_dir();
+        match backup::ensure_backups_dir(&data_dir) {
+            Ok(dir) => open_path(&dir),
+            Err(error) => {
+                self.settings_notice = Some(format!("打开备份目录失败：{error:#}"));
+            }
+        }
+        cx.notify();
+    }
+
+    fn copy_diagnostics(&mut self, cx: &mut Context<Self>) {
+        self.refresh_diagnostics();
+        let text = self
+            .diagnostic_snapshot
+            .as_ref()
+            .map(DiagnosticSnapshot::to_text);
+        match text {
+            Some(text) => {
+                cx.write_to_clipboard(ClipboardItem::new_string(text));
+                self.settings_notice = Some("诊断信息已复制到剪贴板".to_string());
+            }
+            None => {
+                self.settings_notice = Some("诊断信息采集失败，暂无法复制".to_string());
+            }
+        }
+        cx.notify();
+    }
+
+    fn open_log_dir(&mut self, cx: &mut Context<Self>) {
+        let log_path = diagnostics::default_log_path(&self.data_dir());
+        if let Some(dir) = log_path.parent().map(Path::to_path_buf) {
+            let _ = std::fs::create_dir_all(&dir);
+            open_path(&dir);
         }
         cx.notify();
     }
@@ -4206,12 +4411,18 @@ impl KanalibApp {
                         .find(|(path, _)| path == root)
                         .map(|(_, count)| *count)
                         .unwrap_or(0);
+                    let status = self
+                        .source_statuses
+                        .iter()
+                        .find(|status| &status.root == root)
+                        .cloned();
                     body = body.child(source_row(
                         SharedString::from(format!("filter-source-{}", root.display())),
                         root.clone(),
                         source_label(root, source_aliases),
                         count,
                         library && filter == &Filter::Source(root.clone()),
+                        status,
                         this.clone(),
                         colors,
                     ));
@@ -7467,6 +7678,11 @@ impl KanalibApp {
         let this_budget_less = this.clone();
         let this_budget_more = this.clone();
         let this_budget_cleanup = this.clone();
+        let this_backup = this.clone();
+        let this_open_backups = this.clone();
+        let this_restore = this.clone();
+        let this_copy_diagnostics = this.clone();
+        let this_open_logs = this.clone();
         let cache_stats = self.cache_stats.clone();
         let thumb_budget_gb = self.thumb_budget_gb;
         let cache_last_cleanup = self.cache_last_cleanup.clone();
@@ -7697,6 +7913,33 @@ impl KanalibApp {
                         .child(value.display().to_string()),
                 )
         };
+        let info_row = |label: &'static str, value: String, color: Hsla| {
+            div()
+                .flex()
+                .items_center()
+                .justify_between()
+                .gap(px(10.))
+                .px(px(10.))
+                .py(px(6.))
+                .rounded(px(6.))
+                .bg(colors.sunken)
+                .child(
+                    div()
+                        .flex_none()
+                        .text_xs()
+                        .text_color(colors.subtle)
+                        .child(label),
+                )
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w(px(0.))
+                        .truncate()
+                        .text_xs()
+                        .text_color(color)
+                        .child(value),
+                )
+        };
         let this_add_source = this.clone();
         let mut source_rows = div().flex().flex_col().gap(px(6.));
         if roots.is_empty() {
@@ -7710,8 +7953,35 @@ impl KanalibApp {
             for root in roots {
                 let root_for_remove = root.clone();
                 let root_for_rename = root.clone();
+                let root_for_rescan = root.clone();
                 let this_remove = this.clone();
                 let this_rename = this.clone();
+                let this_rescan = this.clone();
+                let status = self
+                    .source_statuses
+                    .iter()
+                    .find(|status| &status.root == root)
+                    .cloned()
+                    .unwrap_or_else(|| SourceScanStatus {
+                        root: root.clone(),
+                        online: root.is_dir(),
+                        ..SourceScanStatus::default()
+                    });
+                let last_scan_text = status
+                    .last_scan
+                    .map(relative_time)
+                    .unwrap_or_else(|| "从未".to_string());
+                let scan_counts_text = format!(
+                    "最近 新增 {} · 更新 {} · 移除 {} · 失败 {}",
+                    status.counts.imported,
+                    status.counts.updated,
+                    status.counts.removed,
+                    status.counts.failed
+                );
+                let filter_summary = scan_filter_summary(&self.state.scan_filter(root));
+                let asset_count = status.asset_count;
+                let online = status.online;
+                let error = status.error.clone();
                 source_rows = source_rows.child(
                     div()
                         .flex()
@@ -7728,13 +7998,40 @@ impl KanalibApp {
                                 .min_w(px(0.))
                                 .flex()
                                 .flex_col()
-                                .gap(px(1.))
+                                .gap(px(2.))
                                 .child(
                                     div()
-                                        .truncate()
-                                        .text_xs()
-                                        .text_color(colors.fg)
-                                        .child(source_label(root, source_aliases)),
+                                        .flex()
+                                        .items_center()
+                                        .gap(px(5.))
+                                        .children((!online).then(|| {
+                                            div()
+                                                .flex_none()
+                                                .flex()
+                                                .items_center()
+                                                .gap(px(3.))
+                                                .child(
+                                                    div()
+                                                        .size(px(6.))
+                                                        .rounded_full()
+                                                        .bg(colors.danger),
+                                                )
+                                                .child(
+                                                    div()
+                                                        .text_xs()
+                                                        .text_color(colors.danger)
+                                                        .child("离线"),
+                                                )
+                                        }))
+                                        .child(
+                                            div()
+                                                .flex_1()
+                                                .min_w(px(0.))
+                                                .truncate()
+                                                .text_xs()
+                                                .text_color(colors.fg)
+                                                .child(source_label(root, source_aliases)),
+                                        ),
                                 )
                                 .child(
                                     div()
@@ -7742,6 +8039,49 @@ impl KanalibApp {
                                         .text_xs()
                                         .text_color(colors.subtle)
                                         .child(root.display().to_string()),
+                                )
+                                .child(
+                                    div()
+                                        .flex()
+                                        .flex_wrap()
+                                        .items_center()
+                                        .gap(px(6.))
+                                        .child(
+                                            div()
+                                                .text_xs()
+                                                .text_color(if online {
+                                                    colors.subtle
+                                                } else {
+                                                    colors.danger
+                                                })
+                                                .child(format!("上次扫描 {last_scan_text}")),
+                                        )
+                                        .child(
+                                            div()
+                                                .text_xs()
+                                                .text_color(colors.subtle)
+                                                .child(format!("· {asset_count} 个资产")),
+                                        )
+                                        .child(
+                                            div()
+                                                .text_xs()
+                                                .text_color(colors.subtle)
+                                                .child(scan_counts_text),
+                                        ),
+                                )
+                                .children(error.map(|error| {
+                                    div()
+                                        .truncate()
+                                        .text_xs()
+                                        .text_color(colors.danger)
+                                        .child(format!("错误：{error}"))
+                                }))
+                                .child(
+                                    div()
+                                        .truncate()
+                                        .text_xs()
+                                        .text_color(colors.subtle)
+                                        .child(filter_summary),
                                 ),
                         )
                         .child(
@@ -7750,6 +8090,21 @@ impl KanalibApp {
                                 .flex()
                                 .items_center()
                                 .gap(px(4.))
+                                .child(
+                                    Button::new(
+                                        SharedString::from(format!(
+                                            "rescan-source-{}",
+                                            root.display()
+                                        )),
+                                        "重扫",
+                                    )
+                                    .size(ControlSize::Sm)
+                                    .on_click(move |_, _, cx| {
+                                        let _ = this_rescan.update(cx, |app, cx| {
+                                            app.rescan_source(root_for_rescan.clone(), cx);
+                                        });
+                                    }),
+                                )
                                 .child(
                                     Button::new(
                                         SharedString::from(format!(
@@ -7979,6 +8334,253 @@ impl KanalibApp {
                     ),
             );
 
+        let backup_section = div()
+            .p(px(16.))
+            .rounded(px(10.))
+            .border_1()
+            .border_color(colors.border)
+            .bg(colors.surface)
+            .flex()
+            .flex_col()
+            .gap(px(10.))
+            .child(
+                div()
+                    .text_sm()
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .child("数据库备份"),
+            )
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(colors.muted)
+                    .child("立即把数据库复制到数据目录下的 backups 子目录，并校验完整性；备份不包含缩略图缓存。"),
+            )
+            .child(path_row("备份目录", backup::backups_dir(&data_dir), colors))
+            .child(
+                div()
+                    .flex()
+                    .flex_wrap()
+                    .items_center()
+                    .gap(px(6.))
+                    .child(
+                        Button::new(
+                            "backup-now",
+                            if self.backup_running {
+                                "备份中…"
+                            } else {
+                                "立即备份"
+                            },
+                        )
+                        .primary()
+                        .disabled(self.backup_running)
+                        .on_click(move |_, _, cx| {
+                            let _ = this_backup.update(cx, |app, cx| app.start_backup(cx));
+                        }),
+                    )
+                    .child(
+                        Button::new("open-backups", "打开备份目录")
+                            .size(ControlSize::Sm)
+                            .icon(IconName::FolderOpen)
+                            .on_click(move |_, _, cx| {
+                                let _ =
+                                    this_open_backups.update(cx, |app, cx| app.open_backups_dir(cx));
+                            }),
+                    )
+                    .child(
+                        Button::new("restore-backup", "恢复备份…")
+                            .size(ControlSize::Sm)
+                            .on_click(move |_, _, cx| {
+                                let _ = this_restore.update(cx, |app, cx| {
+                                    app.settings_notice =
+                                        Some("恢复流程将在后续版本提供".to_string());
+                                    cx.notify();
+                                });
+                            }),
+                    ),
+            )
+            .children(self.last_backup.clone().map(|summary| {
+                div()
+                    .text_xs()
+                    .text_color(colors.muted)
+                    .child(summary)
+            }))
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(colors.subtle)
+                    .child("备份只复制数据库；恢复流程将在后续版本提供。"),
+            );
+
+        let diagnostics_rows: AnyElement = if let Some(snapshot) = &self.diagnostic_snapshot {
+            let mut rows = div().flex().flex_col().gap(px(4.));
+            rows = rows.child(info_row("版本", snapshot.app_version.clone(), colors.fg));
+            rows = rows.child(info_row(
+                "数据目录",
+                snapshot.data_dir.display().to_string(),
+                colors.fg,
+            ));
+            rows = rows.child(info_row(
+                "数据库",
+                format!(
+                    "{} · {}",
+                    snapshot.db_path.display(),
+                    format_bytes(snapshot.db_bytes)
+                ),
+                colors.fg,
+            ));
+            rows = rows.child(info_row(
+                "缩略图缓存",
+                format!(
+                    "{} · {}",
+                    snapshot.thumb_cache_dir.display(),
+                    format_bytes(snapshot.thumb_cache_bytes)
+                ),
+                colors.fg,
+            ));
+            rows = rows.child(info_row(
+                "资产总数",
+                snapshot.asset_count.to_string(),
+                colors.fg,
+            ));
+            rows = rows.child(info_row(
+                "打标队列",
+                format!(
+                    "等待 {} · 运行 {} · 失败 {}",
+                    snapshot.queue_pending, snapshot.queue_running, snapshot.queue_error
+                ),
+                colors.fg,
+            ));
+            rows = rows.child(info_row(
+                "推理设备",
+                snapshot
+                    .sidecar_device
+                    .clone()
+                    .unwrap_or_else(|| "未知".to_string()),
+                colors.fg,
+            ));
+            rows = rows.child(info_row(
+                "最近扫描",
+                snapshot
+                    .last_scan
+                    .map(|seconds| {
+                        format!("{}（{}）", relative_time(seconds), format_date(seconds))
+                    })
+                    .unwrap_or_else(|| "从未".to_string()),
+                colors.fg,
+            ));
+            rows = rows.child(info_row(
+                "最近错误",
+                snapshot
+                    .last_error
+                    .clone()
+                    .unwrap_or_else(|| "无".to_string()),
+                if snapshot.last_error.is_some() {
+                    colors.danger
+                } else {
+                    colors.fg
+                },
+            ));
+            rows = rows.child(info_row(
+                "日志",
+                snapshot
+                    .log_path
+                    .as_ref()
+                    .map(|path| path.display().to_string())
+                    .unwrap_or_else(|| "未启用".to_string()),
+                colors.fg,
+            ));
+            if snapshot.sources.is_empty() {
+                rows = rows.child(info_row("来源", "无".to_string(), colors.fg));
+            } else {
+                for source in &snapshot.sources {
+                    let mut text = format!(
+                        "{} · {} 个资产 · {}",
+                        source_label(&source.root, source_aliases),
+                        source.asset_count,
+                        source
+                            .last_scan
+                            .map(relative_time)
+                            .unwrap_or_else(|| "从未扫描".to_string())
+                    );
+                    if !source.online {
+                        text.push_str(" · 离线");
+                    }
+                    if let Some(error) = &source.error {
+                        text.push_str(&format!(" · 错误：{error}"));
+                    }
+                    rows = rows.child(info_row(
+                        "来源",
+                        text,
+                        if source.online && source.error.is_none() {
+                            colors.fg
+                        } else {
+                            colors.danger
+                        },
+                    ));
+                }
+            }
+            rows.into_any_element()
+        } else {
+            div()
+                .text_xs()
+                .text_color(colors.subtle)
+                .child("诊断信息尚未采集；重新打开设置页或点击“复制诊断信息”会刷新。")
+                .into_any_element()
+        };
+        let diagnostics_section = div()
+            .p(px(16.))
+            .rounded(px(10.))
+            .border_1()
+            .border_color(colors.border)
+            .bg(colors.surface)
+            .flex()
+            .flex_col()
+            .gap(px(8.))
+            .child(
+                div()
+                    .text_sm()
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .child("诊断信息"),
+            )
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(colors.muted)
+                    .child("只读快照：版本、数据目录、数据库与缓存大小、队列、来源状态与最近错误。"),
+            )
+            .child(diagnostics_rows)
+            .child(
+                div()
+                    .flex()
+                    .flex_wrap()
+                    .items_center()
+                    .gap(px(6.))
+                    .child(
+                        Button::new("copy-diagnostics", "复制诊断信息")
+                            .size(ControlSize::Sm)
+                            .icon(IconName::Copy)
+                            .on_click(move |_, _, cx| {
+                                let _ = this_copy_diagnostics
+                                    .update(cx, |app, cx| app.copy_diagnostics(cx));
+                            }),
+                    )
+                    .child(
+                        Button::new("open-log-dir", "打开日志目录")
+                            .size(ControlSize::Sm)
+                            .icon(IconName::FolderOpen)
+                            .on_click(move |_, _, cx| {
+                                let _ =
+                                    this_open_logs.update(cx, |app, cx| app.open_log_dir(cx));
+                            }),
+                    ),
+            )
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(colors.subtle)
+                    .child("诊断信息不包含凭据或完整环境变量；日志路径受 KANALIB_LOG_FILE 影响时以快照为准。"),
+            );
+
         let safety_section = div()
             .p(px(16.))
             .rounded(px(10.))
@@ -8148,6 +8750,8 @@ impl KanalibApp {
                             .child(protected_section)
                             .child(similar_section)
                             .child(data_section)
+                            .child(backup_section)
+                            .child(diagnostics_section)
                             .child(safety_section)
                             .child(shortcut_section)
                             .child(rules_section),
@@ -9047,6 +9651,7 @@ fn source_row(
     label: String,
     count: usize,
     active: bool,
+    status: Option<SourceScanStatus>,
     this: Entity<KanalibApp>,
     colors: UiColors,
 ) -> impl IntoElement {
@@ -9054,10 +9659,20 @@ fn source_row(
     let this_click = this.clone();
     let this_right = this.clone();
     let root_right = root.clone();
+    let (status_text, status_color) = match &status {
+        Some(status) if !status.online => ("离线", colors.danger),
+        Some(status) if status.error.is_some() => ("错误", colors.warning),
+        _ => ("", colors.subtle),
+    };
+    let aria = match (status_text, status.as_ref().and_then(|status| status.error.as_deref())) {
+        ("", _) => root.display().to_string(),
+        (text, Some(error)) => format!("{}（{text}：{error}）", root.display()),
+        (text, None) => format!("{}（{text}）", root.display()),
+    };
     let mut row = div()
         .id(id)
         .role(Role::Button)
-        .aria_label(root.display().to_string())
+        .aria_label(aria)
         .flex()
         .items_center()
         .justify_between()
@@ -9091,10 +9706,32 @@ fn source_row(
         div()
             .flex_1()
             .min_w(px(0.))
-            .truncate()
-            .text_xs()
-            .text_color(colors.fg)
-            .child(label),
+            .flex()
+            .items_center()
+            .gap(px(5.))
+            .children((!status_text.is_empty()).then(|| {
+                div()
+                    .flex_none()
+                    .flex()
+                    .items_center()
+                    .gap(px(3.))
+                    .child(div().size(px(6.)).rounded_full().bg(status_color))
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(status_color)
+                            .child(status_text),
+                    )
+            }))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w(px(0.))
+                    .truncate()
+                    .text_xs()
+                    .text_color(colors.fg)
+                    .child(label),
+            ),
     )
     .child(
         div()
@@ -9111,6 +9748,8 @@ fn source_menu(root: &Path, this: Entity<KanalibApp>) -> Menu {
     let remove_this = this.clone();
     let remove_root = root.to_path_buf();
     let reveal_root = root.to_path_buf();
+    let rescan_this = this.clone();
+    let rescan_root = root.to_path_buf();
     Menu::new()
         .item(
             MenuItem::new("重命名…")
@@ -9118,6 +9757,15 @@ fn source_menu(root: &Path, this: Entity<KanalibApp>) -> Menu {
                 .on_click(move |_, cx| {
                     let _ = rename_this.update(cx, |app, cx| {
                         app.open_source_rename(rename_root.clone(), cx);
+                    });
+                }),
+        )
+        .item(
+            MenuItem::new("重新扫描此来源")
+                .icon(IconName::RefreshCw)
+                .on_click(move |_, cx| {
+                    let _ = rescan_this.update(cx, |app, cx| {
+                        app.rescan_source(rescan_root.clone(), cx);
                     });
                 }),
         )
@@ -10729,6 +11377,49 @@ fn format_date(seconds: u64) -> String {
     format!("{year:04}-{month:02}-{day:02}")
 }
 
+/// 纯 std 相对时间；超过 30 天回退为日期。
+fn relative_time(seconds: u64) -> String {
+    if seconds == 0 {
+        return "从未".to_string();
+    }
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .unwrap_or(0);
+    if now <= seconds {
+        return "刚刚".to_string();
+    }
+    let diff = now - seconds;
+    match diff {
+        0..=59 => "刚刚".to_string(),
+        60..=3_599 => format!("{} 分钟前", diff / 60),
+        3_600..=86_399 => format!("{} 小时前", diff / 3_600),
+        86_400..=2_591_999 => format!("{} 天前", diff / 86_400),
+        _ => format_date(seconds),
+    }
+}
+
+/// 来源排除规则的一行只读摘要。
+fn scan_filter_summary(filter: &ScanFilterConfig) -> String {
+    let hidden = if filter.include_hidden {
+        "包含隐藏"
+    } else {
+        "排除隐藏"
+    };
+    let min = filter
+        .min_bytes
+        .map(format_bytes)
+        .unwrap_or_else(|| "不限".to_string());
+    let max = filter
+        .max_bytes
+        .map(format_bytes)
+        .unwrap_or_else(|| "不限".to_string());
+    format!(
+        "排除规则：{} 条 glob · {hidden} · 大小 {min} – {max}",
+        filter.exclude_globs.len()
+    )
+}
+
 fn display_name(asset: &Asset, show_extensions: bool) -> String {
     if show_extensions {
         return asset.title();
@@ -11145,6 +11836,7 @@ mod tests {
     use super::{Resource, cache_victims, clamp_cache_limit};
     use std::collections::HashMap;
     use std::path::Path;
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     fn resource(name: &str) -> Resource {
         Resource::Path(Path::new(name).into())
@@ -11214,6 +11906,34 @@ mod tests {
         assert!(!no_rating.rating && !no_rating.star);
         let no_resolution = super::detail_columns(560.);
         assert!(!no_resolution.resolution && no_resolution.size && no_resolution.modified);
+    }
+
+    #[test]
+    fn relative_time_buckets_are_stable() {
+        assert_eq!(super::relative_time(0), "从未");
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        assert_eq!(super::relative_time(now), "刚刚");
+        assert_eq!(super::relative_time(now - 120), "2 分钟前");
+        assert_eq!(super::relative_time(now - 7_200), "2 小时前");
+        assert_eq!(super::relative_time(now - 172_800), "2 天前");
+    }
+
+    #[test]
+    fn scan_filter_summary_reports_config() {
+        let filter = kanalib_core::model::ScanFilterConfig {
+            exclude_globs: vec!["**/.git/**".into(), "*_cache".into()],
+            include_hidden: false,
+            min_bytes: Some(1024),
+            max_bytes: Some(2 * 1024 * 1024),
+        };
+        let summary = super::scan_filter_summary(&filter);
+        assert!(summary.contains("2 条 glob"));
+        assert!(summary.contains("排除隐藏"));
+        assert!(summary.contains("1.0 KB"));
+        assert!(summary.contains("2.0 MB"));
     }
 
     /// 手动取证：解码 300 张 t256 后立即丢弃，观察 256K 档是否有泄漏。
