@@ -32,8 +32,10 @@ use kanalib_core::dedup::{
     similarity_pct_from_distance,
 };
 use kanalib_core::model::{
-    Asset, Counts, DiagnosticSnapshot, Filter, SavedSearch, ScanFilterConfig, SearchQuery,
-    SourceScanStatus, TagHit, TagSummary, normalize_tag_name,
+    Asset, Counts, DiagnosticSnapshot, Filter, RetagSummary, SavedSearch, ScanFilterConfig,
+    SearchQuery, SourceScanStatus, TagHit, TagJobError, TagQueueStatus, TagRecomputeSummary,
+    TagSummary, TagThresholds, TAG_CANDIDATE_MIN_SCORE, default_category_thresholds,
+    normalize_tag_name,
 };
 use kanalib_core::backup;
 use kanalib_core::diagnostics::{self, DiagnosticsContext};
@@ -66,6 +68,20 @@ const SIDEBAR_SECTIONS: [&str; 7] = [
     "groups",
     "tags",
 ];
+
+/// 设置页阈值编辑器按 sidecar 的类别顺序展示；未知类别不会出现在这里。
+const TAG_CATEGORY_LABELS: [(&str, &str); 6] = [
+    ("general", "通用"),
+    ("character", "角色"),
+    ("copyright", "版权"),
+    ("style", "风格"),
+    ("meta", "元数据"),
+    ("rating", "分级"),
+];
+/// 重打标超过这个数量先弹确认，避免误点把整个视图重新入队。
+const TAG_RETAG_CONFIRM_THRESHOLD: usize = 500;
+/// 队列区块最多展示的失败任务数。
+const TAG_JOB_ERROR_LIMIT: usize = 5;
 
 gpui::actions!(
     kanalib,
@@ -462,6 +478,13 @@ enum RescanOrigin {
 enum TagDialogMode {
     Add,
     Remove,
+}
+
+/// 大范围重打标的确认信息；`scope` 只用于展示来源（选中/当前视图）。
+#[derive(Clone)]
+struct TagRetagConfirm {
+    paths: Vec<PathBuf>,
+    scope: &'static str,
 }
 
 #[derive(Clone)]
@@ -1045,6 +1068,15 @@ pub struct KanalibApp {
     dedup_notice: Option<String>,
     rescan_confirm: Option<RescanOrigin>,
     settings_notice: Option<String>,
+    tag_thresholds: Option<TagThresholds>,
+    tag_queue_status: Option<TagQueueStatus>,
+    tag_queue_signature: Option<String>,
+    tag_job_errors: Vec<TagJobError>,
+    tag_cpu_allowed: bool,
+    tag_settings_notice: Option<String>,
+    tag_recompute_running: bool,
+    tag_retag_running: bool,
+    tag_retag_confirm: Option<TagRetagConfirm>,
     source_statuses: Vec<SourceScanStatus>,
     last_backup: Option<String>,
     backup_running: bool,
@@ -1259,6 +1291,15 @@ impl KanalibApp {
             dedup_notice: None,
             rescan_confirm: None,
             settings_notice: None,
+            tag_thresholds: None,
+            tag_queue_status: None,
+            tag_queue_signature: None,
+            tag_job_errors: Vec::new(),
+            tag_cpu_allowed: false,
+            tag_settings_notice: None,
+            tag_recompute_running: false,
+            tag_retag_running: false,
+            tag_retag_confirm: None,
             source_statuses,
             last_backup: None,
             backup_running: false,
@@ -1331,16 +1372,35 @@ impl KanalibApp {
         self.sync_source_statuses();
         if self.screen == Screen::Settings {
             self.refresh_diagnostics();
+            self.refresh_tag_settings(cx);
         }
         let weak = cx.entity().downgrade();
         self.refresh_task = Some(cx.spawn(async move |_, cx| {
             let mut last_status = String::new();
             let mut last_scanning = false;
             let mut last_revision = 0u64;
+            let mut ticks = 0u64;
             loop {
                 cx.background_executor()
                     .timer(Duration::from_millis(120))
                     .await;
+                // 队列状态只在设置页轮询：约 1.2s 一次队列快照，每 ~6s 连阈值与错误一起刷新。
+                ticks = ticks.wrapping_add(1);
+                if ticks % 10 == 0
+                    && weak
+                        .update(cx, |app, cx| {
+                            if app.screen == Screen::Settings {
+                                if ticks % 50 == 0 {
+                                    app.refresh_tag_settings(cx);
+                                } else {
+                                    app.refresh_tag_queue_status(cx);
+                                }
+                            }
+                        })
+                        .is_err()
+                {
+                    break;
+                }
                 let snapshot = weak.update(cx, |app, _| {
                     let shared = app.state.shared.lock().unwrap();
                     (shared.status.clone(), shared.scanning, shared.revision)
@@ -1358,6 +1418,7 @@ impl KanalibApp {
                             app.sync_source_statuses();
                             if scan_finished && app.screen == Screen::Settings {
                                 app.refresh_diagnostics();
+                                app.refresh_tag_settings(cx);
                             }
                             cx.notify();
                         })
@@ -1643,6 +1704,388 @@ impl KanalibApp {
         cx.notify();
     }
 
+    /// 读取阈值、队列状态、CPU 开关与最近失败；设置页打开/操作后/轮询时调用。
+    fn refresh_tag_settings(&mut self, cx: &mut Context<Self>) {
+        match self.state.tag_thresholds() {
+            Ok(thresholds) => self.tag_thresholds = Some(thresholds),
+            Err(error) => {
+                log::warn!("tag thresholds: {error:#}");
+                self.tag_settings_notice = Some(format!("读取打标阈值失败：{error:#}"));
+            }
+        }
+        self.tag_cpu_allowed = self.state.allow_cpu_tagging();
+        self.refresh_tag_queue_status(cx);
+        self.refresh_tag_job_errors();
+        cx.notify();
+    }
+
+    /// 只刷新队列快照与失败首条；状态签名不变时不触发重绘。
+    fn refresh_tag_queue_status(&mut self, cx: &mut Context<Self>) {
+        let status = self.state.tag_queue_status();
+        let signature = tag_queue_signature(&status);
+        let changed = self.tag_queue_signature.as_deref() != Some(signature.as_str());
+        self.tag_queue_status = Some(status);
+        self.tag_queue_signature = Some(signature);
+        if changed {
+            cx.notify();
+        }
+    }
+
+    fn refresh_tag_job_errors(&mut self) {
+        match self.state.tag_job_errors(TAG_JOB_ERROR_LIMIT) {
+            Ok(errors) => self.tag_job_errors = errors,
+            Err(error) => log::warn!("tag job errors: {error:#}"),
+        }
+    }
+
+    fn category_threshold_value(&self, category: &str) -> f32 {
+        self.tag_thresholds
+            .as_ref()
+            .and_then(|thresholds| thresholds.categories.get(category).copied())
+            .unwrap_or_else(|| {
+                default_category_thresholds()
+                    .get(category)
+                    .copied()
+                    .unwrap_or(0.2)
+            })
+    }
+
+    fn apply_category_threshold(
+        &mut self,
+        category: &str,
+        value: f32,
+        cx: &mut Context<Self>,
+    ) {
+        if !TAG_CATEGORY_LABELS
+            .iter()
+            .any(|(key, _)| *key == category)
+        {
+            self.tag_settings_notice = Some(format!("未知标签类别：{category}"));
+            cx.notify();
+            return;
+        }
+        match self.state.set_category_threshold(category, value) {
+            Ok(saved) => {
+                self.tag_settings_notice = Some(format!(
+                    "{} 阈值已保存为 {saved:.2}；点击“重算”后应用到已存候选",
+                    tag_category_label(category)
+                ));
+            }
+            Err(error) => {
+                let message = format!("设置 {} 阈值失败：{error:#}", tag_category_label(category));
+                self.tag_settings_notice = Some(message.clone());
+                push_toast(&self.toaster, cx, message, Severity::Danger);
+            }
+        }
+        self.refresh_tag_settings(cx);
+        cx.notify();
+    }
+
+    fn step_category_threshold(&mut self, category: &str, delta: f32, cx: &mut Context<Self>) {
+        let current = self.category_threshold_value(category);
+        let next = threshold_step(current, delta);
+        if (next - current).abs() < 0.0005 {
+            self.tag_settings_notice = Some(format!(
+                "{} 阈值已在 {current:.2}，无法继续调整（范围 0–1）",
+                tag_category_label(category)
+            ));
+            cx.notify();
+            return;
+        }
+        self.apply_category_threshold(category, next, cx);
+    }
+
+    fn reset_category_threshold(&mut self, category: &str, cx: &mut Context<Self>) {
+        let default = default_category_thresholds()
+            .get(category)
+            .copied()
+            .unwrap_or(0.2);
+        self.apply_category_threshold(category, default, cx);
+    }
+
+    fn apply_tag_override(&mut self, name: &str, value: &str, cx: &mut Context<Self>) {
+        let tag = normalize_tag_name(name);
+        if tag.is_empty() {
+            self.tag_settings_notice = Some("请输入要覆盖的标签名".to_string());
+            push_toast(
+                &self.toaster,
+                cx,
+                "请输入要覆盖的标签名",
+                Severity::Warning,
+            );
+            cx.notify();
+            return;
+        }
+        let value = match parse_tag_threshold_text(value) {
+            Ok(value) => value,
+            Err(message) => {
+                self.tag_settings_notice = Some(format!("单标签阈值无效：{message}"));
+                push_toast(
+                    &self.toaster,
+                    cx,
+                    format!("单标签阈值无效：{message}"),
+                    Severity::Warning,
+                );
+                cx.notify();
+                return;
+            }
+        };
+        match self.state.set_tag_threshold(&tag, Some(value)) {
+            Ok(saved) => {
+                self.tag_settings_notice = Some(format!(
+                    "标签 #{tag} 阈值已设为 {:.2}；重算后生效",
+                    saved.unwrap_or(value)
+                ));
+            }
+            Err(error) => {
+                let message = format!("设置标签 #{tag} 阈值失败：{error:#}");
+                self.tag_settings_notice = Some(message.clone());
+                push_toast(&self.toaster, cx, message, Severity::Danger);
+            }
+        }
+        self.refresh_tag_settings(cx);
+        cx.notify();
+    }
+
+    fn clear_tag_override(&mut self, tag: &str, cx: &mut Context<Self>) {
+        match self.state.set_tag_threshold(tag, None) {
+            Ok(_) => {
+                self.tag_settings_notice = Some(format!("标签 #{tag} 已恢复类别阈值；重算后生效"));
+            }
+            Err(error) => {
+                let message = format!("清除标签 #{tag} 覆盖失败：{error:#}");
+                self.tag_settings_notice = Some(message.clone());
+                push_toast(&self.toaster, cx, message, Severity::Danger);
+            }
+        }
+        self.refresh_tag_settings(cx);
+        cx.notify();
+    }
+
+    /// 重算/重打标的目标路径：选中优先，否则当前可见视图。
+    fn tag_target_paths(&self) -> (Vec<PathBuf>, &'static str) {
+        let selected = self.selected_paths();
+        if selected.is_empty() {
+            let mut paths = self.visible_paths();
+            paths.sort();
+            paths.dedup();
+            (paths, "当前视图")
+        } else {
+            let mut paths = selected;
+            paths.sort();
+            paths.dedup();
+            (paths, "选中")
+        }
+    }
+
+    fn start_recompute_tag_thresholds(&mut self, cx: &mut Context<Self>) {
+        if self.tag_recompute_running {
+            return;
+        }
+        let (paths, scope) = self.tag_target_paths();
+        if paths.is_empty() {
+            self.tag_settings_notice =
+                Some("没有可重算的图片：先选择图片或打开有内容的视图".to_string());
+            push_toast(
+                &self.toaster,
+                cx,
+                "没有可重算的图片",
+                Severity::Warning,
+            );
+            cx.notify();
+            return;
+        }
+        let count = paths.len();
+        self.tag_recompute_running = true;
+        self.tag_settings_notice = Some(format!("正在按候选重算{scope} {count} 张的阈值…"));
+        let state = self.state.clone();
+        let task = cx
+            .background_executor()
+            .spawn(async move { state.recompute_tag_thresholds(&paths) });
+        let weak = cx.entity().downgrade();
+        cx.spawn(async move |_, cx| {
+            let result = task.await;
+            let _ = weak.update(cx, |app, cx| {
+                app.tag_recompute_running = false;
+                match result {
+                    Ok(TagRecomputeSummary { updated, skipped }) => {
+                        let message = format!(
+                            "阈值重算完成（{scope}）：更新 {updated} 张 · 跳过 {skipped} 张；跳过项可能缺候选或超出已存 top-K，需要重打标"
+                        );
+                        app.tag_settings_notice = Some(message.clone());
+                        push_toast(&app.toaster, cx, message, Severity::Success);
+                    }
+                    Err(error) => {
+                        let message = format!("阈值重算失败：{error:#}");
+                        app.tag_settings_notice = Some(message.clone());
+                        push_toast(&app.toaster, cx, message, Severity::Danger);
+                    }
+                }
+                app.refresh_tag_settings(cx);
+                cx.notify();
+            });
+        })
+        .detach();
+        cx.notify();
+    }
+
+    fn request_retag(&mut self, selected_only: bool, cx: &mut Context<Self>) {
+        let (mut paths, scope) = if selected_only {
+            (self.selected_paths(), "选中")
+        } else {
+            (self.visible_paths(), "当前视图")
+        };
+        paths.sort();
+        paths.dedup();
+        if paths.is_empty() {
+            let message = if selected_only {
+                "先选择要重打标的图片"
+            } else {
+                "当前视图没有可重打标的图片"
+            };
+            self.tag_settings_notice = Some(message.to_string());
+            push_toast(&self.toaster, cx, message, Severity::Warning);
+            cx.notify();
+            return;
+        }
+        if paths.len() >= TAG_RETAG_CONFIRM_THRESHOLD {
+            self.tag_retag_confirm = Some(TagRetagConfirm { paths, scope });
+        } else {
+            self.start_retag(paths, scope, cx);
+        }
+        cx.notify();
+    }
+
+    fn start_retag(&mut self, paths: Vec<PathBuf>, scope: &'static str, cx: &mut Context<Self>) {
+        if self.tag_retag_running {
+            self.tag_settings_notice = Some("已有重打标任务在运行，请稍候".to_string());
+            cx.notify();
+            return;
+        }
+        let count = paths.len();
+        self.tag_retag_running = true;
+        self.tag_settings_notice = Some(format!(
+            "正在重打标{scope} {count} 张；已有候选的按阈值重算，缺候选的入队…"
+        ));
+        let state = self.state.clone();
+        let task = cx
+            .background_executor()
+            .spawn(async move { state.retag_paths(&paths) });
+        let weak = cx.entity().downgrade();
+        cx.spawn(async move |_, cx| {
+            let result = task.await;
+            let _ = weak.update(cx, |app, cx| {
+                app.tag_retag_running = false;
+                match result {
+                    Ok(RetagSummary {
+                        recomputed,
+                        queued,
+                        missing,
+                    }) => {
+                        let message = format!(
+                            "重打标完成（{scope}）：按候选重算 {recomputed} 张 · 入队 {queued} 张 · 缺失 {missing} 张；手工标签已保留"
+                        );
+                        app.tag_settings_notice = Some(message.clone());
+                        push_toast(&app.toaster, cx, message, Severity::Success);
+                    }
+                    Err(error) => {
+                        let message = format!("重打标失败：{error:#}");
+                        app.tag_settings_notice = Some(message.clone());
+                        push_toast(&app.toaster, cx, message, Severity::Danger);
+                    }
+                }
+                app.refresh_tag_settings(cx);
+                cx.notify();
+            });
+        })
+        .detach();
+        cx.notify();
+    }
+
+    fn prioritize_selected(&mut self, cx: &mut Context<Self>) {
+        let mut paths = self.selected_paths();
+        paths.sort();
+        paths.dedup();
+        if paths.is_empty() {
+            self.tag_settings_notice = Some("先选择图片，再提升打标优先级".to_string());
+            push_toast(
+                &self.toaster,
+                cx,
+                "先选择图片，再提升打标优先级",
+                Severity::Warning,
+            );
+            cx.notify();
+            return;
+        }
+        match self.state.prioritize_tag_jobs(&paths, 100) {
+            Ok(0) => {
+                self.tag_settings_notice =
+                    Some("选中图片没有等待中的打标任务（可能已完成或正在运行）".to_string());
+            }
+            Ok(count) => {
+                self.tag_settings_notice =
+                    Some(format!("已把 {count} 个打标任务提升到高优先级"));
+            }
+            Err(error) => {
+                let message = format!("提升打标优先级失败：{error:#}");
+                self.tag_settings_notice = Some(message.clone());
+                push_toast(&self.toaster, cx, message, Severity::Danger);
+            }
+        }
+        self.refresh_tag_settings(cx);
+        cx.notify();
+    }
+
+    fn toggle_tag_queue(&mut self, cx: &mut Context<Self>) {
+        let paused = self.state.shared.lock().unwrap().tag_status.paused;
+        if paused {
+            match self.state.resume_tag_queue() {
+                Ok(()) => {
+                    self.tag_settings_notice = Some("已继续打标队列".to_string());
+                }
+                Err(error) => {
+                    let message = format!("继续打标失败：{error:#}");
+                    self.tag_settings_notice = Some(message.clone());
+                    push_toast(&self.toaster, cx, message, Severity::Danger);
+                }
+            }
+        } else {
+            self.state.pause_tag_queue();
+            self.tag_settings_notice =
+                Some("已暂停打标；当前批完成后不再认领新任务".to_string());
+        }
+        self.refresh_tag_settings(cx);
+        cx.notify();
+    }
+
+    fn cancel_tag_queue(&mut self, cx: &mut Context<Self>) {
+        self.state.cancel_tag_queue();
+        self.tag_settings_notice =
+            Some("正在取消打标；已完成的结果会保留".to_string());
+        self.refresh_tag_settings(cx);
+        cx.notify();
+    }
+
+    fn toggle_cpu_tagging(&mut self, cx: &mut Context<Self>) {
+        let allow = !self.tag_cpu_allowed;
+        match self.state.set_allow_cpu_tagging(allow) {
+            Ok(()) => {
+                self.tag_settings_notice = Some(if allow {
+                    "已允许 CPU 慢速打标；继续队列后生效".to_string()
+                } else {
+                    "已关闭 CPU 慢速打标；GPU 不可用时队列会暂停".to_string()
+                });
+            }
+            Err(error) => {
+                let message = format!("更新 CPU 打标设置失败：{error:#}");
+                self.tag_settings_notice = Some(message.clone());
+                push_toast(&self.toaster, cx, message, Severity::Danger);
+            }
+        }
+        self.refresh_tag_settings(cx);
+        cx.notify();
+    }
+
     fn set_filter(&mut self, filter: Filter, cx: &mut Context<Self>) {
         self.screen = Screen::Library;
         self.state.set_filter(filter);
@@ -1668,10 +2111,13 @@ impl KanalibApp {
     fn open_settings(&mut self, cx: &mut Context<Self>) {
         self.screen = Screen::Settings;
         self.dedup_confirm = None;
+        self.tag_retag_confirm = None;
+        self.tag_settings_notice = None;
         self.settings_notice = None;
         self.refresh_cache_stats(cx);
         self.sync_source_statuses();
         self.refresh_diagnostics();
+        self.refresh_tag_settings(cx);
     }
 
     fn refresh_cache_stats(&mut self, cx: &mut Context<Self>) {
@@ -3065,6 +3511,9 @@ impl KanalibApp {
             "view:folder" => self.choose_folder(cx),
             "scan:rescan" => self.rescan(cx),
             "scan:retry" => self.retry_failed(cx),
+            "tag:retag-selected" => self.request_retag(true, cx),
+            "tag:prioritize" => self.prioritize_selected(cx),
+            "tag:queue-toggle" => self.toggle_tag_queue(cx),
             "act:fav" => self.apply_favorite(true, cx),
             "act:unfav" => self.apply_favorite(false, cx),
             "act:toggle-fav" => self.toggle_favorite(cx),
@@ -3567,6 +4016,8 @@ impl Render for KanalibApp {
             let settings_width = (window_width - sidebar_width).max(px(640.));
             self.render_settings(
                 &this,
+                window,
+                cx,
                 &roots,
                 &source_aliases,
                 &protected_paths,
@@ -3756,6 +4207,15 @@ impl Render for KanalibApp {
                     Command::new("sort:fav", "收藏优先").icon(IconName::Heart),
                     Command::new("sort:rating", "按模型评级排序").icon(IconName::Sparkles),
                     Command::new("sort:toggle", "切换排序方向").icon(IconName::ArrowDownUp),
+                ],
+            )
+            .group(
+                "打标",
+                [
+                    Command::new("tag:retag-selected", "重打标选中")
+                        .icon(IconName::WandSparkles),
+                    Command::new("tag:prioritize", "提升打标优先级").icon(IconName::ArrowUp),
+                    Command::new("tag:queue-toggle", "暂停 / 继续打标").icon(IconName::Pause),
                 ],
             )
             .group(
@@ -4030,6 +4490,35 @@ impl Render for KanalibApp {
             })
             .into_any_element()
         });
+        let tag_retag_dialog = self.tag_retag_confirm.clone().map(|pending| {
+            let close = this.clone();
+            let confirm = this.clone();
+            let count = pending.paths.len();
+            let scope = pending.scope;
+            ConfirmDialog::new(
+                "tag-retag-dialog",
+                "重打标？",
+                format!(
+                    "将对{scope} {count} 张图片重打标：已有候选的按当前阈值重算，缺候选的入队；手工标签会保留。"
+                ),
+                move |_, cx| {
+                    let _ = close.update(cx, |app, cx| {
+                        app.tag_retag_confirm = None;
+                        cx.notify();
+                    });
+                },
+            )
+            .confirm("开始重打标")
+            .on_confirm(move |_, cx| {
+                let _ = confirm.update(cx, |app, cx| {
+                    if let Some(pending) = app.tag_retag_confirm.take() {
+                        app.start_retag(pending.paths, pending.scope, cx);
+                    }
+                    cx.notify();
+                });
+            })
+            .into_any_element()
+        });
         let cleanup_dialog = pending_cleanup.as_ref().map(|pending| {
             let close = this.clone();
             let confirm = this.clone();
@@ -4129,6 +4618,7 @@ impl Render for KanalibApp {
             .children(tag_merge_dialog)
             .children(remove_source_dialog)
             .children(rescan_dialog)
+            .children(tag_retag_dialog)
             .children(source_rename_dialog)
             .children(source_context_menu)
             .children(cleanup_dialog)
@@ -4201,6 +4691,7 @@ impl Render for KanalibApp {
             && self.source_remove_confirm.is_none()
             && self.source_rename.is_none()
             && self.rescan_confirm.is_none()
+            && self.tag_retag_confirm.is_none()
         {
             window.focus(&self.grid_focus, cx);
             self.focus_grid_pending = false;
@@ -7656,6 +8147,8 @@ impl KanalibApp {
     fn render_settings(
         &self,
         this: &Entity<Self>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
         roots: &[PathBuf],
         source_aliases: &HashMap<PathBuf, String>,
         protected_paths: &[PathBuf],
@@ -7671,6 +8164,16 @@ impl KanalibApp {
         colors: UiColors,
     ) -> AnyElement {
         let page_padding = px(24.);
+        let tag_override_name = window.use_keyed_state(
+            "kanalib-tag-override-name",
+            cx,
+            |window, cx| TextInput::new(window, cx).placeholder("标签名，如 long_hair"),
+        );
+        let tag_override_value = window.use_keyed_state(
+            "kanalib-tag-override-value",
+            cx,
+            |window, cx| TextInput::new(window, cx).placeholder("0.00–1.00"),
+        );
         let this_back = this.clone();
         let this_add = this.clone();
         let this_refresh_cache = this.clone();
@@ -8178,6 +8681,522 @@ impl KanalibApp {
                     .text_color(colors.muted)
                     .child("移除来源只影响图库视图，不会删除磁盘文件。"),
             );
+
+        let thresholds = self.tag_thresholds.clone().unwrap_or_default();
+        let thresholds_loaded = self.tag_thresholds.is_some();
+        let threshold_defaults = default_category_thresholds();
+        let mut threshold_rows = div()
+            .id("tag-thresholds")
+            .aria_label("打标类别阈值")
+            .flex()
+            .flex_col()
+            .gap(px(3.));
+        for (category, label) in TAG_CATEGORY_LABELS {
+            let current = thresholds
+                .categories
+                .get(category)
+                .copied()
+                .or_else(|| threshold_defaults.get(category).copied())
+                .unwrap_or(0.2);
+            let default = threshold_defaults.get(category).copied().unwrap_or(0.2);
+            let minus_category = category.to_string();
+            let plus_category = category.to_string();
+            let reset_category = category.to_string();
+            let this_minus = this.clone();
+            let this_plus = this.clone();
+            let this_reset = this.clone();
+            threshold_rows = threshold_rows.child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(6.))
+                    .child(
+                        div()
+                            .w(px(64.))
+                            .text_xs()
+                            .text_color(colors.fg)
+                            .child(label),
+                    )
+                    .child(
+                        div()
+                            .id(SharedString::from(format!("tag-threshold-{category}")))
+                            .aria_label(format!("{label}类别阈值 {current:.2}"))
+                            .w(px(44.))
+                            .text_xs()
+                            .text_color(colors.muted)
+                            .child(format!("{current:.2}")),
+                    )
+                    .child(
+                        Button::new(
+                            SharedString::from(format!("tag-threshold-{category}-minus")),
+                            "−0.01",
+                        )
+                        .size(ControlSize::Sm)
+                        .disabled(current <= 0.0)
+                        .on_click(move |_, _, cx| {
+                            let _ = this_minus.update(cx, |app, cx| {
+                                app.step_category_threshold(&minus_category, -0.01, cx);
+                            });
+                        }),
+                    )
+                    .child(
+                        Button::new(
+                            SharedString::from(format!("tag-threshold-{category}-plus")),
+                            "+0.01",
+                        )
+                        .size(ControlSize::Sm)
+                        .disabled(current >= 1.0)
+                        .on_click(move |_, _, cx| {
+                            let _ = this_plus.update(cx, |app, cx| {
+                                app.step_category_threshold(&plus_category, 0.01, cx);
+                            });
+                        }),
+                    )
+                    .child(
+                        Button::new(
+                            SharedString::from(format!("tag-threshold-{category}-reset")),
+                            "重置",
+                        )
+                        .size(ControlSize::Sm)
+                        .disabled((current - default).abs() < 0.0005)
+                        .on_click(move |_, _, cx| {
+                            let _ = this_reset.update(cx, |app, cx| {
+                                app.reset_category_threshold(&reset_category, cx);
+                            });
+                        }),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(colors.subtle)
+                            .child(format!("默认 {default:.2}")),
+                    ),
+            );
+        }
+
+        let mut overrides = thresholds.overrides.iter().collect::<Vec<_>>();
+        overrides.sort_by(|(left, _), (right, _)| left.cmp(right));
+        let override_count = overrides.len();
+        let override_rows: AnyElement = if overrides.is_empty() {
+            div()
+                .text_xs()
+                .text_color(colors.subtle)
+                .child("暂无单标签覆盖；所有标签使用类别阈值。")
+                .into_any_element()
+        } else {
+            let mut rows = div().flex().flex_col().gap(px(3.));
+            for (tag, value) in overrides.into_iter().take(8) {
+                let this_clear = this.clone();
+                let tag_name = tag.clone();
+                rows = rows.child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .justify_between()
+                        .gap(px(8.))
+                        .px(px(8.))
+                        .py(px(3.))
+                        .rounded(px(4.))
+                        .bg(colors.sunken)
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w(px(0.))
+                                .truncate()
+                                .text_xs()
+                                .text_color(colors.fg)
+                                .child(format!("#{tag} · {value:.2}")),
+                        )
+                        .child(
+                            Button::new(
+                                SharedString::from(format!("tag-override-clear-{tag}")),
+                                "清除",
+                            )
+                            .size(ControlSize::Sm)
+                            .on_click(move |_, _, cx| {
+                                let _ = this_clear.update(cx, |app, cx| {
+                                    app.clear_tag_override(&tag_name, cx);
+                                });
+                            }),
+                        ),
+                );
+            }
+            if override_count > 8 {
+                rows = rows.child(
+                    div()
+                        .text_xs()
+                        .text_color(colors.subtle)
+                        .child(format!("另有 {} 条覆盖未展开", override_count - 8)),
+                );
+            }
+            rows.into_any_element()
+        };
+
+        let selected_target_count = if !self.selection.is_empty() {
+            self.selection.len()
+        } else if self.state.shared.lock().unwrap().selected.is_some() {
+            1
+        } else {
+            0
+        };
+        let target_count = if selected_target_count > 0 {
+            selected_target_count
+        } else {
+            self.view.visible_indices.len()
+        };
+        let this_recompute = this.clone();
+        let this_apply_override = this.clone();
+        let this_clear_override = this.clone();
+        let override_name_field = tag_override_name.clone();
+        let override_value_field = tag_override_value.clone();
+        let clear_name_field = tag_override_name.clone();
+        let override_inputs = div()
+            .flex()
+            .flex_wrap()
+            .items_center()
+            .gap(px(6.))
+            .child(
+                div()
+                    .w(px(220.))
+                    .child(Input::new(&tag_override_name).least("标签名，如 long_hair")),
+            )
+            .child(
+                div()
+                    .w(px(110.))
+                    .child(Input::new(&tag_override_value).least("0.00–1.00")),
+            )
+            .child(
+                Button::new("tag-override-apply", "应用覆盖")
+                    .size(ControlSize::Sm)
+                    .on_click(move |_, _, cx| {
+                        let name = override_name_field.read(cx).text().to_string();
+                        let value = override_value_field.read(cx).text().to_string();
+                        let _ = this_apply_override.update(cx, |app, cx| {
+                            app.apply_tag_override(&name, &value, cx);
+                        });
+                    }),
+            )
+            .child(
+                Button::new("tag-override-clear", "按标签名清除")
+                    .size(ControlSize::Sm)
+                    .on_click(move |_, _, cx| {
+                        let name = clear_name_field.read(cx).text().to_string();
+                        let _ = this_clear_override.update(cx, |app, cx| {
+                            app.clear_tag_override(&name, cx);
+                        });
+                    }),
+            );
+
+        let queue = self.tag_queue_status.clone().unwrap_or_default();
+        let queue_phase = tag_queue_phase(&queue);
+        let queue_gpu = match queue.gpu_available {
+            Some(true) => "GPU 可用",
+            Some(false) => "GPU 不可用",
+            None => "GPU 状态未知",
+        };
+        let queue_device = queue
+            .device
+            .clone()
+            .unwrap_or_else(|| "未加载".to_string());
+        let queue_status_rows = div()
+            .id("tag-queue-status")
+            .aria_label("打标队列状态")
+            .flex()
+            .flex_col()
+            .gap(px(4.))
+            .child(info_row(
+                "状态",
+                format!(
+                    "{queue_phase} · 等待 {} · 运行 {} · 失败 {} · 完成 {}",
+                    queue.pending, queue.running, queue.error, queue.done
+                ),
+                if queue.error > 0 {
+                    colors.warning
+                } else {
+                    colors.fg
+                },
+            ))
+            .child(info_row(
+                "本轮",
+                format!(
+                    "完成 {} / {} · 失败 {} · 吞吐 {} · ETA {}",
+                    queue.completed,
+                    queue.total,
+                    queue.failed,
+                    format_tag_throughput(queue.throughput_per_sec),
+                    format_tag_eta(queue.eta_secs)
+                ),
+                colors.fg,
+            ))
+            .child(info_row(
+                "设备",
+                format!("{queue_device} · {queue_gpu}"),
+                colors.muted,
+            ));
+        let queue_message = queue.message.clone().map(|message| {
+            div()
+                .text_xs()
+                .text_color(colors.accent)
+                .child(message)
+        });
+        let queue_last_error = queue.last_error.clone().map(|error| {
+            let path = queue
+                .last_error_path
+                .as_ref()
+                .map(|path| path.display().to_string())
+                .unwrap_or_else(|| "未知路径".to_string());
+            div()
+                .truncate()
+                .text_xs()
+                .text_color(colors.danger)
+                .child(format!("最近错误 · {path} · {error}"))
+        });
+
+        let this_pause = this.clone();
+        let this_cancel = this.clone();
+        let this_queue_refresh = this.clone();
+        let this_cpu = this.clone();
+        let this_retry = this.clone();
+        let this_prioritize = this.clone();
+        let this_retag_selected = this.clone();
+        let this_retag_view = this.clone();
+        let queue_actions = div()
+            .flex()
+            .flex_wrap()
+            .items_center()
+            .gap(px(6.))
+            .child(
+                Button::new(
+                    "tag-queue-pause",
+                    if queue.paused {
+                        "继续打标"
+                    } else {
+                        "暂停打标"
+                    },
+                )
+                .primary()
+                .disabled(queue.cancelling)
+                .on_click(move |_, _, cx| {
+                    let _ = this_pause.update(cx, |app, cx| app.toggle_tag_queue(cx));
+                }),
+            )
+            .child(
+                Button::new("tag-queue-cancel", "取消打标")
+                    .size(ControlSize::Sm)
+                    .disabled(queue.cancelling)
+                    .on_click(move |_, _, cx| {
+                        let _ = this_cancel.update(cx, |app, cx| app.cancel_tag_queue(cx));
+                    }),
+            )
+            .child(
+                Button::new("tag-queue-refresh", "刷新队列")
+                    .size(ControlSize::Sm)
+                    .icon(IconName::RefreshCw)
+                    .on_click(move |_, _, cx| {
+                        let _ = this_queue_refresh
+                            .update(cx, |app, cx| app.refresh_tag_settings(cx));
+                    }),
+            )
+            .child(
+                Button::new(
+                    "tag-queue-cpu-toggle",
+                    if self.tag_cpu_allowed {
+                        "允许 CPU 慢速打标：开"
+                    } else {
+                        "允许 CPU 慢速打标：关"
+                    },
+                )
+                .size(ControlSize::Sm)
+                .on_click(move |_, _, cx| {
+                    let _ = this_cpu.update(cx, |app, cx| app.toggle_cpu_tagging(cx));
+                }),
+            )
+            .child(
+                Button::new("tag-queue-retry-failed", "重试失败")
+                    .size(ControlSize::Sm)
+                    .on_click(move |_, _, cx| {
+                        let _ = this_retry.update(cx, |app, cx| app.retry_failed(cx));
+                    }),
+            )
+            .child(
+                Button::new("tag-prioritize-selected", "提升选中优先级")
+                    .size(ControlSize::Sm)
+                    .icon(IconName::ArrowUp)
+                    .on_click(move |_, _, cx| {
+                        let _ = this_prioritize
+                            .update(cx, |app, cx| app.prioritize_selected(cx));
+                    }),
+            )
+            .child(
+                Button::new("tag-retag-selected", "重打标选中")
+                    .size(ControlSize::Sm)
+                    .icon(IconName::WandSparkles)
+                    .on_click(move |_, _, cx| {
+                        let _ = this_retag_selected
+                            .update(cx, |app, cx| app.request_retag(true, cx));
+                    }),
+            )
+            .child(
+                Button::new("tag-retag-view", "重打标当前视图")
+                    .size(ControlSize::Sm)
+                    .on_click(move |_, _, cx| {
+                        let _ = this_retag_view
+                            .update(cx, |app, cx| app.request_retag(false, cx));
+                    }),
+            );
+
+        let error_rows: AnyElement = if self.tag_job_errors.is_empty() {
+            div()
+                .text_xs()
+                .text_color(colors.subtle)
+                .child("最近失败：无")
+                .into_any_element()
+        } else {
+            let mut rows = div().flex().flex_col().gap(px(3.));
+            for error in &self.tag_job_errors {
+                let file_name = error
+                    .path
+                    .file_name()
+                    .map(|name| name.to_string_lossy().to_string())
+                    .unwrap_or_else(|| error.path.display().to_string());
+                rows = rows.child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap(px(1.))
+                        .px(px(8.))
+                        .py(px(3.))
+                        .rounded(px(4.))
+                        .bg(colors.sunken)
+                        .child(
+                            div()
+                                .truncate()
+                                .text_xs()
+                                .text_color(colors.fg)
+                                .child(format!(
+                                    "#{} · 尝试 {} 次 · {}",
+                                    error.job_id, error.attempts, file_name
+                                )),
+                        )
+                        .child(
+                            div()
+                                .truncate()
+                                .text_xs()
+                                .text_color(colors.danger)
+                                .child(
+                                    error
+                                        .last_error
+                                        .clone()
+                                        .unwrap_or_else(|| "没有错误详情".to_string()),
+                                ),
+                        ),
+                );
+            }
+            rows.into_any_element()
+        };
+
+        let tag_section = div()
+            .p(px(16.))
+            .rounded(px(10.))
+            .border_1()
+            .border_color(colors.border)
+            .bg(colors.surface)
+            .flex()
+            .flex_col()
+            .gap(px(8.))
+            .child(
+                div()
+                    .text_sm()
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .child("打标与队列"),
+            )
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(colors.muted)
+                    .child(if thresholds_loaded {
+                        "阈值改动只持久化设置；点击“重算”才按已存候选更新标签。"
+                    } else {
+                        "尚未读取到阈值，当前显示模型默认值；点击“刷新队列”重试。"
+                    }),
+            )
+            .children(self.tag_settings_notice.clone().map(|notice| {
+                div()
+                    .text_xs()
+                    .text_color(colors.accent)
+                    .child(notice)
+            }))
+            .child(
+                div()
+                    .text_xs()
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .child("类别阈值"),
+            )
+            .child(threshold_rows)
+            .child(
+                div()
+                    .flex()
+                    .flex_wrap()
+                    .items_center()
+                    .gap(px(6.))
+                    .child(
+                        Button::new(
+                            "tag-recompute",
+                            if self.tag_recompute_running {
+                                "重算中…"
+                            } else {
+                                "重算当前视图/选中"
+                            },
+                        )
+                        .size(ControlSize::Sm)
+                        .disabled(self.tag_recompute_running)
+                        .on_click(move |_, _, cx| {
+                            let _ = this_recompute.update(cx, |app, cx| {
+                                app.start_recompute_tag_thresholds(cx)
+                            });
+                        }),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(colors.subtle)
+                            .child(format!("目标 {target_count} 张（选中优先）")),
+                    ),
+            )
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(colors.subtle)
+                    .child(format!(
+                        "候选只保存分数 ≥ {TAG_CANDIDATE_MIN_SCORE:.3} 的每类前若干名；阈值低于候选下限或超出已存 top-K 的资产需要重打标。"
+                    )),
+            )
+            .child(
+                div()
+                    .text_xs()
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .child(format!("单标签覆盖（{override_count}）")),
+            )
+            .child(override_inputs)
+            .child(override_rows)
+            .child(div().h(px(1.)).bg(colors.border))
+            .child(
+                div()
+                    .text_sm()
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .child("打标队列"),
+            )
+            .child(queue_status_rows)
+            .children(queue_message)
+            .children(queue_last_error)
+            .child(queue_actions)
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(colors.subtle)
+                    .child("暂停在当前批完成后生效；取消保留已完成结果；重打标会保留手工标签。"),
+            )
+            .child(error_rows);
 
         let data_section = div()
             .p(px(16.))
@@ -8746,6 +9765,7 @@ impl KanalibApp {
                             .flex()
                             .flex_col()
                             .gap(px(12.))
+                            .child(tag_section)
                             .child(sources_section)
                             .child(protected_section)
                             .child(similar_section)
@@ -11341,6 +12361,77 @@ fn friendly_media_error(message: &str) -> String {
     }
 }
 
+fn tag_category_label(category: &str) -> &'static str {
+    TAG_CATEGORY_LABELS
+        .iter()
+        .find(|(key, _)| *key == category)
+        .map(|(_, label)| *label)
+        .unwrap_or("未知类别")
+}
+
+/// 阈值按钮按 0.01 步进；保留两位小数并夹在 0–1，避免浮点累积成 0.18000001。
+fn threshold_step(current: f32, delta: f32) -> f32 {
+    (((current + delta).clamp(0.0, 1.0)) * 100.0).round() / 100.0
+}
+
+fn parse_tag_threshold_text(text: &str) -> Result<f32, String> {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return Err("请输入 0–1 之间的阈值".to_string());
+    }
+    let value = trimmed
+        .parse::<f32>()
+        .map_err(|_| "阈值必须是数字".to_string())?;
+    if !value.is_finite() {
+        return Err("阈值必须是有限数字".to_string());
+    }
+    if !(0.0..=1.0).contains(&value) {
+        return Err("阈值需在 0–1 之间".to_string());
+    }
+    Ok(value)
+}
+
+fn tag_queue_phase(status: &TagQueueStatus) -> &'static str {
+    if status.cancelling {
+        "取消中"
+    } else if status.paused {
+        "已暂停"
+    } else if status.running > 0 {
+        "运行中"
+    } else if status.pending > 0 {
+        "等待中"
+    } else if status.error > 0 {
+        "有空闲失败"
+    } else {
+        "空闲"
+    }
+}
+
+fn format_tag_throughput(rate: f32) -> String {
+    if rate > 0.0 && rate.is_finite() {
+        format!("{rate:.1} 张/秒")
+    } else {
+        "—".to_string()
+    }
+}
+
+fn format_tag_eta(eta: Option<u64>) -> String {
+    match eta {
+        None => "—".to_string(),
+        Some(0) => "0 秒".to_string(),
+        Some(seconds) if seconds < 60 => format!("{seconds} 秒"),
+        Some(seconds) if seconds < 3_600 => {
+            format!("{} 分 {:02} 秒", seconds / 60, seconds % 60)
+        }
+        Some(seconds) => format!("{} 小时 {:02} 分", seconds / 3_600, (seconds % 3_600) / 60),
+    }
+}
+
+/// Debug 覆盖全部展示字段；只用于判断 1s 轮询结果是否有变化，避免空闲时反复重绘。
+fn tag_queue_signature(status: &TagQueueStatus) -> String {
+    format!("{status:?}")
+}
+
 fn format_bytes(bytes: u64) -> String {
     const KB: f64 = 1024.;
     const MB: f64 = KB * 1024.;
@@ -11862,6 +12953,38 @@ mod tests {
     fn image_cache_limit_is_at_least_one() {
         assert_eq!(clamp_cache_limit(0), 1);
         assert_eq!(clamp_cache_limit(128), 128);
+    }
+
+    #[test]
+    fn tag_threshold_step_rounds_and_clamps() {
+        assert_eq!(super::threshold_step(0.17, 0.01), 0.18);
+        assert_eq!(super::threshold_step(0.005, -0.01), 0.0);
+        assert_eq!(super::threshold_step(0.99, 0.01), 1.0);
+        assert_eq!(super::threshold_step(0.0, -0.01), 0.0);
+    }
+
+    #[test]
+    fn tag_threshold_input_rejects_invalid_values() {
+        assert_eq!(super::parse_tag_threshold_text("0.5").unwrap(), 0.5);
+        assert_eq!(super::parse_tag_threshold_text(" 1 ").unwrap(), 1.0);
+        for bad in ["", "-0.01", "1.01", "nan", "abc"] {
+            assert!(
+                super::parse_tag_threshold_text(bad).is_err(),
+                "expected error for {bad:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn tag_eta_and_category_labels_are_stable() {
+        assert_eq!(super::format_tag_eta(None), "—");
+        assert_eq!(super::format_tag_eta(Some(0)), "0 秒");
+        assert_eq!(super::format_tag_eta(Some(12)), "12 秒");
+        assert_eq!(super::format_tag_eta(Some(65)), "1 分 05 秒");
+        assert_eq!(super::format_tag_eta(Some(3_700)), "1 小时 01 分");
+        assert_eq!(super::tag_category_label("general"), "通用");
+        assert_eq!(super::tag_category_label("rating"), "分级");
+        assert_eq!(super::tag_category_label("unknown"), "未知类别");
     }
 
     #[test]
