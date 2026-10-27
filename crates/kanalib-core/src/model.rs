@@ -471,7 +471,7 @@ impl Filter {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum NumOp {
+pub(crate) enum NumOp {
     Eq,
     Gt,
     Ge,
@@ -480,7 +480,7 @@ enum NumOp {
 }
 
 #[derive(Clone, Copy, Debug)]
-enum NumField {
+pub(crate) enum NumField {
     Size,
     Width,
     Height,
@@ -488,24 +488,24 @@ enum NumField {
 }
 
 #[derive(Clone, Copy, Debug)]
-struct NumericFilter {
-    field: NumField,
-    op: NumOp,
-    value: f64,
+pub(crate) struct NumericFilter {
+    pub(crate) field: NumField,
+    pub(crate) op: NumOp,
+    pub(crate) value: f64,
 }
 
 #[derive(Clone, Debug)]
-struct DateFilter {
-    op: NumOp,
-    year: i32,
-    month: u8,
-    day: Option<u8>,
+pub(crate) struct DateFilter {
+    pub(crate) op: NumOp,
+    pub(crate) year: i32,
+    pub(crate) month: u8,
+    pub(crate) day: Option<u8>,
 }
 
 #[derive(Clone, Debug)]
-struct ScopedTag {
-    category: String,
-    value: String,
+pub(crate) struct ScopedTag {
+    pub(crate) category: String,
+    pub(crate) value: String,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -539,6 +539,38 @@ pub struct SearchQuery {
     duplicates_only: bool,
     impossible: bool,
     warnings: Vec<String>,
+}
+
+/// 只读视图：供同 crate 的 SQL 下推构造使用，不改变解析/匹配语义。
+pub(crate) struct SearchQueryParts<'a> {
+    pub(crate) free: &'a [String],
+    pub(crate) exclude_free: &'a [String],
+    pub(crate) tags: &'a [String],
+    pub(crate) exclude_tags: &'a [String],
+    pub(crate) scoped_tags: &'a [ScopedTag],
+    pub(crate) exclude_scoped_tags: &'a [ScopedTag],
+    pub(crate) groups: &'a [String],
+    pub(crate) exclude_groups: &'a [String],
+    pub(crate) names: &'a [String],
+    pub(crate) exclude_names: &'a [String],
+    pub(crate) paths: &'a [String],
+    pub(crate) exclude_paths: &'a [String],
+    pub(crate) rating: Option<&'a str>,
+    pub(crate) exclude_rating: Option<&'a str>,
+    pub(crate) tagged: Option<bool>,
+    pub(crate) favorite: Option<bool>,
+    pub(crate) failed: Option<bool>,
+    pub(crate) damaged: Option<bool>,
+    pub(crate) star: Option<u8>,
+    pub(crate) star_min: Option<u8>,
+    pub(crate) star_max: Option<u8>,
+    pub(crate) exclude_star: Option<u8>,
+    pub(crate) numeric: &'a [NumericFilter],
+    pub(crate) exclude_numeric: &'a [NumericFilter],
+    pub(crate) dates: &'a [DateFilter],
+    pub(crate) exclude_dates: &'a [DateFilter],
+    pub(crate) duplicates_only: bool,
+    pub(crate) impossible: bool,
 }
 
 fn parse_comparison(value: &str) -> (NumOp, &str) {
@@ -611,6 +643,23 @@ fn date_parts(seconds: u64) -> (i32, u8, u8) {
         year += 1;
     }
     (year as i32, month as u8, day as u8)
+}
+
+/// `date_parts` 的逆运算：公历年月日 → 1970-01-01 起的天数。
+/// SQL 下推用它把日期比较变成整数比较，结果与 `date_parts` 的字典序一致。
+pub(crate) fn day_number(year: i32, month: u8, day: u8) -> i64 {
+    let year = if month <= 2 {
+        i64::from(year) - 1
+    } else {
+        i64::from(year)
+    };
+    let era = if year >= 0 { year } else { year - 399 } / 400;
+    let yoe = year - era * 400;
+    let month = i64::from(month);
+    let mp = if month > 2 { month - 3 } else { month + 9 };
+    let doy = (153 * mp + 2) / 5 + i64::from(day) - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    era * 146_097 + doe - 719_468
 }
 
 fn compare_numbers(op: NumOp, actual: f64, target: f64) -> bool {
@@ -842,6 +891,39 @@ impl SearchQuery {
 
     pub fn free_text(&self) -> String {
         self.free.join(" ")
+    }
+
+    pub(crate) fn parts(&self) -> SearchQueryParts<'_> {
+        SearchQueryParts {
+            free: &self.free,
+            exclude_free: &self.exclude_free,
+            tags: &self.tags,
+            exclude_tags: &self.exclude_tags,
+            scoped_tags: &self.scoped_tags,
+            exclude_scoped_tags: &self.exclude_scoped_tags,
+            groups: &self.groups,
+            exclude_groups: &self.exclude_groups,
+            names: &self.names,
+            exclude_names: &self.exclude_names,
+            paths: &self.paths,
+            exclude_paths: &self.exclude_paths,
+            rating: self.rating.as_deref(),
+            exclude_rating: self.exclude_rating.as_deref(),
+            tagged: self.tagged,
+            favorite: self.favorite,
+            failed: self.failed,
+            damaged: self.damaged,
+            star: self.star,
+            star_min: self.star_min,
+            star_max: self.star_max,
+            exclude_star: self.exclude_star,
+            numeric: &self.numeric,
+            exclude_numeric: &self.exclude_numeric,
+            dates: &self.dates,
+            exclude_dates: &self.exclude_dates,
+            duplicates_only: self.duplicates_only,
+            impossible: self.impossible,
+        }
     }
 
     pub fn warnings(&self) -> &[String] {
@@ -1845,4 +1927,20 @@ mod tests {
         assert!(is_ffmpeg_only(Path::new("a.AVIF")));
         assert!(!is_ffmpeg_only(Path::new("a.tiff")));
     }
+    #[test]
+    fn day_number_round_trips_date_parts() {
+        for (year, month, day) in [
+            (1970, 1, 1),
+            (2024, 2, 29),
+            (2000, 2, 29),
+            (2023, 12, 31),
+            (2024, 3, 1),
+        ] {
+            let number = day_number(year, month, day);
+            assert_eq!(date_parts((number as u64) * 86_400), (year, month, day));
+        }
+        assert!(day_number(2024, 2, 28) < day_number(2024, 2, 29));
+        assert!(day_number(2024, 2, 29) < day_number(2024, 3, 1));
+    }
+
 }

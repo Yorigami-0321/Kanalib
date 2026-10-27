@@ -9,7 +9,7 @@ use anyhow::{Context, Result, bail};
 use image::{ImageFormat, Rgb, RgbImage};
 use serde::Deserialize;
 
-use crate::db::{Db, JobCounts, StoredMeta};
+use crate::db::{Db, JobCounts, SearchPage, SearchPageRequest, StoredMeta};
 use crate::dedup::{
     DEFAULT_SIMILAR_THRESHOLD, DuplicateReview, GroupKind, ReviewState, is_protected,
 };
@@ -2110,6 +2110,26 @@ impl AppState {
             .map(str::to_string)
             .collect::<Vec<_>>();
         Db::open(&self.db_path)?.search_paths_in(&roots, &tokens)
+    }
+
+    /// 分页搜索入口；作用范围与 `search_paths` 相同（当前所有本地根目录）。
+    pub fn search_page(&self, request: SearchPageRequest<'_>) -> Result<SearchPage> {
+        let roots = self
+            .shared
+            .lock()
+            .unwrap()
+            .roots
+            .iter()
+            .map(|root| root.to_string_lossy().to_string())
+            .collect::<Vec<_>>();
+        if roots.is_empty() {
+            return Ok(SearchPage {
+                paths: Vec::new(),
+                next: None,
+                total: request.include_total.then_some(0),
+            });
+        }
+        Db::open(&self.db_path)?.search_page(&roots, request)
     }
 
     pub fn stop(&self) {
