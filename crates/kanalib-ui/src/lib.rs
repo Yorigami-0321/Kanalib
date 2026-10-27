@@ -33,11 +33,12 @@ use kanalib_core::dedup::{
 };
 use kanalib_core::model::{
     Asset, Counts, DiagnosticSnapshot, Filter, RetagSummary, SavedSearch, ScanFilterConfig,
-    SearchQuery, SourceScanStatus, TagHit, TagJobError, TagQueueStatus, TagRecomputeSummary,
-    TagSummary, TagThresholds, TAG_CANDIDATE_MIN_SCORE, default_category_thresholds,
-    normalize_tag_name,
+    SearchQuery, SourceScanStatus, TagCandidateReview, TagHit, TagJobError, TagQueueStatus,
+    TagRecomputeSummary, TagReviewState, TagSummary, TagThresholds, TAG_CANDIDATE_MIN_SCORE,
+    default_category_thresholds, is_ffmpeg_only, normalize_tag_name,
 };
 use kanalib_core::backup;
+use kanalib_core::db::{MAX_SEARCH_PAGE, SearchPageRequest, SearchSort};
 use kanalib_core::diagnostics::{self, DiagnosticsContext};
 use kanalib_core::export;
 use kanalib_core::state::{AppState, CacheStats};
@@ -82,6 +83,10 @@ const TAG_CATEGORY_LABELS: [(&str, &str); 6] = [
 const TAG_RETAG_CONFIRM_THRESHOLD: usize = 500;
 /// 队列区块最多展示的失败任务数。
 const TAG_JOB_ERROR_LIMIT: usize = 5;
+/// 搜索输入停止多久后才真正查询（毫秒）。
+const SEARCH_DEBOUNCE_MS: u64 = 220;
+/// 低置信度审核最多加载的候选条数。
+const TAG_REVIEW_LIMIT: usize = 80;
 
 gpui::actions!(
     kanalib,
@@ -354,6 +359,34 @@ fn rating_rank(rating: &str) -> u64 {
         "e" => 4,
         _ => 0,
     }
+}
+
+/// 查询里是否带了 `dup:true`。与 core 的解析规则保持一致：整词、带 `-` 前缀的取反写法不算。
+fn query_wants_duplicates(text: &str) -> bool {
+    text.split_whitespace().any(|raw| {
+        if raw.starts_with('-') {
+            return false;
+        }
+        raw.to_ascii_lowercase()
+            .strip_prefix("dup:")
+            .is_some_and(|value| value.trim() == "true")
+    })
+}
+
+/// 待审候选按资产分组；core 已按路径、分数排序，这里保持同样的顺序。
+fn group_reviews_by_asset(
+    reviews: &[TagCandidateReview],
+) -> Vec<(PathBuf, Vec<TagCandidateReview>)> {
+    let mut groups: Vec<(PathBuf, Vec<TagCandidateReview>)> = Vec::new();
+    for review in reviews {
+        match groups.last_mut() {
+            Some((path, candidates)) if *path == review.path => {
+                candidates.push(review.clone());
+            }
+            _ => groups.push((review.path.clone(), vec![review.clone()])),
+        }
+    }
+    groups
 }
 
 fn prompt_for(asset: &Asset) -> String {
@@ -1025,6 +1058,39 @@ struct ViewCache {
     visible_indices: Arc<Vec<usize>>,
 }
 
+/// 一次搜索的结果快照。防抖结束后整体替换，避免新旧查询的结果混用。
+struct SearchBundle {
+    /// 已应用的查询文本。
+    text: String,
+    /// 生成快照时的数据版本；资产集合变了就不能再用分页结果。
+    revision: u64,
+    filter: Filter,
+    sort: SearchSort,
+    ascending: bool,
+    /// FTS 命中的路径；自由文本为空时为 None。
+    fts_paths: Option<Arc<HashSet<PathBuf>>>,
+    /// `search_page` 返回的有序路径。结果超过分页上限时为 None，回退到内存过滤。
+    page_paths: Option<Arc<Vec<PathBuf>>>,
+}
+
+impl SearchBundle {
+    /// 快照是否还对应当前的查询、筛选、排序与数据版本。
+    fn matches(
+        &self,
+        text: &str,
+        revision: u64,
+        filter: &Filter,
+        sort: SearchSort,
+        ascending: bool,
+    ) -> bool {
+        self.text == text
+            && self.revision == revision
+            && &self.filter == filter
+            && self.sort == sort
+            && self.ascending == ascending
+    }
+}
+
 /// 合成器帧计时探针。`KANALIB_FRAME_METRICS=<秒>` 开启：导入结束后每帧请求一次动画帧，
 /// 到时把 gpui profiler 的直方图汇总成一行 JSON。
 #[cfg(feature = "frame-profiler")]
@@ -1054,7 +1120,13 @@ pub struct KanalibApp {
     cache_last_cleanup: Option<String>,
     cache_budget_checked: bool,
     last_search: String,
-    search_paths: Option<Arc<HashSet<PathBuf>>>,
+    /// 搜索框当前文本；与 `last_search` 不同说明还在防抖窗口内。
+    search_pending: String,
+    search_bundle: Option<Arc<SearchBundle>>,
+    search_debounce_task: Option<Task<()>>,
+    /// 已排入一次“数据变了要重查”的刷新；避免每次渲染都重置防抖计时。
+    search_refresh_queued: bool,
+    search_running: bool,
     last_scanning: bool,
     view: ViewCache,
     grid_rows: usize,
@@ -1077,6 +1149,9 @@ pub struct KanalibApp {
     tag_recompute_running: bool,
     tag_retag_running: bool,
     tag_retag_confirm: Option<TagRetagConfirm>,
+    tag_reviews: Vec<TagCandidateReview>,
+    tag_review_notice: Option<String>,
+    tag_review_running: bool,
     source_statuses: Vec<SourceScanStatus>,
     last_backup: Option<String>,
     backup_running: bool,
@@ -1277,7 +1352,11 @@ impl KanalibApp {
             cache_last_cleanup: None,
             cache_budget_checked: false,
             last_search: String::new(),
-            search_paths: None,
+            search_pending: String::new(),
+            search_bundle: None,
+            search_debounce_task: None,
+            search_refresh_queued: false,
+            search_running: false,
             last_scanning: false,
             view: ViewCache::default(),
             grid_rows: 0,
@@ -1300,6 +1379,9 @@ impl KanalibApp {
             tag_recompute_running: false,
             tag_retag_running: false,
             tag_retag_confirm: None,
+            tag_reviews: Vec::new(),
+            tag_review_notice: None,
+            tag_review_running: false,
             source_statuses,
             last_backup: None,
             backup_running: false,
@@ -1374,6 +1456,8 @@ impl KanalibApp {
             self.refresh_diagnostics();
             self.refresh_tag_settings(cx);
         }
+        // 先跑一次空查询，让首屏用上分页下推的结果。
+        self.schedule_search(cx);
         let weak = cx.entity().downgrade();
         self.refresh_task = Some(cx.spawn(async move |_, cx| {
             let mut last_status = String::new();
@@ -1622,8 +1706,7 @@ impl KanalibApp {
                 }
                 app.state.set_filter(Filter::All);
                 app.state.start_scan();
-                app.last_search.clear();
-                app.search_paths = None;
+                app.reset_search();
                 app.screen = Screen::Library;
                 app.dedup_selected = None;
                 app.dedup_confirm = None;
@@ -1665,8 +1748,7 @@ impl KanalibApp {
         self.state.start_scan();
         match origin {
             RescanOrigin::Library => {
-                self.last_search.clear();
-                self.search_paths = None;
+                // 保留当前查询：资产集合变了会自动重跑一次分页查询。
                 self.screen = Screen::Library;
                 self.dedup_selected = None;
                 self.dedup_confirm = None;
@@ -2086,6 +2168,123 @@ impl KanalibApp {
         cx.notify();
     }
 
+    /// 清空搜索状态；切换来源或重扫后调用。
+    fn reset_search(&mut self) {
+        self.last_search.clear();
+        self.search_pending.clear();
+        self.search_bundle = None;
+        self.view.search_revision = self.view.search_revision.wrapping_add(1);
+    }
+
+    /// 输入防抖：停止输入 SEARCH_DEBOUNCE_MS 后才发起查询。
+    /// 替换旧任务会取消它，所以连续输入只会跑最后一次查询。
+    fn schedule_search(&mut self, cx: &mut Context<Self>) {
+        let weak = cx.entity().downgrade();
+        self.search_debounce_task = Some(cx.spawn(async move |_, cx| {
+            cx.background_executor()
+                .timer(Duration::from_millis(SEARCH_DEBOUNCE_MS))
+                .await;
+            let _ = weak.update(cx, |app, cx| {
+                app.search_refresh_queued = false;
+                app.run_search(cx);
+            });
+        }));
+    }
+
+    /// 执行一次查询。FTS 与分页下推都放到后台线程，避免阻塞渲染。
+    fn run_search(&mut self, cx: &mut Context<Self>) {
+        let text = self.search_pending.clone();
+        let wants_duplicates = query_wants_duplicates(&text);
+        let sort = SearchSort::from_key(self.sort.key()).unwrap_or(SearchSort::Name);
+        let ascending = self.sort_ascending;
+        let (revision, filter, tag_aliases, duplicate_paths) = {
+            let shared = self.state.shared.lock().unwrap();
+            // 去重路径集合只在 dup:true 时构造：其它查询根本不读它。
+            let duplicates = if wants_duplicates {
+                Some(
+                    shared
+                        .dedup
+                        .groups
+                        .iter()
+                        .chain(shared.dedup.similar_groups.iter())
+                        .flat_map(|group| group.assets.iter().map(|asset| asset.path.clone()))
+                        .collect::<HashSet<PathBuf>>(),
+                )
+            } else {
+                None
+            };
+            (
+                shared.revision,
+                shared.filter.clone(),
+                shared.tag_aliases.clone(),
+                duplicates,
+            )
+        };
+        if self
+            .search_bundle
+            .as_ref()
+            .is_some_and(|bundle| bundle.matches(text.as_str(), revision, &filter, sort, ascending))
+        {
+            return;
+        }
+        self.search_running = true;
+        let mut query = SearchQuery::parse(&text);
+        // SQL 按标签名精确匹配，不会自己解析别名；这里先换成规范名，和内存路径保持一致。
+        query.resolve_tag_aliases(&tag_aliases);
+        let state = self.state.clone();
+        let request_filter = filter.clone();
+        let task = cx.background_executor().spawn(async move {
+            let page = state
+                .search_page(SearchPageRequest {
+                    filter: &request_filter,
+                    query: &query,
+                    sort,
+                    ascending,
+                    limit: MAX_SEARCH_PAGE,
+                    cursor: None,
+                    duplicate_paths: duplicate_paths.as_ref(),
+                    include_total: false,
+                })
+                .ok();
+            // 结果超过分页上限时只能回退到内存过滤，保留 FTS 命中集合。
+            let truncated = page.as_ref().is_some_and(|page| page.next.is_some());
+            let fts_paths = {
+                let free = query.free_text();
+                if free.is_empty() {
+                    None
+                } else {
+                    state.search_paths(&free).ok().map(Arc::new)
+                }
+            };
+            (page, truncated, fts_paths)
+        });
+        let weak = cx.entity().downgrade();
+        cx.spawn(async move |_, cx| {
+            let (page, truncated, fts_paths) = task.await;
+            let _ = weak.update(cx, |app, cx| {
+                app.search_running = false;
+                let page_paths = match page {
+                    Some(page) if !truncated => Some(Arc::new(page.paths)),
+                    _ => None,
+                };
+                app.search_bundle = Some(Arc::new(SearchBundle {
+                    text: text.clone(),
+                    revision,
+                    filter: filter.clone(),
+                    sort,
+                    ascending,
+                    fts_paths,
+                    page_paths,
+                }));
+                app.last_search = text;
+                app.view.search_revision = app.view.search_revision.wrapping_add(1);
+                cx.notify();
+            });
+        })
+        .detach();
+        cx.notify();
+    }
+
     fn set_filter(&mut self, filter: Filter, cx: &mut Context<Self>) {
         self.screen = Screen::Library;
         self.state.set_filter(filter);
@@ -2093,6 +2292,8 @@ impl KanalibApp {
         self.focus_grid_pending = true;
         self.auto_select_pending = true;
         self.grid_scroll.scroll_to_item(0, ScrollStrategy::Top);
+        // 筛选是查询的一部分，分页结果要按新筛选重跑。
+        self.schedule_search(cx);
         cx.notify();
     }
 
@@ -2108,6 +2309,105 @@ impl KanalibApp {
         cx.notify();
     }
 
+    /// 读取待审的低置信度候选：分数低于有效阈值、尚未处理过的候选。
+    fn refresh_tag_reviews(&mut self, cx: &mut Context<Self>) {
+        if self.tag_review_running {
+            return;
+        }
+        self.tag_review_running = true;
+        let state = self.state.clone();
+        let task = cx
+            .background_executor()
+            .spawn(async move { state.pending_tag_reviews(TAG_REVIEW_LIMIT) });
+        let weak = cx.entity().downgrade();
+        cx.spawn(async move |_, cx| {
+            let result = task.await;
+            let _ = weak.update(cx, |app, cx| {
+                app.tag_review_running = false;
+                match result {
+                    Ok(reviews) => {
+                        app.tag_reviews = reviews;
+                        app.tag_review_notice = None;
+                    }
+                    Err(error) => {
+                        let message = format!("读取待审候选失败：{error:#}");
+                        log::warn!("pending tag reviews: {error:#}");
+                        app.tag_review_notice = Some(message);
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+        cx.notify();
+    }
+
+    /// 接受或忽略单条候选。
+    fn apply_tag_review(
+        &mut self,
+        path: PathBuf,
+        tag: String,
+        state: TagReviewState,
+        cx: &mut Context<Self>,
+    ) {
+        self.apply_tag_review_async(path, Some(tag), state, cx);
+    }
+
+    /// 按资产批量处理该资产的全部待审候选。
+    fn apply_asset_review(&mut self, path: PathBuf, state: TagReviewState, cx: &mut Context<Self>) {
+        self.apply_tag_review_async(path, None, state, cx);
+    }
+
+    fn apply_tag_review_async(
+        &mut self,
+        path: PathBuf,
+        tag: Option<String>,
+        state: TagReviewState,
+        cx: &mut Context<Self>,
+    ) {
+        let label = match (&tag, state) {
+            (Some(tag), TagReviewState::Accepted) => format!("接受候选 #{tag}"),
+            (Some(tag), TagReviewState::Ignored) => format!("忽略候选 #{tag}"),
+            (Some(tag), TagReviewState::Pending) => format!("恢复候选 #{tag}"),
+            (None, TagReviewState::Accepted) => "整张接受".to_string(),
+            (None, TagReviewState::Ignored) => "整张忽略".to_string(),
+            (None, TagReviewState::Pending) => "整张恢复待审".to_string(),
+        };
+        let app_state = self.state.clone();
+        let toaster = self.toaster.clone();
+        let review_path = path.clone();
+        let task = cx.background_executor().spawn(async move {
+            match &tag {
+                Some(tag) => app_state
+                    .review_tag_candidate(&review_path, tag, state)
+                    .map(|()| 1usize),
+                None => app_state.review_asset_candidates(&review_path, state),
+            }
+        });
+        let weak = cx.entity().downgrade();
+        cx.spawn(async move |_, cx| {
+            let result = task.await;
+            let _ = weak.update(cx, |app, cx| {
+                match result {
+                    Ok(changed) => {
+                        let message = format!("{label} · 处理 {changed} 条");
+                        app.tag_review_notice = Some(message.clone());
+                        push_toast(&toaster, cx, message, Severity::Success);
+                        app.refresh_tag_reviews(cx);
+                    }
+                    Err(error) => {
+                        let message = format!("{label}失败：{error:#}");
+                        app.tag_review_notice = Some(message.clone());
+                        push_toast(&toaster, cx, message, Severity::Danger);
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+        cx.notify();
+    }
+
     fn open_settings(&mut self, cx: &mut Context<Self>) {
         self.screen = Screen::Settings;
         self.dedup_confirm = None;
@@ -2118,6 +2418,7 @@ impl KanalibApp {
         self.sync_source_statuses();
         self.refresh_diagnostics();
         self.refresh_tag_settings(cx);
+        self.refresh_tag_reviews(cx);
     }
 
     fn refresh_cache_stats(&mut self, cx: &mut Context<Self>) {
@@ -3292,6 +3593,8 @@ impl KanalibApp {
         self.persist_setting("ui.sort", mode.key());
         self.persist_setting("ui.sort_ascending", self.sort_ascending.to_string());
         self.focus_grid_pending = true;
+        // 排序是查询的一部分，分页结果要按新排序重跑。
+        self.schedule_search(cx);
         cx.notify();
     }
 
@@ -3299,6 +3602,7 @@ impl KanalibApp {
         self.sort_ascending = ascending;
         self.persist_setting("ui.sort_ascending", ascending.to_string());
         self.focus_grid_pending = true;
+        self.schedule_search(cx);
         cx.notify();
     }
 
@@ -3562,7 +3866,13 @@ impl Render for KanalibApp {
         if self.search_input.is_none() {
             self.search_input = Some(search.clone());
         }
-        let search_text = search.read(cx).text().to_string();
+        let input_text = search.read(cx).text().to_string();
+        if input_text != self.search_pending {
+            self.search_pending = input_text;
+            self.schedule_search(cx);
+        }
+        // 结果由“已应用”的查询驱动；输入框还在防抖窗口内时先显示上一次的结果。
+        let search_text = self.last_search.clone();
         let mut search_query = SearchQuery::parse(&search_text);
         let tag_aliases = self.state.shared.lock().unwrap().tag_aliases.clone();
         search_query.resolve_tag_aliases(&tag_aliases);
@@ -3678,7 +3988,7 @@ impl Render for KanalibApp {
                 Err(error) => log::warn!("tag vocabulary: {error:#}"),
             }
         }
-        let query_changed = search_text != self.last_search;
+        let query_changed = search_text != self.view.visible_search;
         let scan_changed = scanning != self.last_scanning;
         self.last_scanning = scanning;
         if scan_changed && !scanning && !self.selection.is_empty() {
@@ -3708,27 +4018,18 @@ impl Render for KanalibApp {
             self.run_cache_budget_cleanup(false, cx);
         }
         if query_changed {
-            self.last_search = search_text.clone();
-        }
-        if query_changed || scan_changed {
-            let free_text = search_query.free_text();
-            self.search_paths = if free_text.is_empty() {
-                None
-            } else {
-                match self.state.search_paths(&free_text) {
-                    Ok(paths) => Some(Arc::new(paths)),
-                    Err(error) => {
-                        log::warn!("search: {error:#}");
-                        None
-                    }
-                }
-            };
-            self.view.search_revision = self.view.search_revision.wrapping_add(1);
-        }
-        if query_changed {
             self.clear_multi_selection();
             self.auto_select_pending = true;
             self.grid_scroll.scroll_to_item(0, ScrollStrategy::Top);
+        }
+        // 资产集合或筛选变了就重跑一次查询；扫描中不重跑，避免和扫描抢数据库。
+        let search_sort = SearchSort::from_key(self.sort.key()).unwrap_or(SearchSort::Name);
+        let bundle_stale = self.search_bundle.as_ref().map_or(true, |bundle| {
+            !bundle.matches(&search_text, revision, &filter, search_sort, self.sort_ascending)
+        });
+        if !scanning && bundle_stale && !self.search_refresh_queued {
+            self.search_refresh_queued = true;
+            self.schedule_search(cx);
         }
         let needs_visible = revision != self.view.visible_revision
             || self.view.visible_filter.as_ref() != Some(&filter)
@@ -3738,47 +4039,86 @@ impl Render for KanalibApp {
             || self.view.visible_sort_ascending != self.sort_ascending;
         if needs_visible {
             let started = Instant::now();
-            let duplicate_paths = dedup_exact_groups
-                .iter()
-                .chain(dedup_similar_groups.iter())
-                .flat_map(|group| group.assets.iter().map(|asset| asset.path.clone()))
-                .collect::<HashSet<PathBuf>>();
-            let indices = {
-                let assets = assets.read().unwrap();
-                let mut indices = assets
-                    .iter()
-                    .enumerate()
-                    .filter(|(_, asset)| {
-                        filter.matches(asset)
-                            && search_query.matches(
-                                asset,
-                                self.search_paths.as_deref(),
-                                Some(&duplicate_paths),
-                            )
-                    })
-                    .map(|(index, _)| index)
-                    .collect::<Vec<_>>();
-                match self.sort {
-                    SortMode::Name => {
-                        indices.sort_by_cached_key(|&index| {
-                            let asset = &assets[index];
-                            (asset.title().to_lowercase(), asset.path.clone())
-                        });
-                        if !self.sort_ascending {
-                            indices.reverse();
+            // 分页结果与当前查询、筛选、排序和数据版本一致时直接用，否则回退到内存过滤。
+            let current_bundle = self.search_bundle.clone();
+            let bundle = current_bundle.clone().filter(|bundle| {
+                bundle.matches(
+                    &search_text,
+                    revision,
+                    &filter,
+                    search_sort,
+                    self.sort_ascending,
+                )
+            });
+            let page_paths = bundle.as_ref().and_then(|bundle| bundle.page_paths.clone());
+            // 快照过期时至少还能复用同一段文本的 FTS 命中集，避免退化成逐条子串匹配。
+            let fts_paths = bundle
+                .as_ref()
+                .and_then(|bundle| bundle.fts_paths.clone())
+                .or_else(|| {
+                    current_bundle
+                        .as_ref()
+                        .filter(|bundle| bundle.text == search_text)
+                        .and_then(|bundle| bundle.fts_paths.clone())
+                });
+            let indices = match page_paths {
+                Some(paths) => {
+                    // search_page 已经完成筛选与排序，按返回顺序映射到资产下标。
+                    let assets = assets.read().unwrap();
+                    let index_of = assets
+                        .iter()
+                        .enumerate()
+                        .map(|(index, asset)| (asset.path.as_path(), index))
+                        .collect::<HashMap<&Path, usize>>();
+                    paths
+                        .iter()
+                        .filter_map(|path| index_of.get(path.as_path()).copied())
+                        .collect::<Vec<_>>()
+                }
+                None => {
+                    // 去重路径集合只在 dup:true 时构造：其它查询根本不读它。
+                    let duplicate_paths = query_wants_duplicates(&search_text).then(|| {
+                        dedup_exact_groups
+                            .iter()
+                            .chain(dedup_similar_groups.iter())
+                            .flat_map(|group| group.assets.iter().map(|asset| asset.path.clone()))
+                            .collect::<HashSet<PathBuf>>()
+                    });
+                    let assets = assets.read().unwrap();
+                    let mut indices = assets
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, asset)| {
+                            filter.matches(asset)
+                                && search_query.matches(
+                                    asset,
+                                    fts_paths.as_deref(),
+                                    duplicate_paths.as_ref(),
+                                )
+                        })
+                        .map(|(index, _)| index)
+                        .collect::<Vec<_>>();
+                    match self.sort {
+                        SortMode::Name => {
+                            indices.sort_by_cached_key(|&index| {
+                                let asset = &assets[index];
+                                (asset.title().to_lowercase(), asset.path.clone())
+                            });
+                            if !self.sort_ascending {
+                                indices.reverse();
+                            }
                         }
-                    }
-                    mode => {
-                        indices.sort_by_cached_key(|&index| {
-                            let asset = &assets[index];
-                            let primary = match mode {
-                                SortMode::Modified => asset.mtime,
-                                SortMode::Captured => asset.taken_or_modified(),
-                                SortMode::Size => asset.bytes,
-                                SortMode::Resolution => asset.width as u64 * asset.height as u64,
-                                SortMode::Star => asset.star as u64,
-                                SortMode::Favorite => asset.favorite as u64,
-                                SortMode::Rating => rating_rank(&asset.rating),
+                        mode => {
+                            indices.sort_by_cached_key(|&index| {
+                                let asset = &assets[index];
+                                let primary = match mode {
+                                    SortMode::Modified => asset.mtime,
+                                    SortMode::Captured => asset.taken_or_modified(),
+                                    SortMode::Size => asset.bytes,
+                                    SortMode::Resolution => asset.width as u64 * asset.height as u64,
+                                    SortMode::Star => asset.star as u64,
+                                    SortMode::Favorite => asset.favorite as u64,
+                                    SortMode::Rating => rating_rank(&asset.rating),
                                 SortMode::Name => unreachable!(),
                             };
                             let primary = if self.sort_ascending {
@@ -3789,8 +4129,9 @@ impl Render for KanalibApp {
                             (primary, asset.title().to_lowercase(), asset.path.clone())
                         });
                     }
+                    }
+                    indices
                 }
-                indices
             };
             let elapsed_us = started.elapsed().as_secs_f64() * 1_000_000.0;
             self.view.visible_indices = Arc::new(indices);
@@ -6048,6 +6389,15 @@ impl KanalibApp {
                     .text_xs()
                     .text_color(colors.muted)
                     .child(status.to_string()),
+            );
+        }
+        if self.search_running {
+            left = left.child(
+                div()
+                    .px(px(6.))
+                    .text_xs()
+                    .text_color(colors.accent)
+                    .child("搜索中…"),
             );
         }
         let this_all = this.clone();
@@ -9198,6 +9548,236 @@ impl KanalibApp {
             )
             .child(error_rows);
 
+        // 低置信度审核：按资产分组展示待审候选，支持单条与整张处理。
+        let review_groups = group_reviews_by_asset(&self.tag_reviews);
+        let review_total = self.tag_reviews.len();
+        let this_review_refresh = this.clone();
+        let review_actions = div()
+            .flex()
+            .flex_wrap()
+            .items_center()
+            .gap(px(6.))
+            .child(
+                Button::new(
+                    "tag-review-refresh",
+                    if self.tag_review_running {
+                        "读取中…"
+                    } else {
+                        "刷新待审候选"
+                    },
+                )
+                .size(ControlSize::Sm)
+                .icon(IconName::RefreshCw)
+                .disabled(self.tag_review_running)
+                .on_click(move |_, _, cx| {
+                    let _ = this_review_refresh
+                        .update(cx, |app, cx| app.refresh_tag_reviews(cx));
+                }),
+            )
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(colors.subtle)
+                    .child(format!("待审候选 {review_total} 条")),
+            );
+        let review_rows: AnyElement = if review_groups.is_empty() {
+            div()
+                .text_xs()
+                .text_color(colors.subtle)
+                .child(if self.tag_review_running {
+                    "正在读取待审候选…"
+                } else {
+                    "没有待审候选：所有低于阈值的候选都已处理。"
+                })
+                .into_any_element()
+        } else {
+            let mut rows = div().flex().flex_col().gap(px(6.));
+            for (path, candidates) in review_groups {
+                let file_name = path
+                    .file_name()
+                    .map(|name| name.to_string_lossy().to_string())
+                    .unwrap_or_else(|| path.display().to_string());
+                let mut tag_rows = div().flex().flex_col().gap(px(2.));
+                for candidate in &candidates {
+                    let this_accept = this.clone();
+                    let this_ignore = this.clone();
+                    let accept_path = path.clone();
+                    let accept_tag = candidate.tag.clone();
+                    let ignore_path = path.clone();
+                    let ignore_tag = candidate.tag.clone();
+                    let score = candidate.score;
+                    let threshold = candidate.threshold;
+                    let tag_name = candidate.tag.clone();
+                    let category = candidate.category.clone();
+                    tag_rows = tag_rows.child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(px(8.))
+                            .px(px(8.))
+                            .py(px(2.))
+                            .rounded(px(4.))
+                            .bg(colors.sunken)
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w(px(0.))
+                                    .truncate()
+                                    .text_xs()
+                                    .text_color(colors.fg)
+                                    .child(format!("#{tag_name} · {}", tag_category_label(&category))),
+                            )
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(colors.muted)
+                                    .child(format!("分数 {score:.3} / 阈值 {threshold:.3}")),
+                            )
+                            .child(
+                                Button::new(
+                                    SharedString::from(format!(
+                                        "tag-review-accept-{}-{accept_tag}",
+                                        file_name
+                                    )),
+                                    "接受",
+                                )
+                                .size(ControlSize::Sm)
+                                .on_click(move |_, _, cx| {
+                                    let _ = this_accept.update(cx, |app, cx| {
+                                        app.apply_tag_review(
+                                            accept_path.clone(),
+                                            accept_tag.clone(),
+                                            TagReviewState::Accepted,
+                                            cx,
+                                        );
+                                    });
+                                }),
+                            )
+                            .child(
+                                Button::new(
+                                    SharedString::from(format!(
+                                        "tag-review-ignore-{}-{ignore_tag}",
+                                        file_name
+                                    )),
+                                    "忽略",
+                                )
+                                .size(ControlSize::Sm)
+                                .on_click(move |_, _, cx| {
+                                    let _ = this_ignore.update(cx, |app, cx| {
+                                        app.apply_tag_review(
+                                            ignore_path.clone(),
+                                            ignore_tag.clone(),
+                                            TagReviewState::Ignored,
+                                            cx,
+                                        );
+                                    });
+                                }),
+                            ),
+                    );
+                }
+                let this_accept_all = this.clone();
+                let this_ignore_all = this.clone();
+                let accept_all_path = path.clone();
+                let ignore_all_path = path.clone();
+                let candidate_count = candidates.len();
+                rows = rows.child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap(px(4.))
+                        .px(px(8.))
+                        .py(px(6.))
+                        .rounded(px(6.))
+                        .border_1()
+                        .border_color(colors.border)
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .justify_between()
+                                .gap(px(8.))
+                                .child(
+                                    div()
+                                        .flex_1()
+                                        .min_w(px(0.))
+                                        .truncate()
+                                        .text_xs()
+                                        .font_weight(FontWeight::SEMIBOLD)
+                                        .text_color(colors.fg)
+                                        .child(format!("{file_name} · {candidate_count} 条")),
+                                )
+                                .child(
+                                    Button::new(
+                                        SharedString::from(format!(
+                                            "tag-review-accept-all-{file_name}"
+                                        )),
+                                        "整张接受",
+                                    )
+                                    .size(ControlSize::Sm)
+                                    .on_click(move |_, _, cx| {
+                                        let _ = this_accept_all.update(cx, |app, cx| {
+                                            app.apply_asset_review(
+                                                accept_all_path.clone(),
+                                                TagReviewState::Accepted,
+                                                cx,
+                                            );
+                                        });
+                                    }),
+                                )
+                                .child(
+                                    Button::new(
+                                        SharedString::from(format!(
+                                            "tag-review-ignore-all-{file_name}"
+                                        )),
+                                        "整张忽略",
+                                    )
+                                    .size(ControlSize::Sm)
+                                    .on_click(move |_, _, cx| {
+                                        let _ = this_ignore_all.update(cx, |app, cx| {
+                                            app.apply_asset_review(
+                                                ignore_all_path.clone(),
+                                                TagReviewState::Ignored,
+                                                cx,
+                                            );
+                                        });
+                                    }),
+                                ),
+                        )
+                        .child(tag_rows),
+                );
+            }
+            rows.into_any_element()
+        };
+        let review_section = div()
+            .p(px(16.))
+            .rounded(px(10.))
+            .border_1()
+            .border_color(colors.border)
+            .bg(colors.surface)
+            .flex()
+            .flex_col()
+            .gap(px(8.))
+            .child(
+                div()
+                    .text_sm()
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .child("低置信度审核"),
+            )
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(colors.muted)
+                    .child("分数低于有效阈值、尚未处理的候选。接受会写入标签，忽略会标记为已处理。"),
+            )
+            .children(self.tag_review_notice.clone().map(|notice| {
+                div()
+                    .text_xs()
+                    .text_color(colors.accent)
+                    .child(notice)
+            }))
+            .child(review_actions)
+            .child(review_rows);
+
         let data_section = div()
             .p(px(16.))
             .rounded(px(10.))
@@ -9766,6 +10346,7 @@ impl KanalibApp {
                             .flex_col()
                             .gap(px(12.))
                             .child(tag_section)
+                            .child(review_section)
                             .child(sources_section)
                             .child(protected_section)
                             .child(similar_section)
@@ -10440,6 +11021,20 @@ impl KanalibApp {
                         .child(format!(
                             "来源 · {}",
                             source_label(&asset.library_root, source_aliases)
+                        )),
+                )
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(if is_ffmpeg_only(&asset.path) {
+                            colors.warning
+                        } else {
+                            colors.subtle
+                        })
+                        .child(format!(
+                            "格式 · {} · {}",
+                            friendly_format_label(&asset.path),
+                            format_capability_note(&asset.path)
                         )),
                 )
                 .children(exif_panel(asset, colors))
@@ -12348,7 +12943,17 @@ fn window_control_button(
 
 fn friendly_media_error(message: &str) -> String {
     let text = message.to_lowercase();
-    if text.contains("truncated") || text.contains("unexpected end of file") {
+    if text.contains("avif")
+        && (text.contains("unsupported")
+            || text.contains("unknown format")
+            || text.contains("not supported")
+            || text.contains("decoder")
+            || text.contains("cannot identify"))
+    {
+        "AVIF 需要 FFmpeg 解码；未检测到 FFmpeg 时无法生成缩略图".to_string()
+    } else if text.contains("ffmpeg") || text.contains("dav1d") {
+        "FFmpeg 解码失败，缩略图与打标可能不可用".to_string()
+    } else if text.contains("truncated") || text.contains("unexpected end of file") {
         "文件不完整（图片数据被截断）".to_string()
     } else if text.contains("cannot identify image file")
         || text.contains("unidentifiedimageerror")
@@ -12356,8 +12961,45 @@ fn friendly_media_error(message: &str) -> String {
         "无法识别的图片，文件可能已损坏".to_string()
     } else if text.contains("decompression bomb") {
         "图片尺寸超出安全上限".to_string()
+    } else if text.contains("unsupported") || text.contains("unknown format") {
+        "不支持的图片编码".to_string()
     } else {
         message.to_string()
+    }
+}
+
+/// 扩展名对应的友好格式名；未知扩展名回退为大写原名。
+fn friendly_format_label(path: &Path) -> String {
+    let ext = path
+        .extension()
+        .map(|value| value.to_string_lossy().to_lowercase())
+        .unwrap_or_default();
+    match ext.as_str() {
+        "jpg" | "jpeg" => "JPEG".to_string(),
+        "png" => "PNG".to_string(),
+        "webp" => "WebP".to_string(),
+        "gif" => "GIF".to_string(),
+        "bmp" => "BMP".to_string(),
+        "tif" | "tiff" => "TIFF".to_string(),
+        "ico" => "ICO".to_string(),
+        "qoi" => "QOI".to_string(),
+        "exr" => "EXR".to_string(),
+        "avif" => "AVIF".to_string(),
+        "" => "未知格式".to_string(),
+        other => other.to_uppercase(),
+    }
+}
+
+/// 解码能力提示：只有 AVIF 需要 FFmpeg，其余格式走内置解码。
+fn format_capability_note(path: &Path) -> String {
+    if is_ffmpeg_only(path) {
+        if kanalib_core::ffmpeg::available() {
+            "需要 FFmpeg 解码".to_string()
+        } else {
+            "需要 FFmpeg 解码 · 当前未检测到 FFmpeg".to_string()
+        }
+    } else {
+        "内置解码".to_string()
     }
 }
 
@@ -13087,6 +13729,51 @@ mod tests {
             "decode bucket delta: files={} before={before} after={after} delta_kb={}",
             files.len(),
             (after as i64 - before as i64) / 1024,
+        );
+    }
+
+    #[test]
+    fn query_wants_duplicates_only_for_dup_true() {
+        assert!(super::query_wants_duplicates("dup:true"));
+        assert!(super::query_wants_duplicates("sky dup:true"));
+        assert!(super::query_wants_duplicates("DUP:TRUE"));
+        assert!(!super::query_wants_duplicates("dup:false"));
+        assert!(!super::query_wants_duplicates("-dup:true"));
+        assert!(!super::query_wants_duplicates("sky"));
+        assert!(!super::query_wants_duplicates(""));
+    }
+
+    #[test]
+    fn friendly_format_label_maps_known_extensions() {
+        assert_eq!(super::friendly_format_label(Path::new("a.TIFF")), "TIFF");
+        assert_eq!(super::friendly_format_label(Path::new("b.avif")), "AVIF");
+        assert_eq!(super::friendly_format_label(Path::new("c.qoi")), "QOI");
+        assert_eq!(super::friendly_format_label(Path::new("d.xyz")), "XYZ");
+        assert_eq!(super::friendly_format_label(Path::new("noext")), "未知格式");
+    }
+
+    #[test]
+    fn friendly_media_error_points_avif_at_ffmpeg() {
+        assert!(
+            super::friendly_media_error("The image format Avif is not supported")
+                .contains("FFmpeg")
+        );
+        assert!(
+            super::friendly_media_error("ffmpeg exited with code 1")
+                .contains("FFmpeg")
+        );
+        assert!(super::friendly_media_error("unexpected end of file").contains("截断"));
+        assert!(super::friendly_media_error("unsupported color type").contains("不支持"));
+    }
+
+    #[test]
+    fn format_capability_note_marks_ffmpeg_only_formats() {
+        assert_eq!(
+            super::format_capability_note(Path::new("a.png")),
+            "内置解码".to_string()
+        );
+        assert!(
+            super::format_capability_note(Path::new("a.avif")).contains("需要 FFmpeg 解码")
         );
     }
 }
