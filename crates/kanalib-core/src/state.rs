@@ -556,6 +556,8 @@ impl AppState {
     fn start_rescan(self: &Arc<Self>, root: PathBuf, skip_tag: bool) -> Result<()> {
         let root = absolute(root);
         self.prepare_rescan(&root)?;
+        // 与全量重扫保持一致：单来源扫描后旧相似组可能已失效。
+        self.invalidate_similar_scan();
         let state = self.clone();
         let thread_root = root.clone();
         let spawned = std::thread::Builder::new()
@@ -2084,7 +2086,12 @@ fn rename_candidate(
     files: &[PathBuf],
 ) -> Result<Option<PathBuf>> {
     for candidate in db.asset_paths_by_sha1(folder, sha1)? {
-        if candidate != new_path && files.binary_search(&candidate).is_err() {
+        // 排除规则会让仍在磁盘上的旧文件缺席本次 files；必须再确认它确实消失，
+        // 否则会把它误当成重命名来源，搬走标签。
+        if candidate != new_path
+            && files.binary_search(&candidate).is_err()
+            && definitely_missing(&candidate)
+        {
             return Ok(Some(candidate));
         }
     }
@@ -3503,6 +3510,42 @@ mod tests {
         );
         assert_eq!(state.source_statuses()[0].asset_count, 1);
         assert!(base.join("lib").join("b.png").exists());
+        std::fs::remove_dir_all(&base).unwrap();
+    }
+
+    #[test]
+    fn excluded_existing_file_is_not_treated_as_rename_source() {
+        let (base, lib, state) = test_state("filter-rename");
+        let old = lib.join("old.png");
+        write_test_image(&old, [7, 8, 9]);
+        state.rescan_root_blocking(lib.clone(), true).unwrap();
+        state.add_tags(std::slice::from_ref(&old), "keepme").unwrap();
+
+        let filter = ScanFilterConfig {
+            exclude_globs: vec!["old.png".into()],
+            ..ScanFilterConfig::default()
+        };
+        state.set_scan_filter(&lib, filter).unwrap();
+
+        // 与 old.png 内容相同的 new.png：old.png 只是被排除，仍在磁盘上，
+        // 不能被当成“已迁移”的旧路径而搬走标签。
+        let new = lib.join("new.png");
+        std::fs::copy(&old, &new).unwrap();
+        state.rescan_root_blocking(lib.clone(), true).unwrap();
+
+        let shared = state.shared.lock().unwrap();
+        let assets = shared.assets.read().unwrap();
+        assert_eq!(assets.len(), 2);
+        let old_asset = assets.iter().find(|asset| asset.path == old).unwrap();
+        assert!(
+            old_asset
+                .all_tags()
+                .any(|tag| tag.tag == "keepme" && tag.category == "manual")
+        );
+        let new_asset = assets.iter().find(|asset| asset.path == new).unwrap();
+        assert!(!new_asset.all_tags().any(|tag| tag.tag == "keepme"));
+        drop(assets);
+        drop(shared);
         std::fs::remove_dir_all(&base).unwrap();
     }
 }
