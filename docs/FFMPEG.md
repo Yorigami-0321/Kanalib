@@ -13,7 +13,7 @@
 - 项目自身是 MIT；ffmpeg 是独立可执行进程，不作为库链接进 Kanalib。
 - 运行时探测 `ffmpeg -version` 的 `configuration:`；含 `--enable-gpl` 即判为 GPL，并在日志中警告。
 - 当前开发机使用 BtbN 的 LGPL shared 构建：`n8.1.3-24-g92611900bb-20261026`，安装位置 `runtime/ffmpeg`（被 `.gitignore` 忽略）。FFmpeg 源码获取入口：<https://ffmpeg.org/download.html>；BtbN 构建脚本与归档见 <https://github.com/BtbN/FFmpeg-Builds>。
-- 获取/更新：仓库内运行 `powershell -ExecutionPolicy Bypass -File scripts/fetch_ffmpeg_lgpl.ps1 -Force`；便携包根目录也会附带同内容的 `fetch-ffmpeg-lgpl.ps1`，按提示可重新下载到 `runtime/ffmpeg`。脚本固定 autobuild tag、ZIP SHA256 与下载地址，并写入 `FFMPEG-SOURCE.txt`。当前 shared 安装约 160MB（含 DLL）；打包只带 `bin` 中实际文件，不含 `ffplay`/doc。
+- 获取/更新：仓库内运行 `pwsh -NoLogo -NoProfile -ExecutionPolicy Bypass -File scripts/fetch_ffmpeg_lgpl.ps1 -Force`（本机优先 PowerShell 7；只有没有 `pwsh` 时才回退 `powershell.exe`）。便携包根目录也会附带同内容的 `fetch-ffmpeg-lgpl.ps1`，按提示可重新下载到 `runtime/ffmpeg`。脚本固定 autobuild tag、ZIP SHA256 与下载地址，并写入 `FFMPEG-SOURCE.txt`。当前 shared 安装约 160MB（含 DLL）；打包只带 `bin` 中实际文件，不含 `ffplay`/doc。
 - 运行时优先使用 `PATH` 中的 ffmpeg；程序目录的 `runtime/ffmpeg` 是离线备选。若用户希望覆盖二者，设置 `KANALIB_FFMPEG` 即可。
 - 打包：`scripts/build_portable.ps1` 默认只接受 LGPL；拒绝 GPL 并提示改用 LGPL 脚本。包内写入 `runtime/ffmpeg/FFMPEG-BUILD.txt`（版本、GPL 标志、构建参数、每个二进制的 SHA256）。
 

@@ -16,6 +16,7 @@
 *.err
 /sidecar_test.out
 /.qoder-credits/
+/.qoder/
 __pycache__/
 /crates/*/.kanalib/
 
