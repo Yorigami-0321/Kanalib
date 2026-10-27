@@ -3625,7 +3625,15 @@ fn ensure_thumb(
                 }
                 // FFmpeg can decode formats the image crate only writes; the
                 // generated cache is already rotated and sized.
-                None => return Ok((Some(target), thumb_width, thumb_height)),
+                None => {
+                    if let Some((mut width, mut height)) = media::fallback_dimensions(path) {
+                        if (5..=8).contains(&orientation) {
+                            std::mem::swap(&mut width, &mut height);
+                        }
+                        return Ok((Some(target), width, height));
+                    }
+                    return Ok((Some(target), thumb_width, thumb_height));
+                }
             }
         }
         let _ = std::fs::remove_file(&target);
@@ -3737,6 +3745,160 @@ mod tests {
         let (_thumb, width, height) =
             ensure_thumb(&source, &cache, 1, bytes, exif.orientation).unwrap();
         assert_eq!((width, height), (10, 20));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn new_formats_generate_thumbnails_and_keep_dimensions() {
+        let dir = temp_dir("new-formats");
+        let cache = dir.join("thumbs");
+        let tiff = dir.join("sample.tiff");
+        let ico = dir.join("sample.ico");
+        let qoi = dir.join("sample.qoi");
+        let exr = dir.join("sample.exr");
+        image::RgbImage::from_fn(48, 32, |x, y| {
+            image::Rgb([(x * 5) as u8, (y * 7) as u8, 90])
+        })
+        .save(&tiff)
+        .unwrap();
+        image::RgbaImage::from_fn(48, 32, |x, y| {
+            image::Rgba([(x * 5) as u8, (y * 7) as u8, 90, 255])
+        })
+        .save(&ico)
+        .unwrap();
+        image::RgbaImage::from_fn(48, 32, |x, y| {
+            image::Rgba([(x * 5) as u8, (y * 7) as u8, 90, 200])
+        })
+        .save(&qoi)
+        .unwrap();
+        image::Rgb32FImage::from_fn(48, 32, |x, y| {
+            image::Rgb([x as f32 / 48.0, y as f32 / 32.0, 0.5])
+        })
+        .save(&exr)
+        .unwrap();
+
+        for path in [&tiff, &ico, &qoi, &exr] {
+            let bytes = std::fs::metadata(path).unwrap().len();
+            let (exif, _) = media::read_exif(path);
+            let (thumb, width, height) =
+                ensure_thumb(path, &cache, 1, bytes, exif.orientation).unwrap();
+            assert_eq!((width, height), (48, 32), "{}", path.display());
+            let thumb = thumb.unwrap();
+            assert!(thumb.exists(), "{}", path.display());
+            let (thumb_width, thumb_height) = image::ImageReader::open(&thumb)
+                .unwrap()
+                .with_guessed_format()
+                .unwrap()
+                .into_dimensions()
+                .unwrap();
+            // `thumbnail` fills the 512 box even for small sources, keeping 3:2.
+            assert_eq!((thumb_width, thumb_height), (512, 341));
+        }
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn qoi_alpha_flattens_onto_white() {
+        let dir = temp_dir("qoi-alpha");
+        let cache = dir.join("thumbs");
+        let source = dir.join("alpha.qoi");
+        image::RgbaImage::from_pixel(32, 32, image::Rgba([255, 0, 0, 128]))
+            .save(&source)
+            .unwrap();
+        let bytes = std::fs::metadata(&source).unwrap().len();
+        let (thumb, _, _) = ensure_thumb(&source, &cache, 1, bytes, 1).unwrap();
+        let thumb = thumb.unwrap();
+        let image = image::ImageReader::open(&thumb)
+            .unwrap()
+            .with_guessed_format()
+            .unwrap()
+            .decode()
+            .unwrap()
+            .to_rgb8();
+        let pixel = image.get_pixel(16, 16);
+        assert!(
+            pixel[0] > 200 && pixel[1] > 80 && pixel[2] > 80,
+            "alpha should flatten to white, got {pixel:?}"
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn animated_gif_thumbnail_uses_first_frame() {
+        use image::Frame;
+        use image::codecs::gif::GifEncoder;
+        let dir = temp_dir("animated-gif");
+        let cache = dir.join("thumbs");
+        let source = dir.join("animated.gif");
+        let first = image::RgbaImage::from_pixel(32, 24, image::Rgba([255, 0, 0, 255]));
+        let second = image::RgbaImage::from_pixel(32, 24, image::Rgba([0, 0, 255, 255]));
+        let file = std::fs::File::create(&source).unwrap();
+        GifEncoder::new(file)
+            .encode_frames(vec![Frame::new(first), Frame::new(second)])
+            .unwrap();
+        let bytes = std::fs::metadata(&source).unwrap().len();
+        let (thumb, width, height) = ensure_thumb(&source, &cache, 1, bytes, 1).unwrap();
+        assert_eq!((width, height), (32, 24));
+        let image = image::ImageReader::open(thumb.unwrap())
+            .unwrap()
+            .with_guessed_format()
+            .unwrap()
+            .decode()
+            .unwrap()
+            .to_rgb8();
+        let pixel = image.get_pixel(16, 12);
+        assert!(
+            pixel[0] > 200 && pixel[2] < 80,
+            "expected the first (red) frame, got {pixel:?}"
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    #[ignore = "requires ffmpeg with AVIF support (for example KANALIB_FFMPEG=runtime/ffmpeg/bin/ffmpeg.exe)"]
+    fn avif_thumbnail_and_dimensions_come_from_ffmpeg() {
+        let Some(ffmpeg) = ffmpeg::status() else {
+            return;
+        };
+        let dir = temp_dir("avif");
+        let cache = dir.join("thumbs");
+        std::fs::create_dir_all(&cache).unwrap();
+        let png = dir.join("sample.png");
+        let source = dir.join("sample.avif");
+        image::RgbImage::from_fn(96, 64, |x, y| {
+            image::Rgb([(x * 2) as u8, (y * 3) as u8, 60])
+        })
+        .save(&png)
+        .unwrap();
+        let status = std::process::Command::new(&ffmpeg.path)
+            .args(["-hide_banner", "-nostdin", "-v", "error", "-y", "-i"])
+            .arg(&png)
+            .args(["-frames:v", "1"])
+            .arg(&source)
+            .status()
+            .unwrap();
+        assert!(status.success(), "ffmpeg failed to create the AVIF sample");
+
+        let bytes = std::fs::metadata(&source).unwrap().len();
+        let target = thumb_target(&source, &cache, 1, bytes, 1);
+        let outcome = ffmpeg::generate_thumbnails(
+            &[ThumbJob {
+                source: source.clone(),
+                target: target.clone(),
+                alpha: ffmpeg::alpha_source(&source),
+            }],
+            &AtomicBool::new(false),
+            &|_, _| {},
+        );
+        assert_eq!(outcome.generated, 1);
+        assert!(target.exists(), "ffmpeg should generate the AVIF thumbnail");
+
+        let (thumb, width, height) = ensure_thumb(&source, &cache, 1, bytes, 1).unwrap();
+        assert_eq!(thumb, Some(target));
+        assert_eq!((width, height), (96, 64));
+        let hashes = media::hash_file(&source).unwrap();
+        assert_eq!(hashes.sha1.len(), 40);
+        assert!(hashes.decode_error.is_none());
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

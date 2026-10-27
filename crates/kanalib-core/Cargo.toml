@@ -15,7 +15,9 @@ anyhow = "1"
 blake3 = "1"
 dirs = "6"
 ignore = "0.4"
-image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp", "gif", "bmp"] }
+# AVIF decode in image 0.25 needs `avif-native` (dav1d, a native library), so
+# AVIF stays on the ffmpeg path; the plain `avif` feature only adds an encoder.
+image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp", "gif", "bmp", "tiff", "ico", "qoi", "exr"] }
 kamadak-exif = "0.6"
 log = "0.4"
 notify = "8"

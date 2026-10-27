@@ -1417,14 +1417,29 @@ impl Shared {
     }
 }
 
-pub const IMAGE_EXTENSIONS: &[&str] = &["jpg", "jpeg", "png", "webp", "gif", "bmp"];
+pub const IMAGE_EXTENSIONS: &[&str] = &[
+    "jpg", "jpeg", "png", "webp", "gif", "bmp", "tif", "tiff", "ico", "qoi", "exr", "avif",
+];
+
+/// 本构建里 `image` 没有解码器、只能交给 ffmpeg 的扩展名。
+/// AVIF 的 `image` feature 只包含编码器；解码需要 `avif-native`（dav1d 原生库）。
+pub const FFMPEG_ONLY_EXTENSIONS: &[&str] = &["avif"];
+
+fn extension_lower(path: &Path) -> Option<String> {
+    path.extension()
+        .map(|ext| ext.to_string_lossy().to_lowercase())
+}
 
 pub fn is_image(path: &Path) -> bool {
-    path.extension()
-        .map(|ext| {
-            let ext = ext.to_string_lossy().to_lowercase();
-            IMAGE_EXTENSIONS.iter().any(|known| *known == ext)
-        })
+    extension_lower(path)
+        .map(|ext| IMAGE_EXTENSIONS.iter().any(|known| *known == ext))
+        .unwrap_or(false)
+}
+
+/// 仅能由 ffmpeg 解码的图片格式；`image` 回退对其不可用。
+pub fn is_ffmpeg_only(path: &Path) -> bool {
+    extension_lower(path)
+        .map(|ext| FFMPEG_ONLY_EXTENSIONS.iter().any(|known| *known == ext))
         .unwrap_or(false)
 }
 
@@ -1814,5 +1829,20 @@ mod tests {
         assert_eq!(view.tagged, 0);
         assert_eq!(view.ratings, vec![("S".to_string(), 1)]);
         assert_eq!(view.tags, vec![("sky".to_string(), 1)]);
+    }
+
+    #[test]
+    fn image_extensions_accept_new_formats_case_insensitively() {
+        for name in [
+            "a.jpg", "a.JPEG", "a.png", "a.webp", "a.gif", "a.bmp", "a.tif", "a.TIFF", "a.ico",
+            "a.qoi", "a.exr", "a.avif",
+        ] {
+            assert!(is_image(Path::new(name)), "{name} should be an image");
+        }
+        for name in ["a.heic", "a.dng", "a.psd", "a.txt", "noext"] {
+            assert!(!is_image(Path::new(name)), "{name} should not be an image");
+        }
+        assert!(is_ffmpeg_only(Path::new("a.AVIF")));
+        assert!(!is_ffmpeg_only(Path::new("a.tiff")));
     }
 }

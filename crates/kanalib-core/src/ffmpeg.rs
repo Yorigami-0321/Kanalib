@@ -306,7 +306,7 @@ pub fn alpha_source(path: &Path) -> bool {
             .and_then(|value| value.to_str())
             .map(str::to_ascii_lowercase)
             .as_deref(),
-        Some("png" | "webp" | "gif")
+        Some("png" | "webp" | "gif" | "tif" | "tiff" | "ico" | "qoi" | "exr" | "avif")
     )
 }
 
@@ -614,8 +614,61 @@ mod tests {
         assert!(alpha_source(Path::new("a.PNG")));
         assert!(alpha_source(Path::new("a.webp")));
         assert!(alpha_source(Path::new("a.gif")));
+        assert!(alpha_source(Path::new("a.tif")));
+        assert!(alpha_source(Path::new("a.TIFF")));
+        assert!(alpha_source(Path::new("a.ico")));
+        assert!(alpha_source(Path::new("a.qoi")));
+        assert!(alpha_source(Path::new("a.exr")));
+        assert!(alpha_source(Path::new("a.avif")));
         assert!(!alpha_source(Path::new("a.jpg")));
         assert!(!alpha_source(Path::new("a.bmp")));
+    }
+
+    #[test]
+    fn ffmpeg_thumbnail_uses_the_first_animation_frame() {
+        if !available() {
+            return;
+        }
+        use image::Frame;
+        use image::codecs::gif::GifEncoder;
+        let dir = std::env::temp_dir().join(format!(
+            "kanalib-ffmpeg-gif-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let source = dir.join("animated.gif");
+        let target = dir.join("animated.jpg");
+        let first = image::RgbaImage::from_pixel(32, 24, image::Rgba([255, 0, 0, 255]));
+        let second = image::RgbaImage::from_pixel(32, 24, image::Rgba([0, 0, 255, 255]));
+        let file = std::fs::File::create(&source).unwrap();
+        GifEncoder::new(file)
+            .encode_frames(vec![Frame::new(first), Frame::new(second)])
+            .unwrap();
+        let outcome = generate_thumbnails(
+            &[ThumbJob {
+                source,
+                target: target.clone(),
+                alpha: true,
+            }],
+            &AtomicBool::new(false),
+            &|_, _| {},
+        );
+        assert_eq!(outcome.generated, 1);
+        let image = ImageReader::open(&target)
+            .unwrap()
+            .with_guessed_format()
+            .unwrap()
+            .decode()
+            .unwrap()
+            .to_rgb8();
+        let pixel = image.get_pixel(16, 12);
+        assert!(
+            pixel[0] > 200 && pixel[2] < 80,
+            "expected the first (red) frame, got {pixel:?}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

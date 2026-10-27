@@ -1,5 +1,5 @@
 use std::fs::File;
-use std::io::{BufReader, Read};
+use std::io::{BufReader, Read, Seek, SeekFrom};
 use std::path::Path;
 
 use anyhow::{Context, Result};
@@ -7,6 +7,8 @@ use exif::{In, Tag};
 use image::{imageops::FilterType, DynamicImage};
 use serde::{Deserialize, Serialize};
 use sha1::{Digest, Sha1};
+
+use crate::model::is_ffmpeg_only;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ExifData {
@@ -195,8 +197,27 @@ pub fn hash_file(path: &Path) -> Result<ContentHashes> {
         .and_then(|reader| reader.with_guessed_format())
         .map_err(image::ImageError::IoError)
         .and_then(|reader| reader.decode());
+    let ffmpeg_only = is_ffmpeg_only(path);
     let (phash, decode_ok, decode_error) = match decoded {
         Ok(image) => (perceptual_hash(&image), true, None),
+        // `image` 0.25 has no AVIF decoder unless the native dav1d backend is
+        // enabled. Thumbnails still come from ffmpeg, so a recognised AVIF
+        // must not be reported as a damaged file just because phash is absent.
+        Err(error) if ffmpeg_only && matches!(&error, image::ImageError::Unsupported(_)) => {
+            if crate::ffmpeg::available() {
+                log::info!(
+                    "decode {} skipped: ffmpeg-only format, hashes kept, phash skipped",
+                    path.display()
+                );
+                (0, false, None)
+            } else {
+                log::warn!(
+                    "decode {} needs ffmpeg (not available); hashes kept, phash skipped",
+                    path.display()
+                );
+                (0, false, Some("需要 FFmpeg 解码 AVIF".to_string()))
+            }
+        }
         Err(error) => {
             let label = classify_decode_error(&error);
             log::warn!(
@@ -228,6 +249,66 @@ fn classify_decode_error(error: &image::ImageError) -> &'static str {
     } else {
         "图片解码失败，文件可能已损坏"
     }
+}
+
+/// 原始尺寸回退：`image` 没有解码器、但 ffmpeg 能生成缩略图的格式。
+/// 目前只有 AVIF；从 ISO-BMFF 的 `meta/iprp/ipco/ispe` 读取主图尺寸，
+/// 避免把 512 缩略图的尺寸误存成原图尺寸。
+pub fn fallback_dimensions(path: &Path) -> Option<(u32, u32)> {
+    if !is_ffmpeg_only(path) {
+        return None;
+    }
+    let mut file = File::open(path).ok()?;
+    let len = file.metadata().ok()?.len();
+    let mut offset = 0u64;
+    while offset.saturating_add(8) <= len {
+        file.seek(SeekFrom::Start(offset)).ok()?;
+        let mut header = [0u8; 8];
+        file.read_exact(&mut header).ok()?;
+        let mut size = u32::from_be_bytes(header[0..4].try_into().ok()?) as u64;
+        let mut header_len = 8u64;
+        if size == 1 {
+            let mut large = [0u8; 8];
+            file.read_exact(&mut large).ok()?;
+            size = u64::from_be_bytes(large);
+            header_len = 16;
+        } else if size == 0 {
+            size = len - offset;
+        }
+        if size < header_len || offset.saturating_add(size) > len {
+            break;
+        }
+        if &header[4..8] == b"meta" {
+            let body_len = (size - header_len) as usize;
+            if body_len > 16 * 1024 * 1024 {
+                return None;
+            }
+            let mut body = vec![0u8; body_len];
+            file.read_exact(&mut body).ok()?;
+            return ispe_dimensions(&body);
+        }
+        offset = offset.saturating_add(size);
+    }
+    None
+}
+
+fn ispe_dimensions(body: &[u8]) -> Option<(u32, u32)> {
+    let mut best: Option<(u32, u32)> = None;
+    for index in 0..body.len().saturating_sub(15) {
+        if &body[index..index + 4] != b"ispe" {
+            continue;
+        }
+        let width = u32::from_be_bytes(body[index + 8..index + 12].try_into().ok()?);
+        let height = u32::from_be_bytes(body[index + 12..index + 16].try_into().ok()?);
+        if width == 0 || height == 0 || width > 1_000_000 || height > 1_000_000 {
+            continue;
+        }
+        let area = width as u64 * height as u64;
+        if best.is_none_or(|(w, h)| area > w as u64 * h as u64) {
+            best = Some((width, height));
+        }
+    }
+    best
 }
 
 pub fn perceptual_hash(image: &DynamicImage) -> u64 {
@@ -295,8 +376,19 @@ fn dct_2d(input: &[f32], size: usize) -> Vec<f32> {
 
 #[cfg(test)]
 mod tests {
-    use super::perceptual_hash;
+    use super::{fallback_dimensions, hash_file, perceptual_hash};
     use image::{DynamicImage, GrayImage, Luma};
+
+    fn temp_dir(tag: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "kanalib-media-{tag}-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
 
     #[test]
     fn perceptual_hash_is_stable_and_discriminating() {
@@ -357,6 +449,127 @@ mod tests {
         assert_eq!(hashes.blake3.len(), 64);
         assert_eq!(hashes.phash, 0);
 
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn new_image_formats_decode_for_hashes() {
+        let dir = temp_dir("formats");
+        let tiff = dir.join("sample.tiff");
+        let ico = dir.join("sample.ico");
+        let qoi = dir.join("sample.qoi");
+        let exr = dir.join("sample.exr");
+        image::RgbImage::from_fn(48, 32, |x, y| {
+            image::Rgb([(x * 5) as u8, (y * 7) as u8, 90])
+        })
+        .save(&tiff)
+        .unwrap();
+        image::RgbaImage::from_fn(48, 32, |x, y| {
+            image::Rgba([(x * 5) as u8, (y * 7) as u8, 90, 255])
+        })
+        .save(&ico)
+        .unwrap();
+        image::RgbaImage::from_fn(48, 32, |x, y| {
+            image::Rgba([(x * 5) as u8, (y * 7) as u8, 90, 200])
+        })
+        .save(&qoi)
+        .unwrap();
+        image::Rgb32FImage::from_fn(48, 32, |x, y| {
+            image::Rgb([x as f32 / 48.0, y as f32 / 32.0, 0.5])
+        })
+        .save(&exr)
+        .unwrap();
+
+        for path in [&tiff, &ico, &qoi, &exr] {
+            let hashes = hash_file(path).unwrap();
+            assert!(hashes.decode_ok, "{} should decode", path.display());
+            assert!(hashes.decode_error.is_none(), "{}", path.display());
+            assert_ne!(hashes.phash, 0, "{}", path.display());
+            assert_eq!(hashes.sha1.len(), 40);
+            assert_eq!(hashes.blake3.len(), 64);
+        }
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn truncated_new_format_keeps_content_hashes() {
+        let dir = temp_dir("truncated-tiff");
+        let path = dir.join("bad.tiff");
+        image::RgbImage::from_pixel(64, 64, image::Rgb([20, 40, 80]))
+            .save(&path)
+            .unwrap();
+        let bytes = std::fs::read(&path).unwrap();
+        std::fs::write(&path, &bytes[..32.min(bytes.len())]).unwrap();
+
+        let hashes = hash_file(&path).unwrap();
+        assert!(!hashes.decode_ok);
+        assert!(hashes.decode_error.is_some());
+        assert_eq!(hashes.sha1.len(), 40);
+        assert_eq!(hashes.blake3.len(), 64);
+        assert_eq!(hashes.phash, 0);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    fn boxed(kind: &[u8; 4], payload: &[u8]) -> Vec<u8> {
+        let mut bytes = Vec::with_capacity(8 + payload.len());
+        bytes.extend(((8 + payload.len()) as u32).to_be_bytes());
+        bytes.extend(kind);
+        bytes.extend(payload);
+        bytes
+    }
+
+    #[test]
+    fn avif_dimensions_read_ispe_box() {
+        let dir = temp_dir("avif-header");
+        let path = dir.join("sample.avif");
+        let ispe = boxed(b"ispe", &[0, 0, 0, 0, 0, 0, 2, 128, 0, 0, 1, 104]);
+        let meta = boxed(
+            b"meta",
+            &[[0u8, 0, 0, 0].as_slice(), ispe.as_slice()].concat(),
+        );
+        let ftyp = boxed(b"ftyp", b"avif\0\0\0\0avif");
+        std::fs::write(&path, [ftyp, meta].concat()).unwrap();
+
+        assert_eq!(fallback_dimensions(&path), Some((640, 360)));
+        assert_eq!(fallback_dimensions(&dir.join("sample.png")), None);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    #[ignore = "requires ffmpeg with AVIF support (for example KANALIB_FFMPEG=runtime/ffmpeg/bin/ffmpeg.exe)"]
+    fn avif_ffmpeg_fallback_keeps_hashes_without_damage() {
+        let Some(ffmpeg) = crate::ffmpeg::status() else {
+            return;
+        };
+        let dir = temp_dir("avif");
+        let png = dir.join("sample.png");
+        let avif = dir.join("sample.avif");
+        image::RgbImage::from_fn(96, 64, |x, y| {
+            image::Rgb([(x * 2) as u8, (y * 3) as u8, 60])
+        })
+        .save(&png)
+        .unwrap();
+        let status = std::process::Command::new(&ffmpeg.path)
+            .args(["-hide_banner", "-nostdin", "-v", "error", "-y", "-i"])
+            .arg(&png)
+            .args(["-frames:v", "1"])
+            .arg(&avif)
+            .status()
+            .unwrap();
+        assert!(status.success(), "ffmpeg failed to create the AVIF sample");
+
+        assert!(crate::model::is_image(&avif));
+        assert_eq!(fallback_dimensions(&avif), Some((96, 64)));
+        let hashes = hash_file(&avif).unwrap();
+        assert_eq!(hashes.sha1.len(), 40);
+        assert_eq!(hashes.blake3.len(), 64);
+        if hashes.decode_ok {
+            assert_ne!(hashes.phash, 0);
+        } else {
+            // This build has no AVIF decoder in `image`; with ffmpeg present
+            // the file must not be marked as damaged or unsupported.
+            assert!(hashes.decode_error.is_none());
+        }
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }
