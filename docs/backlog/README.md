@@ -41,7 +41,7 @@
 | [pending/overview.md](pending/overview.md) | 未完成项速览（缺口/优先级/依赖） |
 | [pending/browse.md](pending/browse.md) | 浏览与查看：F-003/004/005 |
 | [pending/search-organization.md](pending/search-organization.md) | 搜索与组织：F-012/013/014 |
-| [pending/tags.md](pending/tags.md) | 标签与打标：F-021/023/024 |
+| [pending/tags.md](pending/tags.md) | 标签与打标：F-021/023/024（已归档，本域暂无未完成项） |
 | [pending/library-sources-formats.md](pending/library-sources-formats.md) | 图库/来源/格式：F-030–F-033、F-035–F-037、F-040 |
 | [pending/dedup.md](pending/dedup.md) | 去重：F-045 |
 | [pending/ops.md](pending/ops.md) | 性能/可靠性与交付：F-061–F-063 |
@@ -58,8 +58,8 @@
 
 | 批次 | 目标 | 条目 |
 |---|---|---|
-| 第 1 批 | 图库可信度与规模 | F-012、F-021、F-030、F-032、F-061、F-062、F-063、F-031、F-040（阶段 2） |
-| 第 2 批 | 整理工作流 | F-003、F-004、F-005、F-013、F-014、F-023、F-024、F-033、F-036、F-037、F-045 |
+| 第 1 批 | 图库可信度与规模 | F-012（剩余：非名称排序 p95）、F-030、F-032、F-061、F-063、F-040（阶段 2 剩余） |
+| 第 2 批 | 整理工作流 | F-003、F-004、F-005、F-013、F-014、F-033（剩余：HEIC/RAW/PSD）、F-036、F-037、F-045 |
 | 第 3 批 | 原计划阶段 2 | F-035 |
 | 候选池 | 低优先级/远期 | F-015、F-016、F-025、F-026、F-038、F-039、F-046、F-047、F-048、F-049、F-064、F-065、F-066、F-067、F-068 |
 
