@@ -19,6 +19,24 @@ from torchvision.transforms import functional as vF
 from transformers import AutoModel
 
 THRESHOLD_KEYS = ("general", "character", "copyright", "style", "meta", "rating")
+DEFAULT_THRESHOLDS = {
+    "general": 0.17,
+    "character": 0.27,
+    "copyright": 0.24,
+    "style": 0.15,
+    "meta": 0.17,
+    "rating": 0.41,
+}
+# 每类落库候选上限，与 Rust model.rs 的 candidate_limit 一致。
+CANDIDATE_CAPS = {
+    "general": 40,
+    "character": 40,
+    "copyright": 40,
+    "style": 40,
+    "meta": 40,
+    "rating": 4,
+}
+CANDIDATE_FLOOR = 0.005
 
 
 def classify_error(exc: BaseException) -> tuple[str, str, str]:
@@ -74,18 +92,25 @@ def preprocess(images: list[Image.Image], size: int) -> torch.Tensor:
     return torch.stack(tensors)
 
 
-def build_thresholds(config) -> tuple[torch.Tensor, dict[str, tuple[int, int]]]:
+def build_thresholds(
+    config,
+) -> tuple[torch.Tensor, dict[str, tuple[int, int]], dict[str, float]]:
     thresholds = torch.full((config.num_classes,), 0.2, dtype=torch.float32)
     ranges: dict[str, tuple[int, int]] = {}
+    defaults: dict[str, float] = {}
     start = 0
     for category, count in config.tags_split:
-        thresholds[start : start + count] = float(
-            config.category_best_threshold.get(category, 0.2)
+        value = float(
+            config.category_best_threshold.get(
+                category, DEFAULT_THRESHOLDS.get(category, 0.2)
+            )
         )
+        thresholds[start : start + count] = value
         ranges[category] = (start, start + count)
+        defaults[category] = value
         start += count
     assert start == config.num_classes
-    return thresholds, ranges
+    return thresholds, ranges, defaults
 
 
 class Tagger:
@@ -113,7 +138,9 @@ class Tagger:
         self.model = model
         self.config = model.config
         self.tags = list(model.config.tags)
-        self.thresholds, self.ranges = build_thresholds(model.config)
+        self.thresholds, self.ranges, self.default_thresholds = build_thresholds(
+            model.config
+        )
         start, end = self.ranges["character"]
         self.character_tags = set(self.tags[start:end])
         torch.set_grad_enabled(False)
@@ -162,6 +189,7 @@ class Tagger:
     def decode(self, prob: torch.Tensor) -> dict:
         categories: dict[str, dict] = {}
         all_tags: list[dict] = []
+        candidates: list[dict] = []
         for category, (start, end) in self.ranges.items():
             values = prob[start:end]
             threshold = self.thresholds[start:end]
@@ -187,7 +215,23 @@ class Tagger:
                         "vocab_index": item["vocab_index"],
                     }
                 )
+            limit = CANDIDATE_CAPS.get(category, 0)
+            if limit > 0:
+                count = min(limit, int(values.numel()))
+                scores, indexes = torch.topk(values, count)
+                for score, index in zip(scores.tolist(), indexes.tolist()):
+                    if score < CANDIDATE_FLOOR:
+                        break
+                    candidates.append(
+                        {
+                            "tag": self.tags[start + int(index)],
+                            "category": category,
+                            "score": round(float(score), 4),
+                            "vocab_index": start + int(index),
+                        }
+                    )
         all_tags.sort(key=lambda item: item["score"], reverse=True)
+        candidates.sort(key=lambda item: item["score"], reverse=True)
         rating = categories.get("rating", {}).get("top", [])
         rating_value = (
             rating[0]["tag"].replace("rating:", "") if rating else ""
@@ -225,6 +269,7 @@ class Tagger:
             "group": group,
             "categories": categories,
             "tags": all_tags[:60],
+            "candidates": candidates,
         }
 
     def tag_paths(self, paths: list[str]) -> list[dict]:
@@ -326,6 +371,7 @@ def main() -> None:
                 "device": str(tagger.device),
                 "half": tagger.half,
                 "classes": int(tagger.config.num_classes),
+                "thresholds": tagger.default_thresholds,
                 "model": str(args.model),
             },
             ensure_ascii=False,

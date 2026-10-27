@@ -15,6 +15,166 @@ pub struct TagHit {
     pub vocab_index: Option<u32>,
 }
 
+/// 与 sidecar 模型配置保持一致的类别顺序；阈值与候选上限都按这个集合工作。
+pub const TAG_CATEGORIES: &[&str] = &[
+    "general",
+    "character",
+    "copyright",
+    "style",
+    "meta",
+    "rating",
+];
+
+/// sidecar 未提供类别默认阈值时的兜底（与 pixai-tagger-v1.0 config 对齐）。
+pub fn default_category_thresholds() -> HashMap<String, f32> {
+    HashMap::from([
+        ("general".to_string(), 0.17),
+        ("character".to_string(), 0.27),
+        ("copyright".to_string(), 0.24),
+        ("style".to_string(), 0.15),
+        ("meta".to_string(), 0.17),
+        ("rating".to_string(), 0.41),
+    ])
+}
+
+/// 每类最多保留的候选数。取 40 与 sidecar 原有 `top` 截断一致，保证同阈值重算
+/// 不会比旧行为少标签；rating 只有 4 个词表项。每资产最坏 204 行，行数有界。
+pub fn candidate_limit(category: &str) -> usize {
+    match category {
+        "general" | "character" | "copyright" | "style" | "meta" => 40,
+        "rating" => 4,
+        _ => 0,
+    }
+}
+
+/// 低于该分数的候选不落库；阈值最低可调到 0，但无法恢复未保存的极低分候选。
+pub const TAG_CANDIDATE_MIN_SCORE: f32 = 0.005;
+
+#[derive(Clone, Debug)]
+pub struct TagThresholds {
+    pub categories: HashMap<String, f32>,
+    /// 键含别名；读取时优先单标签覆盖，其次类别默认值。
+    pub overrides: HashMap<String, f32>,
+}
+
+impl Default for TagThresholds {
+    fn default() -> Self {
+        Self {
+            categories: default_category_thresholds(),
+            overrides: HashMap::new(),
+        }
+    }
+}
+
+impl TagThresholds {
+    pub fn threshold(&self, category: &str, tag: &str) -> f32 {
+        self.overrides
+            .get(tag)
+            .copied()
+            .or_else(|| self.overrides.get(&tag.to_lowercase()).copied())
+            .unwrap_or_else(|| {
+                self.categories
+                    .get(&category.to_ascii_lowercase())
+                    .copied()
+                    .unwrap_or(0.2)
+            })
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TagReviewState {
+    Pending,
+    Accepted,
+    Ignored,
+}
+
+impl TagReviewState {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Pending => "pending",
+            Self::Accepted => "accepted",
+            Self::Ignored => "ignored",
+        }
+    }
+
+    pub fn from_db(value: &str) -> Self {
+        match value {
+            "accepted" => Self::Accepted,
+            "ignored" => Self::Ignored,
+            _ => Self::Pending,
+        }
+    }
+}
+
+/// 低置信度审核的一条候选；`threshold` 是查询时的有效阈值（含单标签覆盖）。
+#[derive(Clone, Debug)]
+pub struct TagCandidateReview {
+    pub path: PathBuf,
+    pub tag: String,
+    pub category: String,
+    pub score: f32,
+    pub vocab_index: Option<u32>,
+    pub threshold: f32,
+    pub state: TagReviewState,
+    pub reviewed_at: Option<u64>,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct TagRecomputeSummary {
+    pub updated: usize,
+    pub skipped: usize,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct RetagSummary {
+    pub recomputed: usize,
+    pub queued: usize,
+    pub missing: usize,
+}
+
+#[derive(Clone, Debug)]
+pub struct TagJobError {
+    pub job_id: i64,
+    pub path: PathBuf,
+    pub attempts: u32,
+    pub last_error: Option<String>,
+    pub priority: i64,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct TagQueueTotals {
+    pub pending: usize,
+    pub running: usize,
+    pub error: usize,
+    pub done: usize,
+    pub total: usize,
+}
+
+/// 后台打标队列的运行时状态（暂停/取消、吞吐、ETA、错误与设备）。
+#[derive(Clone, Debug, Default)]
+pub struct TagQueueStatus {
+    pub paused: bool,
+    pub cancelling: bool,
+    pub pending: usize,
+    pub running: usize,
+    pub error: usize,
+    pub done: usize,
+    /// 本轮开始时待处理总数。
+    pub total: usize,
+    /// 本轮已完成数。
+    pub completed: usize,
+    /// 本轮失败数。
+    pub failed: usize,
+    pub elapsed_secs: f64,
+    pub throughput_per_sec: f32,
+    pub eta_secs: Option<u64>,
+    pub last_error: Option<String>,
+    pub last_error_path: Option<PathBuf>,
+    pub device: Option<String>,
+    pub gpu_available: Option<bool>,
+    pub message: Option<String>,
+}
+
 #[derive(Clone, Debug)]
 pub struct Asset {
     pub path: PathBuf,
@@ -145,10 +305,7 @@ impl CountAccumulator {
             *self.groups.entry(asset.group.clone()).or_default() += 1;
         }
         if !asset.library_root.as_os_str().is_empty() {
-            *self
-                .sources
-                .entry(asset.library_root.clone())
-                .or_default() += 1;
+            *self.sources.entry(asset.library_root.clone()).or_default() += 1;
         }
         let mut seen = HashSet::new();
         for tag in asset
@@ -412,7 +569,11 @@ fn parse_size_value(value: &str) -> Option<f64> {
     } else {
         (lower.as_str(), 1.0)
     };
-    number.trim().parse::<f64>().ok().map(|value| value * factor)
+    number
+        .trim()
+        .parse::<f64>()
+        .ok()
+        .map(|value| value * factor)
 }
 
 fn parse_date_filter(value: &str) -> Option<DateFilter> {
@@ -778,7 +939,10 @@ impl SearchQuery {
         for scoped in &self.scoped_tags {
             if !asset.all_tags().any(|hit| {
                 hit.category.eq_ignore_ascii_case(&scoped.category)
-                    && hit.tag.to_lowercase().contains(&scoped.value.to_lowercase())
+                    && hit
+                        .tag
+                        .to_lowercase()
+                        .contains(&scoped.value.to_lowercase())
             }) {
                 return false;
             }
@@ -786,7 +950,10 @@ impl SearchQuery {
         for scoped in &self.exclude_scoped_tags {
             if asset.all_tags().any(|hit| {
                 hit.category.eq_ignore_ascii_case(&scoped.category)
-                    && hit.tag.to_lowercase().contains(&scoped.value.to_lowercase())
+                    && hit
+                        .tag
+                        .to_lowercase()
+                        .contains(&scoped.value.to_lowercase())
             }) {
                 return false;
             }
@@ -972,6 +1139,8 @@ pub struct Shared {
     pub queue_pending: usize,
     pub queue_running: usize,
     pub queue_error: usize,
+    /// 打标队列的运行时控制与进度；后台线程只通过这里读写。
+    pub tag_status: TagQueueStatus,
     pub dedup: DedupState,
     pub saved_searches: Vec<SavedSearch>,
     /// 只影响侧栏标签面的显示，不修改资产标签本身。
@@ -1037,6 +1206,7 @@ impl Shared {
             queue_pending: 0,
             queue_running: 0,
             queue_error: 0,
+            tag_status: TagQueueStatus::default(),
             dedup,
             saved_searches: Vec::new(),
             blocked_tags: HashSet::new(),
@@ -1104,6 +1274,60 @@ impl Shared {
         self.queue_pending = pending;
         self.queue_running = running;
         self.queue_error = error;
+        self.tag_status.pending = pending;
+        self.tag_status.running = running;
+        self.tag_status.error = error;
+    }
+
+    pub fn pause_tag_queue(&mut self) {
+        self.tag_status.paused = true;
+        self.tag_status.cancelling = false;
+        self.tag_status.message = Some("打标已暂停，当前批完成后不再认领新任务".into());
+    }
+
+    pub fn resume_tag_queue(&mut self) {
+        self.tag_status.paused = false;
+        self.tag_status.cancelling = false;
+        self.tag_status.message = Some("打标已继续".into());
+    }
+
+    pub fn cancel_tag_queue(&mut self) {
+        self.tag_status.cancelling = true;
+        self.tag_status.paused = false;
+        self.tag_status.message = Some("正在取消打标，已完成结果会保留".into());
+    }
+
+    /// 更新本轮进度并计算吞吐/ETA；`elapsed_secs` 为本轮累计耗时。
+    pub fn set_tag_progress(
+        &mut self,
+        completed: usize,
+        failed: usize,
+        total: usize,
+        elapsed_secs: f64,
+    ) {
+        let status = &mut self.tag_status;
+        if total > 0 {
+            status.total = total;
+        }
+        status.completed = completed;
+        status.failed = failed;
+        status.elapsed_secs = elapsed_secs;
+        status.throughput_per_sec = if elapsed_secs > 0.0 {
+            completed as f32 / elapsed_secs as f32
+        } else {
+            0.0
+        };
+        let remaining = status.total.saturating_sub(completed);
+        status.eta_secs = if status.throughput_per_sec > 0.0 {
+            Some((remaining as f32 / status.throughput_per_sec).ceil() as u64)
+        } else {
+            None
+        };
+    }
+
+    pub fn set_tag_device(&mut self, device: &str) {
+        self.tag_status.device = Some(device.to_string());
+        self.tag_status.gpu_available = Some(device.to_ascii_lowercase().contains("cuda"));
     }
 
     pub fn sort_assets(&mut self) {
@@ -1466,21 +1690,12 @@ mod tests {
 
     #[test]
     fn manual_tags_join_counts_filters_and_search() {
-        let mut a = asset(
-            "a.png",
-            true,
-            "g",
-            "原创",
-            vec![tag("1girl", "general")],
-        );
+        let mut a = asset("a.png", true, "g", "原创", vec![tag("1girl", "general")]);
         a.manual_tags.push(tag("custom_tag", "manual"));
         let counts = CountAccumulator::from_assets(&[a.clone()]);
         assert_eq!(
             counts.view().tags,
-            vec![
-                ("1girl".to_string(), 1),
-                ("custom_tag".to_string(), 1)
-            ]
+            vec![("1girl".to_string(), 1), ("custom_tag".to_string(), 1)]
         );
         assert!(Filter::Tag("custom_tag".to_string()).matches(&a));
         let query = SearchQuery::parse("tag:custom_tag");
@@ -1523,7 +1738,9 @@ mod tests {
         assert!(SearchQuery::parse("-nothere").matches(&a, None, None));
         assert!(SearchQuery::parse("star:<=4").matches(&a, None, None));
         assert!(!SearchQuery::parse("-star:>=4").matches(&a, None, None));
-        assert!(!SearchQuery::parse("character:clara -copyright:star_rail").matches(&a, None, None));
+        assert!(
+            !SearchQuery::parse("character:clara -copyright:star_rail").matches(&a, None, None)
+        );
         assert!(!SearchQuery::parse("foo:bar").warnings().is_empty());
         assert!(!SearchQuery::parse("date:2026-13").warnings().is_empty());
     }
@@ -1535,6 +1752,45 @@ mod tests {
         assert!(!query.matches(&a, None, None));
         let paths = HashSet::from([PathBuf::from("a.png")]);
         assert!(query.matches(&a, None, Some(&paths)));
+    }
+
+    #[test]
+    fn queue_status_tracks_pause_cancel_throughput_and_eta() {
+        let mut shared = Shared::new(
+            vec![PathBuf::from("lib")],
+            Vec::new(),
+            Default::default(),
+            crate::dedup::DEFAULT_SIMILAR_THRESHOLD,
+            Vec::new(),
+        );
+        shared.set_queue_counts(10, 0, 2);
+        assert_eq!(
+            (shared.tag_status.pending, shared.tag_status.error),
+            (10, 2)
+        );
+
+        shared.pause_tag_queue();
+        assert!(shared.tag_status.paused);
+        shared.set_tag_progress(4, 1, 10, 2.0);
+        assert_eq!(shared.tag_status.completed, 4);
+        assert!((shared.tag_status.throughput_per_sec - 2.0).abs() < f32::EPSILON);
+        assert_eq!(shared.tag_status.eta_secs, Some(3));
+
+        shared.resume_tag_queue();
+        assert!(!shared.tag_status.paused);
+
+        shared.cancel_tag_queue();
+        assert!(shared.tag_status.cancelling);
+        assert!(!shared.tag_status.paused);
+    }
+
+    #[test]
+    fn thresholds_resolve_category_and_tag_overrides() {
+        let mut thresholds = TagThresholds::default();
+        assert!((thresholds.threshold("general", "1girl") - 0.17).abs() < 1e-6);
+        thresholds.overrides.insert("1girl".to_string(), 0.5);
+        assert!((thresholds.threshold("general", "1girl") - 0.5).abs() < 1e-6);
+        assert!((thresholds.threshold("general", "other") - 0.17).abs() < 1e-6);
     }
 
     #[test]

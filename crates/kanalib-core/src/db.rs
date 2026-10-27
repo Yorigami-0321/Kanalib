@@ -11,10 +11,15 @@ use serde::{Deserialize, Serialize};
 use crate::dedup::{DuplicateReview, ReviewState};
 use crate::media::ContentHashes;
 use crate::model::{
-    Asset, BackupReport, Filter, SavedSearch, TableCount, TagHit, TagSummary, normalize_tag_name,
+    Asset, BackupReport, Filter, RetagSummary, SavedSearch, TAG_CANDIDATE_MIN_SCORE, TAG_CATEGORIES,
+    TableCount, TagCandidateReview, TagHit, TagJobError, TagQueueTotals, TagRecomputeSummary,
+    TagReviewState, TagSummary, TagThresholds, candidate_limit, default_category_thresholds,
+    normalize_tag_name,
 };
 
-const SCHEMA_VERSION: i64 = 7;
+const SCHEMA_VERSION: i64 = 8;
+const TAG_THRESHOLDS_KEY: &str = "tags.category_thresholds";
+const ALLOW_CPU_TAGGING_KEY: &str = "tags.allow_cpu";
 
 /// 备份时比对行数的关键表；只统计实际存在的表（以 `sqlite_master` 为准）。
 const BACKUP_KEY_TABLES: &[&str] = &[
@@ -185,6 +190,25 @@ WHERE kind = 'tag'
   AND id NOT IN (SELECT MIN(id) FROM jobs WHERE kind = 'tag' GROUP BY asset_id);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_jobs_kind_asset ON jobs(kind, asset_id);
 CREATE INDEX IF NOT EXISTS idx_jobs_state_kind ON jobs(kind, state, priority);
+"#;
+
+/// v8：每个资产每类只保留有限个模型候选（含阈值下分数），供阈值重算与低置信度审核。
+/// 主键 (asset_id, tag) 同时承担按资产的查询索引；只有 top-K 候选落库，行数有上限。
+const SCHEMA_V8: &str = r#"
+CREATE TABLE IF NOT EXISTS asset_scores (
+    asset_id INTEGER NOT NULL REFERENCES assets(id) ON DELETE CASCADE,
+    tag TEXT NOT NULL,
+    category TEXT NOT NULL DEFAULT '',
+    score REAL NOT NULL DEFAULT 0,
+    vocab_index INTEGER,
+    review_state TEXT NOT NULL DEFAULT 'pending',
+    reviewed_at INTEGER,
+    PRIMARY KEY(asset_id, tag)
+);
+CREATE INDEX IF NOT EXISTS idx_asset_scores_review
+    ON asset_scores(review_state, category);
+CREATE INDEX IF NOT EXISTS idx_tags_threshold_override
+    ON tags(threshold_override) WHERE threshold_override IS NOT NULL;
 "#;
 
 #[derive(Clone, Debug)]
@@ -494,7 +518,9 @@ impl Db {
     }
 
     pub fn asset_paths(&self, folder: &str) -> Result<Vec<PathBuf>> {
-        let mut statement = self.conn.prepare("SELECT path FROM assets WHERE folder = ?1")?;
+        let mut statement = self
+            .conn
+            .prepare("SELECT path FROM assets WHERE folder = ?1")?;
         let rows = statement.query_map([folder], |row| row.get::<_, String>(0))?;
         Ok(rows
             .collect::<rusqlite::Result<Vec<_>>>()?
@@ -504,9 +530,9 @@ impl Db {
     }
 
     pub fn asset_paths_by_sha1(&self, folder: &str, sha1: &str) -> Result<Vec<PathBuf>> {
-        let mut statement = self.conn.prepare(
-            "SELECT path FROM assets WHERE folder = ?1 AND sha1 = ?2",
-        )?;
+        let mut statement = self
+            .conn
+            .prepare("SELECT path FROM assets WHERE folder = ?1 AND sha1 = ?2")?;
         let rows = statement.query_map(params![folder, sha1], |row| row.get::<_, String>(0))?;
         Ok(rows
             .collect::<rusqlite::Result<Vec<_>>>()?
@@ -680,6 +706,531 @@ impl Db {
         Ok(())
     }
 
+    /// 保存 sidecar 结果：候选落 `asset_scores`，按当前阈值重算自动标签。
+    /// `candidates == None` 表示旧 sidecar，退回原有 `tags` 行为并清空候选。
+    pub fn store_tag_result(&self, asset: &Asset, candidates: Option<&[TagHit]>) -> Result<Asset> {
+        let Some(candidates) = candidates else {
+            self.update_tags(asset)?;
+            let path = asset.path.to_string_lossy().to_string();
+            self.conn.execute(
+                "DELETE FROM asset_scores WHERE asset_id = (SELECT id FROM assets WHERE path = ?1)",
+                [&path],
+            )?;
+            return self.load_asset(&asset.path);
+        };
+        let path = asset.path.to_string_lossy().to_string();
+        let thresholds = self.tag_thresholds()?;
+        let tx = self.conn.unchecked_transaction()?;
+        let asset_id: Option<i64> = tx
+            .query_row("SELECT id FROM assets WHERE path = ?1", [&path], |row| {
+                row.get(0)
+            })
+            .optional()?;
+        let Some(asset_id) = asset_id else {
+            bail!("asset not found: {path}");
+        };
+        let states = candidate_states(&tx, asset_id)?;
+        let stored = save_candidates(&tx, asset_id, candidates, &states)?;
+        let auto = auto_candidates(&stored, &states, &thresholds);
+        let (rating, group) = derive_rating_group(&auto, &thresholds);
+        write_auto_tags(
+            &tx,
+            asset_id,
+            &auto,
+            &rating,
+            &group,
+            true,
+            asset.damage.as_deref(),
+        )?;
+        tx.commit()?;
+        self.load_asset(&asset.path)
+    }
+
+    pub fn tag_thresholds(&self) -> Result<TagThresholds> {
+        let mut categories = default_category_thresholds();
+        if let Some(raw) = self.setting(TAG_THRESHOLDS_KEY)? {
+            if let Ok(stored) = serde_json::from_str::<HashMap<String, f32>>(&raw) {
+                for (category, value) in stored {
+                    let category = category.to_ascii_lowercase();
+                    if let Some(slot) = categories.get_mut(&category)
+                        && value.is_finite()
+                    {
+                        *slot = value.clamp(0.0, 1.0);
+                    }
+                }
+            }
+        }
+        let mut overrides = HashMap::new();
+        {
+            let mut statement = self.conn.prepare(
+                "SELECT name, threshold_override FROM tags
+                 WHERE threshold_override IS NOT NULL AND alias_of IS NULL",
+            )?;
+            let rows = statement.query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, f64>(1)?))
+            })?;
+            for row in rows {
+                let (name, value) = row?;
+                if value.is_finite() {
+                    overrides.insert(name, value.clamp(0.0, 1.0) as f32);
+                }
+            }
+        }
+        {
+            let mut statement = self.conn.prepare(
+                "SELECT alias.name, canonical.threshold_override
+                 FROM tags alias
+                 JOIN tags canonical ON canonical.id = alias.alias_of
+                 WHERE canonical.threshold_override IS NOT NULL",
+            )?;
+            let rows = statement.query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, f64>(1)?))
+            })?;
+            for row in rows {
+                let (name, value) = row?;
+                if value.is_finite() {
+                    overrides.insert(name, value.clamp(0.0, 1.0) as f32);
+                }
+            }
+        }
+        Ok(TagThresholds {
+            categories,
+            overrides,
+        })
+    }
+
+    /// 首次收到 sidecar ready 行时，把模型配置里的类别默认阈值落库；已有设置不覆盖。
+    pub fn seed_category_thresholds(&self, values: &HashMap<String, f32>) -> Result<()> {
+        if values.is_empty() || self.setting(TAG_THRESHOLDS_KEY)?.is_some() {
+            return Ok(());
+        }
+        let mut categories = default_category_thresholds();
+        for (category, value) in values {
+            let category = category.to_ascii_lowercase();
+            if let Some(slot) = categories.get_mut(&category)
+                && value.is_finite()
+            {
+                *slot = value.clamp(0.0, 1.0);
+            }
+        }
+        self.set_setting(TAG_THRESHOLDS_KEY, &serde_json::to_string(&categories)?)
+    }
+
+    /// 类别阈值越界会 clamp 到 [0,1]；非有限值报错。
+    pub fn set_category_threshold(&self, category: &str, value: f32) -> Result<f32> {
+        let category = category.trim().to_ascii_lowercase();
+        if !TAG_CATEGORIES.contains(&category.as_str()) {
+            bail!("未知标签类别: {category}");
+        }
+        let value = threshold_value(value)?;
+        let mut categories = self.tag_thresholds()?.categories;
+        categories.insert(category, value);
+        self.set_setting(TAG_THRESHOLDS_KEY, &serde_json::to_string(&categories)?)?;
+        Ok(value)
+    }
+
+    /// 单标签覆盖；`None` 清除。别名写到规范标签上，未使用的标签也可持久化。
+    pub fn set_tag_threshold(&self, tag: &str, value: Option<f32>) -> Result<Option<f32>> {
+        let tag = normalize_tag_name(tag);
+        if tag.is_empty() {
+            bail!("标签名不能为空");
+        }
+        let value = value.map(threshold_value).transpose()?;
+        let existing: Option<(i64, Option<i64>)> = self
+            .conn
+            .query_row(
+                "SELECT id, alias_of FROM tags WHERE name = ?1",
+                [&tag],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+        let tag_id = match existing {
+            Some((id, alias_of)) => alias_of.unwrap_or(id),
+            None => {
+                if value.is_none() {
+                    return Ok(None);
+                }
+                self.conn.execute(
+                    "INSERT INTO tags(name, category) VALUES(?1, '') ON CONFLICT(name) DO NOTHING",
+                    [&tag],
+                )?;
+                self.conn.query_row(
+                    "SELECT COALESCE(alias_of, id) FROM tags WHERE name = ?1",
+                    [&tag],
+                    |row| row.get(0),
+                )?
+            }
+        };
+        self.conn.execute(
+            "UPDATE tags SET threshold_override = ?1 WHERE id = ?2",
+            params![value.map(|value| value as f64), tag_id],
+        )?;
+        Ok(value)
+    }
+
+    pub fn allow_cpu_tagging(&self) -> bool {
+        self.setting(ALLOW_CPU_TAGGING_KEY)
+            .ok()
+            .flatten()
+            .as_deref()
+            == Some("true")
+    }
+
+    pub fn set_allow_cpu_tagging(&self, allow: bool) -> Result<()> {
+        self.set_setting(ALLOW_CPU_TAGGING_KEY, if allow { "true" } else { "false" })
+    }
+
+    /// 只用已存候选重算自动标签；不调用模型，manual 标签与候选行保持不变。
+    pub fn recompute_thresholds(&self, paths: &[PathBuf]) -> Result<TagRecomputeSummary> {
+        let thresholds = self.tag_thresholds()?;
+        let tx = self.conn.unchecked_transaction()?;
+        let mut summary = TagRecomputeSummary::default();
+        let mut seen = HashSet::new();
+        for path in paths {
+            let path_string = path.to_string_lossy().to_string();
+            if !seen.insert(path_string.clone()) {
+                continue;
+            }
+            let asset_id: Option<i64> = tx
+                .query_row(
+                    "SELECT id FROM assets WHERE path = ?1",
+                    [&path_string],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            let Some(asset_id) = asset_id else {
+                summary.skipped += 1;
+                continue;
+            };
+            let (stored, states) = read_candidates(&tx, asset_id)?;
+            if stored.is_empty() {
+                summary.skipped += 1;
+                continue;
+            }
+            let auto = auto_candidates(&stored, &states, &thresholds);
+            let (rating, group) = derive_rating_group(&auto, &thresholds);
+            write_auto_tags(&tx, asset_id, &auto, &rating, &group, false, None)?;
+            summary.updated += 1;
+        }
+        tx.commit()?;
+        Ok(summary)
+    }
+
+    /// 低置信度审核：列出阈值下的待审候选。
+    pub fn pending_tag_candidates(
+        &self,
+        folders: &[String],
+        limit: usize,
+    ) -> Result<Vec<TagCandidateReview>> {
+        if folders.is_empty() || limit == 0 {
+            return Ok(Vec::new());
+        }
+        let thresholds = self.tag_thresholds()?;
+        let placeholders = vec!["?"; folders.len()].join(", ");
+        let base = folders.len();
+        let cases = TAG_CATEGORIES
+            .iter()
+            .enumerate()
+            .map(|(index, category)| format!("WHEN '{category}' THEN ?{}", base + index + 1))
+            .collect::<Vec<_>>()
+            .join(" ");
+        let limit_slot = base + TAG_CATEGORIES.len() + 1;
+        // 在 SQL 里应用有效阈值（单标签覆盖优先，其次类别默认），LIMIT 才能直接命中待审行。
+        let sql = format!(
+            "SELECT a.path, s.tag, s.category, s.score, s.vocab_index, s.review_state,
+                    s.reviewed_at
+             FROM asset_scores s
+             JOIN assets a ON a.id = s.asset_id
+             WHERE a.folder IN ({placeholders}) AND s.review_state = 'pending'
+               AND s.score < COALESCE(
+                    (SELECT COALESCE(t.threshold_override, c.threshold_override)
+                     FROM tags t
+                     LEFT JOIN tags c ON c.id = t.alias_of
+                     WHERE t.name = s.tag
+                       AND COALESCE(t.threshold_override, c.threshold_override) IS NOT NULL
+                     LIMIT 1),
+                    CASE s.category {cases} ELSE 0.2 END)
+             ORDER BY a.path, s.score DESC
+             LIMIT ?{limit_slot}"
+        );
+        let threshold_values = TAG_CATEGORIES
+            .iter()
+            .map(|category| thresholds.threshold(category, "") as f64)
+            .collect::<Vec<_>>();
+        let limit_value = limit as i64;
+        let mut values: Vec<&dyn ToSql> = Vec::with_capacity(folders.len() + 7);
+        for folder in folders {
+            values.push(folder);
+        }
+        for value in &threshold_values {
+            values.push(value);
+        }
+        values.push(&limit_value);
+        let mut statement = self.conn.prepare(&sql)?;
+        let rows = statement.query_map(rusqlite::params_from_iter(values), |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, f64>(3)?,
+                row.get::<_, Option<i64>>(4)?,
+                row.get::<_, String>(5)?,
+                row.get::<_, Option<i64>>(6)?,
+            ))
+        })?;
+        let mut out = Vec::new();
+        for row in rows {
+            let (path, tag, category, score, vocab_index, state, reviewed_at) = row?;
+            let score = score.clamp(0.0, 1.0) as f32;
+            let threshold = thresholds.threshold(&category, &tag);
+            if score >= threshold {
+                continue;
+            }
+            out.push(TagCandidateReview {
+                path: PathBuf::from(path),
+                tag,
+                category,
+                score,
+                vocab_index: vocab_index.map(|value| value.max(0) as u32),
+                threshold,
+                state: TagReviewState::from_db(&state),
+                reviewed_at: reviewed_at.map(|value| value.max(0) as u64),
+            });
+            if out.len() >= limit {
+                break;
+            }
+        }
+        Ok(out)
+    }
+
+    /// 检查器用：某个资产的全部候选（含已接受/已忽略）。
+    pub fn asset_candidates(&self, path: &Path) -> Result<Vec<TagCandidateReview>> {
+        let thresholds = self.tag_thresholds()?;
+        let mut statement = self.conn.prepare(
+            "SELECT a.path, s.tag, s.category, s.score, s.vocab_index, s.review_state,
+                    s.reviewed_at
+             FROM asset_scores s
+             JOIN assets a ON a.id = s.asset_id
+             WHERE a.path = ?1
+             ORDER BY s.score DESC, s.tag",
+        )?;
+        let rows = statement.query_map([path.to_string_lossy().to_string()], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, f64>(3)?,
+                row.get::<_, Option<i64>>(4)?,
+                row.get::<_, String>(5)?,
+                row.get::<_, Option<i64>>(6)?,
+            ))
+        })?;
+        let mut out = Vec::new();
+        for row in rows {
+            let (path, tag, category, score, vocab_index, state, reviewed_at) = row?;
+            let score = score.clamp(0.0, 1.0) as f32;
+            out.push(TagCandidateReview {
+                path: PathBuf::from(path),
+                threshold: thresholds.threshold(&category, &tag),
+                tag,
+                category,
+                score,
+                vocab_index: vocab_index.map(|value| value.max(0) as u32),
+                state: TagReviewState::from_db(&state),
+                reviewed_at: reviewed_at.map(|value| value.max(0) as u64),
+            });
+        }
+        Ok(out)
+    }
+
+    /// 接受/忽略单条候选；接受会把低于阈值的候选加入自动标签。
+    pub fn review_tag_candidate(
+        &self,
+        path: &Path,
+        tag: &str,
+        state: TagReviewState,
+    ) -> Result<()> {
+        let thresholds = self.tag_thresholds()?;
+        let tx = self.conn.unchecked_transaction()?;
+        let asset_id: Option<i64> = tx
+            .query_row(
+                "SELECT id FROM assets WHERE path = ?1",
+                [path.to_string_lossy().to_string()],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let Some(asset_id) = asset_id else {
+            bail!("asset not found: {}", path.display());
+        };
+        let changed = tx.execute(
+            "UPDATE asset_scores
+             SET review_state = ?1, reviewed_at = unixepoch()
+             WHERE asset_id = ?2 AND tag = ?3",
+            params![state.as_str(), asset_id, tag],
+        )?;
+        if changed == 0 {
+            bail!("候选不存在: {tag}");
+        }
+        recompute_asset_tags(&tx, asset_id, &thresholds)?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// 批量接受/忽略某个资产的全部候选；返回更新行数。
+    pub fn review_asset_candidates(&self, path: &Path, state: TagReviewState) -> Result<usize> {
+        let thresholds = self.tag_thresholds()?;
+        let tx = self.conn.unchecked_transaction()?;
+        let asset_id: Option<i64> = tx
+            .query_row(
+                "SELECT id FROM assets WHERE path = ?1",
+                [path.to_string_lossy().to_string()],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let Some(asset_id) = asset_id else {
+            bail!("asset not found: {}", path.display());
+        };
+        let changed = tx.execute(
+            "UPDATE asset_scores
+             SET review_state = ?1, reviewed_at = unixepoch()
+             WHERE asset_id = ?2",
+            params![state.as_str(), asset_id],
+        )?;
+        recompute_asset_tags(&tx, asset_id, &thresholds)?;
+        tx.commit()?;
+        Ok(changed)
+    }
+
+    /// 选择性重打标：有候选时只按阈值重算；缺候选才复用 jobs 队列调用模型。
+    pub fn retag_paths(&self, paths: &[PathBuf]) -> Result<RetagSummary> {
+        let thresholds = self.tag_thresholds()?;
+        let tx = self.conn.unchecked_transaction()?;
+        let mut summary = RetagSummary::default();
+        let mut seen = HashSet::new();
+        for path in paths {
+            let path_string = path.to_string_lossy().to_string();
+            if !seen.insert(path_string.clone()) {
+                continue;
+            }
+            let asset_id: Option<i64> = tx
+                .query_row(
+                    "SELECT id FROM assets WHERE path = ?1",
+                    [&path_string],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            let Some(asset_id) = asset_id else {
+                summary.missing += 1;
+                continue;
+            };
+            let (stored, states) = read_candidates(&tx, asset_id)?;
+            if !stored.is_empty() {
+                let auto = auto_candidates(&stored, &states, &thresholds);
+                let (rating, group) = derive_rating_group(&auto, &thresholds);
+                write_auto_tags(&tx, asset_id, &auto, &rating, &group, false, None)?;
+                summary.recomputed += 1;
+            } else {
+                tx.execute(
+                    "UPDATE assets
+                     SET tagged = 0, tag_state = 'pending', tag_attempts = 0, error = NULL
+                     WHERE id = ?1",
+                    [asset_id],
+                )?;
+                tx.execute(
+                    "INSERT INTO jobs(kind, asset_id, priority, state, attempts, last_error, run_after)
+                     VALUES('tag', ?1, 0, 'pending', 0, NULL, 0)
+                     ON CONFLICT(kind, asset_id) DO UPDATE SET
+                        state = 'pending', attempts = 0, last_error = NULL, run_after = 0",
+                    [asset_id],
+                )?;
+                summary.queued += 1;
+            }
+        }
+        tx.commit()?;
+        Ok(summary)
+    }
+
+    /// 按选中/当前视图提升待处理（含失败待重试）任务的优先级。
+    pub fn prioritize_tag_jobs(&self, paths: &[PathBuf], priority: i64) -> Result<usize> {
+        let priority = priority.clamp(0, 1000);
+        let tx = self.conn.unchecked_transaction()?;
+        let mut updated = 0;
+        for path in paths {
+            updated += tx.execute(
+                "UPDATE jobs
+                 SET priority = MAX(priority, ?1)
+                 WHERE kind = 'tag' AND state IN ('pending', 'error')
+                   AND asset_id = (SELECT id FROM assets WHERE path = ?2)",
+                params![priority, path.to_string_lossy().to_string()],
+            )?;
+        }
+        tx.commit()?;
+        Ok(updated)
+    }
+
+    pub fn tag_job_errors(&self, folders: &[String], limit: usize) -> Result<Vec<TagJobError>> {
+        if folders.is_empty() || limit == 0 {
+            return Ok(Vec::new());
+        }
+        let placeholders = vec!["?"; folders.len()].join(", ");
+        let sql = format!(
+            "SELECT j.id, a.path, j.attempts, j.last_error, j.priority
+             FROM jobs j
+             JOIN assets a ON a.id = j.asset_id
+             WHERE j.kind = 'tag' AND j.state = 'error' AND a.folder IN ({placeholders})
+             ORDER BY j.priority DESC, j.id
+             LIMIT ?"
+        );
+        let limit = limit.to_string();
+        let mut values = folders.iter().map(String::as_str).collect::<Vec<_>>();
+        values.push(limit.as_str());
+        let mut statement = self.conn.prepare(&sql)?;
+        let rows = statement.query_map(rusqlite::params_from_iter(values), |row| {
+            Ok(TagJobError {
+                job_id: row.get(0)?,
+                path: PathBuf::from(row.get::<_, String>(1)?),
+                attempts: row.get::<_, i64>(2)?.max(0) as u32,
+                last_error: row.get(3)?,
+                priority: row.get(4)?,
+            })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    pub fn tag_queue_totals(&self, folders: &[String]) -> Result<TagQueueTotals> {
+        if folders.is_empty() {
+            return Ok(TagQueueTotals::default());
+        }
+        let placeholders = vec!["?"; folders.len()].join(", ");
+        let sql = format!(
+            "SELECT j.state, COUNT(*)
+             FROM jobs j
+             JOIN assets a ON a.id = j.asset_id
+             WHERE j.kind = 'tag' AND a.folder IN ({placeholders})
+             GROUP BY j.state"
+        );
+        let mut statement = self.conn.prepare(&sql)?;
+        let rows = statement.query_map(rusqlite::params_from_iter(folders.iter()), |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, i64>(1)?.max(0) as usize,
+            ))
+        })?;
+        let mut totals = TagQueueTotals::default();
+        for row in rows {
+            let (state, count) = row?;
+            totals.total += count;
+            match state.as_str() {
+                "pending" => totals.pending = count,
+                "running" => totals.running = count,
+                "error" => totals.error = count,
+                "done" => totals.done = count,
+                _ => {}
+            }
+        }
+        Ok(totals)
+    }
+
     pub fn set_favorite(&self, paths: &[PathBuf], favorite: bool) -> Result<usize> {
         let tx = self.conn.unchecked_transaction()?;
         let mut statement = tx.prepare("UPDATE assets SET favorite = ?1 WHERE path = ?2")?;
@@ -841,17 +1392,14 @@ impl Db {
              ORDER BY uses DESC, t.name"
         );
         let mut statement = self.conn.prepare(&sql)?;
-        let rows = statement.query_map(
-            rusqlite::params_from_iter(folders.iter()),
-            |row| {
-                Ok(TagSummary {
-                    name: row.get(0)?,
-                    category: row.get(1)?,
-                    count: row.get::<_, i64>(2)?.max(0) as usize,
-                    manual_count: row.get::<_, i64>(3)?.max(0) as usize,
-                })
-            },
-        )?;
+        let rows = statement.query_map(rusqlite::params_from_iter(folders.iter()), |row| {
+            Ok(TagSummary {
+                name: row.get(0)?,
+                category: row.get(1)?,
+                count: row.get::<_, i64>(2)?.max(0) as usize,
+                manual_count: row.get::<_, i64>(3)?.max(0) as usize,
+            })
+        })?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
@@ -977,10 +1525,7 @@ impl Db {
             params![target_id, source_id],
         )?;
         tx.execute("DELETE FROM asset_tags WHERE tag_id = ?1", [source_id])?;
-        tx.execute(
-            "UPDATE tags SET alias_of = NULL WHERE id = ?1",
-            [target_id],
-        )?;
+        tx.execute("UPDATE tags SET alias_of = NULL WHERE id = ?1", [target_id])?;
         // 别名保持一层：之前指向来源的旧名直接改指目标，避免链式查找。
         tx.execute(
             "UPDATE tags SET alias_of = ?1 WHERE alias_of = ?2",
@@ -1415,17 +1960,21 @@ impl Db {
         let source_id = self.source_id(folder)?;
         let tx = self.conn.unchecked_transaction()?;
         let conflict: Option<i64> = tx
-            .query_row("SELECT id FROM assets WHERE path = ?1", [&new_string], |row| {
-                row.get(0)
-            })
+            .query_row(
+                "SELECT id FROM assets WHERE path = ?1",
+                [&new_string],
+                |row| row.get(0),
+            )
             .optional()?;
         if conflict.is_some() {
             bail!("asset path already exists: {new_string}");
         }
         let old_id: Option<i64> = tx
-            .query_row("SELECT id FROM assets WHERE path = ?1", [&old_string], |row| {
-                row.get(0)
-            })
+            .query_row(
+                "SELECT id FROM assets WHERE path = ?1",
+                [&old_string],
+                |row| row.get(0),
+            )
             .optional()?;
         let Some(old_id) = old_id else {
             bail!("asset not found: {old_string}");
@@ -1530,11 +2079,9 @@ impl Db {
     }
 
     pub fn tags_missing_vocab(&self) -> Result<Vec<String>> {
-        let mut statement = self
-            .conn
-            .prepare(
-                "SELECT name FROM tags WHERE vocab_index IS NULL AND alias_of IS NULL ORDER BY name",
-            )?;
+        let mut statement = self.conn.prepare(
+            "SELECT name FROM tags WHERE vocab_index IS NULL AND alias_of IS NULL ORDER BY name",
+        )?;
         let rows = statement.query_map([], |row| row.get::<_, String>(0))?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
@@ -1554,7 +2101,7 @@ impl Db {
         Ok(())
     }
 
-    fn load_asset(&self, path: &Path) -> Result<Asset> {
+    pub fn load_asset(&self, path: &Path) -> Result<Asset> {
         let path_string = path.to_string_lossy().to_string();
         let mut asset = self.conn.query_row(
             "SELECT path, thumb, width, height, group_name, rating, tags_json, tagged, error,
@@ -1568,10 +2115,7 @@ impl Db {
         Ok(asset)
     }
 
-    fn manual_tags_for_folders(
-        &self,
-        folders: &[String],
-    ) -> Result<HashMap<PathBuf, Vec<TagHit>>> {
+    fn manual_tags_for_folders(&self, folders: &[String]) -> Result<HashMap<PathBuf, Vec<TagHit>>> {
         if folders.is_empty() {
             return Ok(HashMap::new());
         }
@@ -1676,6 +2220,313 @@ fn manual_tag_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<(PathBuf, TagHit)
     ))
 }
 
+fn threshold_value(value: f32) -> Result<f32> {
+    if !value.is_finite() {
+        bail!("阈值必须是有限数值");
+    }
+    Ok(value.clamp(0.0, 1.0))
+}
+
+fn category_rank(category: &str) -> usize {
+    TAG_CATEGORIES
+        .iter()
+        .position(|known| *known == category)
+        .unwrap_or(TAG_CATEGORIES.len())
+}
+
+/// 每类按分数取 top-K，并压掉重复标签；未知类别直接丢弃。
+fn cap_candidates(candidates: &[TagHit]) -> Vec<TagHit> {
+    let mut buckets: HashMap<String, Vec<TagHit>> = HashMap::new();
+    for candidate in candidates {
+        let category = candidate.category.trim().to_ascii_lowercase();
+        if candidate.tag.trim().is_empty() || !candidate.score.is_finite() {
+            continue;
+        }
+        if candidate.score < TAG_CANDIDATE_MIN_SCORE || candidate_limit(&category) == 0 {
+            continue;
+        }
+        buckets.entry(category).or_default().push(TagHit {
+            tag: candidate.tag.trim().to_string(),
+            category: candidate.category.trim().to_ascii_lowercase(),
+            score: candidate.score.clamp(0.0, 1.0),
+            vocab_index: candidate.vocab_index,
+        });
+    }
+    let mut capped = Vec::new();
+    for (category, mut items) in buckets {
+        items.sort_by(|a, b| {
+            b.score
+                .partial_cmp(&a.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| a.tag.cmp(&b.tag))
+        });
+        let mut seen = HashSet::new();
+        items.retain(|item| seen.insert(item.tag.to_lowercase()));
+        items.truncate(candidate_limit(&category));
+        capped.extend(items);
+    }
+    capped.sort_by(|a, b| {
+        category_rank(&a.category)
+            .cmp(&category_rank(&b.category))
+            .then_with(|| {
+                b.score
+                    .partial_cmp(&a.score)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
+            .then_with(|| a.tag.cmp(&b.tag))
+    });
+    capped
+}
+
+fn candidate_states(conn: &Connection, asset_id: i64) -> Result<HashMap<String, TagReviewState>> {
+    let mut statement =
+        conn.prepare("SELECT tag, review_state FROM asset_scores WHERE asset_id = ?1")?;
+    let rows = statement.query_map([asset_id], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            TagReviewState::from_db(&row.get::<_, String>(1)?),
+        ))
+    })?;
+    Ok(rows.collect::<rusqlite::Result<HashMap<_, _>>>()?)
+}
+
+fn save_candidates(
+    conn: &Connection,
+    asset_id: i64,
+    candidates: &[TagHit],
+    states: &HashMap<String, TagReviewState>,
+) -> Result<Vec<TagHit>> {
+    let capped = cap_candidates(candidates);
+    conn.execute("DELETE FROM asset_scores WHERE asset_id = ?1", [asset_id])?;
+    {
+        let mut statement = conn.prepare(
+            "INSERT INTO asset_scores(
+                asset_id, tag, category, score, vocab_index, review_state, reviewed_at
+             ) VALUES(?1, ?2, ?3, ?4, ?5, ?6, NULL)",
+        )?;
+        for candidate in &capped {
+            let state = states
+                .get(&candidate.tag)
+                .copied()
+                .unwrap_or(TagReviewState::Pending);
+            statement.execute(params![
+                asset_id,
+                candidate.tag,
+                candidate.category,
+                candidate.score as f64,
+                candidate.vocab_index.map(|value| value as i64),
+                state.as_str(),
+            ])?;
+        }
+    }
+    Ok(capped)
+}
+
+fn read_candidates(
+    conn: &Connection,
+    asset_id: i64,
+) -> Result<(Vec<TagHit>, HashMap<String, TagReviewState>)> {
+    let mut statement = conn.prepare(
+        "SELECT tag, category, score, vocab_index, review_state
+         FROM asset_scores WHERE asset_id = ?1
+         ORDER BY score DESC, tag",
+    )?;
+    let rows = statement.query_map([asset_id], |row| {
+        Ok((
+            TagHit {
+                tag: row.get(0)?,
+                category: row.get(1)?,
+                score: row.get::<_, f64>(2)? as f32,
+                vocab_index: row
+                    .get::<_, Option<i64>>(3)?
+                    .map(|value| value.max(0) as u32),
+            },
+            TagReviewState::from_db(&row.get::<_, String>(4)?),
+        ))
+    })?;
+    let mut candidates = Vec::new();
+    let mut states = HashMap::new();
+    for row in rows {
+        let (candidate, state) = row?;
+        states.insert(candidate.tag.clone(), state);
+        candidates.push(candidate);
+    }
+    Ok((candidates, states))
+}
+
+fn auto_candidates(
+    candidates: &[TagHit],
+    states: &HashMap<String, TagReviewState>,
+    thresholds: &TagThresholds,
+) -> Vec<TagHit> {
+    let mut seen = HashSet::new();
+    let mut auto = candidates
+        .iter()
+        .filter(|candidate| {
+            let accepted = states
+                .get(&candidate.tag)
+                .is_some_and(|state| *state == TagReviewState::Accepted);
+            accepted || candidate.score >= thresholds.threshold(&candidate.category, &candidate.tag)
+        })
+        .filter(|candidate| seen.insert(candidate.tag.to_lowercase()))
+        .cloned()
+        .collect::<Vec<_>>();
+    auto.sort_by(|a, b| {
+        b.score
+            .partial_cmp(&a.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| a.tag.cmp(&b.tag))
+    });
+    auto
+}
+
+fn choose_copyright(tags: &[&str]) -> Option<String> {
+    let mut fallback = None;
+    for tag in tags {
+        if *tag == "original" {
+            continue;
+        }
+        if fallback.is_none() {
+            fallback = Some((*tag).to_string());
+        }
+        if !tag.ends_with("_(series)") {
+            return Some((*tag).to_string());
+        }
+        let root = tag.split(['_', ':']).next().unwrap_or("");
+        for other in tags {
+            if other == tag || other.ends_with("_(series)") {
+                continue;
+            }
+            if other.split(['_', ':']).next().unwrap_or("") == root {
+                return Some((*other).to_string());
+            }
+        }
+    }
+    fallback
+}
+
+/// 与 sidecar 的 rating / group 语义对齐；角色换装归并不在 Rust 侧重做。
+fn derive_rating_group(auto: &[TagHit], thresholds: &TagThresholds) -> (String, String) {
+    let mut passing = auto
+        .iter()
+        .filter(|candidate| {
+            candidate.score >= thresholds.threshold(&candidate.category, &candidate.tag)
+        })
+        .collect::<Vec<_>>();
+    passing.sort_by(|a, b| {
+        b.score
+            .partial_cmp(&a.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| a.tag.cmp(&b.tag))
+    });
+    let rating = passing
+        .iter()
+        .find(|candidate| candidate.category == "rating")
+        .map(|candidate| {
+            candidate
+                .tag
+                .strip_prefix("rating:")
+                .unwrap_or(&candidate.tag)
+                .to_string()
+        })
+        .unwrap_or_default();
+    let general = passing
+        .iter()
+        .filter(|candidate| candidate.category == "general")
+        .map(|candidate| candidate.tag.as_str())
+        .collect::<HashSet<_>>();
+    let meta = passing
+        .iter()
+        .filter(|candidate| candidate.category == "meta")
+        .map(|candidate| candidate.tag.as_str())
+        .collect::<HashSet<_>>();
+    let copyright = passing
+        .iter()
+        .filter(|candidate| candidate.category == "copyright")
+        .map(|candidate| candidate.tag.as_str())
+        .collect::<Vec<_>>();
+    let group = if general
+        .iter()
+        .any(|tag| matches!(*tag, "text_focus" | "text-only_page" | "fake_screenshot"))
+    {
+        "截图/文本".to_string()
+    } else if meta
+        .iter()
+        .any(|tag| matches!(*tag, "photo_(medium)" | "off-topic"))
+    {
+        "非动漫/实景".to_string()
+    } else if let Some(copyright) = choose_copyright(&copyright) {
+        format!("作品: {copyright}")
+    } else if let Some(character) = passing
+        .iter()
+        .find(|candidate| candidate.category == "character")
+    {
+        format!("角色: {}", character.tag)
+    } else if !copyright.is_empty() {
+        "原创".to_string()
+    } else {
+        "未分类".to_string()
+    };
+    (rating, group)
+}
+
+fn write_auto_tags(
+    conn: &Connection,
+    asset_id: i64,
+    tags: &[TagHit],
+    rating: &str,
+    group: &str,
+    clear_error: bool,
+    damage: Option<&str>,
+) -> Result<()> {
+    conn.execute(
+        "DELETE FROM asset_tags WHERE asset_id = ?1 AND origin = 'auto'",
+        [asset_id],
+    )?;
+    for tag in tags {
+        let tag_id = upsert_tag(conn, tag)?;
+        conn.execute(
+            "INSERT INTO asset_tags(asset_id, tag_id, confidence, origin)
+             VALUES(?1, ?2, ?3, 'auto')
+             ON CONFLICT(asset_id, tag_id, origin) DO UPDATE SET
+                confidence = MAX(confidence, excluded.confidence)",
+            params![asset_id, tag_id, tag.score as f64],
+        )?;
+    }
+    refresh_auto_tags_json(conn, asset_id)?;
+    refresh_tags_text(conn, asset_id)?;
+    if clear_error {
+        conn.execute(
+            "UPDATE assets
+             SET group_name = ?1, rating = ?2, tagged = 1, tag_state = 'done',
+                 tag_attempts = 0, error = NULL, damage = ?3
+             WHERE id = ?4",
+            params![group, rating, damage, asset_id],
+        )?;
+    } else {
+        conn.execute(
+            "UPDATE assets SET group_name = ?1, rating = ?2 WHERE id = ?3",
+            params![group, rating, asset_id],
+        )?;
+    }
+    Ok(())
+}
+
+fn recompute_asset_tags(
+    conn: &Connection,
+    asset_id: i64,
+    thresholds: &TagThresholds,
+) -> Result<bool> {
+    let (candidates, states) = read_candidates(conn, asset_id)?;
+    if candidates.is_empty() {
+        return Ok(false);
+    }
+    let auto = auto_candidates(&candidates, &states, thresholds);
+    let (rating, group) = derive_rating_group(&auto, thresholds);
+    write_auto_tags(conn, asset_id, &auto, &rating, &group, false, None)?;
+    Ok(true)
+}
+
 fn refresh_tags_text(conn: &Connection, asset_id: i64) -> Result<()> {
     let mut statement = conn.prepare(
         "SELECT name FROM (
@@ -1700,8 +2551,8 @@ fn refresh_tags_text(conn: &Connection, asset_id: i64) -> Result<()> {
 }
 
 fn tag_asset_ids(conn: &Connection, tag_id: i64) -> Result<Vec<i64>> {
-    let mut statement =
-        conn.prepare("SELECT DISTINCT asset_id FROM asset_tags WHERE tag_id = ?1 ORDER BY asset_id")?;
+    let mut statement = conn
+        .prepare("SELECT DISTINCT asset_id FROM asset_tags WHERE tag_id = ?1 ORDER BY asset_id")?;
     let rows = statement.query_map([tag_id], |row| row.get::<_, i64>(0))?;
     Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
 }
@@ -1746,11 +2597,7 @@ fn upsert_tag(conn: &Connection, tag: &TagHit) -> Result<i64> {
             "UPDATE tags SET category = ?1,
                 vocab_index = COALESCE(?2, vocab_index)
              WHERE id = ?3",
-            params![
-                tag.category,
-                tag.vocab_index.map(|value| value as i64),
-                id
-            ],
+            params![tag.category, tag.vocab_index.map(|value| value as i64), id],
         )?;
         return Ok(id);
     }
@@ -1883,7 +2730,9 @@ fn ensure_asset_columns(conn: &Connection) -> Result<()> {
         conn.execute_batch("ALTER TABLE assets ADD COLUMN captured_at INTEGER;")?;
     }
     if !columns.iter().any(|column| column == "metadata_json") {
-        conn.execute_batch("ALTER TABLE assets ADD COLUMN metadata_json TEXT NOT NULL DEFAULT '{}';")?;
+        conn.execute_batch(
+            "ALTER TABLE assets ADD COLUMN metadata_json TEXT NOT NULL DEFAULT '{}';",
+        )?;
     }
     conn.execute_batch(
         "CREATE INDEX IF NOT EXISTS idx_assets_captured_at ON assets(captured_at);",
@@ -1900,9 +2749,7 @@ fn ensure_tag_columns(conn: &Connection) -> Result<()> {
     if !columns.iter().any(|column| column == "alias_of") {
         conn.execute_batch("ALTER TABLE tags ADD COLUMN alias_of INTEGER;")?;
     }
-    conn.execute_batch(
-        "CREATE INDEX IF NOT EXISTS idx_tags_alias_of ON tags(alias_of);",
-    )?;
+    conn.execute_batch("CREATE INDEX IF NOT EXISTS idx_tags_alias_of ON tags(alias_of);")?;
     Ok(())
 }
 
@@ -1963,6 +2810,7 @@ fn migrate(conn: &Connection) -> Result<()> {
     }
     conn.execute_batch(SCHEMA_V4)?;
     conn.execute_batch(SCHEMA_V5)?;
+    conn.execute_batch(SCHEMA_V8)?;
     conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
     Ok(())
 }
@@ -2078,7 +2926,7 @@ mod tests {
     use super::Db;
     use crate::dedup::{DuplicateReview, ReviewState};
     use crate::media::ContentHashes;
-    use crate::model::Filter;
+    use crate::model::{Filter, TagReviewState};
     use rusqlite::Connection;
     use std::fs;
     use std::path::{Path, PathBuf};
@@ -2110,10 +2958,8 @@ mod tests {
 
     #[test]
     fn moving_asset_keeps_tags_favorite_and_star() {
-        let root = std::env::temp_dir().join(format!(
-            "kanalib-rename-asset-test-{}",
-            std::process::id()
-        ));
+        let root =
+            std::env::temp_dir().join(format!("kanalib-rename-asset-test-{}", std::process::id()));
         let _ = fs::remove_dir_all(&root);
         fs::create_dir_all(&root).unwrap();
         let db = Db::open(&root.join("kanalib.db")).unwrap();
@@ -2154,12 +3000,7 @@ mod tests {
         assert!(moved.favorite);
         assert_eq!(moved.star, 4);
         assert!(moved.tags.iter().any(|tag| tag.tag == "1girl"));
-        assert!(
-            moved
-                .manual_tags
-                .iter()
-                .any(|tag| tag.tag == "manual_tag")
-        );
+        assert!(moved.manual_tags.iter().any(|tag| tag.tag == "manual_tag"));
         assert!(!db.asset_paths("C:\\lib").unwrap().contains(&old));
         assert!(
             db.asset_paths_by_sha1("C:\\lib", &hashes.sha1)
@@ -2173,10 +3014,8 @@ mod tests {
 
     #[test]
     fn renaming_and_merging_tags_keep_aliases_and_fts() {
-        let root = std::env::temp_dir().join(format!(
-            "kanalib-tag-alias-test-{}",
-            std::process::id()
-        ));
+        let root =
+            std::env::temp_dir().join(format!("kanalib-tag-alias-test-{}", std::process::id()));
         let _ = fs::remove_dir_all(&root);
         fs::create_dir_all(&root).unwrap();
         let db = Db::open(&root.join("kanalib.db")).unwrap();
@@ -2233,12 +3072,7 @@ mod tests {
         let asset = db.load_asset(&path).unwrap();
         assert!(asset.tags.iter().any(|tag| tag.tag == "1girl"));
         assert!(!asset.tags.iter().any(|tag| tag.tag == "longhair"));
-        assert!(
-            asset
-                .manual_tags
-                .iter()
-                .any(|tag| tag.tag == "manual_tag")
-        );
+        assert!(asset.manual_tags.iter().any(|tag| tag.tag == "manual_tag"));
         let aliases = db.load_tag_aliases().unwrap();
         assert_eq!(aliases.get("longhair"), Some(&"1girl".to_string()));
         assert_eq!(aliases.get("long_hair"), Some(&"1girl".to_string()));
@@ -2349,7 +3183,9 @@ mod tests {
             assert_eq!(clara.manual_tags.len(), 1);
             assert_eq!(clara.manual_tags[0].tag, "manualtag");
             assert_eq!(clara.manual_tags[0].category, "manual");
-            let hits = db.search_paths("C:\\lib", &["manualtag".to_string()]).unwrap();
+            let hits = db
+                .search_paths("C:\\lib", &["manualtag".to_string()])
+                .unwrap();
             assert!(hits.contains(&clara_path));
             let summary = db
                 .list_tags("C:\\lib")
@@ -2358,7 +3194,10 @@ mod tests {
                 .find(|tag| tag.name == "manualtag")
                 .expect("manual tag summary");
             assert_eq!((summary.count, summary.manual_count), (1, 1));
-            assert_eq!(db.remove_tags(&[clara_path.clone()], "manualtag").unwrap(), 1);
+            assert_eq!(
+                db.remove_tags(&[clara_path.clone()], "manualtag").unwrap(),
+                1
+            );
             let clara = db
                 .load_folder("C:\\lib")
                 .unwrap()
@@ -2366,7 +3205,9 @@ mod tests {
                 .find(|asset| asset.path.ends_with("克拉拉.png"))
                 .expect("clara without manual tag");
             assert!(clara.manual_tags.is_empty());
-            let hits = db.search_paths("C:\\lib", &["manualtag".to_string()]).unwrap();
+            let hits = db
+                .search_paths("C:\\lib", &["manualtag".to_string()])
+                .unwrap();
             assert!(!hits.contains(&clara_path));
 
             let saved_id = db
@@ -2527,12 +3368,420 @@ mod tests {
         let _ = fs::remove_dir_all(&root);
     }
 
+    fn temp_root(tag: &str) -> PathBuf {
+        let root = std::env::temp_dir().join(format!(
+            "kanalib-{tag}-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        root
+    }
+
+    fn hash(seed: char) -> ContentHashes {
+        ContentHashes {
+            sha1: seed.to_string().repeat(40),
+            blake3: seed.to_string().repeat(64),
+            phash: 7,
+            decode_ok: true,
+            decode_error: None,
+        }
+    }
+
+    fn candidate(tag: &str, category: &str, score: f32) -> crate::model::TagHit {
+        crate::model::TagHit {
+            tag: tag.to_string(),
+            category: category.to_string(),
+            score,
+            vocab_index: None,
+        }
+    }
+
+    #[test]
+    fn migrates_v7_to_v8_and_preserves_data() {
+        let root = temp_root("v7-v8");
+        let db_path = root.join("kanalib.db");
+        {
+            let conn = Connection::open(&db_path).unwrap();
+            conn.execute_batch(super::SCHEMA_V2).unwrap();
+            conn.execute_batch(super::SCHEMA_V4).unwrap();
+            conn.execute_batch(super::SCHEMA_V5).unwrap();
+            conn.execute_batch(
+                "INSERT INTO sources(kind, name, locator) VALUES('local', 'C:\\lib', 'C:\\lib');",
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO assets(
+                    source_id, path, folder, name, width, height, bytes, mtime, tagged,
+                    tags_json, tags_text
+                 ) VALUES(1, 'C:\\lib\\a.png', 'C:\\lib', 'a.png', 10, 20, 100, 10, 1,
+                    '[{\"tag\":\"1girl\",\"category\":\"general\",\"score\":0.9}]', '1girl')",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO tags(name, category, vocab_index, threshold_override)
+                 VALUES('1girl', 'general', 0, 0.33)",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO asset_tags(asset_id, tag_id, confidence, origin)
+                 VALUES(1, 1, 1.0, 'manual')",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO settings(key, value) VALUES('theme', 'dark')",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO jobs(kind, asset_id, state, attempts) VALUES('tag', 1, 'pending', 0)",
+                [],
+            )
+            .unwrap();
+            conn.pragma_update(None, "user_version", 7).unwrap();
+        }
+
+        {
+            let db = Db::open(&db_path).unwrap();
+            let asset = db.load_asset(Path::new("C:\\lib\\a.png")).unwrap();
+            assert!(asset.tagged);
+            assert!(asset.tags.iter().any(|tag| tag.tag == "1girl"));
+            assert!(asset.manual_tags.iter().any(|tag| tag.tag == "1girl"));
+            assert_eq!(db.setting("theme").unwrap().as_deref(), Some("dark"));
+            assert_eq!(
+                db.tag_thresholds().unwrap().overrides.get("1girl").copied(),
+                Some(0.33)
+            );
+            assert_eq!(db.tag_queue_totals(&["C:\\lib".into()]).unwrap().pending, 1);
+            let conn = Connection::open(&db_path).unwrap();
+            let version: i64 = conn
+                .query_row("PRAGMA user_version", [], |row| row.get(0))
+                .unwrap();
+            assert_eq!(version, super::SCHEMA_VERSION);
+            let has_scores: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'asset_scores'",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(has_scores, 1);
+            drop(conn);
+        }
+        let backups = fs::read_dir(&root)
+            .unwrap()
+            .filter_map(|entry| entry.ok())
+            .filter(|entry| entry.file_name().to_string_lossy().contains(".bak-v7-"))
+            .count();
+        assert_eq!(backups, 1);
+
+        // 再打开一次：版本已是 8，不重复备份，数据保持。
+        {
+            let db = Db::open(&db_path).unwrap();
+            assert_eq!(db.load_folder("C:\\lib").unwrap().len(), 1);
+        }
+        let backups_again = fs::read_dir(&root)
+            .unwrap()
+            .filter_map(|entry| entry.ok())
+            .filter(|entry| entry.file_name().to_string_lossy().contains(".bak-v7-"))
+            .count();
+        assert_eq!(backups_again, 1);
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn candidates_are_capped_and_threshold_recompute_keeps_manual_tags() {
+        let root = temp_root("candidates");
+        let db = Db::open(&root.join("kanalib.db")).unwrap();
+        let path = PathBuf::from("C:\\lib\\a.png");
+        db.upsert_meta("C:\\lib", &path, None, 10, 20, 100, 10, &hash('a'), false)
+            .unwrap();
+        db.add_manual_tags(std::slice::from_ref(&path), "keep_me", "manual")
+            .unwrap();
+        let asset = db.load_asset(&path).unwrap();
+
+        let mut candidates = Vec::new();
+        for index in 0..60 {
+            candidates.push(candidate(
+                &format!("g{index:02}"),
+                "general",
+                0.90 - index as f32 * 0.01,
+            ));
+        }
+        for index in 0..30 {
+            candidates.push(candidate(
+                &format!("c{index:02}"),
+                "character",
+                0.80 - index as f32 * 0.01,
+            ));
+        }
+        for index in 0..20 {
+            candidates.push(candidate(
+                &format!("p{index:02}"),
+                "copyright",
+                0.70 - index as f32 * 0.005,
+            ));
+        }
+        for index in 0..30 {
+            candidates.push(candidate(
+                &format!("s{index:02}"),
+                "style",
+                0.60 - index as f32 * 0.01,
+            ));
+        }
+        for index in 0..20 {
+            candidates.push(candidate(
+                &format!("m{index:02}"),
+                "meta",
+                0.50 - index as f32 * 0.01,
+            ));
+        }
+        for (index, (tag, score)) in [
+            ("rating:g", 0.90),
+            ("rating:s", 0.50),
+            ("rating:q", 0.20),
+            ("rating:e", 0.10),
+            ("rating:x", 0.05),
+            ("rating:y", 0.01),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            candidates.push(candidate(tag, "rating", score));
+            let _ = index;
+        }
+
+        let stored = db.store_tag_result(&asset, Some(&candidates)).unwrap();
+        let scores = db.asset_candidates(&path).unwrap();
+        let count = |category: &str| {
+            scores
+                .iter()
+                .filter(|candidate| candidate.category == category)
+                .count()
+        };
+        assert_eq!(count("general"), 40);
+        assert_eq!(count("character"), 30);
+        assert_eq!(count("copyright"), 20);
+        assert_eq!(count("style"), 30);
+        assert_eq!(count("meta"), 20);
+        assert_eq!(count("rating"), 4);
+        assert!(!scores.iter().any(|candidate| candidate.tag == "g59"));
+        assert!(!stored.tags.iter().any(|tag| tag.tag == "keep_me"));
+        assert!(stored.manual_tags.iter().any(|tag| tag.tag == "keep_me"));
+        assert_eq!(stored.rating, "g");
+        assert!(stored.group.starts_with("作品: "));
+
+        db.set_category_threshold("general", 0.545).unwrap();
+        let summary = db
+            .recompute_thresholds(std::slice::from_ref(&path))
+            .unwrap();
+        assert_eq!(summary.updated, 1);
+        let recomputed = db.load_asset(&path).unwrap();
+        assert_eq!(
+            recomputed
+                .tags
+                .iter()
+                .filter(|tag| tag.category == "general")
+                .count(),
+            36
+        );
+        assert!(
+            recomputed
+                .manual_tags
+                .iter()
+                .any(|tag| tag.tag == "keep_me")
+        );
+
+        db.set_tag_threshold("g00", Some(0.95)).unwrap();
+        db.recompute_thresholds(std::slice::from_ref(&path))
+            .unwrap();
+        let recomputed = db.load_asset(&path).unwrap();
+        assert!(!recomputed.tags.iter().any(|tag| tag.tag == "g00"));
+        db.set_tag_threshold("g00", None).unwrap();
+        db.recompute_thresholds(std::slice::from_ref(&path))
+            .unwrap();
+        assert!(
+            db.load_asset(&path)
+                .unwrap()
+                .tags
+                .iter()
+                .any(|tag| tag.tag == "g00")
+        );
+
+        assert_eq!(db.set_category_threshold("general", 2.5).unwrap(), 1.0);
+        assert_eq!(db.set_category_threshold("general", -1.0).unwrap(), 0.0);
+        assert!(db.set_category_threshold("unknown", 0.2).is_err());
+        assert_eq!(
+            db.set_tag_threshold("never_used", Some(0.4)).unwrap(),
+            Some(0.4)
+        );
+        assert_eq!(
+            db.tag_thresholds()
+                .unwrap()
+                .overrides
+                .get("never_used")
+                .copied(),
+            Some(0.4)
+        );
+        drop(db);
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn low_confidence_candidates_can_be_accepted_or_ignored() {
+        let root = temp_root("review");
+        let db = Db::open(&root.join("kanalib.db")).unwrap();
+        let path = PathBuf::from("C:\\lib\\a.png");
+        db.upsert_meta("C:\\lib", &path, None, 10, 20, 100, 10, &hash('b'), false)
+            .unwrap();
+        let asset = db.load_asset(&path).unwrap();
+        let candidates = vec![
+            candidate("hit", "general", 0.90),
+            candidate("low", "general", 0.10),
+            candidate("original", "copyright", 0.50),
+            candidate("rating:g", "rating", 0.80),
+        ];
+        db.store_tag_result(&asset, Some(&candidates)).unwrap();
+
+        let pending = db.pending_tag_candidates(&["C:\\lib".into()], 10).unwrap();
+        assert!(pending.iter().any(|candidate| candidate.tag == "low"));
+        assert!(!pending.iter().any(|candidate| candidate.tag == "hit"));
+
+        db.review_tag_candidate(&path, "low", TagReviewState::Accepted)
+            .unwrap();
+        assert!(
+            db.load_asset(&path)
+                .unwrap()
+                .tags
+                .iter()
+                .any(|tag| tag.tag == "low")
+        );
+        assert!(
+            db.pending_tag_candidates(&["C:\\lib".into()], 10)
+                .unwrap()
+                .is_empty()
+        );
+
+        db.review_tag_candidate(&path, "low", TagReviewState::Ignored)
+            .unwrap();
+        let asset = db.load_asset(&path).unwrap();
+        assert!(!asset.tags.iter().any(|tag| tag.tag == "low"));
+        assert!(asset.tags.iter().any(|tag| tag.tag == "hit"));
+        let ignored = db
+            .asset_candidates(&path)
+            .unwrap()
+            .into_iter()
+            .find(|candidate| candidate.tag == "low")
+            .unwrap();
+        assert_eq!(ignored.state, TagReviewState::Ignored);
+
+        let changed = db
+            .review_asset_candidates(&path, TagReviewState::Ignored)
+            .unwrap();
+        assert!(changed >= 3);
+        assert!(
+            db.pending_tag_candidates(&["C:\\lib".into()], 10)
+                .unwrap()
+                .is_empty()
+        );
+
+        // 阈值一旦降到候选分数以下，待审列表必须立即为空（单标签与类别两条路径）。
+        db.review_tag_candidate(&path, "low", TagReviewState::Pending)
+            .unwrap();
+        assert!(
+            db.pending_tag_candidates(&["C:\\lib".into()], 10)
+                .unwrap()
+                .iter()
+                .any(|candidate| candidate.tag == "low")
+        );
+        db.set_tag_threshold("low", Some(0.05)).unwrap();
+        assert!(
+            db.pending_tag_candidates(&["C:\\lib".into()], 10)
+                .unwrap()
+                .is_empty()
+        );
+        db.set_tag_threshold("low", None).unwrap();
+        db.set_category_threshold("general", 0.05).unwrap();
+        assert!(
+            db.pending_tag_candidates(&["C:\\lib".into()], 10)
+                .unwrap()
+                .is_empty()
+        );
+        drop(db);
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn selective_retag_uses_candidates_and_queue_is_idempotent() {
+        let root = temp_root("retag");
+        let db = Db::open(&root.join("kanalib.db")).unwrap();
+        let a = PathBuf::from("C:\\lib\\a.png");
+        let b = PathBuf::from("C:\\lib\\b.png");
+        let c = PathBuf::from("C:\\lib\\c.png");
+        for (path, seed) in [(&a, 'c'), (&b, 'd'), (&c, 'e')] {
+            db.upsert_meta("C:\\lib", path, None, 10, 20, 100, 10, &hash(seed), false)
+                .unwrap();
+        }
+        db.add_manual_tags(std::slice::from_ref(&a), "keep_me", "manual")
+            .unwrap();
+        let asset = db.load_asset(&a).unwrap();
+        db.store_tag_result(
+            &asset,
+            Some(&[
+                candidate("hit", "general", 0.9),
+                candidate("low", "general", 0.1),
+            ]),
+        )
+        .unwrap();
+
+        let summary = db
+            .retag_paths(&[
+                a.clone(),
+                a.clone(),
+                b.clone(),
+                PathBuf::from("C:\\lib\\missing.png"),
+            ])
+            .unwrap();
+        assert_eq!(summary.recomputed, 1);
+        assert_eq!(summary.queued, 1);
+        assert_eq!(summary.missing, 1);
+        assert_eq!(db.tag_queue_totals(&["C:\\lib".into()]).unwrap().pending, 1);
+        assert!(
+            db.load_asset(&a)
+                .unwrap()
+                .manual_tags
+                .iter()
+                .any(|tag| tag.tag == "keep_me")
+        );
+
+        let again = db.retag_paths(&[b.clone()]).unwrap();
+        assert_eq!((again.queued, again.recomputed), (1, 0));
+        assert_eq!(db.tag_queue_totals(&["C:\\lib".into()]).unwrap().pending, 1);
+
+        db.retag_paths(&[c.clone()]).unwrap();
+        assert_eq!(db.prioritize_tag_jobs(&[b.clone()], 10).unwrap(), 1);
+        let jobs = db.claim_tag_jobs("C:\\lib", 10).unwrap();
+        assert_eq!(jobs.len(), 2);
+        assert_eq!(jobs[0].path, b);
+        db.fail_tag_job(jobs[0].id, "boom").unwrap();
+        let errors = db.tag_job_errors(&["C:\\lib".into()], 10).unwrap();
+        assert_eq!(errors.len(), 1);
+        assert_eq!(errors[0].path, b);
+        assert_eq!(errors[0].last_error.as_deref(), Some("boom"));
+        let totals = db.tag_queue_totals(&["C:\\lib".into()]).unwrap();
+        assert_eq!((totals.error, totals.pending, totals.running), (1, 0, 1));
+        drop(db);
+        let _ = fs::remove_dir_all(&root);
+    }
+
     #[test]
     fn multi_root_library_loads_searches_and_counts() {
-        let root = std::env::temp_dir().join(format!(
-            "kanalib-multi-root-test-{}",
-            std::process::id()
-        ));
+        let root =
+            std::env::temp_dir().join(format!("kanalib-multi-root-test-{}", std::process::id()));
         let _ = fs::remove_dir_all(&root);
         fs::create_dir_all(&root).unwrap();
         let db_path = root.join("kanalib.db");
@@ -2575,12 +3824,16 @@ mod tests {
         let roots = vec!["C:\\lib".to_string(), "C:\\lib2".to_string()];
         let assets = db.load_library(&roots).unwrap();
         assert_eq!(assets.len(), 2);
-        assert!(assets
-            .iter()
-            .any(|asset| asset.library_root == PathBuf::from("C:\\lib2")));
-        assert!(assets
-            .iter()
-            .all(|asset| asset.manual_tags.iter().any(|tag| tag.tag == "sharedtag")));
+        assert!(
+            assets
+                .iter()
+                .any(|asset| asset.library_root == PathBuf::from("C:\\lib2"))
+        );
+        assert!(
+            assets
+                .iter()
+                .all(|asset| asset.manual_tags.iter().any(|tag| tag.tag == "sharedtag"))
+        );
         let hits = db
             .search_paths_in(&roots, &["sharedtag".to_string()])
             .unwrap();
@@ -2592,10 +3845,7 @@ mod tests {
             .find(|tag| tag.name == "sharedtag")
             .expect("multi-root tag summary");
         assert_eq!((summary.count, summary.manual_count), (2, 2));
-        assert_eq!(
-            db.load_library(&["C:\\lib".to_string()]).unwrap().len(),
-            1
-        );
+        assert_eq!(db.load_library(&["C:\\lib".to_string()]).unwrap().len(), 1);
         let _ = fs::remove_dir_all(&root);
     }
 }

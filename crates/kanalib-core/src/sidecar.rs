@@ -1,9 +1,10 @@
+use std::collections::HashMap;
 use std::fs::OpenOptions;
 use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use serde::Deserialize;
 use serde_json::json;
 
@@ -21,6 +22,9 @@ pub struct TagItem {
     pub rating: Option<String>,
     pub group: Option<String>,
     pub tags: Option<Vec<TagHit>>,
+    /// 新版 sidecar 返回的每类 top-K（含阈值下分数）；旧 sidecar 缺省为 None。
+    #[serde(default)]
+    pub candidates: Option<Vec<TagHit>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -51,12 +55,15 @@ struct Envelope {
     device: Option<String>,
     half: Option<bool>,
     classes: Option<usize>,
+    /// 模型配置里的类别默认阈值；旧 sidecar 缺省为空。
+    thresholds: Option<HashMap<String, f32>>,
 }
 
 pub struct ReadyInfo {
     pub device: String,
     pub half: bool,
     pub classes: usize,
+    pub thresholds: HashMap<String, f32>,
 }
 
 pub struct Sidecar {
@@ -77,7 +84,12 @@ pub fn project_root() -> PathBuf {
         return PathBuf::from(value);
     }
     if let Some(dir) = exe_dir() {
-        if dir.join("sidecar").join("tagger").join("server.py").exists() {
+        if dir
+            .join("sidecar")
+            .join("tagger")
+            .join("server.py")
+            .exists()
+        {
             return dir;
         }
     }
@@ -190,11 +202,7 @@ fn append_sidecar_log(root: &Path, label: &str, bytes: &[u8]) {
     }
 }
 
-pub fn repair_file(
-    input: &Path,
-    output: &Path,
-    max_size: Option<u32>,
-) -> Result<RepairOutcome> {
+pub fn repair_file(input: &Path, output: &Path, max_size: Option<u32>) -> Result<RepairOutcome> {
     let root = project_root();
     let script = root.join("sidecar").join("tagger").join("repair.py");
     if !script.exists() {
@@ -252,9 +260,7 @@ pub fn repair_file(
         }
         bail!(
             "{}",
-            envelope
-                .error
-                .unwrap_or_else(|| "图片修复失败".to_string())
+            envelope.error.unwrap_or_else(|| "图片修复失败".to_string())
         );
     }
     Ok(RepairOutcome {
@@ -337,6 +343,7 @@ impl Sidecar {
             device: envelope.device.unwrap_or_else(|| "unknown".into()),
             half: envelope.half.unwrap_or(false),
             classes: envelope.classes.unwrap_or(0),
+            thresholds: envelope.thresholds.unwrap_or_default(),
         };
         Ok((sidecar, ready))
     }
@@ -408,6 +415,29 @@ mod tests {
             root.join("models").join("pixai-tagger-v1.0")
         );
         fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn parses_optional_candidates_and_ready_thresholds() {
+        let envelope: super::Envelope = serde_json::from_str(
+            r#"{"id":1,"ok":true,"items":[
+                {"path":"a.png","ok":true,"tags":[],
+                 "candidates":[{"tag":"low","category":"general","score":0.1}]},
+                {"path":"b.png","ok":true,"tags":[]}
+            ]}"#,
+        )
+        .unwrap();
+        let items = envelope.items.unwrap();
+        assert_eq!(items[0].candidates.as_ref().unwrap().len(), 1);
+        assert!(items[1].candidates.is_none());
+
+        let ready: super::Envelope = serde_json::from_str(
+            r#"{"ready":true,"device":"cuda","half":true,"classes":30877,
+                "thresholds":{"general":0.17,"character":0.27}}"#,
+        )
+        .unwrap();
+        let thresholds = ready.thresholds.unwrap();
+        assert_eq!(thresholds.get("general").copied(), Some(0.17));
     }
 
     #[test]

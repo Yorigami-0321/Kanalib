@@ -16,8 +16,10 @@ use crate::dedup::{
 use crate::ffmpeg::{self, ThumbJob};
 use crate::media;
 use crate::model::{
-    Asset, CountAccumulator, Filter, PendingCleanup, SavedSearch, ScanCounts, ScanFilterConfig,
-    Shared, SourceScanStatus, TagHit, TagSummary, normalize_tag_name,
+    Asset, CountAccumulator, Filter, PendingCleanup, RetagSummary, SavedSearch, ScanCounts,
+    ScanFilterConfig, Shared, SourceScanStatus, TagCandidateReview, TagHit, TagJobError,
+    TagQueueStatus, TagRecomputeSummary, TagReviewState, TagSummary, TagThresholds,
+    normalize_tag_name,
 };
 use crate::scan_filter::{self, ScanFilterPreview};
 use crate::sidecar::{Sidecar, project_root, repair_file};
@@ -49,6 +51,8 @@ pub struct AppState {
     self_ref: Mutex<Weak<AppState>>,
     /// 是否允许启动文件监听（headless / KANALIB_DISABLE_WATCH 或测试时为 false）。
     watch_allowed: bool,
+    /// 独立打标 worker（暂停后继续）是否在运行；与扫描线程互斥使用。
+    tag_worker: Mutex<bool>,
     db_path: PathBuf,
     cache_dir: PathBuf,
 }
@@ -77,119 +81,119 @@ impl AppState {
             saved_searches,
             blocked_tags,
         ) = match Db::open(&db_path) {
-                Ok(db) => {
-                    if let Err(error) = import_vocabulary(&db) {
-                        log::warn!("vocab import: {error:#}");
-                    }
-                    if let Err(error) = backfill_vocab(&db) {
-                        log::warn!("vocab backfill: {error:#}");
-                    }
-                    let saved_roots = db.setting("library.local_roots").ok().flatten();
-                    let mut roots = match saved_roots.as_deref() {
-                        Some(value) => serde_json::from_str::<Vec<String>>(value)
-                            .unwrap_or_default()
-                            .into_iter()
-                            .map(|path| absolute(PathBuf::from(path)))
-                            .collect::<Vec<_>>(),
-                        None => initial_folder.clone().into_iter().collect(),
-                    };
-                    let mut seen = HashSet::new();
-                    roots.retain(|root| seen.insert(root.clone()));
-                    if saved_roots.is_none() {
-                        let values = roots
-                            .iter()
-                            .map(|root| root.to_string_lossy().to_string())
-                            .collect::<Vec<_>>();
-                        if let Err(error) = db.set_setting(
-                            "library.local_roots",
-                            &serde_json::to_string(&values).unwrap_or_default(),
-                        ) {
-                            log::warn!("save local roots: {error:#}");
-                        }
-                    }
-                    let root_strings = roots
+            Ok(db) => {
+                if let Err(error) = import_vocabulary(&db) {
+                    log::warn!("vocab import: {error:#}");
+                }
+                if let Err(error) = backfill_vocab(&db) {
+                    log::warn!("vocab backfill: {error:#}");
+                }
+                let saved_roots = db.setting("library.local_roots").ok().flatten();
+                let mut roots = match saved_roots.as_deref() {
+                    Some(value) => serde_json::from_str::<Vec<String>>(value)
+                        .unwrap_or_default()
+                        .into_iter()
+                        .map(|path| absolute(PathBuf::from(path)))
+                        .collect::<Vec<_>>(),
+                    None => initial_folder.clone().into_iter().collect(),
+                };
+                let mut seen = HashSet::new();
+                roots.retain(|root| seen.insert(root.clone()));
+                if saved_roots.is_none() {
+                    let values = roots
                         .iter()
                         .map(|root| root.to_string_lossy().to_string())
                         .collect::<Vec<_>>();
-                    let assets = load_tile_thumbs(match db.load_library(&root_strings) {
-                        Ok(assets) => assets,
-                        Err(error) => {
-                            log::error!("load assets: {error:#}");
-                            Vec::new()
-                        }
-                    });
-                    let reviews = match db.load_duplicate_reviews() {
-                        Ok(reviews) => reviews,
-                        Err(error) => {
-                            log::warn!("load duplicate reviews: {error:#}");
-                            Default::default()
-                        }
-                    };
-                    let threshold = db
-                        .setting("dedup.similar_threshold")
-                        .ok()
-                        .flatten()
-                        .and_then(|value| value.parse::<u8>().ok())
-                        .map(|value| value.clamp(2, 24))
-                        .unwrap_or(DEFAULT_SIMILAR_THRESHOLD);
-                    let protected_paths = db
-                        .setting("dedup.protected_paths")
-                        .ok()
-                        .flatten()
-                        .and_then(|value| serde_json::from_str::<Vec<String>>(&value).ok())
-                        .unwrap_or_default()
-                        .into_iter()
-                        .map(PathBuf::from)
-                        .collect::<Vec<_>>();
-                    if let Err(error) = db.recover_tag_jobs() {
-                        log::warn!("recover tag jobs: {error:#}");
+                    if let Err(error) = db.set_setting(
+                        "library.local_roots",
+                        &serde_json::to_string(&values).unwrap_or_default(),
+                    ) {
+                        log::warn!("save local roots: {error:#}");
                     }
-                    let mut queue_counts = JobCounts::default();
-                    for root in &root_strings {
-                        if let Err(error) = db.enqueue_tag_jobs(root) {
-                            log::warn!("enqueue tag jobs for {root}: {error:#}");
-                        }
-                        if let Ok(counts) = db.tag_job_counts(root) {
-                            queue_counts.pending += counts.pending;
-                            queue_counts.running += counts.running;
-                            queue_counts.error += counts.error;
-                        }
-                    }
-                    let saved_searches = db.load_saved_searches().unwrap_or_else(|error| {
-                        log::warn!("load saved searches: {error:#}");
+                }
+                let root_strings = roots
+                    .iter()
+                    .map(|root| root.to_string_lossy().to_string())
+                    .collect::<Vec<_>>();
+                let assets = load_tile_thumbs(match db.load_library(&root_strings) {
+                    Ok(assets) => assets,
+                    Err(error) => {
+                        log::error!("load assets: {error:#}");
                         Vec::new()
-                    });
-                    let blocked_tags = db
-                        .setting("tags.blocked")
-                        .ok()
-                        .flatten()
-                        .and_then(|value| serde_json::from_str::<Vec<String>>(&value).ok())
-                        .unwrap_or_default();
-                    (
-                        roots,
-                        assets,
-                        reviews,
-                        threshold,
-                        protected_paths,
-                        queue_counts,
-                        saved_searches,
-                        blocked_tags,
-                    )
+                    }
+                });
+                let reviews = match db.load_duplicate_reviews() {
+                    Ok(reviews) => reviews,
+                    Err(error) => {
+                        log::warn!("load duplicate reviews: {error:#}");
+                        Default::default()
+                    }
+                };
+                let threshold = db
+                    .setting("dedup.similar_threshold")
+                    .ok()
+                    .flatten()
+                    .and_then(|value| value.parse::<u8>().ok())
+                    .map(|value| value.clamp(2, 24))
+                    .unwrap_or(DEFAULT_SIMILAR_THRESHOLD);
+                let protected_paths = db
+                    .setting("dedup.protected_paths")
+                    .ok()
+                    .flatten()
+                    .and_then(|value| serde_json::from_str::<Vec<String>>(&value).ok())
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(PathBuf::from)
+                    .collect::<Vec<_>>();
+                if let Err(error) = db.recover_tag_jobs() {
+                    log::warn!("recover tag jobs: {error:#}");
                 }
-                Err(error) => {
-                    log::error!("open database: {error:#}");
-                    (
-                        initial_folder.into_iter().collect(),
-                        Vec::new(),
-                        Default::default(),
-                        DEFAULT_SIMILAR_THRESHOLD,
-                        Vec::new(),
-                        JobCounts::default(),
-                        Vec::new(),
-                        Vec::new(),
-                    )
+                let mut queue_counts = JobCounts::default();
+                for root in &root_strings {
+                    if let Err(error) = db.enqueue_tag_jobs(root) {
+                        log::warn!("enqueue tag jobs for {root}: {error:#}");
+                    }
+                    if let Ok(counts) = db.tag_job_counts(root) {
+                        queue_counts.pending += counts.pending;
+                        queue_counts.running += counts.running;
+                        queue_counts.error += counts.error;
+                    }
                 }
-            };
+                let saved_searches = db.load_saved_searches().unwrap_or_else(|error| {
+                    log::warn!("load saved searches: {error:#}");
+                    Vec::new()
+                });
+                let blocked_tags = db
+                    .setting("tags.blocked")
+                    .ok()
+                    .flatten()
+                    .and_then(|value| serde_json::from_str::<Vec<String>>(&value).ok())
+                    .unwrap_or_default();
+                (
+                    roots,
+                    assets,
+                    reviews,
+                    threshold,
+                    protected_paths,
+                    queue_counts,
+                    saved_searches,
+                    blocked_tags,
+                )
+            }
+            Err(error) => {
+                log::error!("open database: {error:#}");
+                (
+                    initial_folder.into_iter().collect(),
+                    Vec::new(),
+                    Default::default(),
+                    DEFAULT_SIMILAR_THRESHOLD,
+                    Vec::new(),
+                    JobCounts::default(),
+                    Vec::new(),
+                    Vec::new(),
+                )
+            }
+        };
         let mut shared = Shared::new(roots, assets, reviews, similar_threshold, protected_paths);
         shared.saved_searches = saved_searches;
         shared.blocked_tags = blocked_tags.into_iter().collect();
@@ -221,6 +225,7 @@ impl AppState {
             watchers: Mutex::new(HashMap::new()),
             self_ref: Mutex::new(Weak::new()),
             watch_allowed,
+            tag_worker: Mutex::new(false),
             db_path,
             cache_dir,
         });
@@ -343,7 +348,10 @@ impl AppState {
             shared.status = if shared.roots.is_empty() {
                 "请添加文件夹".to_string()
             } else {
-                format!("已移除来源 · 磁盘文件未删除 · 剩余 {} 个来源", shared.roots.len())
+                format!(
+                    "已移除来源 · 磁盘文件未删除 · 剩余 {} 个来源",
+                    shared.roots.len()
+                )
             };
             shared.error = None;
             removed
@@ -395,6 +403,7 @@ impl AppState {
             shared.scanning = true;
             shared.error = None;
             shared.pending_cleanup = None;
+            shared.tag_status.cancelling = false;
             shared.status = "扫描中...".into();
         }
         let state = self.clone();
@@ -470,6 +479,7 @@ impl AppState {
             shared.scanning = true;
             shared.error = None;
             shared.pending_cleanup = None;
+            shared.tag_status.cancelling = false;
             shared.status = "扫描中...".into();
         }
         let cancel = Arc::new(AtomicBool::new(false));
@@ -970,11 +980,7 @@ impl AppState {
                 })
             })
             .collect::<Vec<_>>();
-        vocabulary.sort_by(|a, b| {
-            b.count
-                .cmp(&a.count)
-                .then_with(|| a.name.cmp(&b.name))
-        });
+        vocabulary.sort_by(|a, b| b.count.cmp(&a.count).then_with(|| a.name.cmp(&b.name)));
         Ok(vocabulary)
     }
 
@@ -995,12 +1001,7 @@ impl AppState {
         }
         let values = aliases
             .iter()
-            .map(|(path, alias)| {
-                (
-                    path.to_string_lossy().to_string(),
-                    alias.to_string(),
-                )
-            })
+            .map(|(path, alias)| (path.to_string_lossy().to_string(), alias.to_string()))
             .collect::<HashMap<_, _>>();
         Db::open(&self.db_path)?
             .set_setting("library.source_aliases", &serde_json::to_string(&values)?)?;
@@ -1077,9 +1078,7 @@ impl AppState {
 
     pub fn rename_tag(&self, old: &str, new: &str) -> Result<usize> {
         let affected = Db::open(&self.db_path)?.rename_tag(old, new)?;
-        self.reload_after_tag_change(format!(
-            "已重命名标签 #{old} → #{new} · 影响 {affected} 张"
-        ))?;
+        self.reload_after_tag_change(format!("已重命名标签 #{old} → #{new} · 影响 {affected} 张"))?;
         Ok(affected)
     }
 
@@ -1151,6 +1150,261 @@ impl AppState {
             total += db.retry_failed(root)?;
         }
         Ok(total)
+    }
+
+    fn root_strings(&self) -> Vec<String> {
+        self.shared
+            .lock()
+            .unwrap()
+            .roots
+            .iter()
+            .map(|root| root.to_string_lossy().to_string())
+            .collect()
+    }
+
+    /// 重算/审核后把受影响的资产从 DB 读回共享列表，计数与筛选同步更新。
+    fn sync_assets(&self, paths: &[PathBuf]) -> Result<()> {
+        let db = Db::open(&self.db_path)?;
+        let mut updated = Vec::new();
+        for path in paths {
+            if let Ok(asset) = db.load_asset(path) {
+                updated.push(asset);
+            }
+        }
+        let updated = load_tile_thumbs(updated);
+        let mut shared = self.shared.lock().unwrap();
+        for asset in updated {
+            shared.upsert(asset);
+        }
+        shared.revision = shared.revision.wrapping_add(1);
+        Ok(())
+    }
+
+    pub fn tag_thresholds(&self) -> Result<TagThresholds> {
+        Db::open(&self.db_path)?.tag_thresholds()
+    }
+
+    pub fn set_category_threshold(&self, category: &str, value: f32) -> Result<f32> {
+        let value = Db::open(&self.db_path)?.set_category_threshold(category, value)?;
+        let mut shared = self.shared.lock().unwrap();
+        shared.status = format!("{category} 阈值已设为 {value:.3}");
+        shared.error = None;
+        shared.revision = shared.revision.wrapping_add(1);
+        Ok(value)
+    }
+
+    pub fn set_tag_threshold(&self, tag: &str, value: Option<f32>) -> Result<Option<f32>> {
+        let value = Db::open(&self.db_path)?.set_tag_threshold(tag, value)?;
+        let mut shared = self.shared.lock().unwrap();
+        shared.status = match value {
+            Some(value) => format!("标签 #{tag} 阈值已设为 {value:.3}"),
+            None => format!("标签 #{tag} 已恢复类别阈值"),
+        };
+        shared.error = None;
+        shared.revision = shared.revision.wrapping_add(1);
+        Ok(value)
+    }
+
+    /// 仅用已存候选重算；候选缺失的资产计入 skipped，不会自动调用模型。
+    pub fn recompute_tag_thresholds(&self, paths: &[PathBuf]) -> Result<TagRecomputeSummary> {
+        if paths.is_empty() {
+            return Ok(TagRecomputeSummary::default());
+        }
+        let roots = self.shared.lock().unwrap().roots.clone();
+        validate_under_roots(&roots, paths)?;
+        let summary = Db::open(&self.db_path)?.recompute_thresholds(paths)?;
+        self.sync_assets(paths)?;
+        let mut shared = self.shared.lock().unwrap();
+        shared.status = format!(
+            "阈值重算完成 · {} 张更新 · {} 张缺候选",
+            summary.updated, summary.skipped
+        );
+        shared.error = None;
+        shared.revision = shared.revision.wrapping_add(1);
+        Ok(summary)
+    }
+
+    pub fn pending_tag_reviews(&self, limit: usize) -> Result<Vec<TagCandidateReview>> {
+        let folders = self.root_strings();
+        Db::open(&self.db_path)?.pending_tag_candidates(&folders, limit)
+    }
+
+    pub fn asset_tag_candidates(&self, path: &Path) -> Result<Vec<TagCandidateReview>> {
+        Db::open(&self.db_path)?.asset_candidates(path)
+    }
+
+    pub fn review_tag_candidate(
+        &self,
+        path: &Path,
+        tag: &str,
+        state: TagReviewState,
+    ) -> Result<()> {
+        Db::open(&self.db_path)?.review_tag_candidate(path, tag, state)?;
+        self.sync_assets(&[path.to_path_buf()])?;
+        let mut shared = self.shared.lock().unwrap();
+        shared.status = match state {
+            TagReviewState::Accepted => format!("已接受候选 #{tag}"),
+            TagReviewState::Ignored => format!("已忽略候选 #{tag}"),
+            TagReviewState::Pending => format!("候选 #{tag} 已恢复待审"),
+        };
+        shared.error = None;
+        Ok(())
+    }
+
+    pub fn review_asset_candidates(&self, path: &Path, state: TagReviewState) -> Result<usize> {
+        let changed = Db::open(&self.db_path)?.review_asset_candidates(path, state)?;
+        self.sync_assets(&[path.to_path_buf()])?;
+        let mut shared = self.shared.lock().unwrap();
+        shared.status = format!("已批量处理 {changed} 条候选");
+        shared.error = None;
+        Ok(changed)
+    }
+
+    /// 选中/当前视图重打标：有候选先做阈值重算，缺候选才入队；manual 标签始终保留。
+    pub fn retag_paths(self: &Arc<Self>, paths: &[PathBuf]) -> Result<RetagSummary> {
+        if paths.is_empty() {
+            return Ok(RetagSummary::default());
+        }
+        let roots = self.shared.lock().unwrap().roots.clone();
+        validate_under_roots(&roots, paths)?;
+        let summary = Db::open(&self.db_path)?.retag_paths(paths)?;
+        self.sync_assets(paths)?;
+        let (paused, scanning) = {
+            let mut shared = self.shared.lock().unwrap();
+            shared.status = format!(
+                "重打标 · {} 张按候选重算 · {} 张已入队",
+                summary.recomputed, summary.queued
+            );
+            shared.error = None;
+            shared.revision = shared.revision.wrapping_add(1);
+            (shared.tag_status.paused, shared.scanning)
+        };
+        if summary.queued > 0 && !paused && !scanning {
+            if let Err(error) = self.resume_tag_queue() {
+                log::warn!("start tag worker after retag: {error:#}");
+            }
+        }
+        Ok(summary)
+    }
+
+    pub fn prioritize_tag_jobs(&self, paths: &[PathBuf], priority: i64) -> Result<usize> {
+        if paths.is_empty() {
+            return Ok(0);
+        }
+        Db::open(&self.db_path)?.prioritize_tag_jobs(paths, priority)
+    }
+
+    pub fn tag_job_errors(&self, limit: usize) -> Result<Vec<TagJobError>> {
+        Db::open(&self.db_path)?.tag_job_errors(&self.root_strings(), limit)
+    }
+
+    pub fn pause_tag_queue(&self) {
+        {
+            let mut shared = self.shared.lock().unwrap();
+            shared.pause_tag_queue();
+            shared.status = "打标已暂停 · 当前批完成后不再认领新任务".into();
+            shared.error = None;
+            shared.revision = shared.revision.wrapping_add(1);
+        }
+        log::info!("tag queue paused");
+    }
+
+    pub fn cancel_tag_queue(&self) {
+        {
+            let mut shared = self.shared.lock().unwrap();
+            shared.cancel_tag_queue();
+            shared.status = "正在取消打标 · 已完成结果会保留".into();
+            shared.error = None;
+            shared.revision = shared.revision.wrapping_add(1);
+        }
+        log::info!("tag queue cancel requested");
+    }
+
+    /// 继续打标：不再扫描磁盘，直接消费 pending jobs；已暂停/取消的标志会清除。
+    pub fn resume_tag_queue(self: &Arc<Self>) -> Result<()> {
+        {
+            let shared = self.shared.lock().unwrap();
+            if shared.scanning {
+                bail!("扫描进行中，暂不能单独继续打标队列");
+            }
+        }
+        let mut worker = self.tag_worker.lock().unwrap();
+        if *worker {
+            let mut shared = self.shared.lock().unwrap();
+            shared.resume_tag_queue();
+            shared.status = "打标已在运行".into();
+            return Ok(());
+        }
+        *worker = true;
+        drop(worker);
+        {
+            let mut shared = self.shared.lock().unwrap();
+            shared.resume_tag_queue();
+            shared.status = "继续打标...".into();
+            shared.error = None;
+            shared.revision = shared.revision.wrapping_add(1);
+        }
+        let state = self.clone();
+        let spawned = std::thread::Builder::new()
+            .name("kanalib-tagger".into())
+            .spawn(move || {
+                let result = run_tag_worker(&state);
+                if let Err(error) = result {
+                    let mut shared = state.shared.lock().unwrap();
+                    shared.tag_status.last_error = Some(format!("{error:#}"));
+                    shared.tag_status.paused = true;
+                    shared.status = "打标失败，已暂停".into();
+                    shared.error = Some(format!("{error:#}"));
+                    shared.revision = shared.revision.wrapping_add(1);
+                }
+                *state.tag_worker.lock().unwrap() = false;
+            });
+        if spawned.is_err() {
+            *self.tag_worker.lock().unwrap() = false;
+            let mut shared = self.shared.lock().unwrap();
+            shared.error = Some("无法创建打标线程".into());
+            bail!("无法创建打标线程");
+        }
+        Ok(())
+    }
+
+    pub fn tag_queue_status(&self) -> TagQueueStatus {
+        let mut status = self.shared.lock().unwrap().tag_status.clone();
+        if let Ok(db) = Db::open(&self.db_path) {
+            let folders = self.root_strings();
+            if let Ok(totals) = db.tag_queue_totals(&folders) {
+                status.pending = totals.pending;
+                status.running = totals.running;
+                status.error = totals.error;
+                status.done = totals.done;
+            }
+            if let Ok(errors) = db.tag_job_errors(&folders, 1)
+                && let Some(error) = errors.first()
+            {
+                status.last_error = error.last_error.clone();
+                status.last_error_path = Some(error.path.clone());
+            }
+        }
+        status
+    }
+
+    pub fn allow_cpu_tagging(&self) -> bool {
+        Db::open(&self.db_path)
+            .map(|db| db.allow_cpu_tagging())
+            .unwrap_or(false)
+    }
+
+    pub fn set_allow_cpu_tagging(&self, allow: bool) -> Result<()> {
+        Db::open(&self.db_path)?.set_allow_cpu_tagging(allow)?;
+        let mut shared = self.shared.lock().unwrap();
+        shared.status = if allow {
+            "已允许 CPU 慢速打标；继续队列后生效".into()
+        } else {
+            "GPU 不可用时默认暂停打标".into()
+        };
+        shared.error = None;
+        shared.revision = shared.revision.wrapping_add(1);
+        Ok(())
     }
 
     pub fn cancel_pending_cleanup(&self) {
@@ -1315,12 +1569,16 @@ impl AppState {
             let Some(asset) = updated else {
                 bail!("资产在修复期间被移除：{}", path.display());
             };
-            db.update_tags(&asset)?;
-            let damage = asset.damage.clone();
-            let name = asset.title();
+            let mut stored = db.store_tag_result(&asset, item.candidates.as_deref())?;
+            if stored.width == 0 && asset.width > 0 {
+                stored.width = asset.width;
+                stored.height = asset.height;
+            }
+            let damage = stored.damage.clone();
+            let name = stored.title();
             {
                 let mut shared = self.shared.lock().unwrap();
-                shared.upsert(asset);
+                shared.upsert(stored);
                 shared.status = if let Some(damage) = damage {
                     format!("修复完成（{damage}） · {name}")
                 } else {
@@ -1380,25 +1638,23 @@ impl AppState {
         let thread_output = output.clone();
         let spawned = std::thread::Builder::new()
             .name("kanalib-repair-export".into())
-            .spawn(move || {
-                match repair_file(&path, &thread_output, None) {
-                    Ok(outcome) => {
-                        let mut shared = state.shared.lock().unwrap();
-                        shared.status = if let Some(damage) = outcome.damage {
-                            format!("已导出修复副本（{damage}） · {}", thread_output.display())
-                        } else {
-                            format!("已导出修复副本 · {}", thread_output.display())
-                        };
-                        shared.error = None;
-                        shared.revision = shared.revision.wrapping_add(1);
-                    }
-                    Err(error) => {
-                        log::warn!("export repair {}: {error:#}", path.display());
-                        let mut shared = state.shared.lock().unwrap();
-                        shared.error = Some(format!("导出修复副本失败：{error:#}"));
-                        shared.status = "导出修复副本失败".into();
-                        shared.revision = shared.revision.wrapping_add(1);
-                    }
+            .spawn(move || match repair_file(&path, &thread_output, None) {
+                Ok(outcome) => {
+                    let mut shared = state.shared.lock().unwrap();
+                    shared.status = if let Some(damage) = outcome.damage {
+                        format!("已导出修复副本（{damage}） · {}", thread_output.display())
+                    } else {
+                        format!("已导出修复副本 · {}", thread_output.display())
+                    };
+                    shared.error = None;
+                    shared.revision = shared.revision.wrapping_add(1);
+                }
+                Err(error) => {
+                    log::warn!("export repair {}: {error:#}", path.display());
+                    let mut shared = state.shared.lock().unwrap();
+                    shared.error = Some(format!("导出修复副本失败：{error:#}"));
+                    shared.status = "导出修复副本失败".into();
+                    shared.revision = shared.revision.wrapping_add(1);
                 }
             });
         if spawned.is_err() {
@@ -2382,10 +2638,12 @@ fn index_inner(
                 if full_purge || large_purge {
                     let missing_set = missing.into_iter().collect::<HashSet<_>>();
                     let mut shared = state.shared.lock().unwrap();
-                    let pending = shared.pending_cleanup.get_or_insert_with(|| PendingCleanup {
-                        roots: Vec::new(),
-                        paths: HashSet::new(),
-                    });
+                    let pending = shared
+                        .pending_cleanup
+                        .get_or_insert_with(|| PendingCleanup {
+                            roots: Vec::new(),
+                            paths: HashSet::new(),
+                        });
                     if !pending.roots.iter().any(|root| root == folder) {
                         pending.roots.push(folder.to_path_buf());
                     }
@@ -2464,6 +2722,30 @@ fn index_inner(
         shared.scanning = false;
         return Ok(());
     }
+    let (paused, cancelling) = {
+        let shared = state.shared.lock().unwrap();
+        (shared.tag_status.paused, shared.tag_status.cancelling)
+    };
+    if paused || cancelling {
+        stats.skipped_tagging = true;
+        let mut shared = state.shared.lock().unwrap();
+        shared.set_queue_counts(queue.pending, 0, queue.error);
+        shared.status = if paused {
+            format!(
+                "完成 · {} 张图片（打标已暂停，队列 {} 张待处理）",
+                files.len(),
+                queue.pending
+            )
+        } else {
+            format!(
+                "完成 · {} 张图片（打标已取消，队列 {} 张未处理）",
+                files.len(),
+                queue.pending
+            )
+        };
+        shared.scanning = false;
+        return Ok(());
+    }
 
     {
         let mut shared = state.shared.lock().unwrap();
@@ -2472,14 +2754,32 @@ fn index_inner(
     let load_start = Instant::now();
     let (mut sidecar, ready) = Sidecar::spawn()?;
     stats.tag_load_secs = load_start.elapsed().as_secs_f64();
+    if let Err(error) = db.seed_category_thresholds(&ready.thresholds) {
+        log::warn!("seed category thresholds: {error:#}");
+    }
+    let device_label = if ready.half {
+        format!("{} · FP16", ready.device)
+    } else {
+        ready.device.clone()
+    };
     {
         let mut shared = state.shared.lock().unwrap();
-        shared.sidecar_device = Some(if ready.half {
-            format!("{} · FP16", ready.device)
-        } else {
-            ready.device.clone()
-        });
+        shared.set_tag_device(&ready.device);
+        shared.sidecar_device = Some(device_label.clone());
         shared.status = format!("打标中 0/{} · {} 类标签", queue.pending, ready.classes);
+    }
+    if !ready.device.to_ascii_lowercase().contains("cuda") && !db.allow_cpu_tagging() {
+        stats.skipped_tagging = true;
+        let mut shared = state.shared.lock().unwrap();
+        shared.pause_tag_queue();
+        shared.set_queue_counts(queue.pending, 0, queue.error);
+        shared.status = format!(
+            "GPU 不可用（{device_label}）· 已暂停打标，队列 {} 张待处理；允许 CPU 慢速打标后可继续",
+            queue.pending
+        );
+        shared.scanning = false;
+        shared.revision = shared.revision.wrapping_add(1);
+        return Ok(());
     }
     process_tag_queue(
         state,
@@ -2748,7 +3048,7 @@ fn process_tag_queue(
     let tag_start = Instant::now();
     let mut done = 0usize;
     loop {
-        if cancel.load(Ordering::SeqCst) {
+        if tag_queue_stopped(state, cancel) {
             break;
         }
         let jobs = db.claim_tag_jobs(folder, 4)?;
@@ -2756,10 +3056,21 @@ fn process_tag_queue(
             break;
         }
         let job_ids = jobs.iter().map(|job| job.id).collect::<Vec<_>>();
+        // 认领与暂停在锁外有竞态；暂停/取消落在认领之后时立即归还，不浪费模型推理。
+        if tag_queue_stopped(state, cancel) {
+            db.release_tag_jobs(&job_ids)?;
+            break;
+        }
         {
             let counts = db.tag_job_counts(folder)?;
             let mut shared = state.shared.lock().unwrap();
             shared.set_queue_counts(counts.pending, counts.running, counts.error);
+            shared.set_tag_progress(
+                done,
+                stats.tag_errors,
+                total,
+                tag_start.elapsed().as_secs_f64(),
+            );
             shared.status = format!(
                 "打标中 {done}/{total} · 队列 {} · 失败 {}",
                 counts.pending, counts.error
@@ -2823,11 +3134,15 @@ fn process_tag_queue(
                     done += 1;
                     continue;
                 };
-                db.update_tags(&asset)?;
+                let mut stored = db.store_tag_result(&asset, item.candidates.as_deref())?;
+                if stored.width == 0 && asset.width > 0 {
+                    stored.width = asset.width;
+                    stored.height = asset.height;
+                }
                 if let Some(job_id) = job_id {
                     db.complete_tag_job(job_id)?;
                 }
-                state.shared.lock().unwrap().upsert(asset);
+                state.shared.lock().unwrap().upsert(stored);
                 stats.tagged += 1;
             } else {
                 let error = item
@@ -2842,6 +3157,11 @@ fn process_tag_queue(
                     db.fail_tag_job(job_id, &error)?;
                 }
                 stats.tag_errors += 1;
+                {
+                    let mut shared = state.shared.lock().unwrap();
+                    shared.tag_status.last_error = Some(error.clone());
+                    shared.tag_status.last_error_path = Some(path.clone());
+                }
                 let updated = {
                     let shared = state.shared.lock().unwrap();
                     let mut asset = shared
@@ -2889,11 +3209,23 @@ fn process_tag_queue(
     let counts = db.tag_job_counts(folder)?;
     let mut shared = state.shared.lock().unwrap();
     shared.set_queue_counts(counts.pending, counts.running, counts.error);
+    shared.set_tag_progress(
+        done,
+        stats.tag_errors,
+        total,
+        tag_start.elapsed().as_secs_f64(),
+    );
     shared.sort_assets();
-    shared.status = if cancel.load(Ordering::SeqCst) {
+    shared.status = if cancel.load(Ordering::SeqCst) || shared.tag_status.cancelling {
+        shared.tag_status.cancelling = false;
         format!(
-            "已停止 · 已打标 {done}/{total} · 队列 {} 张待处理",
+            "已取消 · 已完成 {done}/{total} · 队列 {} 张未处理",
             counts.pending
+        )
+    } else if shared.tag_status.paused {
+        format!(
+            "打标已暂停 · 队列 {} 张待处理 · {} 个失败",
+            counts.pending, counts.error
         )
     } else if counts.pending > 0 {
         format!(
@@ -2910,6 +3242,95 @@ fn process_tag_queue(
         format!("完成 · {} 张图片已打标", shared.counts.total())
     };
     shared.scanning = false;
+    Ok(())
+}
+
+/// 扫描取消、队列暂停与取消任一成立时停止认领新 job；当前批结果仍会落库。
+fn tag_queue_stopped(state: &Arc<AppState>, cancel: &Arc<AtomicBool>) -> bool {
+    if cancel.load(Ordering::SeqCst) {
+        return true;
+    }
+    let shared = state.shared.lock().unwrap();
+    shared.tag_status.paused || shared.tag_status.cancelling
+}
+
+/// 暂停后“继续”使用的独立 worker：复用 jobs 队列，不重新扫描磁盘。
+fn run_tag_worker(state: &Arc<AppState>) -> Result<()> {
+    let db = Db::open(&state.db_path)?;
+    let roots = state.root_strings();
+    if roots.is_empty() {
+        let mut shared = state.shared.lock().unwrap();
+        shared.status = "没有可打标的来源".into();
+        shared.revision = shared.revision.wrapping_add(1);
+        return Ok(());
+    }
+    for root in &roots {
+        db.recover_tag_jobs()?;
+        db.enqueue_tag_jobs(root)?;
+    }
+    let mut total = 0;
+    for root in &roots {
+        total += db.tag_job_counts(root)?.pending;
+    }
+    {
+        let mut shared = state.shared.lock().unwrap();
+        shared.tag_status.total = total;
+        shared.tag_status.completed = 0;
+        shared.tag_status.failed = 0;
+        shared.tag_status.cancelling = false;
+        shared
+            .tag_status
+            .message
+            .get_or_insert_with(|| "打标队列运行中".into());
+        shared.revision = shared.revision.wrapping_add(1);
+    }
+    if total == 0 {
+        let mut shared = state.shared.lock().unwrap();
+        shared.status = "没有待打标任务".into();
+        shared.revision = shared.revision.wrapping_add(1);
+        return Ok(());
+    }
+    let cancel = Arc::new(AtomicBool::new(false));
+    if tag_queue_stopped(state, &cancel) {
+        return Ok(());
+    }
+
+    let (mut sidecar, ready) = Sidecar::spawn()?;
+    if let Err(error) = db.seed_category_thresholds(&ready.thresholds) {
+        log::warn!("seed category thresholds: {error:#}");
+    }
+    let device_label = if ready.half {
+        format!("{} · FP16", ready.device)
+    } else {
+        ready.device.clone()
+    };
+    {
+        let mut shared = state.shared.lock().unwrap();
+        shared.set_tag_device(&ready.device);
+        shared.sidecar_device = Some(device_label.clone());
+        shared.tag_status.last_error = None;
+        shared.tag_status.last_error_path = None;
+    }
+    if !ready.device.to_ascii_lowercase().contains("cuda") && !state.allow_cpu_tagging() {
+        let mut shared = state.shared.lock().unwrap();
+        shared.pause_tag_queue();
+        shared.status =
+            format!("GPU 不可用（{device_label}）· 已暂停打标；允许 CPU 慢速打标后可继续");
+        shared.revision = shared.revision.wrapping_add(1);
+        return Ok(());
+    }
+
+    let mut stats = ScanStats::default();
+    for root in &roots {
+        if tag_queue_stopped(state, &cancel) {
+            break;
+        }
+        let pending = db.tag_job_counts(root)?.pending;
+        if pending == 0 {
+            continue;
+        }
+        process_tag_queue(state, &db, root, &mut sidecar, &cancel, &mut stats, pending)?;
+    }
     Ok(())
 }
 
@@ -3156,13 +3577,7 @@ fn backfill_tile_thumbs(state: &Arc<AppState>, cancel: &AtomicBool) {
     );
 }
 
-fn thumb_target(
-    path: &Path,
-    cache_dir: &Path,
-    mtime: u64,
-    bytes: u64,
-    orientation: u8,
-) -> PathBuf {
+fn thumb_target(path: &Path, cache_dir: &Path, mtime: u64, bytes: u64, orientation: u8) -> PathBuf {
     let mut key = format!(
         "v3-{}-{}-{}-{}",
         path.to_string_lossy(),
@@ -3268,8 +3683,7 @@ mod tests {
         let (thumb, width, height) = ensure_thumb(&source, &cache, 1, 123, 1).unwrap();
         assert_eq!((width, height), (64, 32));
         let thumb = thumb.unwrap();
-        db.record_thumb_source(&thumb, &source, 1, 123, 1)
-            .unwrap();
+        db.record_thumb_source(&thumb, &source, 1, 123, 1).unwrap();
         let tile = ensure_tile_thumb(&thumb).unwrap();
 
         std::fs::remove_file(&tile).unwrap();
@@ -3320,8 +3734,8 @@ mod tests {
         let (exif, captured_at) = media::read_exif(&source);
         assert_eq!(exif.orientation, 6);
         assert!(captured_at.is_none());
-        let (_thumb, width, height) = ensure_thumb(&source, &cache, 1, bytes, exif.orientation)
-            .unwrap();
+        let (_thumb, width, height) =
+            ensure_thumb(&source, &cache, 1, bytes, exif.orientation).unwrap();
         assert_eq!((width, height), (10, 20));
         std::fs::remove_dir_all(&dir).unwrap();
     }
