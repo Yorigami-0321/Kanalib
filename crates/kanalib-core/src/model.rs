@@ -1133,6 +1133,148 @@ pub fn is_image(path: &Path) -> bool {
         .unwrap_or(false)
 }
 
+/// 单个来源（本地根目录）最近一次扫描的运行时状态；不落库。
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct SourceScanStatus {
+    /// 来源根目录（已规范化的绝对路径）。
+    pub root: PathBuf,
+    /// 最近一次扫描完成时间（Unix 秒）；None 表示尚未完整扫描。
+    pub last_scan: Option<u64>,
+    /// 该来源当前在图库中的资产数。
+    pub asset_count: usize,
+    /// 最近一次扫描的计数明细。
+    pub counts: ScanCounts,
+    /// 最近一次扫描错误；成功时为 None。
+    pub error: Option<String>,
+    /// 来源当前是否可访问；离线来源不参与缺失清理。
+    pub online: bool,
+}
+
+/// 一次来源扫描的计数明细。
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct ScanCounts {
+    /// 遍历发现的图片文件数。
+    pub discovered: usize,
+    /// 新增入库数。
+    pub imported: usize,
+    /// 更新（mtime/size 变化）数。
+    pub updated: usize,
+    /// 磁盘缺失后从图库移除数。
+    pub removed: usize,
+    /// 读取/解码失败数。
+    pub failed: usize,
+}
+
+/// 扫描阶段；UI 用它区分“遍历/哈希/缩略图/打标/对账”。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ScanPhase {
+    #[default]
+    Idle,
+    Discovering,
+    Hashing,
+    Thumbnails,
+    Tagging,
+    Reconciling,
+    Done,
+    Failed,
+}
+
+/// 扫描进度快照；由核心线更新，UI 只读。
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct ScanProgress {
+    pub phase: ScanPhase,
+    /// 当前阶段已完成数量。
+    pub done: usize,
+    /// 当前阶段总量；未知时为 0。
+    pub total: usize,
+    /// 当前处理的文件路径。
+    pub current: Option<PathBuf>,
+    /// 当前来源根目录。
+    pub source: Option<PathBuf>,
+    /// 每秒处理文件数；无法估算时为 0。
+    pub throughput: f32,
+    /// 预计剩余秒数；无法估算时为 None。
+    pub eta_secs: Option<u64>,
+}
+
+/// 关键表在备份库中的行数。
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct TableCount {
+    pub table: String,
+    pub rows: i64,
+}
+
+/// 一次数据库备份的结果与校验信息。
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct BackupReport {
+    /// 源数据库路径。
+    pub source: PathBuf,
+    /// 备份文件路径。
+    pub destination: PathBuf,
+    /// 备份文件字节数。
+    pub bytes: u64,
+    /// 备份耗时（毫秒）。
+    pub elapsed_ms: u64,
+    /// 备份库关键表行数。
+    pub tables: Vec<TableCount>,
+    /// 备份库 `PRAGMA integrity_check` 是否通过。
+    pub integrity_ok: bool,
+    /// 校验差异或非致命错误说明。
+    pub warnings: Vec<String>,
+}
+
+/// 扫描排除规则；按来源根目录序列化为 JSON 存于 settings。
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ScanFilterConfig {
+    /// 排除 glob（相对来源根目录）；如 `**/.git/**`、`*_cache`。
+    pub exclude_globs: Vec<String>,
+    /// 是否包含隐藏文件/目录（以 `.` 开头）。
+    pub include_hidden: bool,
+    /// 小于该字节数的文件跳过；None 不限制。
+    pub min_bytes: Option<u64>,
+    /// 大于该字节数的文件跳过；None 不限制。
+    pub max_bytes: Option<u64>,
+}
+
+impl ScanFilterConfig {
+    /// 是否配置了任一过滤条件；未配置时扫描可走无过滤快路径。
+    pub fn is_active(&self) -> bool {
+        !self.exclude_globs.is_empty()
+            || !self.include_hidden
+            || self.min_bytes.is_some()
+            || self.max_bytes.is_some()
+    }
+}
+
+/// 诊断页展示的只读快照；不包含凭据与完整环境变量。
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct DiagnosticSnapshot {
+    /// 应用版本（`CARGO_PKG_VERSION`）。
+    pub app_version: String,
+    /// 数据目录（通常为 exe 同级的 `.kanalib`）。
+    pub data_dir: PathBuf,
+    pub db_path: PathBuf,
+    pub db_bytes: u64,
+    pub thumb_cache_dir: PathBuf,
+    pub thumb_cache_bytes: u64,
+    /// 图库资产总数。
+    pub asset_count: usize,
+    pub queue_pending: usize,
+    pub queue_running: usize,
+    pub queue_error: usize,
+    /// 各来源最近扫描状态。
+    pub sources: Vec<SourceScanStatus>,
+    /// 最近一次扫描时间（Unix 秒）。
+    pub last_scan: Option<u64>,
+    /// 最近一次错误（扫描/任务），可为空。
+    pub last_error: Option<String>,
+    /// 日志文件路径；未启用文件日志时为 None。
+    pub log_path: Option<PathBuf>,
+    /// 推理设备（如 `cuda`/`cpu`）；未知时为 None。
+    pub sidecar_device: Option<String>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
