@@ -35,10 +35,10 @@
 | F-003 | 图片对比（相似组/多选，同步缩放与元数据差异） | PLAN §6.2；digiKam Light Table | 待确认 | 中 |
 | F-004 | 以图找相似（选中一张作为锚点） | PLAN §6.2 pHash；Eagle | 待确认 | 中 |
 | F-005 | 分组浏览与时间线（日期/来源/评级） | Windows Explorer；digiKam | 待确认 | 中 |
-| F-006 | VS Code 式左侧栏（活动栏/折叠树/可调宽） | 用户截图；VS Code | 待实现 | 高 |
-| F-007 | 中间区域内联放大（替代全屏 overlay 查看器） | 用户口述 + 第四张截图 | 待实现 | 高 |
-| F-008 | 移除幻灯片功能（已实现，产品决定下线） | 用户 2026-10-26 指示 | 待移除 | 中 |
-| F-009 | 图标视图收敛：移除平铺/大图标、超大图标改名大图标、评级/标签数迁移、缩略图全图自适应、小图标改九宫格 | 用户截图/口述；F-001 | 待实现 | 高 |
+| F-006 | VS Code 式左侧栏（活动栏/折叠树/可调宽） | 用户截图；VS Code | 已实现 | 高 |
+| F-007 | 中间区域内联放大（替代全屏 overlay 查看器） | 用户口述 + 第四张截图 | 已实现 | 高 |
+| F-008 | 移除幻灯片功能（已实现，产品决定下线） | 用户 2026-10-26 指示 | 已实现 | 中 |
+| F-009 | 图标视图收敛：移除平铺/大图标、超大图标改名大图标、评级/标签数迁移、缩略图全图自适应、小图标改九宫格 | 用户截图/口述；F-001 | 已实现 | 高 |
 | F-010 | 搜索语法补齐（类别/状态/数值/日期/路径） | PLAN §8.1；SearchQuery | 已实现 | 高 |
 | F-011 | 标签面升级（类别页签、侧栏搜索、查看更多） | PLAN §2.2/§8.1；Counts | 已实现 | 高 |
 | F-012 | 搜索与筛选性能（10 万 p95 < 150ms） | PLAN §12/阶段 3；100k 实测 | 待确认 | 高 |
@@ -64,8 +64,8 @@
 | F-038 | 窗口大小/位置/最大化记忆 | 代码/UX | 候选 | 低 |
 | F-039 | 单实例/托盘/开机启动 | PLAN 参考工程经验 | 候选 | 低 |
 | F-040 | 缩略图/文件处理改用 ffmpeg（含许可与性能评估） | 用户口述；本机 ffmpeg | 待确认 | 高 |
-| F-041 | 标题栏主题按钮移位、放大并统一风格 | 用户截图 1/2 | 待实现 | 中 |
-| F-042 | VS Code 式底栏；命令面板入口移到底栏 | 用户截图 3 | 待实现 | 高 |
+| F-041 | 标题栏主题按钮移位、放大并统一风格 | 用户截图 1/2 | 已实现 | 中 |
+| F-042 | VS Code 式底栏；命令面板入口移到底栏 | 用户截图 3 | 已实现 | 高 |
 | F-045 | 相似阈值自定义与预览 | PLAN §6.2 | 待确认 | 中 |
 | F-046 | 去重组搜索/排序 | 代码/UX | 候选 | 低 |
 | F-047 | 回收站入口与删除审计 | 代码/安全 | 候选 | 低 |
@@ -115,12 +115,13 @@
 | F-022 | 已实现 | `tag_vocab` + `update_tag_suggestions`，按全词表前缀/子串补全，最多 50 条 |
 | F-034 | 已实现 | `kamadak-exif` 解析；缩略图按 Orientation 旋转并交换尺寸；写入 `captured_at`；`sort:captured` |
 | F-060 | 已实现 | `cleanup_to_budget` / `run_cache_budget_cleanup`；设置页有预算与最近清理结果；启动/扫描后检查 |
-| F-006/F-007 | 待实现 | 本轮新登记：VS Code 式左侧栏、中间区域内联放大；见下方「UI 外壳与内联查看」 |
-| F-008 | 待移除 | 幻灯片已实现（`ViewerSlideshow`、`viewer_slideshow`、`slideshow_task`、S/Space 绑定、工具栏按钮），产品决定下线；见下方「F-008」 |
-| F-009 | 待实现 | 当前仍有 8 种视图与平铺；图标格只显示名称，评级/标签数只出现在平铺；缩略图 `ObjectFit::Cover` 裁切；菜单图标 Xl=`Image`、Md=`LayoutGrid`，无九宫格资源。见下方「F-009」 |
+| F-006 | 已实现（2026-10-27） | 48px 活动栏（图库/搜索/重复项/标签/设置/主题，失败与待审重复组角标）；260px 面板（200–420 可拖拽，`ui.sidebar_width` 持久化）；分组折叠与 `ui.sidebar_collapsed`；面板标题与“…”菜单（添加文件夹/重扫/停止/重试失败/全部折叠）；`Ctrl+B`；侧栏品牌与平铺操作按钮移除 |
+| F-007 | 已实现（2026-10-26 内联） | 查看器已移入内容区，侧栏/检查器/标题栏/底栏保留；Esc 返回原网格与滚动位置 |
+| F-008 | 已实现（2026-10-26 移除） | 已删除 `ViewerSlideshow`、`viewer_slideshow`/`slideshow_task`、S/Space 绑定、播放按钮与提示；查看器其余能力保留 |
+| F-009 | 已实现（2026-10-27） | `ViewMode` 收敛为 6 种（大/中/小图标、列表、详细信息、内容）；大图标沿用原超大 288/268；三个图标格统一 `Contain` 全图、名称 +「评级/★」+「N 标签」信息行，行高 `图片区高 + 68`；新增 `IconName::Grid3x3` 与 `grid-3x3.svg`；删除平铺、旧大图标、平铺摘要设置与命令入口 |
 | F-040 | 待确认 | 当前缩略图/哈希/修复仍走 `image` crate 与 Python；工作区已有 `tools/ffmpeg/bin`（GPL full build，已加入 `.gitignore`），尚未接入，需评估许可、进程模型与性能 |
-| F-041 | 待实现 | 主题按钮当前在导出左侧、`ControlSize::Sm`；需移到导出与窗口控制之间、放大并统一为 Ghost 风格 |
-| F-042 | 待实现 | 当前没有底栏；命令面板按钮在标题栏 `open-palette`（`IconButton` Sm）；侧栏状态卡承载扫描/队列/设备信息 |
+| F-041 | 已实现 | 主题按钮已移到导出与窗口控制之间，`ControlSize::Md` + Ghost |
+| F-042 | 已实现（2026-10-27） | 26px 底栏：左侧状态/总数/已打标/未打标/失败/损坏可点击跳筛选，右侧队列/设备/命令面板；标题栏不再有命令面板入口；侧栏重复状态卡已移除 |
 | F-003/F-004/F-005 | 未实现 | 对比仍只有去重卡片；无单图锚点相似；无分组标题 |
 | F-012–F-014 | 未实现/待确认 | 搜索重建与去重路径构造仍在；智能集合仍只有保存/应用/删除；`collections` 表未用 |
 | F-021/F-023/F-024 | 未实现 | 阈值仍由 sidecar 模型配置决定；无独立暂停/优先级；无选择重打标 |
@@ -168,14 +169,14 @@ F-006 与 F-007 是 2026-10-26 新登记的 UI 改版需求：左侧栏改为 VS
 | `SearchQuery::parse()` 已支持类别/状态/数值/日期/路径与 warnings（`model.rs:495-690`） | F-010 已实现；非本地 `source:` 仍提示不支持 | F-010 |
 | 可见索引每次重建都构造 `duplicate_paths` 并对全部资产排序（`lib.rs:2181-2243`） | 搜索每个按键都可能做 O(n log n) 工作 | F-012 |
 | 短于 3 字的词走 `LIKE %x%`（`db.rs:996-1031`） | 短词全表扫描，命中越多越慢 | F-012 |
-| `render_viewer` 已用 `ImageViewer`（缩放/平移/旋转/全屏），但为 `absolute().occlude().bg(black())` 全窗口 overlay（`lib.rs:5017-5045`） | F-002 已实现；默认形态需按 F-007 改内联 | F-002、F-007 |
-| 幻灯片已实现：`ViewerSlideshow`、`viewer_slideshow`/`slideshow_task`、S/Space 绑定、工具栏按钮与底部提示（`lib.rs:84`、`1051-1053`、`1155-1156`、`2570-2600`、`5043-5141`、`5223`） | 产品决定移除；不进入内联查看器 | F-008 |
-| `handle_tile_click` 的双击调用 `open_lightbox_at`（`lib.rs:2047-2049`），查看器盖住侧栏与检查器 | 双击入口存在，但呈现形态不符合“中间区域放大” | F-007 |
-| 侧栏 `render_sidebar`（`lib.rs:4028`）为单列滚动、固定 245px，无活动栏/折叠树/拖拽调宽 | 需要 VS Code 式外壳；已有 `show_sidebar` 可复用 | F-006 |
-| `ViewMode` 仍有 8 种（含 Tiles/大图标），图标格只显示名称，评级/标签数只在 `show_summary` 时渲染；tile 媒体 `ObjectFit::Cover`（`lib.rs:10344`）；`ViewMode::icon()` 把 Xl→`Image`、Lg/Md/Sm→`LayoutGrid`，仓库只有 `layout-grid.svg`（2×2），无九宫格资源 | 需要 F-009 的视图收敛、信息迁移、contain 全图显示与新增九宫格图标 | F-009 |
+| `render_viewer` 已改为内容区内联（`flex_1` + 主题背景），侧栏/检查器/标题栏/底栏保持可见；保留 `ImageViewer` 缩放/平移/旋转/全屏与原图切换 | F-007 已实现；不再使用全窗口 overlay | F-002、F-007 |
+| 幻灯片已移除：`ViewerSlideshow`、`viewer_slideshow`/`slideshow_task`、S/Space 绑定、播放按钮与提示均已删除 | 查看器只保留缩放/平移/旋转/全屏/切图 | F-008 |
+| `handle_tile_click` 的双击进入内容区内联查看器，侧栏/检查器/标题栏/底栏保持可见 | F-007 形态符合“中间区域放大” | F-007 |
+| 侧栏为 48px 活动栏 + 260px 面板（200–420 可拖拽），面板有标题与“…”菜单，分组可折叠并持久化 | F-006 已实现；`ui.sidebar_width`、`ui.sidebar_collapsed` | F-006 |
+| `ViewMode` 为 6 种；三个图标格统一 `Contain`、名称 + 评级/星级 + 标签数；小图标使用新增 `grid-3x3.svg` | F-009 已实现；旧 `icons-xl`/`icons-lg`/`tiles` 可迁移 | F-009 |
 | 缩略图/哈希解码仍用 `image` crate（`state.rs:2517-2546`、`media.rs:194`）；修复走 Python `repair.py`；工作区已有 `tools/ffmpeg/bin/ffmpeg.exe`（GPL full build，213MB；已从根目录移入并加入 `.gitignore`），但 Cargo/脚本未引用 | ffmpeg 迁移需先定许可、进程模型与缓存失效策略 | F-040 |
-| 标题栏控件顺序为 命令面板 → 排序 → 查看 → 主题 → 导出 → 窗口控制；主题 `IconButton` 为 `ControlSize::Sm`，导出为 Ghost（`lib.rs:4771-4940`） | 主题按钮需移到导出与窗口控制之间，放大并统一 Ghost 风格 | F-041 |
-| shell 只有标题栏 + 内容行（`lib.rs:3825-3845`），没有底栏；命令面板按钮在标题栏（`open-palette`，`lib.rs:4804`）；侧栏状态卡显示扫描/计数/设备/队列（`lib.rs:4540-4606`） | 需要新增 VS Code 式底栏，并把命令面板入口与状态信息迁移过去 | F-042 |
+| 标题栏控件顺序为 排序 → 查看 → 导出 → 主题 → 窗口控制；主题 `IconButton` 为 `ControlSize::Md` + Ghost | F-041 已实现 | F-041 |
+| shell 为标题栏 + 内容行 + 26px 底栏；命令面板入口在底栏右侧；底栏左侧状态项可跳筛选 | F-042 已实现 | F-042 |
 | 去重卡片是并排缩略图 + 差异表（`lib.rs:4645-4714`） | 缺同步缩放/平移的对比视图 | F-003 |
 | `kamadak-exif` 已接入；Orientation 旋转/尺寸交换、`captured_at`、`sort:captured` 已实现（`media.rs`、`state.rs`） | F-034 已实现；GPS 仍未展示 | F-034 |
 | `IMAGE_EXTENSIONS` 只有 jpg/jpeg/png/webp/gif/bmp（`model.rs:1125`） | TIFF/AVIF/HEIC/RAW/PSD 无法入库 | F-033 |
@@ -224,6 +225,65 @@ F-006 与 F-007 是 2026-10-26 新登记的 UI 改版需求：左侧栏改为 VS
 共同验证：`cargo test --workspace`（core 32 + UI 5 通过，4 项按需忽略）；全部 UI 冒烟使用隔离数据根 `.kanalib/ui_f001_root` 与 `sample_library`，未触碰真实图库。F-002 的 `R` 旋转、`1`/`0` 缩放沿用 `ImageViewer` 焦点行为，工具栏按钮始终可用；原图切换只加载当前一张。
 
 > 2026-10-26 补充：F-002 的 overlay 形态是第一批实现；用户随后明确要求改为中间区域内联放大，因此默认交互按 F-007 重做。查看器的缩放/旋转/全屏保留为可选；幻灯片已实现但按 F-008 移除。
+
+### UI 改版实现记录（2026-10-26/27）
+
+| 条目 | 实现要点 | 验证 |
+|---|---|---|
+| F-008 | 删除 `ViewerSlideshow` action、`viewer_slideshow`/`slideshow_task`、S/Space 绑定、播放按钮与“S 幻灯片”提示；保留切图/缩放/旋转/全屏/原图切换 | `grep` 无残留引用；`cargo check --workspace` 通过 |
+| F-041 | 主题按钮从导出左侧移到导出右侧、窗口控制左侧，`ControlSize::Md` + Ghost，非图库页仍位于窗口控制左侧 | `cargo check --workspace` 通过 |
+| F-007 | 查看器从全窗口 overlay 改为内容区内联；保留侧栏/检查器/标题栏/底栏；顶部返回/文件名/页码/原图/全屏/关闭，底部切图与提示；Esc 关闭回网格；筛选/搜索变化时当前图不可见则自动关闭；`lightbox_*` 状态改名 `viewer_*` | 截图 `.kanalib/f007_inline.png`、`f007_after_esc.png`；Esc 返回原视图与滚动位置实机通过 |
+| F-042 | 新增 26px 底栏：左侧状态/总数/已打标/未打标/失败/损坏可点击跳筛选，右侧队列/设备/命令面板；标题栏移除命令面板；侧栏重复状态卡移除 | 截图 `.kanalib/ui_shell_statusbar.png`、`.kanalib/f006_sidebar.png`；底栏与标题栏顺序实机通过 |
+| F-006 | 48px 活动栏（图库/搜索/重复项/标签/设置/主题，失败与待审重复组角标）；260px 面板，200–420 拖拽调宽；面板标题 + “…”菜单；来源/筛选/智能集合/整理/评级/自动归类/标签分组可折叠；移除侧栏品牌与平铺操作按钮；`Ctrl+B` | 截图 `.kanalib/f006_sidebar.png`、`f006_collapsed.png`、`f006_resized5.png`；拖拽到 420 后写入 `ui.sidebar_width`，重启保持；UIA 可识别 ToolBar「活动栏」、分组与行 |
+| F-009 | `ViewMode` 收敛为 6 种；三个图标格统一 `Contain`、名称 + 评级/星级 + 标签数；新增 `grid-3x3.svg` + `IconName::Grid3x3`；删除平铺、旧大图标、平铺摘要设置/命令/快捷键 | 截图 `.kanalib/f006_viewmenu.png`（6 项与九宫格图标）、`f009_large.png`；`view_modes_are_converged_to_six` 等 6 个测试通过；`cargo check --workspace` 通过 |
+
+## 非 UI 现成组件调研（2026-10-26）
+
+> 范围：只覆盖后端、文件处理、来源、搜索、缓存、日志、交付等非 UI 条目；F-003/F-005/F-006/F-007/F-008/F-009/F-041/F-042 等界面交互不在本表。版本为 2026-10-26 在 crates.io 查询到的结果，落库前需再核对当前版本与 MSRV。
+>
+> 原则：**能用成熟 crate/二进制解决的不自己写**；已经在工作区稳定运行、且经过实测的实现（标签面、搜索语法、EXIF、缓存预算）不为了“用库”而重写。
+
+### 结论速览
+
+- **直接采用**：`notify`/`notify-debouncer-mini`（文件监听）、`ignore`/`globset`（排除规则）、`reqwest` + `reqwest_dav` + `keyring`（网络源与凭据）、`rusqlite` 的 `backup` feature（数据库备份）、`flexi_logger`（滚动日志）、`image` 的 tiff/avif/ico/qoi/exr feature、`lcms2`（ICC）、`ffmpeg-sidecar`（ffmpeg 进程管理）、`rbook`/`pdfium-render`/`lopdf`（小说/PDF，阶段 4）。
+- **先评估**：`ffmpeg-next`（libav 进程内解码）、`image_hasher`（替换自研 pHash）、`libheif-rs`/`rawloader`/`psd`（HEIC/RAW/PSD）、`usearch`/`sqlite-vec`/`fastembed`（向量检索）、`moka`/`lru`（缓存重写）。
+- **保持自研**：打标阈值/低置信度、jobs 队列、单来源扫描、从图库移除、扫描进度、磁盘缓存预算、当前 pHash 与 ThumbCache；这些没有合适的现成件，或现有实现已实测稳定。
+- **不建议引入**：`tantivy`（当前 SQLite FTS5 足够，双索引成本高）、通用任务队列框架、GPL 许可的 `epub` crate（项目 MIT，许可冲突）。
+
+### 逐条对照
+
+| 条目 | 可直接复用 | 许可/状态 | 建议 | 备注 |
+|---|---|---|---|---|
+| F-040 | 仓库内 `tools/ffmpeg/bin` + `ffmpeg-sidecar` 2.7.0；需要进程内解码时用 `ffmpeg-next` 9.0.0 | sidecar MIT；ffmpeg 当前为 GPL full build；ffmpeg-next WTFPL 包装 | 先用 `ffmpeg-sidecar`/CLI 工作池，10k/100k 基准后再决定是否上 libav | 不自己写进程管理/管道；GPL/LGPL 与打包体积另议 |
+| F-030 | `notify` 8.2.1 + `notify-debouncer-mini` 0.7.0（稳定）；需要重命名配对时评估 `notify-debouncer-full` 0.8 RC | CC0 / MIT OR Apache-2.0 | 直接采用，替换手写轮询/防抖 | 与 F-032 的 `ignore` 过滤一起用 |
+| F-032 | `ignore` 0.4.33（WalkBuilder，支持 gitignore/glob 覆盖）；需要单独匹配时用 `globset` | Unlicense OR MIT | 直接采用；用它替换纯 `walkdir` 的排除逻辑 | 自定义规则顺序、隐藏文件、最小/最大字节数仍由业务层决定 |
+| F-033 | `image` 0.25 的 `tiff`/`avif`/`ico`/`qoi`/`exr` feature；`libheif-rs` 3.0.0（HEIC）；`rawloader` 0.37.2（RAW）；`psd` 0.3.5（PSD） | image MIT/Apache；libheif-rs MIT + 原生 libheif LGPL；rawloader LGPL-2.1；psd MIT/Apache | 先开 image feature（TIFF/AVIF 等），HEIC/RAW/PSD 按许可与真实需求再评估 | ffmpeg 可覆盖部分格式，但不能替代全部；解码器安全/体积要测 |
+| F-035 | `reqwest` 0.13.5（HTTP）；`reqwest_dav` 0.3.3（WebDAV）；`keyring` 4.2.0（Windows Credential Manager） | MIT OR Apache-2.0 | 直接采用；Immich 没有维护良好的 Rust SDK，按官方 OpenAPI 生成薄客户端或手写少量端点 | 不自写 HTTP/WebDAV/凭据存储；只读约束仍在业务层 |
+| F-061 | `rusqlite` 0.32（项目当前）的 `backup` feature（SQLite Backup API；crates.io 最新 0.41） | MIT | 直接采用，替代手写复制 DB/WAL | 与定期备份/恢复 UI 一起做；恢复前重启/独占仍由应用控制 |
+| F-062 | `flexi_logger` 0.31.10（滚动文件、保留策略）；或 `tracing` + `tracing-appender` | MIT OR Apache-2.0 | 直接采用，替换当前仅 env/headless 才落盘的 `env_logger` 配置 | 不上自研日志轮转；敏感路径/凭据需脱敏 |
+| F-045 | `image_hasher` 3.1.1（pHash/平均哈希等） | MIT OR Apache-2.0 | 先评估：换库会改变哈希值，现有去重评审状态会失效；新实现或重写时直接用 | 当前自研 DCT pHash 已稳定，不必为用库而换 |
+| F-060 | `lru`（已被传递依赖）/`moka` 0.12.16（并发、权重） | MIT/Apache | 保持现有 `ThumbCache` 与磁盘预算；仅内存缓存重写时考虑 `moka` | 当前 10 万实测已达标，重写风险大于收益 |
+| F-012 | SQLite FTS5（已有）+ 索引/去重路径懒加载/输入防抖；`tantivy` 0.27 可用但不建议 | MIT | 保持 FTS5，不引入 Tantivy；先把现成 SQLite 能力用满 | 双索引会带来一致性与磁盘成本 |
+| F-016 | Python `open_clip_torch`（sidecar）+ `usearch` 2.26.6（ANN）或 `sqlite-vec` 0.1 alpha；Rust 侧 `fastembed` 7.5.0 | open_clip MIT；usearch Apache-2.0；sqlite-vec MIT/Apache（alpha）；fastembed Apache-2.0 | 评估：优先 open_clip + usearch；sqlite-vec 仍 alpha，不作为唯一方案 | 不自己写向量索引；后端仍受 PyTorch sidecar 约束 |
+| F-064 | `lcms2` 6.2.0（LittleCMS 包装） | MIT | 直接采用（若做 ICC/广色域） | 当前 ffmpeg 构建已带 lcms2；不要在 Rust 里手写色彩变换 |
+| F-026 | `quick-xml` 0.42（解析/生成 XMP）；或外部 ExifTool；Exempi 的 Rust 绑定已弃用 | MIT；ExifTool 需额外分发 | 暂缓：没有维护良好的 Rust XMP 绑定，先明确写回范围 | 不自己实现完整 XMP 模型；优先 sidecar 导出 |
+| F-066 | 视频用 ffmpeg；EPUB 用 `rbook` 0.7.12（Apache-2.0），不要用 GPL 的 `epub` 2.1.5；PDF 用 `pdfium-render` 0.9.4 或 `lopdf` 0.46 | Apache/MIT；pdfium 需原生二进制 | 阶段 4 评估；先把 ffmpeg 接入复用到视频 | 许可与二进制约束多，别在阶段 1 开工 |
+| F-021 | 无合适现成件 | — | 保持 sidecar 自研：阈值/低置信度是模型语义 | 可复用现有 jobs/标签表，不引入新框架 |
+| F-023 | 无合适现成件 | — | 保持 jobs 表；不要引入通用 job queue | 现有 SQLite 队列已持久化/可恢复 |
+| F-024 | 复用现有 sidecar + jobs | — | 不新增组件 | 选择范围与覆盖策略是业务逻辑 |
+| F-031 | 无合适现成件 | — | 保持自研来源模型 | 需要先把 local roots 统一到 sources |
+| F-037 | 现有 `Db::delete_assets` | — | 直接复用 | 只删 DB、不碰磁盘；忽略列表另做 |
+| F-063 | 无合适现成件 | — | 自研结构化 ScanProgress | `indicatif` 只适合 CLI，不适合 GPUI 状态栏 |
+| F-013/F-014 | SQLite `saved_searches` / `collections` | — | 复用现有 schema | 不需要 ORM/集合框架 |
+| F-065 | Inno Setup / WiX / MSIX + Windows 签名工具 | 各自许可 | 评估；不自研安装器 | 便携版已可用，安装器属阶段 3 |
+
+### 采用边界
+
+- **先复用、后重写**：F-030/F-032/F-035/F-061/F-062 是明确的“不要自己写”项；直接引入 crate 能减少大量边界 bug。
+- **不要为了库而换算法**：F-045 的 pHash、F-060 的 ThumbCache 已经过实测；换库必须单独评估评审状态/内存/缓存迁移，不与 UI 改版捆绑。
+- **许可先过门**：`ffmpeg` GPL full build、`rawloader` LGPL-2.1、`libheif` LGPL、`epub` GPL-3.0 都需要在分发前确认；项目当前是 MIT，不能默认把 GPL 依赖随包发布。
+- **格式支持不要夸大**：`image` feature 与 ffmpeg 构建能力不同；HEIC/AVIF/RAW 以实际样本测试为准，不写“支持所有格式”。
+- **已有实现不返工**：F-010/F-011/F-020/F-022/F-034/F-060 已在工作区实现并通过测试；除非新增需求，不重写为第三方库。
 
 ## F-001 图库视图模式改版（Windows 资源管理器式「查看」菜单）
 
@@ -604,6 +664,8 @@ enum PaneMode {
 
 ### F-006 VS Code 式左侧栏
 
+> 2026-10-27 已实现：48px 活动栏 + 可调宽面板；活动栏的图库/搜索聚焦当前图库，重复项/标签/设置切换到对应页面；面板标题与“…”菜单、分组折叠、宽度/折叠状态持久化、`Ctrl+B` 均已接入；侧栏顶部品牌与平铺式操作按钮移除。
+
 - **需求**：把当前 245px 固定、平铺式侧栏改成类似 VS Code 的「活动栏 + 可折叠资源树 + 可调宽面板」；保留现有来源、筛选、智能集合、标签、整理、设置等能力，不因外观改版丢功能。
 - **依据**：用户第一张截图（VS Code 资源管理器）；当前侧栏 `render_sidebar`（`lib.rs:4028`）为单列滚动、固定 `.w(px(245.))`（函数末尾）、无活动栏；`show_sidebar` 与 `view:sidebar` 已存在（`lib.rs:1061`、`2709`、`2828`、`2891`），可直接复用。
 - **现状**：
@@ -768,6 +830,8 @@ enum PaneMode {
 
 ### F-009 图标视图收敛与信息迁移
 
+> 2026-10-27 已实现：最终 6 种视图；三个图标格统一 `Contain` 与“名称 + 评级/星级 + 标签数”信息行；新增 `grid-3x3.svg` 与 `IconName::Grid3x3`；删除平铺、旧大图标与平铺摘要设置/命令，`Ctrl+Shift+2/7` 留空。
+
 - **需求**：
   - 把平铺视图里的「评级 + 标签数」移到大/中/小图标视图，然后移除平铺视图。
   - 删除现有「大图标」档（208px），把「超大图标」改名为「大图标」。
@@ -851,6 +915,7 @@ enum PaneMode {
 - **依据**：`PLAN.md` §12 与阶段 3 目标搜索 p95 < 150ms；10 万实测 p95 284ms（`synthetic` 全命中）；可见索引重建（`lib.rs:2181-2243`）；短词 LIKE（`db.rs:996-1031`）。
 - **现状**：每次搜索文本变化都会重建可见索引；`duplicate_paths` 无论是否使用 `dup:true` 都会从所有去重组构造 Set；对全部命中做 O(n log n) 排序；短于 3 字的词走 `LIKE %x%` 全表扫描。
 - **建议**：搜索输入加 120–200ms 防抖；仅在 `dup:true` 时构造 `duplicate_paths`；把筛选/排序下推到 SQL（评级、收藏、星级、来源、时间等索引列），使用 keyset 分页；预计算排序键或缓存有序索引；在 10 万与 100 万合成库上分别测 p50/p95、首屏与键入延迟。
+- **可复用**：继续用现有 SQLite FTS5（trigram + 短词回退）；不建议为此引入 Tantivy 双索引。防抖/缓存可复用现成模式，不新增搜索框架。
 - **验收**：10 万暖库 `synthetic` 全命中 p95 ≤ 150ms；输入 5 个字符内不出现可感知卡顿；结果与当前内存过滤完全一致；筛选/排序切换不劣化。
 - **依赖/风险**：SQL 与内存过滤的语义必须逐条对齐；FTS5 trigram 对 2 字词仍会回退，需明确回退策略。
 
@@ -925,6 +990,7 @@ enum PaneMode {
 - **依据**：`PLAN.md` §6.1 的 `notify` 文件监听；当前依赖只有 `walkdir`，重扫是手动触发。
 - **现状**：外部新增/删除/重命名不会实时反映；重扫已做缺失对账与 SHA1 重命名识别，但仍是全量遍历。
 - **建议**：为每个本地来源启动 `notify`/`ReadDirectoryChangesW` 监听，做事件防抖与批量合并；新增/修改/删除/重命名分别走增量索引；重命名优先用 SHA1 复用标签；来源离线时暂停监听并提示；监听失败回退手动重扫；忽略规则复用 F-032。
+- **可复用**：`notify` 8.2.1 + `notify-debouncer-mini` 0.7（稳定）或 `notify-debouncer-full` 0.8 RC（重命名配对）；过滤用 F-032 的 `ignore`/`globset`。不自写轮询/防抖。
 - **验收**：在图库目录新增/删除/重命名文件后数秒内界面更新；不产生重复条目；来源离线不误删；10 万库事件风暴不阻塞 UI。
 - **依赖/风险**：网络盘/OneDrive 的事件语义；事件风暴与 DB 写入竞争；必须与 F-032 的排除规则一致。
 
@@ -941,6 +1007,7 @@ enum PaneMode {
 - **依据**：`PLAN.md` §8.1 的“排除规则”；当前 `walkdir` 只按扩展名过滤（`state.rs:1591-1612`）。
 - **现状**：扫描父目录时会把缓存、临时目录、工程目录里的图片一起导入；没有 glob、隐藏文件、最小/最大文件大小或系统目录排除。
 - **建议**：按来源配置排除 glob（如 `.git/**`、`node_modules/**`、`**/cache/**`）与默认排除项；支持隐藏/系统文件、最小/最大字节数；保存前预览命中数量；对已入库但被新规则排除的资产给出“保留/移出图库”的选择。
+- **可复用**：`ignore` 0.4.33（`WalkBuilder`，支持 gitignore/glob 覆盖）或 `globset`；用现成遍历/匹配器替换纯 `walkdir` 的手工过滤。
 - **验收**：排除目录不进入索引；规则修改后可预览与执行清理；不会因规则误删磁盘文件；重扫结果可解释。
 - **依赖/风险**：glob 语义与 Windows 路径分隔符；排除策略不能与缺失对账混淆。
 
@@ -949,6 +1016,7 @@ enum PaneMode {
 - **依据**：`IMAGE_EXTENSIONS` 只有 jpg/jpeg/png/webp/gif/bmp（`model.rs:689`）；`image` crate 只启用这些 feature；digiKam/PhotoPrism 支持 RAW/HEIC 等。
 - **现状**：TIFF、AVIF、HEIC/HEIF、RAW、PSD 等无法入库；GIF/WebP 没有动画播放入口（缩略图与灯箱均为静态）。
 - **建议**：分阶段接入：先加 TIFF/AVIF（`image` crate feature）与 ICO/QOI 等低成本格式；再评估 HEIC（libheif）与 RAW（LibRaw）；PSD 可先做合成预览；查看器支持动画 GIF/WebP；格式能力在 UI 中标注，解码失败仍保留哈希与损坏状态。
+- **可复用**：`image` 0.25 的 `tiff`/`avif`/`ico`/`qoi`/`exr` feature；`libheif-rs` 3.0（HEIC）、`rawloader` 0.37（RAW，LGPL-2.1）、`psd` 0.3（PSD）。不自己写解码器；许可/原生依赖先评估。
 - **验收**：新格式能被扫描、生成缩略图、显示尺寸与哈希；损坏文件不阻塞扫描；安装包体积与解码安全性有记录。
 - **依赖/风险**：二进制体积、解码器许可证、解码安全（解压炸弹）；不同格式的 EXIF/方向与 F-034 共享处理。
 
@@ -966,6 +1034,7 @@ enum PaneMode {
 - **依据**：`PLAN.md` §9 与阶段 2；`sources` 表已有 `kind/config_json/read_only/last_sync_at/sync_cursor`；当前只有本地根。
 - **现状**：没有 HTTP 客户端依赖；无法连接 Immich 或 WebDAV；跨源统一视图与跨源去重也未实现。
 - **建议**：定义统一 `Source` trait；Immich 只读（版本探测、分页搜索、`updatedAfter` 增量、缩略图下载、只读约束）；WebDAV（PROPFIND、ETag/Last-Modified、并发限流）；凭据进 Windows Credential Manager；远程缩略图落本地缓存；离线不阻塞本地库；SHA1 跨源精确去重；来源设置页支持测试连接/同步。
+- **可复用**：`reqwest` 0.13（HTTP）、`reqwest_dav` 0.3（WebDAV）、`keyring` 4.2（Windows Credential Manager）；Immich 没有成熟 Rust SDK，按官方 OpenAPI 生成薄客户端或只写必要端点。不自写 HTTP/WebDAV/凭据存储。
 - **验收**：按 PLAN 阶段 2 验收：同一张图在本地与 Immich 能归入同一精确重复组；网盘断线不影响本地库；远端不写回。
 - **依赖/风险**：范围大；凭据与网络安全；API 版本差异；远程缩略图缓存与 F-060 预算共享。
 
@@ -998,9 +1067,9 @@ enum PaneMode {
   - **阶段 2**：pHash 解码、损坏修复/导出、动画首帧/动画预览；再评估视频。
   - **不承诺**：ffmpeg 不能自动解决所有 HEIC/AVIF/RAW；取决于构建与容器解析，需实测后再更新 F-033。
 - **架构选项（需先做基准再定）**：
-  1. **CLI 工作池**：每张图启动一次 `ffmpeg.exe`，用 `-v error -i <path> -vf "scale=512:512:force_original_aspect_ratio=decrease" -frames:v 1 -f image2pipe -vcodec mjpeg -` 输出；固定 N 个 worker，参数逐个传递、不经过 shell。优点是直接用仓库内二进制；缺点是 10 万张的进程启动/退出成本可能压倒解码本身。
+  1. **CLI 工作池**：每张图启动一次 `ffmpeg.exe`，用 `-v error -i <path> -vf "scale=512:512:force_original_aspect_ratio=decrease" -frames:v 1 -f image2pipe -vcodec mjpeg -` 输出；固定 N 个 worker，参数逐个传递、不经过 shell。可直接复用 `ffmpeg-sidecar` 2.7.0（MIT）的进程封装，不自己写管道/退出处理；缺点是 10 万张的进程启动/退出成本可能压倒解码本身。
   2. **常驻 worker / sidecar**：用 Rust 管理一个长生命周期进程或批量协议，减少启动次数；实现复杂度较高。
-  3. **libav 绑定**（`ffmpeg-next` 等）：进程内解码，性能最好；需要固定 DLL/静态构建、Windows 打包和许可审查，构建复杂度最高。
+  3. **libav 绑定**：`ffmpeg-next` 9.0.0（WTFPL 包装）等，进程内解码，性能最好；需要固定 DLL/静态构建、Windows 打包和许可审查，构建复杂度最高。
   - 建议先实现 CLI 工作池并在 10k/100k 合成库上测缩略图阶段；若不高于现有 1,130s 的 1.2 倍且滚动无回归，则保留 CLI；否则转向 libav 绑定。不要把这条性能门禁省掉。
 - **缩略图语义**：
   - `scale=512:512:force_original_aspect_ratio=decrease`（整图 contain，保持比例），`-frames:v 1` 首帧，输出 JPEG；alpha 按现有规则合成白底（或明确改为 PNG/透明，需产品决定）。
@@ -1038,6 +1107,7 @@ enum PaneMode {
 - **依据**：`PLAN.md` §6.2 的 6/10/14 预设；当前设置页与去重页只提供三档。
 - **现状**：阈值可持久化、可临时切换；没有连续值、没有扫描前的结果预估、没有阈值变化对组数/成员数的影响预览。
 - **建议**：提供 0–32 的滑杆与相似度百分比映射；显示预估组数/成员数/耗时（可采样）；区分“本次扫描临时值”和“默认值”；对低阈值提示链式合并风险；保留三档快捷按钮。
+- **可复用**：若重写 pHash，用 `image_hasher` 3.1.1 取代自研 DCT；当前自研实现已稳定，换库会改变哈希值并使去重评审状态失效，建议只在重写时采用。并行扫描可复用 `rayon`。
 - **验收**：任意阈值可扫描并持久化为默认；预览数量与实扫一致；低阈值有风险提示；切换阈值不清空已审核状态（沿用现有签名策略）。
 - **依赖/风险**：低阈值下 O(n²) 与组爆炸；相似度映射只是近似；与 F-004 的单图查询阈值保持一致。
 
@@ -1051,6 +1121,7 @@ enum PaneMode {
 - **改版前缺口**：只能清理没有任何资产引用的孤儿缩略图；`ThumbCache` 只限制内存解码图（128 项），磁盘缓存无上限；10 万库的 t256 回填会持续占用空间。
 - **当前实现（2026-10-26 复核）**：已有 `cleanup_to_budget`/`run_cache_budget_cleanup`、可配置 `thumb_budget_gb`、启动/扫描后检查与最近清理结果；仍可继续评估访问时间来源与清理并发边界。
 - **建议**：增加可配置磁盘预算（默认 10GB）与 LRU 淘汰；记录最近访问时间（文件 atime 在 Windows 不可靠，可在 DB 或 sidecar 元数据中记录）；空闲/扫描结束后清理；保护当前可见页与正在解码的条目；设置页显示总量、命中率、最近清理结果；提供“立即清理到预算”。
+- **可复用**：内存解码缓存重写时可评估 `moka` 0.12（并发/权重）或 `lru`；当前 `ThumbCache` 与磁盘预算已实测，建议保留，不为了用库而重写。
 - **验收**：超过预算后自动回落到预算内；当前视图缩略图不被误删；扫描中不清理；清理后重新滚动可重建；10 万库重复滚动不产生大量解码抖动。
 - **依赖/风险**：访问时间来源；删除与解码并发；与 F-002 的 512 预览共享缓存。
 
@@ -1059,6 +1130,7 @@ enum PaneMode {
 - **依据**：当前备份只在 schema 迁移前执行（`db.rs:242`、`1295-1318`）；`PLAN.md` 没有定期备份 UI。
 - **现状**：用户无法在应用内创建/恢复备份；WAL 文件与 DB 一致性、损坏检测、VACUUM 都没有入口。
 - **建议**：设置页增加“立即备份/恢复/打开备份目录”；自动按日/周备份并保留 N 份；备份前做 WAL checkpoint；恢复前校验并提示重启；显示 DB 大小、WAL 大小、完整性检查结果；可选导出/导入图库设置。
+- **可复用**：`rusqlite` 0.41 的 `backup` feature 直接使用 SQLite Backup API，替代手写 DB/WAL 复制；保留策略/恢复 UI 仍由应用实现。
 - **验收**：备份可在另一数据目录恢复并正常打开；保留策略生效；恢复失败不破坏现有库；大库备份不长时间阻塞 UI。
 - **依赖/风险**：恢复时的进程独占；大库复制耗时；与 F-062 的诊断信息共享。
 
@@ -1067,6 +1139,7 @@ enum PaneMode {
 - **依据**：`PLAN.md` 阶段 3“日志与诊断”；当前日志只在 `KANALIB_LOG_FILE` 或 headless 时落盘（`main.rs:18-40`），release GUI 的 stderr 不可见。
 - **现状**：用户遇到扫描失败、sidecar 崩溃、图片解码失败时没有可收集的日志；设置页只显示状态字符串。
 - **建议**：默认写入数据目录的滚动日志（按大小/天数）；新增“诊断”页：版本、数据目录、DB/缓存大小、资产与队列计数、GPU/sidecar 状态、最近扫描指标、最近错误、日志尾部；支持复制诊断信息；对路径/凭据做脱敏。
+- **可复用**：`flexi_logger` 0.31（`log` 门面、滚动/保留）替换当前 `env_logger` 的文件配置；若统一到 `tracing`，用 `tracing-appender`。不自研轮转。
 - **验收**：正常启动即产生日志；诊断页能复制出可定位问题的信息；日志大小受限；不泄露 Immich/WebDAV 凭据。
 - **依赖/风险**：隐私脱敏；日志与 UI 线程解耦；与 F-061 的备份路径一致。
 
@@ -1100,6 +1173,8 @@ enum PaneMode {
 | F-067 | 操作撤销/历史 | 标签、星级、收藏等可撤销；删除仍走回收站 | 代码/UX |
 | F-068 | 复制图片到剪贴板 | 当前只复制 Prompt/路径；增加 PNG/DIB 复制，便于外部工作流 | 代码/UX |
 
+> 非 UI 候选（F-016/F-026/F-064/F-065/F-066 等）的可复用组件、许可与建议见上文「非 UI 现成组件调研」。
+
 ---
 
 ## 扩展条目参考与本地依据
@@ -1113,5 +1188,6 @@ enum PaneMode {
 - [FFmpeg 滤镜](https://ffmpeg.org/ffmpeg-filters.html)：`scale`、`thumbnail`、`zscale`。
 - [FFmpeg 许可](https://ffmpeg.org/legal.html)：GPL/LGPL 构建与分发义务。
 - [Lucide grid-3x3](https://lucide.dev/icons/grid-3x3)：F-009 小图标九宫格参考（Ely 当前未内置该 SVG）。
+- 现成组件（2026-10-26 查询）：[notify](https://crates.io/crates/notify)、[ignore](https://crates.io/crates/ignore)、[reqwest_dav](https://crates.io/crates/reqwest_dav)、[rusqlite](https://crates.io/crates/rusqlite)、[flexi_logger](https://crates.io/crates/flexi_logger)、[ffmpeg-sidecar](https://crates.io/crates/ffmpeg-sidecar)、[image_hasher](https://crates.io/crates/image_hasher)、[usearch](https://crates.io/crates/usearch)、[lcms2](https://crates.io/crates/lcms2)、[rbook](https://crates.io/crates/rbook)。
 - 本地代码与文档：`docs/PLAN.md` 第 2、5、6、7、8、9、10、11、12、15 节；`crates/kanalib-ui/src/lib.rs`；`crates/kanalib-core/src/{model,state,db,media}.rs`；`sidecar/tagger/server.py`；`vendor/ely-gpui-components/src/{menus,overlays,media}/`。
 - F-001 的 Windows 资源管理器与快捷键参考见 F-001.9。

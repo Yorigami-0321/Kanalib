@@ -176,6 +176,7 @@ icons! {
     GitPullRequestClosed => "git-pull-request-closed",
     GitPullRequestDraft => "git-pull-request-draft",
     Globe => "globe",
+    Grid3x3 => "grid-3x3",
     GripHorizontal => "grip-horizontal",
     GripVertical => "grip-vertical",
     Hand => "hand",

@@ -8,7 +8,7 @@ use ely_gpui_component::{
     feedback::{Toast, ToastViewport, Toaster},
     forms::{Choice, Input, Rating, TagInput, TextInput},
     media::ImageViewer,
-    menus::{ContextMenu, DropdownMenu, Menu, MenuItem},
+    menus::{ContextMenu, DropdownMenu, Menu, MenuItem, OverflowMenu},
     navigation::{Command, CommandPalette},
     overlays::{ConfirmDialog, PromptDialog},
     primitives::{Icon, IconName, Severity},
@@ -16,11 +16,13 @@ use ely_gpui_component::{
 };
 use gpui::prelude::*;
 use gpui::{
-    AnyElement, App, ClickEvent, ClipboardItem, Context, Entity, FocusHandle, Focusable,
-    FontWeight, Hsla, ImageCache, ImageCacheError, ImageCacheItem, IntoElement, KeyBinding,
-    Modifiers, MouseButton, ObjectFit, ParentElement, Pixels, Render, RenderImage, Resource, Role,
-    ScrollStrategy, SharedString, Styled, Task, UniformListScrollHandle, WeakEntity, Window, div,
-    black, image_cache, img, px, uniform_list, white,
+    AnyElement, App, ClickEvent, ClipboardItem, Context, DispatchPhase, Entity, FocusHandle,
+    Focusable, FontWeight, Hsla, ImageCache, ImageCacheError, ImageCacheItem, IntoElement,
+    KeyBinding, Modifiers, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ObjectFit,
+    ParentElement,
+    Pixels, Render, RenderImage, Resource, Role, ScrollStrategy, SharedString, Styled, Task,
+    UniformListScrollHandle, WeakEntity, Window, canvas, div, image_cache, img, px, uniform_list,
+    white,
 };
 #[cfg(feature = "frame-profiler")]
 use hdrhistogram::Histogram;
@@ -47,6 +49,20 @@ const DEDUP_MAX_VISIBLE: usize = 4;
 const SETTINGS_MAX_WIDTH: f32 = 1080.;
 const TAG_ROW_HEIGHT: f32 = 54.;
 const TITLEBAR_HEIGHT: f32 = 48.;
+const STATUS_BAR_HEIGHT: f32 = 26.;
+const ACTIVITY_BAR_WIDTH: f32 = 48.;
+const SIDEBAR_MIN_WIDTH: f32 = 200.;
+const SIDEBAR_MAX_WIDTH: f32 = 420.;
+const SIDEBAR_DEFAULT_WIDTH: f32 = 260.;
+const SIDEBAR_SECTIONS: [&str; 7] = [
+    "sources",
+    "filters",
+    "collections",
+    "organize",
+    "ratings",
+    "groups",
+    "tags",
+];
 
 gpui::actions!(
     kanalib,
@@ -69,19 +85,17 @@ gpui::actions!(
         Rate3,
         Rate4,
         Rate5,
-        ViewIconsXl,
-        ViewIconsLg,
-        ViewIconsMd,
-        ViewIconsSm,
+        ToggleSidebar,
+        ViewIconsLarge,
+        ViewIconsMedium,
+        ViewIconsSmall,
         ViewList,
         ViewDetails,
-        ViewTiles,
         ViewContent,
         ViewerClose,
         ViewerPrev,
         ViewerNext,
         ViewerFullscreen,
-        ViewerSlideshow,
     ]
 );
 
@@ -146,51 +160,43 @@ impl SortMode {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 enum ViewMode {
-    IconsXl,
-    IconsLg,
-    IconsMd,
-    IconsSm,
+    IconsLarge,
+    #[default]
+    IconsMedium,
+    IconsSmall,
     List,
     Details,
-    #[default]
-    Tiles,
     Content,
 }
 
 impl ViewMode {
-    const ALL: [ViewMode; 8] = [
-        Self::IconsXl,
-        Self::IconsLg,
-        Self::IconsMd,
-        Self::IconsSm,
+    const ALL: [ViewMode; 6] = [
+        Self::IconsLarge,
+        Self::IconsMedium,
+        Self::IconsSmall,
         Self::List,
         Self::Details,
-        Self::Tiles,
         Self::Content,
     ];
 
     fn key(self) -> &'static str {
         match self {
-            Self::IconsXl => "icons-xl",
-            Self::IconsLg => "icons-lg",
-            Self::IconsMd => "icons-md",
-            Self::IconsSm => "icons-sm",
+            Self::IconsLarge => "icons-large",
+            Self::IconsMedium => "icons-medium",
+            Self::IconsSmall => "icons-small",
             Self::List => "list",
             Self::Details => "details",
-            Self::Tiles => "tiles",
             Self::Content => "content",
         }
     }
 
     fn from_key(value: &str) -> Option<Self> {
         Some(match value {
-            "icons-xl" => Self::IconsXl,
-            "icons-lg" => Self::IconsLg,
-            "icons-md" => Self::IconsMd,
-            "icons-sm" => Self::IconsSm,
+            "icons-large" | "icons-xl" | "icons-lg" => Self::IconsLarge,
+            "icons-medium" | "icons-md" | "tiles" => Self::IconsMedium,
+            "icons-small" | "icons-sm" => Self::IconsSmall,
             "list" => Self::List,
             "details" => Self::Details,
-            "tiles" => Self::Tiles,
             "content" => Self::Content,
             _ => return None,
         })
@@ -198,37 +204,33 @@ impl ViewMode {
 
     fn label(self) -> &'static str {
         match self {
-            Self::IconsXl => "超大图标",
-            Self::IconsLg => "大图标",
-            Self::IconsMd => "中图标",
-            Self::IconsSm => "小图标",
+            Self::IconsLarge => "大图标",
+            Self::IconsMedium => "中图标",
+            Self::IconsSmall => "小图标",
             Self::List => "列表",
             Self::Details => "详细信息",
-            Self::Tiles => "平铺",
             Self::Content => "内容",
         }
     }
 
     fn icon(self) -> IconName {
         match self {
-            Self::IconsXl => IconName::Image,
-            Self::IconsLg | Self::IconsMd | Self::IconsSm => IconName::LayoutGrid,
+            Self::IconsLarge => IconName::Image,
+            Self::IconsMedium => IconName::LayoutGrid,
+            Self::IconsSmall => IconName::Grid3x3,
             Self::List => IconName::List,
             Self::Details => IconName::Table,
-            Self::Tiles => IconName::Rows2,
             Self::Content => IconName::AlignJustify,
         }
     }
 
     fn shortcut(self) -> &'static str {
         match self {
-            Self::IconsXl => "ctrl-shift-1",
-            Self::IconsLg => "ctrl-shift-2",
-            Self::IconsMd => "ctrl-shift-3",
-            Self::IconsSm => "ctrl-shift-4",
+            Self::IconsLarge => "ctrl-shift-1",
+            Self::IconsMedium => "ctrl-shift-3",
+            Self::IconsSmall => "ctrl-shift-4",
             Self::List => "ctrl-shift-5",
             Self::Details => "ctrl-shift-6",
-            Self::Tiles => "ctrl-shift-7",
             Self::Content => "ctrl-shift-8",
         }
     }
@@ -236,17 +238,15 @@ impl ViewMode {
     fn is_grid(self) -> bool {
         matches!(
             self,
-            Self::IconsXl | Self::IconsLg | Self::IconsMd | Self::IconsSm | Self::Tiles
+            Self::IconsLarge | Self::IconsMedium | Self::IconsSmall
         )
     }
 
     fn min_width(self) -> f32 {
         match self {
-            Self::IconsXl => 288.,
-            Self::IconsLg => 224.,
-            Self::IconsMd => 160.,
-            Self::IconsSm => 128.,
-            Self::Tiles => 160.,
+            Self::IconsLarge => 288.,
+            Self::IconsMedium => 160.,
+            Self::IconsSmall => 128.,
             Self::List | Self::Details => 1.,
             Self::Content => 1.,
         }
@@ -254,29 +254,23 @@ impl ViewMode {
 
     fn image_height(self) -> f32 {
         match self {
-            Self::IconsXl => 268.,
-            Self::IconsLg => 208.,
-            Self::IconsMd => 150.,
-            Self::IconsSm => 112.,
-            Self::Tiles => 150.,
+            Self::IconsLarge => 268.,
+            Self::IconsMedium => 150.,
+            Self::IconsSmall => 112.,
             Self::List | Self::Details | Self::Content => 0.,
         }
     }
 
-    fn row_height(self, tile_summary: bool) -> f32 {
+    fn row_height(self) -> f32 {
         match self {
-            Self::IconsXl
-            | Self::IconsLg
-            | Self::IconsMd
-            | Self::IconsSm => self.image_height() + 48.,
-            Self::Tiles => self.image_height() + if tile_summary { 98. } else { 48. },
+            Self::IconsLarge | Self::IconsMedium | Self::IconsSmall => self.image_height() + 68.,
             Self::List | Self::Details => 32.,
             Self::Content => 84.,
         }
     }
 
     fn prefers_large_thumb(self) -> bool {
-        matches!(self, Self::IconsXl)
+        matches!(self, Self::IconsLarge)
     }
 }
 
@@ -284,9 +278,9 @@ fn resolve_view_mode(saved: Option<&str>, legacy_density: Option<&str>) -> ViewM
     saved
         .and_then(ViewMode::from_key)
         .unwrap_or_else(|| match legacy_density {
-            Some("small") => ViewMode::IconsSm,
-            Some("large") => ViewMode::IconsLg,
-            _ => ViewMode::Tiles,
+            Some("small") => ViewMode::IconsSmall,
+            Some("large") => ViewMode::IconsLarge,
+            _ => ViewMode::IconsMedium,
         })
 }
 
@@ -372,7 +366,7 @@ fn source_label(root: &Path, aliases: &HashMap<PathBuf, String>) -> String {
         .unwrap_or_else(|| root.display().to_string())
 }
 
-fn lightbox_caption(asset: &Asset) -> SharedString {
+fn viewer_caption(asset: &Asset) -> SharedString {
     let general = asset
         .all_tags()
         .filter(|tag| matches!(tag.category.as_str(), "general" | "manual"))
@@ -406,6 +400,17 @@ enum Screen {
     Tags,
     Settings,
 }
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ActivityTarget {
+    Library,
+    Search,
+    Duplicates,
+    Tags,
+    Settings,
+    Theme,
+}
+
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum DedupFilter {
@@ -511,7 +516,6 @@ struct UiColors {
     warning: Hsla,
     warning_subtle: Hsla,
     backdrop: Hsla,
-    on_media: Hsla,
 }
 
 impl UiColors {
@@ -534,7 +538,6 @@ impl UiColors {
             warning: colors.warning,
             warning_subtle: colors.warning_subtle,
             backdrop: colors.backdrop,
-            on_media: colors.on_media,
         }
     }
 }
@@ -1048,9 +1051,7 @@ pub struct KanalibApp {
     viewer_focus: FocusHandle,
     focus_grid_pending: bool,
     focus_viewer_pending: bool,
-    viewer_slideshow: bool,
     viewer_original: bool,
-    slideshow_task: Option<Task<()>>,
     auto_select_pending: bool,
     selection: Arc<HashSet<PathBuf>>,
     selection_anchor: Option<PathBuf>,
@@ -1059,14 +1060,19 @@ pub struct KanalibApp {
     view_mode: ViewMode,
     pane_mode: PaneMode,
     show_sidebar: bool,
+    sidebar_width: f32,
+    sidebar_collapsed: HashSet<String>,
+    sidebar_resizing: bool,
+    sidebar_persist_task: Option<Task<()>>,
     show_extensions: bool,
-    show_tile_summary: bool,
     pending_scroll_position: Option<usize>,
     search_input: Option<Entity<TextInput>>,
     palette_open: bool,
-    lightbox_slides: Vec<(PathBuf, SharedString)>,
-    lightbox_at: Option<usize>,
-    lightbox_viewed: HashSet<PathBuf>,
+    viewer_slides: Vec<(PathBuf, SharedString)>,
+    viewer_at: Option<usize>,
+    viewer_viewed: HashSet<PathBuf>,
+    viewer_origin_filter: Option<Filter>,
+    viewer_origin_search: String,
     save_search_open: bool,
     tag_dialog: Option<TagDialogMode>,
     tag_dialog_epoch: u64,
@@ -1122,6 +1128,7 @@ impl KanalibApp {
         cx.bind_keys([
             KeyBinding::new("ctrl-k", OpenPalette, None),
             KeyBinding::new("ctrl-shift-p", OpenPalette, None),
+            KeyBinding::new("ctrl-b", ToggleSidebar, None),
             KeyBinding::new("ctrl-f", FocusSearch, None),
             KeyBinding::new("up", SelectPrevRow, Some(GRID_CONTEXT)),
             KeyBinding::new("down", SelectNextRow, Some(GRID_CONTEXT)),
@@ -1140,20 +1147,16 @@ impl KanalibApp {
             KeyBinding::new("5", Rate5, Some(GRID_CONTEXT)),
             KeyBinding::new("ctrl-a", SelectAllVisible, Some(GRID_CONTEXT)),
             KeyBinding::new("escape", ClearSelection, Some(GRID_CONTEXT)),
-            KeyBinding::new("ctrl-shift-1", ViewIconsXl, None),
-            KeyBinding::new("ctrl-shift-2", ViewIconsLg, None),
-            KeyBinding::new("ctrl-shift-3", ViewIconsMd, None),
-            KeyBinding::new("ctrl-shift-4", ViewIconsSm, None),
+            KeyBinding::new("ctrl-shift-1", ViewIconsLarge, None),
+            KeyBinding::new("ctrl-shift-3", ViewIconsMedium, None),
+            KeyBinding::new("ctrl-shift-4", ViewIconsSmall, None),
             KeyBinding::new("ctrl-shift-5", ViewList, None),
             KeyBinding::new("ctrl-shift-6", ViewDetails, None),
-            KeyBinding::new("ctrl-shift-7", ViewTiles, None),
             KeyBinding::new("ctrl-shift-8", ViewContent, None),
             KeyBinding::new("escape", ViewerClose, Some(VIEWER_CONTEXT)),
             KeyBinding::new("left", ViewerPrev, Some(VIEWER_CONTEXT)),
             KeyBinding::new("right", ViewerNext, Some(VIEWER_CONTEXT)),
             KeyBinding::new("f", ViewerFullscreen, Some(VIEWER_CONTEXT)),
-            KeyBinding::new("s", ViewerSlideshow, Some(VIEWER_CONTEXT)),
-            KeyBinding::new("space", ViewerSlideshow, Some(VIEWER_CONTEXT)),
         ]);
         let state = AppState::new(folder);
         let initial_selected = state.shared.lock().unwrap().selected.clone();
@@ -1181,10 +1184,21 @@ impl KanalibApp {
             .setting("ui.show_extensions")
             .map(|value| value != "false")
             .unwrap_or(true);
-        let show_tile_summary = state
-            .setting("ui.show_tile_summary")
-            .map(|value| value != "false")
-            .unwrap_or(true);
+        let sidebar_width = state
+            .setting("ui.sidebar_width")
+            .and_then(|value| value.parse::<f32>().ok())
+            .map(|value| value.clamp(SIDEBAR_MIN_WIDTH, SIDEBAR_MAX_WIDTH))
+            .unwrap_or(SIDEBAR_DEFAULT_WIDTH);
+        let sidebar_collapsed = state
+            .setting("ui.sidebar_collapsed")
+            .map(|value| {
+                value
+                    .split(',')
+                    .filter(|key| SIDEBAR_SECTIONS.contains(key))
+                    .map(str::to_string)
+                    .collect()
+            })
+            .unwrap_or_default();
         let thumb_budget_gb = state
             .setting("cache.thumb_budget_gb")
             .and_then(|value| value.parse::<u64>().ok())
@@ -1257,9 +1271,7 @@ impl KanalibApp {
             viewer_focus: cx.focus_handle(),
             focus_grid_pending: true,
             focus_viewer_pending: false,
-            viewer_slideshow: false,
             viewer_original: false,
-            slideshow_task: None,
             auto_select_pending: false,
             selection: Arc::new(initial_selected.iter().cloned().collect()),
             selection_anchor: initial_selected,
@@ -1268,14 +1280,19 @@ impl KanalibApp {
             view_mode,
             pane_mode,
             show_sidebar,
+            sidebar_width,
+            sidebar_collapsed,
+            sidebar_resizing: false,
+            sidebar_persist_task: None,
             show_extensions,
-            show_tile_summary,
             pending_scroll_position: None,
             search_input: None,
             palette_open: false,
-            lightbox_slides: Vec::new(),
-            lightbox_at: None,
-            lightbox_viewed: HashSet::new(),
+            viewer_slides: Vec::new(),
+            viewer_at: None,
+            viewer_viewed: HashSet::new(),
+            viewer_origin_filter: None,
+            viewer_origin_search: String::new(),
             save_search_open: false,
             tag_dialog: None,
             tag_dialog_epoch: 0,
@@ -2045,7 +2062,7 @@ impl KanalibApp {
             self.state.select(Some(path.clone()));
         }
         if click_count >= 2 {
-            self.open_lightbox_at(&path);
+            self.open_viewer_at(&path);
         }
         cx.notify();
     }
@@ -2446,7 +2463,7 @@ impl KanalibApp {
         );
     }
 
-    fn open_lightbox_at(&mut self, path: &Path) {
+    fn open_viewer_at(&mut self, path: &Path) {
         let (slides, at) = {
             let shared = self.state.shared.lock().unwrap();
             let assets = shared.assets.read().unwrap();
@@ -2459,11 +2476,11 @@ impl KanalibApp {
                 if asset.path.as_path() == path {
                     at = Some(slides.len());
                 }
-                slides.push((asset.path.clone(), lightbox_caption(asset)));
+                slides.push((asset.path.clone(), viewer_caption(asset)));
             }
             if at.is_none() {
                 if let Some(asset) = assets.iter().find(|asset| asset.path.as_path() == path) {
-                    slides = vec![(asset.path.clone(), lightbox_caption(asset))];
+                    slides = vec![(asset.path.clone(), viewer_caption(asset))];
                     at = Some(0);
                 }
             }
@@ -2471,16 +2488,24 @@ impl KanalibApp {
         };
         if let Some(at) = at {
             self.palette_open = false;
-            self.lightbox_viewed.clear();
+            self.screen = Screen::Library;
+            self.viewer_viewed.clear();
             if let Some((path, _)) = slides.get(at) {
-                self.lightbox_viewed.insert(path.clone());
+                self.viewer_viewed.insert(path.clone());
             }
-            self.lightbox_slides = slides;
-            self.lightbox_at = Some(at);
+            self.viewer_slides = slides;
+            self.viewer_at = Some(at);
             self.focus_viewer_pending = true;
-            self.viewer_slideshow = false;
             self.viewer_original = false;
-            self.slideshow_task = None;
+            self.viewer_origin_filter = Some(
+                self.state
+                    .shared
+                    .lock()
+                    .unwrap()
+                    .filter
+                    .clone(),
+            );
+            self.viewer_origin_search = self.last_search.clone();
         }
     }
 
@@ -2501,9 +2526,7 @@ impl KanalibApp {
     }
 
     fn close_viewer(&mut self, cx: &mut Context<Self>) {
-        let paths = self.take_lightbox_cleanup();
-        self.viewer_slideshow = false;
-        self.slideshow_task = None;
+        let paths = self.take_viewer_cleanup();
         self.focus_grid_pending = true;
         for path in paths {
             self.remove_viewer_asset(&path, cx);
@@ -2512,26 +2535,26 @@ impl KanalibApp {
     }
 
     fn set_viewer_at(&mut self, at: usize, cx: &mut Context<Self>) {
-        let count = self.lightbox_slides.len();
+        let count = self.viewer_slides.len();
         if count == 0 || at >= count {
             return;
         }
         let previous = self
-            .lightbox_at
-            .and_then(|previous| self.lightbox_slides.get(previous))
+            .viewer_at
+            .and_then(|previous| self.viewer_slides.get(previous))
             .map(|(path, _)| path.clone());
-        self.lightbox_at = Some(at);
-        if let Some((path, _)) = self.lightbox_slides.get(at) {
+        self.viewer_at = Some(at);
+        if let Some((path, _)) = self.viewer_slides.get(at) {
             let path = path.clone();
-            self.lightbox_viewed.insert(path.clone());
+            self.viewer_viewed.insert(path.clone());
             self.selection = Arc::new(HashSet::from([path.clone()]));
             self.selection_anchor = Some(path.clone());
             self.state.select(Some(path));
         }
         if let Some(previous) = previous
             && self
-                .lightbox_at
-                .and_then(|at| self.lightbox_slides.get(at))
+                .viewer_at
+                .and_then(|at| self.viewer_slides.get(at))
                 .is_none_or(|(path, _)| path != &previous)
         {
             self.remove_viewer_asset(&previous, cx);
@@ -2540,17 +2563,17 @@ impl KanalibApp {
     }
 
     fn step_viewer(&mut self, delta: isize, wrap: bool, cx: &mut Context<Self>) {
-        let count = self.lightbox_slides.len();
+        let count = self.viewer_slides.len();
         if count == 0 {
             return;
         }
-        let current = self.lightbox_at.unwrap_or(0) as isize;
+        let current = self.viewer_at.unwrap_or(0) as isize;
         let target = if wrap {
             (current + delta).rem_euclid(count as isize) as usize
         } else {
             (current + delta).clamp(0, count as isize - 1) as usize
         };
-        if Some(target) != self.lightbox_at {
+        if Some(target) != self.viewer_at {
             self.set_viewer_at(target, cx);
         }
     }
@@ -2558,42 +2581,12 @@ impl KanalibApp {
     fn toggle_viewer_source(&mut self, cx: &mut Context<Self>) {
         self.viewer_original = !self.viewer_original;
         if let Some(path) = self
-            .lightbox_at
-            .and_then(|at| self.lightbox_slides.get(at))
+            .viewer_at
+            .and_then(|at| self.viewer_slides.get(at))
             .map(|(path, _)| path.clone())
         {
             self.remove_viewer_asset(&path, cx);
         }
-        cx.notify();
-    }
-
-    fn toggle_viewer_slideshow(&mut self, cx: &mut Context<Self>) {
-        if self.viewer_slideshow {
-            self.viewer_slideshow = false;
-            self.slideshow_task = None;
-            cx.notify();
-            return;
-        }
-        if self.lightbox_at.is_none() {
-            return;
-        }
-        self.viewer_slideshow = true;
-        let weak = cx.entity().downgrade();
-        self.slideshow_task = Some(cx.spawn(async move |_, cx| loop {
-            cx.background_executor()
-                .timer(Duration::from_secs(3))
-                .await;
-            let keep = weak.update(cx, |app, cx| {
-                if !app.viewer_slideshow || app.lightbox_at.is_none() {
-                    return false;
-                }
-                app.step_viewer(1, true, cx);
-                true
-            });
-            if !matches!(keep, Ok(true)) {
-                break;
-            }
-        }));
         cx.notify();
     }
 
@@ -2609,22 +2602,24 @@ impl KanalibApp {
             .or_else(|| self.visible_paths().first().cloned());
         match path {
             Some(path) => {
-                self.open_lightbox_at(&path);
+                self.open_viewer_at(&path);
                 cx.notify();
             }
             None => push_toast(&self.toaster, cx, "没有可查看的图片", Severity::Warning),
         }
     }
 
-    fn take_lightbox_cleanup(&mut self) -> Vec<PathBuf> {
-        if let Some(at) = self.lightbox_at {
-            if let Some((path, _)) = self.lightbox_slides.get(at) {
-                self.lightbox_viewed.insert(path.clone());
+    fn take_viewer_cleanup(&mut self) -> Vec<PathBuf> {
+        if let Some(at) = self.viewer_at {
+            if let Some((path, _)) = self.viewer_slides.get(at) {
+                self.viewer_viewed.insert(path.clone());
             }
         }
-        self.lightbox_at = None;
-        self.lightbox_slides.clear();
-        self.lightbox_viewed.drain().collect()
+        self.viewer_at = None;
+        self.viewer_slides.clear();
+        self.viewer_origin_filter = None;
+        self.viewer_origin_search.clear();
+        self.viewer_viewed.drain().collect()
     }
 
     fn focus_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -2706,6 +2701,50 @@ impl KanalibApp {
         self.set_pane_mode(next, cx);
     }
 
+    fn set_sidebar_width(&mut self, width: f32, cx: &mut Context<Self>) {
+        let width = width.clamp(SIDEBAR_MIN_WIDTH, SIDEBAR_MAX_WIDTH);
+        if (width - self.sidebar_width).abs() < 0.5 {
+            return;
+        }
+        self.sidebar_width = width;
+        self.anchor_scroll();
+        let weak = cx.entity().downgrade();
+        self.sidebar_persist_task = Some(cx.spawn(async move |_, cx| {
+            cx.background_executor()
+                .timer(Duration::from_millis(250))
+                .await;
+            let _ = weak.update(cx, |app, _| {
+                app.persist_setting("ui.sidebar_width", format!("{:.0}", app.sidebar_width));
+            });
+        }));
+        cx.notify();
+    }
+
+    fn sidebar_section_open(&self, key: &str) -> bool {
+        !self.sidebar_collapsed.contains(key)
+    }
+
+    fn toggle_sidebar_section(&mut self, key: &str, cx: &mut Context<Self>) {
+        if !self.sidebar_collapsed.remove(key) {
+            self.sidebar_collapsed.insert(key.to_string());
+        }
+        let mut keys = self.sidebar_collapsed.iter().cloned().collect::<Vec<_>>();
+        keys.sort();
+        self.persist_setting("ui.sidebar_collapsed", keys.join(","));
+        cx.notify();
+    }
+
+    fn collapse_sidebar_sections(&mut self, cx: &mut Context<Self>) {
+        self.sidebar_collapsed = SIDEBAR_SECTIONS
+            .iter()
+            .map(|key| key.to_string())
+            .collect();
+        let mut keys = self.sidebar_collapsed.iter().cloned().collect::<Vec<_>>();
+        keys.sort();
+        self.persist_setting("ui.sidebar_collapsed", keys.join(","));
+        cx.notify();
+    }
+
     fn set_show_sidebar(&mut self, show: bool, cx: &mut Context<Self>) {
         self.anchor_scroll();
         self.show_sidebar = show;
@@ -2717,13 +2756,6 @@ impl KanalibApp {
     fn set_show_extensions(&mut self, show: bool, cx: &mut Context<Self>) {
         self.show_extensions = show;
         self.persist_setting("ui.show_extensions", show.to_string());
-        cx.notify();
-    }
-
-    fn set_show_tile_summary(&mut self, show: bool, cx: &mut Context<Self>) {
-        self.anchor_scroll();
-        self.show_tile_summary = show;
-        self.persist_setting("ui.show_tile_summary", show.to_string());
         cx.notify();
     }
 
@@ -2814,20 +2846,17 @@ impl KanalibApp {
                 cx.notify();
             }
             "view:theme" => self.toggle_theme(cx),
-            "view:xl" => self.set_view_mode(ViewMode::IconsXl, cx),
-            "view:lg" => self.set_view_mode(ViewMode::IconsLg, cx),
-            "view:md" => self.set_view_mode(ViewMode::IconsMd, cx),
-            "view:sm" => self.set_view_mode(ViewMode::IconsSm, cx),
+            "view:large" => self.set_view_mode(ViewMode::IconsLarge, cx),
+            "view:medium" => self.set_view_mode(ViewMode::IconsMedium, cx),
+            "view:small" => self.set_view_mode(ViewMode::IconsSmall, cx),
             "view:list" => self.set_view_mode(ViewMode::List, cx),
             "view:details" => self.set_view_mode(ViewMode::Details, cx),
-            "view:tiles" => self.set_view_mode(ViewMode::Tiles, cx),
             "view:content" => self.set_view_mode(ViewMode::Content, cx),
             "pane:details" => self.toggle_pane_mode(PaneMode::Details, cx),
             "pane:preview" => self.toggle_pane_mode(PaneMode::Preview, cx),
             "pane:hidden" => self.set_pane_mode(PaneMode::Hidden, cx),
             "view:sidebar" => self.set_show_sidebar(!self.show_sidebar, cx),
             "view:extensions" => self.set_show_extensions(!self.show_extensions, cx),
-            "view:tile-summary" => self.set_show_tile_summary(!self.show_tile_summary, cx),
             "view:folder" => self.choose_folder(cx),
             "scan:rescan" => self.rescan(cx),
             "scan:retry" => self.retry_failed(cx),
@@ -2888,11 +2917,25 @@ impl Render for KanalibApp {
         let scale = window.scale_factor();
         let viewport = window.viewport_size();
         let window_width = viewport.width;
-        let sidebar_width = if self.show_sidebar { px(245.) } else { px(0.) };
         let inspector_width = px(self.pane_mode.width());
+        let panel_width = if self.show_sidebar {
+            let available = (window_width - px(ACTIVITY_BAR_WIDTH) - inspector_width - px(340.))
+                .max(px(SIDEBAR_MIN_WIDTH));
+            px(self
+                .sidebar_width
+                .min(available.as_f32())
+                .max(SIDEBAR_MIN_WIDTH))
+        } else {
+            px(0.)
+        };
+        let sidebar_width = if self.show_sidebar {
+            px(ACTIVITY_BAR_WIDTH) + panel_width
+        } else {
+            px(0.)
+        };
         let mut main_width = window_width - sidebar_width - inspector_width;
-        if main_width < px(360.) {
-            main_width = px(360.);
+        if main_width < px(340.) {
+            main_width = px(340.);
         }
         log::debug!(
             "layout viewport={}x{} scale={} main={}",
@@ -3099,7 +3142,7 @@ impl Render for KanalibApp {
             self.view.visible_indices = Arc::new(indices);
             self.view.visible_revision = revision;
             self.view.visible_filter = Some(filter.clone());
-            self.view.visible_search = search_text;
+            self.view.visible_search = search_text.clone();
             self.view.visible_search_revision = self.view.search_revision;
             self.view.visible_sort = self.sort;
             self.view.visible_sort_ascending = self.sort_ascending;
@@ -3139,6 +3182,27 @@ impl Render for KanalibApp {
                     self.selection = Arc::new(HashSet::new());
                     self.selection_anchor = None;
                 }
+            }
+        }
+        if let Some(origin_filter) = self.viewer_origin_filter.clone()
+            && self.viewer_at.is_some()
+            && (origin_filter != filter || self.viewer_origin_search != search_text)
+        {
+            let current_path = self
+                .viewer_at
+                .and_then(|at| self.viewer_slides.get(at))
+                .map(|(path, _)| path.clone());
+            let still_visible = current_path.is_some_and(|path| {
+                let assets = assets.read().unwrap();
+                visible_indices
+                    .iter()
+                    .any(|&index| assets.get(index).is_some_and(|asset| asset.path == path))
+            });
+            if still_visible {
+                self.viewer_origin_filter = Some(filter.clone());
+                self.viewer_origin_search = search_text.clone();
+            } else {
+                self.close_viewer(cx);
             }
         }
         #[cfg(feature = "frame-profiler")]
@@ -3256,13 +3320,7 @@ impl Render for KanalibApp {
                 &this,
                 &roots,
                 &source_aliases,
-                &status,
-                error.as_deref(),
                 scanning,
-                device.as_deref(),
-                queue_pending,
-                queue_running,
-                queue_error,
                 &filter,
                 &counts,
                 self.screen,
@@ -3273,6 +3331,7 @@ impl Render for KanalibApp {
                 &tag_search,
                 &tag_query,
                 &search,
+                panel_width.as_f32(),
                 colors,
             )
             .into_any_element()
@@ -3280,7 +3339,15 @@ impl Render for KanalibApp {
             div().flex_none().into_any_element()
         };
         let (cache_hits, cache_misses) = self.thumb_cache.read(cx).access_stats();
-        let content: AnyElement = if self.screen == Screen::Tags {
+        let viewer_content = (self.screen == Screen::Library)
+            .then(|| {
+                self.viewer_at
+                    .and_then(|at| self.render_viewer(&this, at, colors))
+            })
+            .flatten();
+        let content: AnyElement = if let Some(viewer) = viewer_content {
+            viewer
+        } else if self.screen == Screen::Tags {
             let tags_width = (window_width - sidebar_width).max(px(640.));
             self.render_tags(
                 &this,
@@ -3406,17 +3473,14 @@ impl Render for KanalibApp {
                         .icon(IconName::X)
                         .keys("escape"),
                     Command::new("view:save", "保存当前视图为智能集合").icon(IconName::Plus),
-                    Command::new("view:xl", "查看 · 超大图标")
+                    Command::new("view:large", "查看 · 大图标")
                         .icon(IconName::Image)
                         .keys("ctrl-shift-1"),
-                    Command::new("view:lg", "查看 · 大图标")
-                        .icon(IconName::LayoutGrid)
-                        .keys("ctrl-shift-2"),
-                    Command::new("view:md", "查看 · 中图标")
+                    Command::new("view:medium", "查看 · 中图标")
                         .icon(IconName::LayoutGrid)
                         .keys("ctrl-shift-3"),
-                    Command::new("view:sm", "查看 · 小图标")
-                        .icon(IconName::LayoutGrid)
+                    Command::new("view:small", "查看 · 小图标")
+                        .icon(IconName::Grid3x3)
                         .keys("ctrl-shift-4"),
                     Command::new("view:list", "查看 · 列表")
                         .icon(IconName::List)
@@ -3424,9 +3488,6 @@ impl Render for KanalibApp {
                     Command::new("view:details", "查看 · 详细信息")
                         .icon(IconName::Table)
                         .keys("ctrl-shift-6"),
-                    Command::new("view:tiles", "查看 · 平铺")
-                        .icon(IconName::Rows2)
-                        .keys("ctrl-shift-7"),
                     Command::new("view:content", "查看 · 内容")
                         .icon(IconName::AlignJustify)
                         .keys("ctrl-shift-8"),
@@ -3435,8 +3496,6 @@ impl Render for KanalibApp {
                     Command::new("pane:hidden", "窗格 · 隐藏").icon(IconName::EyeOff),
                     Command::new("view:sidebar", "显示/隐藏侧栏").icon(IconName::PanelLeft),
                     Command::new("view:extensions", "显示/隐藏文件扩展名").icon(IconName::FileType),
-                    Command::new("view:tile-summary", "平铺显示/隐藏标签摘要")
-                        .icon(IconName::Tag),
                     Command::new(
                         "view:theme",
                         if dark {
@@ -3507,9 +3566,6 @@ impl Render for KanalibApp {
             })
             .into_any_element()
         });
-        let viewer = self
-            .lightbox_at
-            .and_then(|at| self.render_viewer(&this, at, colors));
         let save_dialog = self.save_search_open.then(|| {
             let field = window.use_keyed_state("kanalib-save-search", cx, |window, cx| {
                 TextInput::new(window, cx).placeholder("智能集合名称")
@@ -3825,6 +3881,20 @@ impl Render for KanalibApp {
             &search,
             colors,
         );
+        let status_bar = self.render_status_bar(
+            &this,
+            &status,
+            error.as_deref(),
+            scanning,
+            device.as_deref(),
+            queue_pending,
+            queue_running,
+            queue_error,
+            &counts,
+            &filter,
+            window_width,
+            colors,
+        );
         let shell = div()
             .flex()
             .flex_col()
@@ -3846,8 +3916,8 @@ impl Render for KanalibApp {
                     .child(content)
                     .children(inspector),
             )
+            .child(status_bar)
             .children(palette)
-            .children(viewer)
             .children(save_dialog)
             .children(tag_dialog)
             .children(tag_rename_dialog)
@@ -3859,11 +3929,14 @@ impl Render for KanalibApp {
             .children(cleanup_dialog)
             .child(ToastViewport::new("kanalib-toasts", &self.toaster))
             .on_action(cx.listener(|this, _: &OpenPalette, _, cx| {
-                if !this.palette_open && this.lightbox_at.is_some() {
+                if !this.palette_open && this.viewer_at.is_some() {
                     this.close_viewer(cx);
                 }
                 this.palette_open = !this.palette_open;
                 cx.notify();
+            }))
+            .on_action(cx.listener(|this, _: &ToggleSidebar, _, cx| {
+                this.set_show_sidebar(!this.show_sidebar, cx);
             }))
             .on_action(cx.listener(|this, _: &FocusSearch, window, cx| {
                 this.focus_search(window, cx);
@@ -3890,17 +3963,14 @@ impl Render for KanalibApp {
             .on_action(cx.listener(|this, _: &Rate3, _, cx| this.apply_star(3, cx)))
             .on_action(cx.listener(|this, _: &Rate4, _, cx| this.apply_star(4, cx)))
             .on_action(cx.listener(|this, _: &Rate5, _, cx| this.apply_star(5, cx)))
-            .on_action(cx.listener(|this, _: &ViewIconsXl, _, cx| {
-                this.set_view_mode(ViewMode::IconsXl, cx)
+            .on_action(cx.listener(|this, _: &ViewIconsLarge, _, cx| {
+                this.set_view_mode(ViewMode::IconsLarge, cx)
             }))
-            .on_action(cx.listener(|this, _: &ViewIconsLg, _, cx| {
-                this.set_view_mode(ViewMode::IconsLg, cx)
+            .on_action(cx.listener(|this, _: &ViewIconsMedium, _, cx| {
+                this.set_view_mode(ViewMode::IconsMedium, cx)
             }))
-            .on_action(cx.listener(|this, _: &ViewIconsMd, _, cx| {
-                this.set_view_mode(ViewMode::IconsMd, cx)
-            }))
-            .on_action(cx.listener(|this, _: &ViewIconsSm, _, cx| {
-                this.set_view_mode(ViewMode::IconsSm, cx)
+            .on_action(cx.listener(|this, _: &ViewIconsSmall, _, cx| {
+                this.set_view_mode(ViewMode::IconsSmall, cx)
             }))
             .on_action(cx.listener(|this, _: &ViewList, _, cx| {
                 this.set_view_mode(ViewMode::List, cx)
@@ -3908,20 +3978,17 @@ impl Render for KanalibApp {
             .on_action(cx.listener(|this, _: &ViewDetails, _, cx| {
                 this.set_view_mode(ViewMode::Details, cx)
             }))
-            .on_action(cx.listener(|this, _: &ViewTiles, _, cx| {
-                this.set_view_mode(ViewMode::Tiles, cx)
-            }))
             .on_action(cx.listener(|this, _: &ViewContent, _, cx| {
                 this.set_view_mode(ViewMode::Content, cx)
             }));
-        if self.focus_viewer_pending && self.lightbox_at.is_some() {
+        if self.focus_viewer_pending && self.viewer_at.is_some() {
             window.focus(&self.viewer_focus, cx);
             self.focus_viewer_pending = false;
         }
         if self.focus_grid_pending
             && self.screen == Screen::Library
             && !self.palette_open
-            && self.lightbox_at.is_none()
+            && self.viewer_at.is_none()
             && !self.save_search_open
             && self.tag_dialog.is_none()
             && self.tag_rename.is_none()
@@ -4025,18 +4092,68 @@ fn round(value: f64, digits: u32) -> f64 {
 }
 
 impl KanalibApp {
+    fn sidebar_section_header(
+        &self,
+        key: &'static str,
+        title: &'static str,
+        count: Option<usize>,
+        this: &Entity<Self>,
+        colors: UiColors,
+    ) -> AnyElement {
+        let open = self.sidebar_section_open(key);
+        let this = this.clone();
+        div()
+            .id(SharedString::from(format!("sidebar-section-{key}")))
+            .role(Role::Button)
+            .aria_label(title)
+            .flex_1()
+            .min_w(px(0.))
+            .h(px(28.))
+            .px(px(6.))
+            .flex()
+            .items_center()
+            .gap(px(4.))
+            .rounded(px(4.))
+            .cursor_pointer()
+            .hover(move |style| style.bg(colors.hover))
+            .on_click(move |_, _, cx| {
+                let _ = this.update(cx, |app, cx| app.toggle_sidebar_section(key, cx));
+            })
+            .child(
+                Icon::new(if open {
+                    IconName::ChevronDown
+                } else {
+                    IconName::ChevronRight
+                })
+                .size(IconSize::Xs)
+                .color(colors.subtle),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .min_w(px(0.))
+                    .truncate()
+                    .text_xs()
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(colors.subtle)
+                    .child(title),
+            )
+            .children(count.map(|count| {
+                div()
+                    .flex_none()
+                    .text_xs()
+                    .text_color(colors.subtle)
+                    .child(count.to_string())
+            }))
+            .into_any_element()
+    }
+
     fn render_sidebar(
         &self,
         this: &Entity<Self>,
         roots: &[PathBuf],
         source_aliases: &HashMap<PathBuf, String>,
-        status: &str,
-        error: Option<&str>,
         scanning: bool,
-        device: Option<&str>,
-        queue_pending: usize,
-        queue_running: usize,
-        queue_error: usize,
         filter: &Filter,
         counts: &Counts,
         screen: Screen,
@@ -4047,15 +4164,11 @@ impl KanalibApp {
         tag_search: &Entity<TextInput>,
         tag_query: &str,
         search: &Entity<TextInput>,
+        panel_width: f32,
         colors: UiColors,
     ) -> impl IntoElement + use<> {
         let state = self.state.clone();
-        let this_choose = this.clone();
-        let this_rescan = this.clone();
-        let this_stop = this.clone();
-        let this_retry = this.clone();
         let this_dedup = this.clone();
-        let this_settings = this.clone();
         let library = screen == Screen::Library;
         let mut body = div()
             .id("sidebar-body")
@@ -4068,127 +4181,120 @@ impl KanalibApp {
             .flex_col()
             .gap(px(2.));
 
-        body = body.child(section("来源", colors));
-        if roots.is_empty() {
-            body = body.child(
-                div()
-                    .px(px(8.))
-                    .pb(px(4.))
-                    .text_xs()
-                    .text_color(colors.subtle)
-                    .child("还没有图库文件夹"),
-            );
-        } else {
-            for root in roots {
-                let count = counts
-                    .sources
-                    .iter()
-                    .find(|(path, _)| path == root)
-                    .map(|(_, count)| *count)
-                    .unwrap_or(0);
-                body = body.child(source_row(
-                    SharedString::from(format!("filter-source-{}", root.display())),
-                    root.clone(),
-                    source_label(root, source_aliases),
-                    count,
-                    library && filter == &Filter::Source(root.clone()),
+        body = body.child(self.sidebar_section_header(
+            "sources",
+            "来源",
+            Some(roots.len()),
+            this,
+            colors,
+        ));
+        if self.sidebar_section_open("sources") {
+            if roots.is_empty() {
+                body = body.child(
+                    div()
+                        .px(px(8.))
+                        .pb(px(4.))
+                        .text_xs()
+                        .text_color(colors.subtle)
+                        .child("还没有图库文件夹"),
+                );
+            } else {
+                for root in roots {
+                    let count = counts
+                        .sources
+                        .iter()
+                        .find(|(path, _)| path == root)
+                        .map(|(_, count)| *count)
+                        .unwrap_or(0);
+                    body = body.child(source_row(
+                        SharedString::from(format!("filter-source-{}", root.display())),
+                        root.clone(),
+                        source_label(root, source_aliases),
+                        count,
+                        library && filter == &Filter::Source(root.clone()),
+                        this.clone(),
+                        colors,
+                    ));
+                }
+            }
+        }
+
+        body = body.child(self.sidebar_section_header(
+            "filters",
+            "筛选",
+            Some(counts.total),
+            this,
+            colors,
+        ));
+        if self.sidebar_section_open("filters") {
+            body = body.child(filter_row(
+                SharedString::from("filter-all"),
+                "全部图片".into(),
+                counts.total,
+                library && *filter == Filter::All,
+                Filter::All,
+                state.clone(),
+                this.clone(),
+                colors,
+            ));
+            body = body.child(filter_row(
+                SharedString::from("filter-untagged"),
+                "未打标".into(),
+                counts.untagged,
+                library && *filter == Filter::Untagged,
+                Filter::Untagged,
+                state.clone(),
+                this.clone(),
+                colors,
+            ));
+            body = body.child(filter_row(
+                SharedString::from("filter-favorites"),
+                "收藏".into(),
+                counts.favorites,
+                library && *filter == Filter::Favorites,
+                Filter::Favorites,
+                state.clone(),
+                this.clone(),
+                colors,
+            ));
+            if counts.failed > 0 {
+                body = body.child(filter_row(
+                    SharedString::from("filter-failed"),
+                    "失败".into(),
+                    counts.failed,
+                    library && filter == &Filter::Failed,
+                    Filter::Failed,
+                    state.clone(),
+                    this.clone(),
+                    colors,
+                ));
+            }
+            if counts.damaged > 0 {
+                body = body.child(filter_row(
+                    SharedString::from("filter-damaged"),
+                    "损坏".into(),
+                    counts.damaged,
+                    library && filter == &Filter::Damaged,
+                    Filter::Damaged,
+                    state.clone(),
                     this.clone(),
                     colors,
                 ));
             }
         }
 
-        body = body.child(section("筛选", colors));
-        body = body.child(filter_row(
-            SharedString::from("filter-all"),
-            "全部图片".into(),
-            counts.total,
-            library && *filter == Filter::All,
-            Filter::All,
-            state.clone(),
-            this.clone(),
-            colors,
-        ));
-        body = body.child(filter_row(
-            SharedString::from("filter-untagged"),
-            "未打标".into(),
-            counts.untagged,
-            library && *filter == Filter::Untagged,
-            Filter::Untagged,
-            state.clone(),
-            this.clone(),
-            colors,
-        ));
-        body = body.child(filter_row(
-            SharedString::from("filter-favorites"),
-            "收藏".into(),
-            counts.favorites,
-            library && *filter == Filter::Favorites,
-            Filter::Favorites,
-            state.clone(),
-            this.clone(),
-            colors,
-        ));
-        if counts.failed > 0 {
-            body = body.child(filter_row(
-                SharedString::from("filter-failed"),
-                "失败".into(),
-                counts.failed,
-                library && *filter == Filter::Failed,
-                Filter::Failed,
-                state.clone(),
-                this.clone(),
-                colors,
-            ));
-        }
-        if counts.damaged > 0 {
-            body = body.child(filter_row(
-                SharedString::from("filter-damaged"),
-                "损坏".into(),
-                counts.damaged,
-                library && *filter == Filter::Damaged,
-                Filter::Damaged,
-                state.clone(),
-                this.clone(),
-                colors,
-            ));
-        }
-
-        body = body.child(section("整理", colors));
-        body = body.child(dedup_row(
-            SharedString::from("dedup-entry"),
-            "重复项",
-            dedup_pending.to_string(),
-            screen == Screen::Duplicates,
-            GroupKind::Exact,
-            this_dedup,
-            colors,
-        ));
-        let this_tags = this.clone();
-        body = body.child(tag_manager_row(
-            SharedString::from("tag-manager-entry"),
-            "标签管理",
-            screen == Screen::Tags,
-            this_tags,
-            colors,
-        ));
-
         let this_save_search = this.clone();
         body = body.child(
             div()
                 .flex()
                 .items_center()
-                .justify_between()
-                .px(px(8.))
-                .pt(px(10.))
-                .pb(px(4.))
-                .child(
-                    div()
-                        .text_xs()
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .text_color(colors.subtle)
-                        .child("智能集合"),
-                )
+                .child(self.sidebar_section_header(
+                    "collections",
+                    "智能集合",
+                    Some(saved_searches.len()),
+                    this,
+                    colors,
+                ))
                 .child(
                     IconButton::new("save-saved-search", IconName::Plus)
                         .size(ControlSize::Sm)
@@ -4201,17 +4307,18 @@ impl KanalibApp {
                         }),
                 ),
         );
-        if saved_searches.is_empty() {
-            body = body.child(
-                div()
-                    .px(px(8.))
-                    .pb(px(4.))
-                    .text_xs()
-                    .text_color(colors.subtle)
-                    .child("保存筛选与搜索，随时回来"),
-            );
-        } else {
-            for saved in saved_searches {
+        if self.sidebar_section_open("collections") {
+            if saved_searches.is_empty() {
+                body = body.child(
+                    div()
+                        .px(px(8.))
+                        .pb(px(4.))
+                        .text_xs()
+                        .text_color(colors.subtle)
+                        .child("保存筛选与搜索，随时回来"),
+                );
+            } else {
+                for saved in saved_searches {
                 let name = saved.name.clone();
                 let detail = if saved.query.is_empty() {
                     saved.filter.label()
@@ -4271,37 +4378,81 @@ impl KanalibApp {
                         ),
                 );
             }
+            }
+        }
+
+        body = body.child(self.sidebar_section_header(
+            "organize",
+            "整理",
+            Some(dedup_pending),
+            this,
+            colors,
+        ));
+        if self.sidebar_section_open("organize") {
+            body = body.child(dedup_row(
+                SharedString::from("dedup-entry"),
+                "重复项",
+                dedup_pending.to_string(),
+                screen == Screen::Duplicates,
+                GroupKind::Exact,
+                this_dedup,
+                colors,
+            ));
+            let this_tags = this.clone();
+            body = body.child(tag_manager_row(
+                SharedString::from("tag-manager-entry"),
+                "标签管理",
+                screen == Screen::Tags,
+                this_tags,
+                colors,
+            ));
         }
 
         if !counts.ratings.is_empty() {
-            body = body.child(section("评级", colors));
-            for (rating, count) in counts.ratings.iter() {
-                body = body.child(filter_row(
-                    SharedString::from(format!("filter-rating-{rating}")),
-                    format!("评级 {rating}"),
-                    *count,
-                    library && filter == &Filter::Rating(rating.clone()),
-                    Filter::Rating(rating.clone()),
-                    state.clone(),
-                    this.clone(),
-                    colors,
-                ));
+            body = body.child(self.sidebar_section_header(
+                "ratings",
+                "评级",
+                Some(counts.ratings.len()),
+                this,
+                colors,
+            ));
+            if self.sidebar_section_open("ratings") {
+                for (rating, count) in counts.ratings.iter() {
+                    body = body.child(filter_row(
+                        SharedString::from(format!("filter-rating-{rating}")),
+                        format!("评级 {rating}"),
+                        *count,
+                        library && filter == &Filter::Rating(rating.clone()),
+                        Filter::Rating(rating.clone()),
+                        state.clone(),
+                        this.clone(),
+                        colors,
+                    ));
+                }
             }
         }
 
         if !counts.groups.is_empty() {
-            body = body.child(section("自动归类", colors));
-            for (group, count) in counts.groups.iter() {
-                body = body.child(filter_row(
-                    SharedString::from(format!("filter-group-{group}")),
-                    group.clone(),
-                    *count,
-                    library && filter == &Filter::Group(group.clone()),
-                    Filter::Group(group.clone()),
-                    state.clone(),
-                    this.clone(),
-                    colors,
-                ));
+            body = body.child(self.sidebar_section_header(
+                "groups",
+                "自动归类",
+                Some(counts.groups.len()),
+                this,
+                colors,
+            ));
+            if self.sidebar_section_open("groups") {
+                for (group, count) in counts.groups.iter() {
+                    body = body.child(filter_row(
+                        SharedString::from(format!("filter-group-{group}")),
+                        group.clone(),
+                        *count,
+                        library && filter == &Filter::Group(group.clone()),
+                        Filter::Group(group.clone()),
+                        state.clone(),
+                        this.clone(),
+                        colors,
+                    ));
+                }
             }
         }
 
@@ -4310,17 +4461,13 @@ impl KanalibApp {
             div()
                 .flex()
                 .items_center()
-                .justify_between()
-                .px(px(8.))
-                .pt(px(10.))
-                .pb(px(4.))
-                .child(
-                    div()
-                        .text_xs()
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .text_color(colors.subtle)
-                        .child("标签"),
-                )
+                .child(self.sidebar_section_header(
+                    "tags",
+                    "标签",
+                    Some(tag_vocab.len()),
+                    this,
+                    colors,
+                ))
                 .child(
                     IconButton::new("tag-pane-sort", IconName::ArrowDownUp)
                         .size(ControlSize::Sm)
@@ -4337,6 +4484,7 @@ impl KanalibApp {
                         }),
                 ),
         );
+        if self.sidebar_section_open("tags") {
         body = body.child(
             div()
                 .px(px(8.))
@@ -4501,123 +4649,267 @@ impl KanalibApp {
             );
         }
 
-        div()
-            .w(px(245.))
+        }
+
+        let screen_title = match screen {
+            Screen::Library => "资源管理器",
+            Screen::Duplicates => "重复项",
+            Screen::Tags => "标签管理",
+            Screen::Settings => "设置",
+        };
+
+        let this_choose = this.clone();
+        let this_rescan = this.clone();
+        let this_stop = this.clone();
+        let this_retry = this.clone();
+        let this_collapse = this.clone();
+        let mut more_menu = Menu::new()
+            .item(
+                MenuItem::new("添加文件夹")
+                    .icon(IconName::FolderOpen)
+                    .on_click(move |_, cx| {
+                        let _ = this_choose.update(cx, |app, cx| app.choose_folder(cx));
+                    }),
+            )
+            .item(
+                MenuItem::new("重新扫描图库")
+                    .icon(IconName::RefreshCw)
+                    .on_click(move |_, cx| {
+                        let _ = this_rescan.update(cx, |app, cx| app.rescan(cx));
+                    }),
+            );
+        if scanning {
+            more_menu = more_menu.item(
+                MenuItem::new("停止扫描")
+                    .icon(IconName::Square)
+                    .on_click(move |_, cx| {
+                        let _ = this_stop.update(cx, |app, cx| {
+                            app.state.stop();
+                            cx.notify();
+                        });
+                    }),
+            );
+        }
+        if counts.failed > 0 {
+            more_menu = more_menu.item(
+                MenuItem::new("重试失败")
+                    .icon(IconName::RotateCcw)
+                    .on_click(move |_, cx| {
+                        let _ = this_retry.update(cx, |app, cx| app.retry_failed(cx));
+                    }),
+            );
+        }
+        more_menu = more_menu.separator().item(
+            MenuItem::new("全部折叠")
+                .icon(IconName::ChevronsUpDown)
+                .on_click(move |_, cx| {
+                    let _ = this_collapse.update(cx, |app, cx| app.collapse_sidebar_sections(cx));
+                }),
+        );
+
+        let panel = div()
+            .relative()
+            .w(px(panel_width))
             .flex_none()
             .h_full()
             .flex()
             .flex_col()
             .bg(colors.surface)
-            .border_1()
+            .border_r_1()
             .border_color(colors.border)
             .child(
                 div()
-                    .px(px(16.))
-                    .pt(px(16.))
-                    .pb(px(8.))
+                    .h(px(36.))
+                    .px(px(10.))
                     .flex()
-                    .flex_col()
-                    .gap(px(2.))
+                    .items_center()
+                    .justify_between()
+                    .border_b_1()
+                    .border_color(colors.border)
                     .child(
                         div()
-                            .text_xl()
-                            .font_weight(FontWeight::BOLD)
-                            .child("Kanalib"),
-                    ),
-            )
-            .child(
-                div()
-                    .px(px(12.))
-                    .pb(px(8.))
-                    .flex()
-                    .flex_wrap()
-                    .gap(px(6.))
-                    .child(
-                        Button::new("choose-folder", "添加文件夹")
-                            .primary()
-                            .on_click(move |_, _, cx| {
-                                let _ = this_choose.update(cx, |app, cx| app.choose_folder(cx));
-                            }),
-                    )
-                    .child(Button::new("rescan", "重新扫描图库").on_click(move |_, _, cx| {
-                        let _ = this_rescan.update(cx, |app, cx| app.rescan(cx));
-                    }))
-                    .children((counts.failed > 0).then(|| {
-                        Button::new("retry-failed", "重试失败").on_click(move |_, _, cx| {
-                            let _ = this_retry.update(cx, |app, cx| app.retry_failed(cx));
-                        })
-                    }))
-                    .children(scanning.then(|| {
-                        Button::new("stop", "停止").on_click(move |_, _, cx| {
-                            let _ = this_stop.update(cx, |app, cx| {
-                                app.state.stop();
-                                cx.notify();
-                            });
-                        })
-                    })),
-            )
-            .child(
-                div()
-                    .mx(px(10.))
-                    .mb(px(8.))
-                    .p(px(10.))
-                    .rounded(px(8.))
-                    .bg(colors.sunken)
-                    .flex()
-                    .flex_col()
-                    .gap(px(3.))
-                    .child(
-                        div()
+                            .truncate()
                             .text_xs()
-                            .text_color(if error.is_some() {
-                                colors.danger
-                            } else {
-                                colors.muted
-                            })
-                            .child(error.unwrap_or(status).to_string()),
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .child(screen_title),
                     )
-                    .child(
-                        div()
-                            .text_xs()
-                            .text_color(colors.subtle)
-                            .child(format!(
-                                "{} 张 · 已打标 {} · 未打标 {} · 失败 {}",
-                                counts.total, counts.tagged, counts.untagged, counts.failed
-                            )),
-                    )
-                    .child(
-                        div()
-                            .text_xs()
-                            .text_color(colors.subtle)
-                            .child(device.unwrap_or("推理设备 · 未加载").to_string()),
-                    )
-                    .child(
-                        div()
-                            .text_xs()
-                            .text_color(if queue_error > 0 {
-                                colors.warning
-                            } else {
-                                colors.subtle
-                            })
-                            .child(if queue_pending + queue_running + queue_error == 0 {
-                                "打标队列 · 已清空".to_string()
-                            } else {
-                                format!(
-                                    "打标队列 · 等待 {queue_pending} · 运行 {queue_running} · 失败 {queue_error}"
-                                )
-                            }),
-                    ),
-            )
-            .child(
-                div().px(px(8.)).py(px(4.)).child(settings_row(
-                    SharedString::from("settings-entry"),
-                    "设置",
-                    screen == Screen::Settings,
-                    this_settings,
-                    colors,
-                )),
+                    .child(OverflowMenu::new("sidebar-more", more_menu).tooltip("侧栏操作")),
             )
             .child(body)
+            .child(
+                div()
+                    .id("sidebar-resize")
+                    .aria_label("调整侧栏宽度")
+                    .absolute()
+                    .right(px(-3.))
+                    .top_0()
+                    .bottom_0()
+                    .w(px(6.))
+                    .cursor_ew_resize()
+                    .hover(move |style| style.bg(colors.accent)),
+            )
+            .child(
+                canvas(
+                    |_, _, _| {},
+                    {
+                        let this = this.clone();
+                        move |_, _, window, _| {
+                            let pressed = this.clone();
+                            let panel_right = ACTIVITY_BAR_WIDTH + panel_width;
+                            window.on_mouse_event(
+                                move |event: &MouseDownEvent, phase, _, cx| {
+                                    if phase != DispatchPhase::Capture
+                                        || event.button != MouseButton::Left
+                                        || event.position.y.as_f32() < TITLEBAR_HEIGHT
+                                        || (event.position.x.as_f32() - panel_right).abs() > 4.
+                                    {
+                                        return;
+                                    }
+                                    cx.stop_propagation();
+                                    let _ = pressed.update(cx, |app, cx| {
+                                        app.sidebar_resizing = true;
+                                        cx.notify();
+                                    });
+                                },
+                            );
+                            let moved = this.clone();
+                            window.on_mouse_event(
+                                move |event: &MouseMoveEvent, phase, _, cx| {
+                                    if phase != DispatchPhase::Bubble {
+                                        return;
+                                    }
+                                    if !moved.read(cx).sidebar_resizing {
+                                        return;
+                                    }
+                                    let width =
+                                        event.position.x.as_f32() - ACTIVITY_BAR_WIDTH;
+                                    let _ = moved.update(cx, |app, cx| {
+                                        app.set_sidebar_width(width, cx)
+                                    });
+                                },
+                            );
+                            let lifted = this.clone();
+                            window.on_mouse_event(move |_: &MouseUpEvent, phase, _, cx| {
+                                if phase != DispatchPhase::Bubble {
+                                    return;
+                                }
+                                let _ = lifted.update(cx, |app, cx| {
+                                    if app.sidebar_resizing {
+                                        app.sidebar_resizing = false;
+                                        app.persist_setting(
+                                            "ui.sidebar_width",
+                                            format!("{:.0}", app.sidebar_width),
+                                        );
+                                        cx.notify();
+                                    }
+                                });
+                            });
+                        }
+                    },
+                )
+                .absolute()
+                .top_0()
+                .left_0()
+                .w(px(1.))
+                .h(px(1.)),
+            );
+
+        let this_library = this.clone();
+        let this_search = this.clone();
+        let this_duplicates = this.clone();
+        let this_tags = this.clone();
+        let this_settings = this.clone();
+        let this_theme = this.clone();
+        let library_badge = counts.failed;
+        let activity = div()
+            .id("activity-bar")
+            .role(Role::Toolbar)
+            .aria_label("活动栏")
+            .w(px(ACTIVITY_BAR_WIDTH))
+            .flex_none()
+            .h_full()
+            .flex()
+            .flex_col()
+            .items_center()
+            .justify_between()
+            .py(px(6.))
+            .bg(colors.sunken)
+            .border_r_1()
+            .border_color(colors.border)
+            .child(
+                div()
+                    .w_full()
+                    .flex()
+                    .flex_col()
+                    .items_center()
+                    .gap(px(2.))
+                    .child(activity_item(
+                        ActivityTarget::Library,
+                        IconName::Library,
+                        "图库",
+                        screen == Screen::Library,
+                        library_badge,
+                        this_library,
+                        colors,
+                    ))
+                    .child(activity_item(
+                        ActivityTarget::Search,
+                        IconName::Search,
+                        "搜索",
+                        false,
+                        0,
+                        this_search,
+                        colors,
+                    ))
+                    .child(activity_item(
+                        ActivityTarget::Duplicates,
+                        IconName::Copy,
+                        "重复项",
+                        screen == Screen::Duplicates,
+                        dedup_pending,
+                        this_duplicates,
+                        colors,
+                    ))
+                    .child(activity_item(
+                        ActivityTarget::Tags,
+                        IconName::Tag,
+                        "标签",
+                        screen == Screen::Tags,
+                        0,
+                        this_tags,
+                        colors,
+                    ))
+                    .child(activity_item(
+                        ActivityTarget::Settings,
+                        IconName::Settings,
+                        "设置",
+                        screen == Screen::Settings,
+                        0,
+                        this_settings,
+                        colors,
+                    )),
+            )
+            .child(activity_item(
+                ActivityTarget::Theme,
+                if self.theme_dark {
+                    IconName::Sun
+                } else {
+                    IconName::Moon
+                },
+                "主题",
+                false,
+                0,
+                this_theme,
+                colors,
+            ));
+
+        div()
+            .flex_none()
+            .h_full()
+            .w(px(ACTIVITY_BAR_WIDTH + panel_width))
+            .flex()
+            .child(activity)
+            .child(panel)
     }
 
     fn sort_menu(&self, this: &Entity<Self>) -> Menu {
@@ -4652,7 +4944,6 @@ impl KanalibApp {
     fn display_menu(&self, this: &Entity<Self>) -> Menu {
         let sidebar = this.clone();
         let extensions = this.clone();
-        let summary = this.clone();
         Menu::new()
             .item(
                 MenuItem::check("侧栏", self.show_sidebar)
@@ -4669,15 +4960,6 @@ impl KanalibApp {
                     .on_click(move |_, cx| {
                         let _ = extensions.update(cx, |app, cx| {
                             app.set_show_extensions(!app.show_extensions, cx)
-                        });
-                    }),
-            )
-            .item(
-                MenuItem::check("平铺显示标签摘要", self.show_tile_summary)
-                    .icon(IconName::Tag)
-                    .on_click(move |_, cx| {
-                        let _ = summary.update(cx, |app, cx| {
-                            app.set_show_tile_summary(!app.show_tile_summary, cx)
                         });
                     }),
             )
@@ -4797,20 +5079,8 @@ impl KanalibApp {
         } else {
             px(220.)
         };
-        let this_palette = this.clone();
         let this_theme = this.clone();
 
-        let palette = library.then(|| {
-            IconButton::new("open-palette", IconName::Command)
-                .size(ControlSize::Sm)
-                .tooltip("命令面板 (Ctrl+K)")
-                .on_click(move |_, _, cx| {
-                    let _ = this_palette.update(cx, |app, cx| {
-                        app.palette_open = true;
-                        cx.notify();
-                    });
-                })
-        });
         let sort = library.then(|| {
             DropdownMenu::new("library-sort", "排序", self.sort_menu(this))
                 .icon(IconName::ArrowDownUp)
@@ -4829,7 +5099,8 @@ impl KanalibApp {
                 IconName::Moon
             },
         )
-        .size(ControlSize::Sm)
+        .size(ControlSize::Md)
+        .variant(ButtonVariant::Ghost)
         .tooltip(if self.theme_dark {
             "切换到浅色主题"
         } else {
@@ -4922,11 +5193,10 @@ impl KanalibApp {
             .gap(px(4.));
         if library {
             controls = controls
-                .children(palette)
                 .children(sort)
                 .children(view)
-                .child(theme)
-                .children(export);
+                .children(export)
+                .child(theme);
         } else {
             controls = controls.child(theme);
         }
@@ -5014,13 +5284,238 @@ impl KanalibApp {
         bar.into_any_element()
     }
 
+    fn render_status_bar(
+        &self,
+        this: &Entity<Self>,
+        status: &str,
+        error: Option<&str>,
+        scanning: bool,
+        device: Option<&str>,
+        queue_pending: usize,
+        queue_running: usize,
+        queue_error: usize,
+        counts: &Counts,
+        filter: &Filter,
+        width: Pixels,
+        colors: UiColors,
+    ) -> AnyElement {
+        let compact = width < px(1100.);
+        let library = self.screen == Screen::Library;
+        let mut left = div()
+            .flex_1()
+            .min_w(px(0.))
+            .flex()
+            .items_center()
+            .gap(px(2.));
+        if let Some(message) = error {
+            let this_error = this.clone();
+            left = left.child(status_bar_item(
+                "status-error",
+                SharedString::from(format!(
+                    "错误 · {}",
+                    message.lines().next().unwrap_or_default()
+                )),
+                colors.danger,
+                colors,
+                false,
+                move |_, _, cx| {
+                    let _ = this_error.update(cx, |app, cx| app.open_settings(cx));
+                },
+            ));
+        } else if scanning {
+            let this_stop = this.clone();
+            left = left.child(status_bar_item(
+                "status-scanning",
+                SharedString::from("扫描中 · 点击停止"),
+                colors.accent,
+                colors,
+                false,
+                move |_, _, cx| {
+                    let _ = this_stop.update(cx, |app, cx| {
+                        app.state.stop();
+                        cx.notify();
+                    });
+                },
+            ));
+        } else {
+            left = left.child(
+                div()
+                    .max_w(px(if compact { 150. } else { 260. }))
+                    .truncate()
+                    .px(px(6.))
+                    .text_xs()
+                    .text_color(colors.muted)
+                    .child(status.to_string()),
+            );
+        }
+        let this_all = this.clone();
+        left = left.child(status_bar_item(
+            "status-total",
+            SharedString::from(format!("{} 张", counts.total)),
+            colors.fg,
+            colors,
+            library && *filter == Filter::All,
+            move |_, _, cx| {
+                let _ = this_all.update(cx, |app, cx| app.set_filter(Filter::All, cx));
+            },
+        ));
+        left = left
+            .child(
+                div()
+                    .px(px(6.))
+                    .text_xs()
+                    .text_color(colors.subtle)
+                    .child(format!("已打标 {}", counts.tagged)),
+            )
+            .child({
+                let this_untagged = this.clone();
+                status_bar_item(
+                    "status-untagged",
+                    SharedString::from(format!("未打标 {}", counts.untagged)),
+                    colors.muted,
+                    colors,
+                    library && *filter == Filter::Untagged,
+                    move |_, _, cx| {
+                        let _ = this_untagged
+                            .update(cx, |app, cx| app.set_filter(Filter::Untagged, cx));
+                    },
+                )
+            });
+        if counts.failed > 0 {
+            let this_failed = this.clone();
+            left = left.child(status_bar_item(
+                "status-failed",
+                SharedString::from(format!("失败 {}", counts.failed)),
+                colors.danger,
+                colors,
+                library && *filter == Filter::Failed,
+                move |_, _, cx| {
+                    let _ = this_failed.update(cx, |app, cx| app.set_filter(Filter::Failed, cx));
+                },
+            ));
+        }
+        if counts.damaged > 0 {
+            let this_damaged = this.clone();
+            left = left.child(status_bar_item(
+                "status-damaged",
+                SharedString::from(format!("损坏 {}", counts.damaged)),
+                colors.warning,
+                colors,
+                library && *filter == Filter::Damaged,
+                move |_, _, cx| {
+                    let _ = this_damaged
+                        .update(cx, |app, cx| app.set_filter(Filter::Damaged, cx));
+                },
+            ));
+        }
+
+        let mut right = div()
+            .flex_none()
+            .flex()
+            .items_center()
+            .gap(px(2.));
+        if !compact {
+            let this_queue = this.clone();
+            let queue_label = if queue_pending + queue_running + queue_error == 0 {
+                "队列空闲".to_string()
+            } else {
+                format!(
+                    "队列 等待 {queue_pending} · 运行 {queue_running} · 失败 {queue_error}"
+                )
+            };
+            right = right.child(status_bar_item(
+                "status-queue",
+                SharedString::from(queue_label),
+                if queue_error > 0 {
+                    colors.warning
+                } else {
+                    colors.muted
+                },
+                colors,
+                false,
+                move |_, _, cx| {
+                    let _ = this_queue.update(cx, |app, cx| app.open_settings(cx));
+                },
+            ));
+            let this_device = this.clone();
+            right = right.child(status_bar_item(
+                "status-device",
+                SharedString::from(
+                    device
+                        .map(str::to_string)
+                        .unwrap_or_else(|| "推理设备 · 未加载".to_string()),
+                ),
+                colors.subtle,
+                colors,
+                false,
+                move |_, _, cx| {
+                    let _ = this_device.update(cx, |app, cx| app.open_settings(cx));
+                },
+            ));
+        }
+        let this_palette = this.clone();
+        let palette = div()
+            .id("status-palette")
+            .role(Role::Button)
+            .aria_label("命令面板 (Ctrl+K)")
+            .h_full()
+            .px(px(6.))
+            .flex()
+            .items_center()
+            .gap(px(4.))
+            .rounded(px(4.))
+            .cursor_pointer()
+            .hover(move |item| item.bg(colors.hover))
+            .on_click(move |_, _, cx| {
+                let _ = this_palette.update(cx, |app, cx| {
+                    app.palette_open = true;
+                    cx.notify();
+                });
+            })
+            .child(
+                Icon::new(IconName::Command)
+                    .size(IconSize::Xs)
+                    .color(colors.muted),
+            )
+            .children((!compact).then(|| {
+                div()
+                    .text_xs()
+                    .text_color(colors.muted)
+                    .child("命令面板")
+            }))
+            .children((!compact).then(|| {
+                div()
+                    .text_xs()
+                    .text_color(colors.subtle)
+                    .child("Ctrl+K")
+            }));
+        right = right.child(palette);
+
+        div()
+            .flex_none()
+            .w_full()
+            .h(px(STATUS_BAR_HEIGHT))
+            .px(px(8.))
+            .flex()
+            .items_center()
+            .justify_between()
+            .gap(px(8.))
+            .bg(colors.surface)
+            .border_t_1()
+            .border_color(colors.border)
+            .text_xs()
+            .child(left)
+            .child(right)
+            .into_any_element()
+    }
+
     fn render_viewer(
         &self,
         this: &Entity<Self>,
         at: usize,
         colors: UiColors,
     ) -> Option<AnyElement> {
-        let (path, caption) = self.lightbox_slides.get(at)?.clone();
+        let (path, caption) = self.viewer_slides.get(at)?.clone();
         let source = if self.viewer_original {
             path.clone()
         } else {
@@ -5032,7 +5527,7 @@ impl KanalibApp {
                 .and_then(|asset| asset.thumb.clone().or_else(|| asset.tile_thumb.clone()))
                 .unwrap_or_else(|| path.clone())
         };
-        let count = self.lightbox_slides.len();
+        let count = self.viewer_slides.len();
         let title = path
             .file_name()
             .map(|name| name.to_string_lossy().to_string())
@@ -5040,21 +5535,17 @@ impl KanalibApp {
         let close = this.clone();
         let prev = this.clone();
         let next = this.clone();
-        let slideshow = this.clone();
         let prev_disabled = at == 0;
         let next_disabled = at + 1 >= count;
-        let slideshow_active = self.viewer_slideshow;
-        let overlay = div()
-            .id("kanalib-viewer-overlay")
-            .absolute()
-            .top(px(0.))
-            .left(px(0.))
-            .size_full()
-            .occlude()
+        let root = div()
+            .id("kanalib-viewer-inline")
+            .flex_1()
+            .min_w(px(0.))
+            .h_full()
             .flex()
             .flex_col()
-            .bg(black())
-            .text_color(colors.on_media)
+            .bg(colors.bg)
+            .text_color(colors.fg)
             .key_context(VIEWER_CONTEXT)
             .track_focus(&self.viewer_focus)
             .on_action(move |_: &ViewerClose, _, cx| {
@@ -5068,163 +5559,158 @@ impl KanalibApp {
             })
             .on_action(move |_: &ViewerFullscreen, window, _| {
                 window.toggle_fullscreen();
-            })
-            .on_action(move |_: &ViewerSlideshow, _, cx| {
-                let _ = slideshow.update(cx, |app, cx| app.toggle_viewer_slideshow(cx));
             });
+        let back_button = this.clone();
         let close_button = this.clone();
-        let slideshow_button = this.clone();
         let source_button = this.clone();
         let prev_button = this.clone();
         let next_button = this.clone();
         Some(
-            overlay
-                .child(
-                    div()
-                        .flex_none()
-                        .h(px(52.))
-                        .px(px(16.))
-                        .flex()
-                        .items_center()
-                        .justify_between()
-                        .gap(px(8.))
-                        .child(
-                            div()
-                                .min_w(px(0.))
-                                .truncate()
-                                .text_sm()
-                                .font_weight(FontWeight::SEMIBOLD)
-                                .child(title),
-                        )
-                        .child(
-                            div()
-                                .flex_none()
-                                .flex()
-                                .items_center()
-                                .gap(px(8.))
-                                .child(
-                                    div()
-                                        .text_xs()
-                                        .text_color(colors.on_media.opacity(0.65))
-                                        .child(format!("{} / {count}", at + 1)),
-                                )
-                                .child(
-                                    Button::new(
-                                        "viewer-source",
-                                        if self.viewer_original {
-                                            "预览"
-                                        } else {
-                                            "原图"
-                                        },
-                                    )
+            root.child(
+                div()
+                    .flex_none()
+                    .h(px(48.))
+                    .px(px(12.))
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .gap(px(8.))
+                    .border_b_1()
+                    .border_color(colors.border)
+                    .child(
+                        div()
+                            .min_w(px(0.))
+                            .flex()
+                            .items_center()
+                            .gap(px(8.))
+                            .child(
+                                Button::new("viewer-back", "返回图库")
+                                    .icon(IconName::ChevronLeft)
                                     .size(ControlSize::Sm)
+                                    .variant(ButtonVariant::Ghost)
                                     .on_click(move |_, _, cx| {
-                                        let _ = source_button.update(cx, |app, cx| {
-                                            app.toggle_viewer_source(cx)
+                                        let _ = back_button
+                                            .update(cx, |app, cx| app.close_viewer(cx));
+                                    }),
+                            )
+                            .child(
+                                div()
+                                    .min_w(px(0.))
+                                    .truncate()
+                                    .text_sm()
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .child(title),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .flex_none()
+                            .flex()
+                            .items_center()
+                            .gap(px(8.))
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(colors.subtle)
+                                    .child(format!("{} / {count}", at + 1)),
+                            )
+                            .child(
+                                Button::new(
+                                    "viewer-source",
+                                    if self.viewer_original { "预览" } else { "原图" },
+                                )
+                                .size(ControlSize::Sm)
+                                .variant(ButtonVariant::Ghost)
+                                .on_click(move |_, _, cx| {
+                                    let _ = source_button
+                                        .update(cx, |app, cx| app.toggle_viewer_source(cx));
+                                }),
+                            )
+                            .child(
+                                IconButton::new("viewer-fullscreen", IconName::Fullscreen)
+                                    .size(ControlSize::Sm)
+                                    .tooltip("全屏 (F)")
+                                    .on_click(move |_, window, _| {
+                                        window.toggle_fullscreen();
+                                    }),
+                            )
+                            .child(
+                                IconButton::new("viewer-close", IconName::X)
+                                    .size(ControlSize::Sm)
+                                    .tooltip("关闭 (Esc)")
+                                    .on_click(move |_, _, cx| {
+                                        let _ = close_button
+                                            .update(cx, |app, cx| app.close_viewer(cx));
+                                    }),
+                            ),
+                    ),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .min_h(px(0.))
+                    .w_full()
+                    .p(px(12.))
+                    .child(ImageViewer::new("kanalib-viewer", source)),
+            )
+            .child(
+                div()
+                    .flex_none()
+                    .px(px(12.))
+                    .py(px(8.))
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .gap(px(10.))
+                    .border_t_1()
+                    .border_color(colors.border)
+                    .child(
+                        div()
+                            .min_w(px(0.))
+                            .flex()
+                            .items_center()
+                            .gap(px(6.))
+                            .child(
+                                IconButton::new("viewer-prev", IconName::ChevronLeft)
+                                    .size(ControlSize::Sm)
+                                    .tooltip("上一张 (←)")
+                                    .disabled(prev_disabled)
+                                    .on_click(move |_, _, cx| {
+                                        let _ = prev_button.update(cx, |app, cx| {
+                                            app.step_viewer(-1, false, cx)
                                         });
                                     }),
-                                )
-                                .child(
-                                    IconButton::new("viewer-slideshow", if slideshow_active {
-                                        IconName::Pause
-                                    } else {
-                                        IconName::Play
-                                    })
+                            )
+                            .child(
+                                IconButton::new("viewer-next", IconName::ChevronRight)
                                     .size(ControlSize::Sm)
-                                    .tooltip(if slideshow_active {
-                                        "暂停幻灯片 (S)"
-                                    } else {
-                                        "幻灯片 (S)"
-                                    })
+                                    .tooltip("下一张 (→)")
+                                    .disabled(next_disabled)
                                     .on_click(move |_, _, cx| {
-                                        let _ = slideshow_button.update(cx, |app, cx| {
-                                            app.toggle_viewer_slideshow(cx)
+                                        let _ = next_button.update(cx, |app, cx| {
+                                            app.step_viewer(1, false, cx)
                                         });
                                     }),
-                                )
-                                .child(
-                                    IconButton::new("viewer-fullscreen", IconName::Fullscreen)
-                                        .size(ControlSize::Sm)
-                                        .tooltip("全屏 (F)")
-                                        .on_click(move |_, window, _| {
-                                            window.toggle_fullscreen();
-                                        }),
-                                )
-                                .child(
-                                    IconButton::new("viewer-close", IconName::X)
-                                        .size(ControlSize::Sm)
-                                        .tooltip("关闭 (Esc)")
-                                        .on_click(move |_, _, cx| {
-                                            let _ = close_button
-                                                .update(cx, |app, cx| app.close_viewer(cx));
-                                        }),
-                                ),
-                        ),
-                )
-                .child(
-                    div()
-                        .flex_1()
-                        .min_h(px(0.))
-                        .w_full()
-                        .px(px(16.))
-                        .child(ImageViewer::new("kanalib-viewer", source)),
-                )
-                .child(
-                    div()
-                        .flex_none()
-                        .px(px(16.))
-                        .py(px(10.))
-                        .flex()
-                        .items_center()
-                        .justify_between()
-                        .gap(px(10.))
-                        .child(
-                            div()
-                                .min_w(px(0.))
-                                .flex()
-                                .items_center()
-                                .gap(px(8.))
-                                .child(
-                                    IconButton::new("viewer-prev", IconName::ChevronLeft)
-                                        .size(ControlSize::Sm)
-                                        .tooltip("上一张 (←)")
-                                        .disabled(prev_disabled)
-                                        .on_click(move |_, _, cx| {
-                                            let _ = prev_button.update(cx, |app, cx| {
-                                                app.step_viewer(-1, false, cx)
-                                            });
-                                        }),
-                                )
-                                .child(
-                                    IconButton::new("viewer-next", IconName::ChevronRight)
-                                        .size(ControlSize::Sm)
-                                        .tooltip("下一张 (→)")
-                                        .disabled(next_disabled)
-                                        .on_click(move |_, _, cx| {
-                                            let _ = next_button.update(cx, |app, cx| {
-                                                app.step_viewer(1, false, cx)
-                                            });
-                                        }),
-                                )
-                                .child(
-                                    div()
-                                        .truncate()
-                                        .text_xs()
-                                        .text_color(colors.on_media.opacity(0.8))
-                                        .child(caption),
-                                ),
-                        )
-                        .child(
-                            div()
-                                .flex_none()
-                                .text_xs()
-                                .text_color(colors.on_media.opacity(0.55))
-                                .child(
-                                    "← → 切图 · +/- 缩放 · Ctrl+滚轮缩放 · 拖拽平移 · R 旋转 · F 全屏 · S 幻灯片",
-                                ),
-                        ),
-                )
-                .into_any_element(),
+                            )
+                            .child(
+                                div()
+                                    .truncate()
+                                    .text_xs()
+                                    .text_color(colors.muted)
+                                    .child(caption),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .flex_none()
+                            .text_xs()
+                            .text_color(colors.subtle)
+                            .child(
+                                "← → 切图 · +/- 缩放 · Ctrl+滚轮缩放 · 拖拽平移 · R 旋转 · F 全屏",
+                            ),
+                    ),
+            )
+            .into_any_element(),
         )
     }
 
@@ -5290,7 +5776,7 @@ impl KanalibApp {
         };
         let tile_width = grid_tile_width(width.as_f32(), columns);
         let image_height = self.view_mode.image_height();
-        let row_height = self.view_mode.row_height(self.show_tile_summary);
+        let row_height = self.view_mode.row_height();
         let visible = visible_indices.len();
         let row_count = if is_grid {
             visible.div_ceil(columns)
@@ -5302,7 +5788,6 @@ impl KanalibApp {
         let detail_columns = detail_columns(width.as_f32());
         let view_mode = self.view_mode;
         let show_extensions = self.show_extensions;
-        let show_summary = self.view_mode == ViewMode::Tiles && self.show_tile_summary;
         let sort_mode = self.sort;
         let sort_ascending = self.sort_ascending;
         let grid: AnyElement = if rows_for_list.is_empty() {
@@ -5359,7 +5844,6 @@ impl KanalibApp {
                                 image_height,
                                 focus_for_list.clone(),
                                 colors,
-                                show_summary,
                                 prefer_large,
                                 show_extensions,
                             ));
@@ -8413,15 +8897,127 @@ impl KanalibApp {
     }
 }
 
-fn section(title: &str, colors: UiColors) -> impl IntoElement {
+fn status_bar_item(
+    id: &'static str,
+    label: SharedString,
+    color: Hsla,
+    colors: UiColors,
+    active: bool,
+    on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+) -> AnyElement {
     div()
-        .px(px(8.))
-        .pt(px(10.))
-        .pb(px(4.))
-        .text_xs()
-        .font_weight(FontWeight::SEMIBOLD)
-        .text_color(colors.subtle)
-        .child(title.to_string())
+        .id(id)
+        .role(Role::Button)
+        .aria_label(label.clone())
+        .h_full()
+        .px(px(6.))
+        .flex()
+        .items_center()
+        .rounded(px(4.))
+        .cursor_pointer()
+        .hover(move |item| item.bg(colors.hover))
+        .when(active, |item| item.bg(colors.selection))
+        .on_click(on_click)
+        .child(
+            div()
+                .truncate()
+                .whitespace_nowrap()
+                .text_xs()
+                .text_color(color)
+                .child(label),
+        )
+        .into_any_element()
+}
+
+fn activity_item(
+    target: ActivityTarget,
+    icon: IconName,
+    label: &'static str,
+    active: bool,
+    badge: usize,
+    this: Entity<KanalibApp>,
+    colors: UiColors,
+) -> AnyElement {
+    let this_click = this.clone();
+    let item = div()
+        .id(SharedString::from(format!("activity-{label}")))
+        .role(Role::Button)
+        .aria_label(label)
+        .relative()
+        .w_full()
+        .h(px(40.))
+        .flex()
+        .items_center()
+        .justify_center()
+        .cursor_pointer()
+        .text_color(if active { colors.fg } else { colors.muted })
+        .hover(move |style| style.bg(colors.hover))
+        .on_click(move |_, window, cx| {
+            let search = if target == ActivityTarget::Search {
+                this_click.read(cx).search_input.clone()
+            } else {
+                None
+            };
+            let _ = this_click.update(cx, |app, cx| match target {
+                ActivityTarget::Library => {
+                    app.screen = Screen::Library;
+                    app.dedup_confirm = None;
+                    cx.notify();
+                }
+                ActivityTarget::Search => {
+                    app.screen = Screen::Library;
+                    app.dedup_confirm = None;
+                    cx.notify();
+                }
+                ActivityTarget::Duplicates => {
+                    app.open_dedup_mode(GroupKind::Exact, cx);
+                }
+                ActivityTarget::Tags => app.open_tag_manager(cx),
+                ActivityTarget::Settings => app.open_settings(cx),
+                ActivityTarget::Theme => app.toggle_theme(cx),
+            });
+            if let Some(search) = search {
+                let handle = search.read(cx).focus_handle(cx);
+                window.focus(&handle, cx);
+            }
+        })
+        .child(Icon::new(icon).size(IconSize::Lg).color(if active {
+            colors.accent
+        } else {
+            colors.muted
+        }))
+        .children(active.then(|| {
+            div()
+                .absolute()
+                .left_0()
+                .top(px(8.))
+                .bottom(px(8.))
+                .w(px(2.))
+                .rounded_full()
+                .bg(colors.accent)
+        }))
+        .children((badge > 0).then(|| {
+            div()
+                .absolute()
+                .top(px(3.))
+                .right(px(3.))
+                .min_w(px(15.))
+                .h(px(15.))
+                .px(px(3.))
+                .rounded_full()
+                .bg(colors.danger)
+                .flex()
+                .items_center()
+                .justify_center()
+                .text_xs()
+                .text_color(white())
+                .child(if badge > 99 {
+                    "99+".to_string()
+                } else {
+                    badge.to_string()
+                })
+        }));
+    item.into_any_element()
 }
 
 fn source_row(
@@ -8643,35 +9239,6 @@ fn tag_manager_row(
             .text_color(if active { colors.accent } else { colors.subtle })
             .child("›"),
     )
-}
-
-fn settings_row(
-    id: SharedString,
-    label: &'static str,
-    active: bool,
-    this: Entity<KanalibApp>,
-    colors: UiColors,
-) -> impl IntoElement {
-    let mut row = div()
-        .id(id)
-        .role(Role::Button)
-        .aria_label(label)
-        .flex()
-        .items_center()
-        .justify_between()
-        .px(px(8.))
-        .py(px(5.))
-        .rounded(px(5.))
-        .cursor_pointer()
-        .hover(move |style| style.bg(colors.hover));
-    if active {
-        row = row.bg(colors.selection);
-    }
-    row.on_click(move |_, _, cx| {
-        let _ = this.update(cx, |app, cx| app.open_settings(cx));
-    })
-    .child(div().text_xs().text_color(colors.fg).child(label))
-    .child(div().text_xs().text_color(colors.subtle).child("›"))
 }
 
 fn dedup_filter_chip(
@@ -10327,7 +10894,6 @@ fn tile(
     image_height: f32,
     focus: FocusHandle,
     colors: UiColors,
-    show_summary: bool,
     prefer_large: bool,
     show_extensions: bool,
 ) -> impl IntoElement {
@@ -10341,7 +10907,7 @@ fn tile(
         img(thumb)
             .image_cache(&thumb_cache)
             .size_full()
-            .object_fit(ObjectFit::Cover)
+            .object_fit(ObjectFit::Contain)
             .into_any_element()
     } else {
         div()
@@ -10359,13 +10925,8 @@ fn tile(
     } else {
         colors.border
     };
-    let error = asset
-        .error
-        .clone()
-        .map(|message| friendly_media_error(&message));
-    let has_error = error.is_some();
+    let has_error = asset.error.is_some();
     let has_damage = asset.damage.is_some();
-    let summary = error.unwrap_or_else(|| asset.summary());
     let title = display_name(&asset, show_extensions);
     let tag_count = asset
         .all_tags()
@@ -10460,6 +11021,19 @@ fn tile(
                         .text_xs()
                         .text_color(colors.warning)
                         .child("损坏")
+                }))
+                .children(has_error.then(|| {
+                    div()
+                        .absolute()
+                        .right(px(6.))
+                        .bottom(px(6.))
+                        .px(px(6.))
+                        .py(px(1.))
+                        .rounded(px(4.))
+                        .bg(colors.backdrop)
+                        .text_xs()
+                        .text_color(colors.danger)
+                        .child("失败")
                 })),
         )
         .child(
@@ -10470,50 +11044,37 @@ fn tile(
                 .text_color(colors.fg)
                 .child(title),
         );
-    if show_summary {
-        tile = tile
+    tile = tile.child(
+        div()
+            .flex()
+            .items_center()
+            .justify_between()
+            .gap(px(4.))
             .child(
                 div()
                     .truncate()
                     .text_xs()
-                    .text_color(if has_error {
-                        colors.danger
-                    } else if has_damage {
-                        colors.warning
+                    .text_color(colors.subtle)
+                    .child(if rating.is_empty() {
+                        if star > 0 {
+                            format!("★ {star}")
+                        } else {
+                            "未评级".to_string()
+                        }
+                    } else if star > 0 {
+                        format!("评级 {rating} · ★ {star}")
                     } else {
-                        colors.muted
-                    })
-                    .child(summary),
+                        format!("评级 {rating}")
+                    }),
             )
             .child(
                 div()
-                    .flex()
-                    .items_center()
-                    .justify_between()
-                    .child(
-                        div()
-                            .text_xs()
-                            .text_color(colors.subtle)
-                            .child(if rating.is_empty() {
-                                if star > 0 {
-                                    format!("★ {star}")
-                                } else {
-                                    "未评级".to_string()
-                                }
-                            } else if star > 0 {
-                                format!("评级 {rating} · ★ {star}")
-                            } else {
-                                format!("评级 {rating}")
-                            }),
-                    )
-                    .child(
-                        div()
-                            .text_xs()
-                            .text_color(colors.subtle)
-                            .child(format!("{tag_count} 标签")),
-                    ),
-            );
-    }
+                    .flex_none()
+                    .text_xs()
+                    .text_color(colors.subtle)
+                    .child(format!("{tag_count} 标签")),
+            ),
+    );
 
     div()
         .flex_none()
@@ -10601,14 +11162,25 @@ mod tests {
     #[test]
     fn view_mode_migrates_legacy_density() {
         use super::{ViewMode, resolve_view_mode};
-        assert_eq!(resolve_view_mode(None, Some("small")), ViewMode::IconsSm);
-        assert_eq!(resolve_view_mode(None, Some("medium")), ViewMode::Tiles);
-        assert_eq!(resolve_view_mode(None, Some("large")), ViewMode::IconsLg);
-        assert_eq!(resolve_view_mode(None, None), ViewMode::Tiles);
+        assert_eq!(resolve_view_mode(None, Some("small")), ViewMode::IconsSmall);
+        assert_eq!(resolve_view_mode(None, Some("medium")), ViewMode::IconsMedium);
+        assert_eq!(resolve_view_mode(None, Some("large")), ViewMode::IconsLarge);
+        assert_eq!(resolve_view_mode(None, None), ViewMode::IconsMedium);
         assert_eq!(
             resolve_view_mode(Some("details"), Some("large")),
             ViewMode::Details
         );
+    }
+
+    #[test]
+    fn view_modes_are_converged_to_six() {
+        use super::ViewMode;
+        assert_eq!(ViewMode::ALL.len(), 6);
+        assert_eq!(ViewMode::from_key("tiles"), Some(ViewMode::IconsMedium));
+        assert_eq!(ViewMode::from_key("icons-lg"), Some(ViewMode::IconsLarge));
+        assert_eq!(ViewMode::from_key("icons-xl"), Some(ViewMode::IconsLarge));
+        assert_eq!(ViewMode::IconsSmall.icon().name(), "grid-3x3");
+        assert_eq!(ViewMode::IconsMedium.icon().name(), "layout-grid");
     }
 
     #[test]
