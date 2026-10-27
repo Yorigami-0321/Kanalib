@@ -1,17 +1,35 @@
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, bail};
-use rusqlite::{Connection, OptionalExtension, ToSql, params};
+use rusqlite::backup::{Backup, StepResult};
+use rusqlite::{Connection, OpenFlags, OptionalExtension, ToSql, params};
 use serde::{Deserialize, Serialize};
 
 use crate::dedup::{DuplicateReview, ReviewState};
 use crate::media::ContentHashes;
-use crate::model::{Asset, Filter, SavedSearch, TagHit, TagSummary, normalize_tag_name};
+use crate::model::{
+    Asset, BackupReport, Filter, SavedSearch, TableCount, TagHit, TagSummary, normalize_tag_name,
+};
 
 const SCHEMA_VERSION: i64 = 7;
+
+/// 备份时比对行数的关键表；只统计实际存在的表（以 `sqlite_master` 为准）。
+const BACKUP_KEY_TABLES: &[&str] = &[
+    "settings",
+    "sources",
+    "assets",
+    "tags",
+    "asset_tags",
+    "jobs",
+    "saved_searches",
+    "collections",
+    "collection_assets",
+    "duplicate_reviews",
+    "thumb_sources",
+];
 
 #[derive(Clone, Copy, Debug, Default)]
 pub struct JobCounts {
@@ -246,6 +264,36 @@ pub struct Db {
     conn: Connection,
 }
 
+/// 备份临时文件守卫：只清理本次创建的临时文件；成功 rename 后不再清理。
+struct BackupTemp {
+    path: PathBuf,
+    kept: bool,
+}
+
+impl BackupTemp {
+    fn new(path: PathBuf) -> Self {
+        Self { path, kept: false }
+    }
+
+    fn keep(&mut self) {
+        self.kept = true;
+    }
+}
+
+impl Drop for BackupTemp {
+    fn drop(&mut self) {
+        if self.kept {
+            return;
+        }
+        let _ = fs::remove_file(&self.path);
+        for suffix in ["-wal", "-shm", "-journal"] {
+            let mut side = self.path.as_os_str().to_owned();
+            side.push(suffix);
+            let _ = fs::remove_file(PathBuf::from(side));
+        }
+    }
+}
+
 impl Db {
     pub fn open(path: &Path) -> Result<Self> {
         if let Some(parent) = path.parent() {
@@ -265,6 +313,180 @@ impl Db {
         ensure_thumb_sources(&conn)?;
         conn.execute_batch("CREATE INDEX IF NOT EXISTS idx_assets_path ON assets(path);")?;
         Ok(Self { conn })
+    }
+
+    /// 把当前数据库备份到 `destination`，并校验备份文件。
+    ///
+    /// 步骤：先 `wal_checkpoint(TRUNCATE)` 把 WAL 中未落盘页写回主库（失败只记
+    /// 警告，SQLite Backup API 仍会复制当前事务视图），再用 `rusqlite` 的 backup
+    /// 把数据库复制到目标目录下的临时文件；校验 `integrity_check` 与关键表行数
+    /// 后原子 rename 到目标路径。已存在的目标文件默认拒绝覆盖；失败时只删除本次
+    /// 创建的临时产物，源库不受影响。
+    pub fn backup_to(&self, destination: &Path) -> Result<BackupReport> {
+        let started = Instant::now();
+        if destination.as_os_str().is_empty() {
+            bail!("备份目标路径为空");
+        }
+        if destination.exists() {
+            bail!("备份文件已存在，拒绝覆盖：{}", destination.display());
+        }
+        let parent = destination
+            .parent()
+            .filter(|value| !value.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."));
+        if !parent.is_dir() {
+            bail!("备份目录不存在：{}", parent.display());
+        }
+        let file_name = destination
+            .file_name()
+            .map(|value| value.to_string_lossy().to_string())
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(|| "kanalib.db".to_string());
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let pid = std::process::id();
+        let mut attempt = 0u32;
+        let mut temp_path = parent.join(format!(".{file_name}.{pid}-{nonce}.tmp"));
+        // 只使用本进程新建的临时文件，避免误改同目录已有文件。
+        while temp_path.exists() {
+            attempt += 1;
+            temp_path = parent.join(format!(".{file_name}.{pid}-{nonce}-{attempt}.tmp"));
+        }
+        let mut temp = BackupTemp::new(temp_path.clone());
+        let mut warnings = Vec::new();
+
+        match self.conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, i64>(1)?,
+                row.get::<_, i64>(2)?,
+            ))
+        }) {
+            Ok((busy, log, checkpointed)) => {
+                if busy != 0 || checkpointed != log {
+                    warnings.push(format!(
+                        "WAL checkpoint 未完全完成（忙={busy}，日志 {log} 页，已写入 {checkpointed} 页）；备份仍通过 SQLite Backup API 复制当前视图"
+                    ));
+                }
+            }
+            Err(err) => warnings.push(format!(
+                "WAL checkpoint 失败：{err}；备份仍通过 SQLite Backup API 复制当前视图"
+            )),
+        }
+
+        {
+            let mut target = Connection::open(&temp_path)
+                .with_context(|| format!("创建备份临时文件 {}", temp_path.display()))?;
+            target.busy_timeout(Duration::from_secs(5))?;
+            {
+                let backup = Backup::new(&self.conn, &mut target)
+                    .with_context(|| format!("启动数据库备份到 {}", temp_path.display()))?;
+                let mut busy_retries = 0u32;
+                loop {
+                    match backup.step(1024)? {
+                        StepResult::Done => break,
+                        StepResult::More => busy_retries = 0,
+                        // Busy / Locked（以及未来新增状态）都按可重试处理。
+                        _ => {
+                            busy_retries += 1;
+                            if busy_retries > 200 {
+                                bail!("源数据库持续被占用，备份在 10 秒内未能完成");
+                            }
+                            std::thread::sleep(Duration::from_millis(50));
+                        }
+                    }
+                }
+            }
+            // 源库是 WAL 模式，复制出的文件头也带 WAL 标记；改成 DELETE 模式，
+            // 让备份是单个自包含文件（仍包含全部已 checkpoint/未落盘内容）。
+            let journal_mode: String = target
+                .query_row("PRAGMA journal_mode=DELETE", [], |row| row.get(0))
+                .unwrap_or_else(|_| "wal".to_string());
+            if !journal_mode.eq_ignore_ascii_case("delete") {
+                warnings.push(format!(
+                    "备份文件日志模式仍为 {journal_mode}；建议恢复前保持同目录文件完整"
+                ));
+            }
+        }
+
+        let (tables, integrity) = {
+            let conn = Connection::open_with_flags(&temp_path, OpenFlags::SQLITE_OPEN_READ_ONLY)
+                .with_context(|| format!("打开备份文件校验 {}", temp_path.display()))?;
+            let integrity: String =
+                conn.query_row("PRAGMA integrity_check", [], |row| row.get(0))?;
+            let mut tables = Vec::new();
+            for name in BACKUP_KEY_TABLES {
+                if !table_exists(&self.conn, name)? {
+                    continue;
+                }
+                let source_rows = table_row_count(&self.conn, name)?;
+                let backup_rows = if table_exists(&conn, name)? {
+                    table_row_count(&conn, name)?
+                } else {
+                    warnings.push(format!("备份库缺少表 {name}"));
+                    0
+                };
+                if source_rows != backup_rows {
+                    warnings.push(format!(
+                        "表 {name} 行数不一致：源 {source_rows}，备份 {backup_rows}"
+                    ));
+                }
+                tables.push(TableCount {
+                    table: (*name).to_string(),
+                    rows: backup_rows,
+                });
+            }
+            (tables, integrity)
+        };
+        if integrity != "ok" {
+            bail!("备份文件完整性校验失败：{integrity}");
+        }
+
+        let bytes = fs::metadata(&temp_path)
+            .with_context(|| format!("读取备份临时文件 {}", temp_path.display()))?
+            .len();
+        fs::rename(&temp_path, destination)
+            .with_context(|| format!("保存备份文件到 {}", destination.display()))?;
+        temp.keep();
+        let source = self.database_path();
+        log::info!(
+            "database backup {} -> {} ({} bytes, {} ms)",
+            source.display(),
+            destination.display(),
+            bytes,
+            started.elapsed().as_millis()
+        );
+        Ok(BackupReport {
+            source,
+            destination: destination.to_path_buf(),
+            bytes,
+            elapsed_ms: started.elapsed().as_millis() as u64,
+            tables,
+            integrity_ok: true,
+            warnings,
+        })
+    }
+
+    /// 当前连接主库的文件路径；内存库返回空路径。
+    fn database_path(&self) -> PathBuf {
+        let mut statement = match self.conn.prepare("PRAGMA database_list") {
+            Ok(statement) => statement,
+            Err(_) => return PathBuf::new(),
+        };
+        let mut rows = match statement.query([]) {
+            Ok(rows) => rows,
+            Err(_) => return PathBuf::new(),
+        };
+        while let Ok(Some(row)) = rows.next() {
+            let name: String = row.get(1).unwrap_or_default();
+            let file: String = row.get(2).unwrap_or_default();
+            if name == "main" {
+                return PathBuf::from(file);
+            }
+        }
+        PathBuf::new()
     }
 
     pub fn load_folder(&self, folder: &str) -> Result<Vec<Asset>> {
@@ -1566,6 +1788,22 @@ fn escape_like(value: &str) -> String {
         .replace('\\', "\\\\")
         .replace('%', "\\%")
         .replace('_', "\\_")
+}
+
+fn table_exists(conn: &Connection, name: &str) -> Result<bool> {
+    let count: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?1",
+        [name],
+        |row| row.get(0),
+    )?;
+    Ok(count > 0)
+}
+
+fn table_row_count(conn: &Connection, name: &str) -> Result<i64> {
+    conn.query_row(&format!("SELECT COUNT(*) FROM \"{name}\""), [], |row| {
+        row.get(0)
+    })
+    .with_context(|| format!("统计表 {name} 行数"))
 }
 
 fn migration_version(path: &Path) -> Result<Option<i64>> {
