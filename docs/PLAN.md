@@ -310,6 +310,7 @@ duplicate_reviews  group_key(sha1), state(pending/ignored/done), keeper_path, me
 ### 阶段 3：标签工作流与交付
 - 批量标签、阈值调优、智能集合、prompt 复制/导出、全屏查看器、缓存管理、安装包/签名、日志与诊断。
 - 验收：10 万资产滚动 60fps 目标；搜索 p95 <150ms；缓存可限量；安装包在干净 Windows 环境可用。
+  - 2026-10-27 修订：`搜索 p95 <150ms` 不再当硬门禁，改以「同一份库上的实测上限」为回归口径（名称排序 133ms、非名称排序 276–304ms）；权威表述见 [backlog/constraints.md](backlog/constraints.md) 的性能条目。
 
 ### 阶段 4：扩展
 - 视频缩略图/播放（ffmpeg/mpv）、小说（EPUB/PDF）阅读与文本索引、CLIP/向量语义搜索、可选标签写回与 XMP sidecar、Linux/macOS 发布。

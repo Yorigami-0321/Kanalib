@@ -14,6 +14,7 @@
 | [backlog/constraints.md](backlog/constraints.md) | 安全/性能/缓存/许可/本机脚本等全局约束 |
 | [backlog/parallel-plan.md](backlog/parallel-plan.md) | 并行开发矩阵与第一轮任务包 |
 | [backlog/round-2.md](backlog/round-2.md) | 第二轮任务包（打标/搜索/媒体） |
+| [backlog/round-3.md](backlog/round-3.md) | 第三轮任务包（组织/相似浏览/扫描可观测/性能与媒体收尾） |
 | [backlog/component-research.md](backlog/component-research.md) | 非 UI 现成组件调研 |
 | [backlog/candidate-pool.md](backlog/candidate-pool.md) | 候选池 |
 | [backlog/references.md](backlog/references.md) | 参考与本地依据 |

@@ -3,7 +3,7 @@
 > 上级索引：[../FEATURE-BACKLOG.md](../FEATURE-BACKLOG.md) · 文档地图：[README](./README.md)
 
 - **安全**：绝不自动删除；删除只进 Windows 回收站且仅限本地固定磁盘；保护路径优先保留且不可移入回收站；只读来源不写回；移除来源/资产只动 DB，不改磁盘文件。
-- **性能**：100k 历史基线 151.5fps / present p99 15.84ms / 峰值 329MB；搜索目标 p95 <150ms（当前名称排序 133ms 已达标，命中全库的非名称排序 276–304ms 未达标，瓶颈是临时 B 树排序；数字口径见 [pending/search-organization.md](pending/search-organization.md)）；相似扫描 100k 约 2.7–3.0s；冷导入 100k 42.3min（ffmpeg 阶段 1）。任何重写不得劣于这些预算或在记录中说明原因。
+- **性能**：100k 历史基线 151.5fps / present p99 15.84ms / 峰值 329MB；搜索以「同一份库上的实测上限」为口径（2026-10-27 决定：`p95 <150ms` 不再是硬门禁）——当前记录：名称排序 p95 133ms 达标，命中全库的非名称排序 p95 276–304ms 为已知上限，瓶颈是临时 B 树排序；数字口径与用的哪份库见 [pending/search-organization.md](pending/search-organization.md)；相似扫描 100k 约 2.7–3.0s；冷导入 100k 42.3min（ffmpeg 阶段 1）。任何重写不得劣于这些记录值，或必须给出新的实测上限与原因；引用数字必须说明用的是哪份库。
 - **缓存/内存**：所有 `img()` 必须显式 `.image_cache(&thumb_cache)`，不得回退 gpui 全局资产缓存；内存 LRU 128 项；网格用 t256、大图标/检查器用 512；磁盘预算 10GB、缓存键 `v3`、`thumb_access`/`thumb_sources` 保持一致。
 - **UI 固定规格**：6 种视图；图标格固定图片区与行高（大 288/268、中 160/150、小 128/112，行高 +68），`Contain` 全图不裁切；小图标九宫格；无平铺/旧大图标；无幻灯片；查看器内联，不做全窗口 overlay；侧栏 48+260（200–420）；底栏 26px；主题按钮 `Md`+Ghost。
 - **迁移/持久化**：`ui.view_mode` 旧键 `icons-xl`/`icons-lg`/`tiles` 需映射；`ui.sidebar_width`/`ui.sidebar_collapsed`/`ui.pane_mode`；旧 `ui.density` 兜底；缩略图缓存 `v3`；ffmpeg 路径/env/回退顺序不可打乱。

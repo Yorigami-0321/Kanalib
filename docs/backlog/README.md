@@ -49,6 +49,7 @@
 | [constraints.md](constraints.md) | 安全/性能/缓存/许可/本机脚本等全局约束 |
 | [parallel-plan.md](parallel-plan.md) | 并行开发矩阵 + 第一轮可直接派发的任务包 |
 | [round-2.md](round-2.md) | 第二轮任务包：打标质量/队列、搜索性能、媒体格式与阶段 2 |
+| [round-3.md](round-3.md) | 第三轮任务包：组织（集合/相册）、相似与浏览、扫描可观测与小交互、性能与媒体收尾 |
 | [component-research.md](component-research.md) | 非 UI 现成组件调研（可直接采用/评估/自研） |
 | [references.md](references.md) | 外部参考与本地依据 |
 
@@ -69,3 +70,4 @@
 - **实现后**：从 `pending/` 移入 [implemented.md](implemented.md)，只保留关键约束与验证。
 - **派发任务**：先看 [parallel-plan.md](parallel-plan.md)；UI 只有一条车道，schema/sidecar 单一负责人。
 - **不写工时/排期**；代码行号会漂移，按函数名搜索。
+- **文档自检**：`bash scripts/check_backlog_docs.sh` 校验 registry 的 F-xxx 不重复不丢失、implemented 与 pending 的状态不互相矛盾；每轮收口后重跑一次。
