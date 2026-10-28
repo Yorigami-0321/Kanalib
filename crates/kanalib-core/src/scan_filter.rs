@@ -12,6 +12,7 @@ use std::path::{Component, Path, PathBuf};
 use anyhow::{Context, Result, bail};
 use ignore::WalkBuilder;
 use ignore::overrides::{Override, OverrideBuilder};
+use serde::{Deserialize, Serialize};
 use walkdir::WalkDir;
 
 use crate::db::Db;
@@ -19,6 +20,9 @@ use crate::model::{ScanFilterConfig, is_image};
 
 /// settings 表中的配置键；值为 `{ root: ScanFilterConfig }` 的 JSON 对象。
 pub const SCAN_FILTERS_SETTING_KEY: &str = "scan.filters";
+
+/// F-037 持久忽略列表；路径/哈希/glob 三种粒度共用同一份 settings JSON。
+pub const IGNORE_RULES_SETTING_KEY: &str = "library.ignore";
 
 /// 预览最多返回多少个被排除样例，避免为 UI 保留大列表。
 pub const PREVIEW_SAMPLE_LIMIT: usize = 20;
@@ -170,9 +174,24 @@ pub fn collect_images(root: &Path, config: &ScanFilterConfig) -> Result<ScanWalk
     })
 }
 
+/// 在 F-032 排除规则之上叠加 F-037 持久忽略项。
+///
+/// 路径忽略在遍历后统一剔除；glob 合并进过滤配置，仍可在遍历时剪枝目录。
+pub fn collect_images_with_ignores(
+    root: &Path,
+    config: &ScanFilterConfig,
+    rules: &IgnoreRules,
+) -> Result<ScanWalk> {
+    let ignores = CompiledIgnoreRules::new(root, rules);
+    let merged = ignores.merged_config(config);
+    let mut walk = collect_images(root, &merged)?;
+    walk.files
+        .retain(|path| !ignores.path_ignored(path));
+    Ok(walk)
+}
+
 /// 无规则快路径：与改造前的遍历逻辑保持一致。
-fn collect_images_fast(root: &Path) -> ScanWalk {
-    let mut files = Vec::new();
+fn collect_images_fast(root: &Path) -> ScanWalk {    let mut files = Vec::new();
     let mut walk_complete = true;
     for entry in WalkDir::new(root).follow_links(false) {
         let entry = match entry {
@@ -222,9 +241,244 @@ pub fn preview_scan_filter(root: &Path, config: &ScanFilterConfig) -> Result<Sca
     Ok(preview)
 }
 
+/// F-037 持久忽略列表。
+///
+/// 语义：
+/// - `paths`：绝对文件路径；扫描遍历、监听事件与哈希前都会跳过，恢复后重新参与扫描。
+/// - `sha1`：内容哈希（小写）；扫描/监听在算出哈希后跳过，避免同内容副本重新入库。
+/// - `globs`：按来源根目录保存的 glob，与 F-032 排除规则使用同一 `Override` 语义；
+///   区别是它属于“忽略列表”，可逐条查看与恢复，而 `scan.filters` 是来源级扫描配置。
+///
+/// glob 只影响索引，不删除磁盘文件。
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct IgnoreRules {
+    pub paths: Vec<String>,
+    pub sha1: Vec<String>,
+    pub globs: BTreeMap<String, Vec<String>>,
+}
+
+fn path_key(path: &Path) -> String {
+    path.to_string_lossy().to_lowercase()
+}
+
+fn normalized_hash(value: &str) -> String {
+    value.trim().to_ascii_lowercase()
+}
+
+impl IgnoreRules {
+    pub fn is_empty(&self) -> bool {
+        self.paths.is_empty() && self.sha1.is_empty() && self.globs.is_empty()
+    }
+
+    pub fn contains_path(&self, path: &Path) -> bool {
+        let key = path_key(path);
+        self.paths
+            .iter()
+            .any(|item| path_key(Path::new(item)) == key)
+    }
+
+    /// 新增路径忽略项；已存在时返回 false。
+    pub fn insert_path(&mut self, path: &Path) -> bool {
+        if self.contains_path(path) {
+            return false;
+        }
+        self.paths.push(path.to_string_lossy().to_string());
+        self.paths.sort();
+        true
+    }
+
+    /// 移除路径忽略项；返回是否实际移除。
+    pub fn remove_path(&mut self, path: &Path) -> bool {
+        let key = path_key(path);
+        let before = self.paths.len();
+        self.paths.retain(|item| path_key(Path::new(item)) != key);
+        self.paths.len() != before
+    }
+
+    pub fn contains_hash(&self, sha1: &str) -> bool {
+        let hash = normalized_hash(sha1);
+        !hash.is_empty() && self.sha1.iter().any(|item| item == &hash)
+    }
+
+    pub fn insert_hash(&mut self, sha1: &str) -> bool {
+        let hash = normalized_hash(sha1);
+        if hash.is_empty() || self.contains_hash(&hash) {
+            return false;
+        }
+        self.sha1.push(hash);
+        self.sha1.sort();
+        true
+    }
+
+    pub fn remove_hash(&mut self, sha1: &str) -> bool {
+        let hash = normalized_hash(sha1);
+        let before = self.sha1.len();
+        self.sha1.retain(|item| item != &hash);
+        self.sha1.len() != before
+    }
+
+    /// 某来源的忽略 glob 列表（根目录大小写不敏感）。
+    pub fn globs_for(&self, root: &Path) -> Vec<String> {
+        let key = path_key(root);
+        self.globs
+            .iter()
+            .find(|(stored, _)| path_key(Path::new(stored)) == key)
+            .map(|(_, globs)| globs.clone())
+            .unwrap_or_default()
+    }
+
+    /// 校验并新增一条来源 glob；非法 glob 返回错误。
+    pub fn insert_glob(&mut self, root: &Path, pattern: &str) -> Result<bool> {
+        let pattern = pattern.trim();
+        if pattern.is_empty() {
+            bail!("忽略规则不能为空");
+        }
+        validate_exclude_glob(root, pattern)?;
+        let key = path_key(root);
+        let stored = self
+            .globs
+            .keys()
+            .find(|stored| path_key(Path::new(stored)) == key)
+            .cloned()
+            .unwrap_or_else(|| {
+                let value = root.to_string_lossy().to_string();
+                self.globs.insert(value.clone(), Vec::new());
+                value
+            });
+        let globs = self.globs.get_mut(&stored).expect("ignore glob root present");
+        if globs.iter().any(|item| item == pattern) {
+            return Ok(false);
+        }
+        globs.push(pattern.to_string());
+        globs.sort();
+        Ok(true)
+    }
+
+    pub fn remove_glob(&mut self, root: &Path, pattern: &str) -> bool {
+        let pattern = pattern.trim();
+        let key = path_key(root);
+        let Some((_, globs)) = self
+            .globs
+            .iter_mut()
+            .find(|(stored, _)| path_key(Path::new(stored)) == key)
+        else {
+            return false;
+        };
+        let before = globs.len();
+        globs.retain(|item| item != pattern);
+        let changed = globs.len() != before;
+        if globs.is_empty() {
+            self.globs
+                .retain(|stored, _| path_key(Path::new(stored)) != key);
+        }
+        changed
+    }
+
+    /// 来源被移除时同步清掉它的 glob，避免 settings 里留下无主规则。
+    pub fn prune_root(&mut self, root: &Path) {
+        let key = path_key(root);
+        self.globs
+            .retain(|stored, _| path_key(Path::new(stored)) != key);
+    }
+}
+
+fn validate_exclude_glob(root: &Path, pattern: &str) -> Result<()> {
+    let config = ScanFilterConfig {
+        exclude_globs: vec![pattern.to_string()],
+        ..ScanFilterConfig::default()
+    };
+    CompiledScanFilter::new(root, &config).map(|_| ())
+}
+
+/// 单次扫描/监听使用的编译后忽略规则；路径与哈希用集合查找，glob 合并进过滤配置。
+#[derive(Clone, Debug)]
+pub struct CompiledIgnoreRules {
+    root: PathBuf,
+    paths: std::collections::HashSet<String>,
+    sha1: std::collections::HashSet<String>,
+    globs: Vec<String>,
+}
+
+impl CompiledIgnoreRules {
+    pub fn new(root: &Path, rules: &IgnoreRules) -> Self {
+        Self {
+            root: root.to_path_buf(),
+            paths: rules.paths.iter().map(|path| path_key(Path::new(path))).collect(),
+            sha1: rules
+                .sha1
+                .iter()
+                .map(|hash| normalized_hash(hash))
+                .filter(|hash| !hash.is_empty())
+                .collect(),
+            globs: rules.globs_for(root),
+        }
+    }
+
+    pub fn path_ignored(&self, path: &Path) -> bool {
+        self.paths.contains(&path_key(path))
+    }
+
+    pub fn hash_ignored(&self, sha1: &str) -> bool {
+        let hash = normalized_hash(sha1);
+        !hash.is_empty() && self.sha1.contains(&hash)
+    }
+
+    pub fn merged_config(&self, base: &ScanFilterConfig) -> ScanFilterConfig {
+        let mut merged = base.clone();
+        merged.exclude_globs.extend(self.globs.iter().cloned());
+        merged
+    }
+
+    /// 统一忽略判定：F-037 路径/glob + F-032 来源排除规则。
+    pub fn ignores(
+        &self,
+        filter: &CompiledScanFilter,
+        path: &Path,
+        is_dir: bool,
+        bytes: Option<u64>,
+    ) -> bool {
+        self.path_ignored(path) || filter.excludes(path, is_dir, bytes)
+    }
+
+    pub fn root(&self) -> &Path {
+        &self.root
+    }
+}
+
+/// 从 settings 读取持久忽略列表；缺失时返回空列表。
+pub fn load_ignore_rules(db: &Db) -> Result<IgnoreRules> {
+    let Some(value) = db.setting(IGNORE_RULES_SETTING_KEY)? else {
+        return Ok(IgnoreRules::default());
+    };
+    serde_json::from_str(&value).context("解析 library.ignore 失败")
+}
+
+/// 写回持久忽略列表；路径/哈希去重排序，便于比对与测试。
+pub fn save_ignore_rules(db: &Db, rules: &IgnoreRules) -> Result<()> {
+    let mut normalized = rules.clone();
+    normalized.paths.sort();
+    normalized.paths.dedup();
+    normalized.sha1 = normalized
+        .sha1
+        .iter()
+        .map(|hash| normalized_hash(hash))
+        .filter(|hash| !hash.is_empty())
+        .collect();
+    normalized.sha1.sort();
+    normalized.sha1.dedup();
+    for globs in normalized.globs.values_mut() {
+        globs.sort();
+        globs.dedup();
+    }
+    db.set_setting(
+        IGNORE_RULES_SETTING_KEY,
+        &serde_json::to_string(&normalized).context("序列化 library.ignore 失败")?,
+    )
+}
+
 /// 从 settings 读取所有来源的排除规则。
-pub fn load_filters(db: &Db) -> Result<HashMap<PathBuf, ScanFilterConfig>> {
-    let Some(value) = db.setting(SCAN_FILTERS_SETTING_KEY)? else {
+pub fn load_filters(db: &Db) -> Result<HashMap<PathBuf, ScanFilterConfig>> {    let Some(value) = db.setting(SCAN_FILTERS_SETTING_KEY)? else {
         return Ok(HashMap::new());
     };
     let parsed = serde_json::from_str::<HashMap<String, ScanFilterConfig>>(&value)
@@ -403,6 +657,75 @@ mod tests {
         let walk = collect_images(&dir, &config).unwrap();
         assert_eq!(walk.files.len(), 2);
 
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn ignore_rules_round_trip_and_merge_with_scan_filters() {
+        let dir = temp_dir("ignore-rules");
+        let db = Db::open(&dir.join("kanalib.db")).unwrap();
+        let root = dir.join("lib");
+        std::fs::create_dir_all(root.join("cache")).unwrap();
+        write_image(&root.join("keep.png"), 0);
+        write_image(&root.join("gone.png"), 0);
+        write_image(&root.join("cache").join("skip.png"), 0);
+
+        let ignored_path = root.join("gone.png");
+        let mut rules = IgnoreRules::default();
+        assert!(rules.insert_path(&ignored_path));
+        assert!(!rules.insert_path(&ignored_path));
+        assert!(rules.insert_hash("ABCDEF"));
+        assert!(!rules.insert_hash("abcdef"));
+        assert!(rules.insert_glob(&root, "cache/**").unwrap());
+        assert!(!rules.insert_glob(&root, "cache/**").unwrap());
+
+        save_ignore_rules(&db, &rules).unwrap();
+        let loaded = load_ignore_rules(&db).unwrap();
+        assert_eq!(loaded, rules);
+        assert!(loaded.contains_hash("abcdef"));
+        assert!(loaded.contains_path(&ignored_path));
+
+        let compiled = CompiledIgnoreRules::new(&root, &loaded);
+        assert!(compiled.path_ignored(&ignored_path));
+        assert!(compiled.hash_ignored("abcdef"));
+        assert!(compiled.hash_ignored("ABCDEF"));
+        assert!(!compiled.hash_ignored("other"));
+
+        let config = ScanFilterConfig {
+            exclude_globs: vec!["*.tmp".into()],
+            ..ScanFilterConfig::default()
+        };
+        let merged = compiled.merged_config(&config);
+        assert!(merged.exclude_globs.contains(&"*.tmp".to_string()));
+        assert!(merged.exclude_globs.contains(&"cache/**".to_string()));
+
+        let walk = collect_images_with_ignores(&root, &config, &loaded).unwrap();
+        let names = walk
+            .files
+            .iter()
+            .map(|path| path.file_name().unwrap().to_string_lossy().to_string())
+            .collect::<Vec<_>>();
+        assert_eq!(names, vec!["keep.png".to_string()]);
+
+        let mut restored = loaded.clone();
+        assert!(restored.remove_path(&ignored_path));
+        assert!(restored.remove_hash("abcdef"));
+        assert!(restored.remove_glob(&root, "cache/**"));
+        assert!(restored.is_empty());
+        save_ignore_rules(&db, &restored).unwrap();
+        assert!(load_ignore_rules(&db).unwrap().is_empty());
+
+        drop(db);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn invalid_ignore_glob_returns_error() {
+        let dir = temp_dir("ignore-invalid");
+        let mut rules = IgnoreRules::default();
+        let error = rules.insert_glob(&dir, "[").unwrap_err();
+        assert!(format!("{error:#}").contains("排除规则"));
+        assert!(rules.is_empty());
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

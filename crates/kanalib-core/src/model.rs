@@ -1320,6 +1320,8 @@ pub struct Shared {
     pub source_statuses: HashMap<PathBuf, SourceScanStatus>,
     /// 来源级扫描排除规则；键为绝对根目录，与 settings 的 `scan.filters` 同步。
     pub scan_filters: HashMap<PathBuf, ScanFilterConfig>,
+    /// 持久忽略列表；与 settings 的 `library.ignore` 同步。
+    pub ignore_rules: crate::scan_filter::IgnoreRules,
     /// 当前扫描的结构化进度；UI 只读。
     pub scan_progress: ScanProgress,
     /// 最近一次扫描结束后的结构化摘要。
@@ -1385,6 +1387,7 @@ impl Shared {
             source_aliases: HashMap::new(),
             source_statuses,
             scan_filters: HashMap::new(),
+            ignore_rules: Default::default(),
             scan_progress: ScanProgress::default(),
             scan_summary: None,
             pending_cleanup: None,

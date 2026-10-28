@@ -21,7 +21,7 @@ use crate::model::{
     SourceScanStatus, TagCandidateReview, TagHit, TagJobError, TagQueueStatus, TagRecomputeSummary,
     TagReviewState, TagSummary, TagThresholds, normalize_tag_name,
 };
-use crate::scan_filter::{self, ScanFilterPreview};
+use crate::scan_filter::{self, CompiledIgnoreRules, IgnoreRules, ScanFilterPreview};
 use crate::sidecar::{Sidecar, project_root, repair_file};
 use crate::watch;
 
@@ -212,6 +212,10 @@ impl AppState {
         shared.scan_filters = Db::open(&db_path)
             .ok()
             .and_then(|db| scan_filter::load_filters(&db).ok())
+            .unwrap_or_default();
+        shared.ignore_rules = Db::open(&db_path)
+            .ok()
+            .and_then(|db| scan_filter::load_ignore_rules(&db).ok())
             .unwrap_or_default();
         shared.set_queue_counts(
             queue_counts.pending,
@@ -611,6 +615,161 @@ impl AppState {
         scan_filter::preview_scan_filter(&root, config)
     }
 
+    /// 当前持久忽略列表快照；供设置页查看路径/哈希/glob 三种粒度。
+    pub fn ignore_rules(&self) -> IgnoreRules {
+        self.shared.lock().unwrap().ignore_rules.clone()
+    }
+
+    /// 从图库移除所选资产（只删 DB 记录），并把路径加入持久忽略列表。
+    pub fn remove_from_library(&self, paths: &[PathBuf]) -> Result<usize> {
+        self.remove_from_library_inner(paths, false)
+    }
+
+    /// 从图库移除所选资产，并把路径与内容 SHA1 都加入忽略列表；
+    /// 之后同内容的副本重扫/监听也不会重新导入。
+    pub fn remove_from_library_with_hash(&self, paths: &[PathBuf]) -> Result<usize> {
+        self.remove_from_library_inner(paths, true)
+    }
+
+    fn remove_from_library_inner(&self, paths: &[PathBuf], remember_hash: bool) -> Result<usize> {
+        if paths.is_empty() {
+            return Ok(0);
+        }
+        let paths = paths
+            .iter()
+            .map(|path| absolute(path.clone()))
+            .collect::<Vec<_>>();
+        let mut rules = self.ignore_rules();
+        let hashes = if remember_hash {
+            let shared = self.shared.lock().unwrap();
+            let assets = shared.assets.read().unwrap();
+            paths
+                .iter()
+                .filter_map(|path| {
+                    assets
+                        .iter()
+                        .find(|asset| &asset.path == path)
+                        .and_then(|asset| asset.sha1.clone())
+                })
+                .collect::<Vec<_>>()
+        } else {
+            Vec::new()
+        };
+        let db = Db::open(&self.db_path)?;
+        let removed = db.delete_assets(&paths)?;
+        for path in &paths {
+            rules.insert_path(path);
+        }
+        for hash in &hashes {
+            rules.insert_hash(hash);
+        }
+        scan_filter::save_ignore_rules(&db, &rules)?;
+
+        let targets = paths.iter().cloned().collect::<HashSet<_>>();
+        let mut shared = self.shared.lock().unwrap();
+        shared.ignore_rules = rules;
+        let clear_pending = if let Some(pending) = shared.pending_cleanup.as_mut() {
+            pending.paths.retain(|path| !targets.contains(path));
+            pending.paths.is_empty()
+        } else {
+            false
+        };
+        if clear_pending {
+            shared.pending_cleanup = None;
+        }
+        shared.remove_assets(&targets);
+        shared.refresh_after_removal(&targets);
+        shared.error = None;
+        shared.status = if remember_hash {
+            format!(
+                "已从图库移除 {removed} 张并忽略其路径与内容哈希 · 磁盘文件未删除"
+            )
+        } else {
+            format!("已从图库移除 {removed} 张并忽略路径 · 磁盘文件未删除")
+        };
+        shared.revision = shared.revision.wrapping_add(1);
+        Ok(removed)
+    }
+
+    /// 新增一条来源 glob 忽略规则；只影响后续扫描/监听，不删除磁盘文件。
+    pub fn add_ignored_glob(&self, root: &Path, pattern: &str) -> Result<bool> {
+        let root = absolute(root.to_path_buf());
+        {
+            let shared = self.shared.lock().unwrap();
+            if !shared.roots.contains(&root) {
+                bail!("来源不存在: {}", root.display());
+            }
+        }
+        let mut rules = self.ignore_rules();
+        let added = rules.insert_glob(&root, pattern)?;
+        if !added {
+            return Ok(false);
+        }
+        scan_filter::save_ignore_rules(&Db::open(&self.db_path)?, &rules)?;
+        let mut shared = self.shared.lock().unwrap();
+        shared.ignore_rules = rules;
+        shared.status = format!("已添加忽略规则 · {}", pattern.trim());
+        shared.error = None;
+        shared.revision = shared.revision.wrapping_add(1);
+        Ok(true)
+    }
+
+    /// 移除路径忽略项；不会自动重新扫描，调用方可在之后触发重扫。
+    pub fn restore_ignored_paths(&self, paths: &[PathBuf]) -> Result<usize> {
+        let mut rules = self.ignore_rules();
+        let mut restored = 0;
+        for path in paths {
+            if rules.remove_path(&absolute(path.clone())) {
+                restored += 1;
+            }
+        }
+        if restored > 0 {
+            scan_filter::save_ignore_rules(&Db::open(&self.db_path)?, &rules)?;
+            let mut shared = self.shared.lock().unwrap();
+            shared.ignore_rules = rules;
+            shared.status = format!("已恢复 {restored} 条路径忽略项 · 重扫后重新导入");
+            shared.error = None;
+            shared.revision = shared.revision.wrapping_add(1);
+        }
+        Ok(restored)
+    }
+
+    /// 移除内容哈希忽略项；不会自动重新扫描。
+    pub fn restore_ignored_hashes(&self, hashes: &[String]) -> Result<usize> {
+        let mut rules = self.ignore_rules();
+        let mut restored = 0;
+        for hash in hashes {
+            if rules.remove_hash(hash) {
+                restored += 1;
+            }
+        }
+        if restored > 0 {
+            scan_filter::save_ignore_rules(&Db::open(&self.db_path)?, &rules)?;
+            let mut shared = self.shared.lock().unwrap();
+            shared.ignore_rules = rules;
+            shared.status = format!("已恢复 {restored} 条哈希忽略项 · 重扫后重新导入");
+            shared.error = None;
+            shared.revision = shared.revision.wrapping_add(1);
+        }
+        Ok(restored)
+    }
+
+    /// 移除来源 glob 忽略项；返回是否实际移除。
+    pub fn restore_ignored_glob(&self, root: &Path, pattern: &str) -> Result<bool> {
+        let root = absolute(root.to_path_buf());
+        let mut rules = self.ignore_rules();
+        if !rules.remove_glob(&root, pattern) {
+            return Ok(false);
+        }
+        scan_filter::save_ignore_rules(&Db::open(&self.db_path)?, &rules)?;
+        let mut shared = self.shared.lock().unwrap();
+        shared.ignore_rules = rules;
+        shared.status = format!("已恢复忽略规则 · {}", pattern.trim());
+        shared.error = None;
+        shared.revision = shared.revision.wrapping_add(1);
+        Ok(true)
+    }
+
     /// 重新扫描单个来源；扫描进行中拒绝。来源离线时只标记错误，不触发清理。
     ///
     /// 同一入口供来源右键菜单与监听事件风暴回退使用。
@@ -802,6 +961,8 @@ impl AppState {
         path: &Path,
     ) -> Result<FileIndexOutcome> {
         let folder = root.to_string_lossy();
+        let rules = self.shared.lock().unwrap().ignore_rules.clone();
+        let ignores = CompiledIgnoreRules::new(root, &rules);
         index_file(
             self,
             db,
@@ -809,6 +970,7 @@ impl AppState {
             &folder,
             path,
             RenamePolicy::MissingOnDisk,
+            &ignores,
             None,
         )
     }
@@ -2991,7 +3153,9 @@ fn index_inner(
 
     let walk_start = Instant::now();
     let config = state.scan_filter(folder);
-    let walk = scan_filter::collect_images(folder, &config)?;
+    let ignore_rules = state.shared.lock().unwrap().ignore_rules.clone();
+    let ignores = CompiledIgnoreRules::new(folder, &ignore_rules);
+    let walk = scan_filter::collect_images_with_ignores(folder, &config, &ignore_rules)?;
     let files = walk.files;
     let mut walk_complete = walk.walk_complete;
     stats.files = files.len();
@@ -3033,6 +3197,7 @@ fn index_inner(
             &folder_string,
             path,
             rename_policy,
+            &ignores,
             prefetched_exif.remove(path),
         ) {
             Ok(outcome) => outcome,
@@ -3054,6 +3219,7 @@ fn index_inner(
                 stats.unchanged += 1;
                 stats.imported += 1;
             }
+            IndexedFile::Ignored => stats.ignored += 1,
             IndexedFile::Imported | IndexedFile::Renamed => stats.imported += 1,
             IndexedFile::Updated => {
                 stats.imported += 1;
@@ -3282,6 +3448,8 @@ pub(crate) enum IndexedFile {
     Imported,
     Updated,
     Renamed,
+    /// 命中忽略规则（路径/哈希/glob），未写入图库。
+    Ignored,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -3314,6 +3482,7 @@ fn index_file(
     folder_string: &str,
     path: &Path,
     rename: RenamePolicy<'_>,
+    ignore: &CompiledIgnoreRules,
     prefetched_exif: Option<(media::ExifData, Option<u64>)>,
 ) -> Result<FileIndexOutcome> {
     let metadata =
@@ -3383,6 +3552,11 @@ fn index_file(
             hashes
         }
     };
+    // F-037 哈希粒度忽略：内容命中后不再入库，也不走重命名/缩略图。
+    if ignore.hash_ignored(&hashes.sha1) {
+        outcome.kind = IndexedFile::Ignored;
+        return Ok(outcome);
+    }
     let (exif, captured_at) = prefetched_exif.unwrap_or_else(|| media::read_exif(path));
     let metadata_json = serde_json::to_string(&exif).unwrap_or_else(|_| "{}".to_string());
     let thumb_started = Instant::now();
@@ -4470,6 +4644,120 @@ mod tests {
         assert!(lib.join("0.png").exists());
         assert!(lib.join("1.png").exists());
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn remove_from_library_keeps_disk_file_and_rescan_skips_then_restores() {
+        let (base, lib, state) = test_state("remove-ignore-path");
+        let keep = lib.join("keep.png");
+        let removed = lib.join("removed.png");
+        write_test_image(&keep, [1, 2, 3]);
+        write_test_image(&removed, [9, 8, 7]);
+        state.scan_blocking(true).unwrap();
+        state.add_tags(std::slice::from_ref(&removed), "gone-tag").unwrap();
+
+        let count = state.remove_from_library(std::slice::from_ref(&removed)).unwrap();
+        assert_eq!(count, 1);
+        // 只动 DB：磁盘文件必须原样保留。
+        assert!(removed.exists());
+        assert_eq!(state.shared.lock().unwrap().counts.total(), 1);
+        assert!(state.ignore_rules().contains_path(&removed));
+        assert!(state.setting(scan_filter::IGNORE_RULES_SETTING_KEY).is_some());
+
+        // 重扫不会重新导入已忽略路径。
+        state.scan_blocking(true).unwrap();
+        assert_eq!(state.shared.lock().unwrap().counts.total(), 1);
+        let summary = state.scan_summary().unwrap();
+        assert_eq!(summary.skipped, 1);
+        assert!(removed.exists());
+
+        // 恢复后下一次重扫重新导入。
+        assert_eq!(
+            state
+                .restore_ignored_paths(std::slice::from_ref(&removed))
+                .unwrap(),
+            1
+        );
+        assert!(!state.ignore_rules().contains_path(&removed));
+        state.scan_blocking(true).unwrap();
+        assert_eq!(state.shared.lock().unwrap().counts.total(), 2);
+        assert!(
+            state
+                .shared
+                .lock()
+                .unwrap()
+                .assets
+                .read()
+                .unwrap()
+                .iter()
+                .any(|asset| asset.path == removed)
+        );
+        std::fs::remove_dir_all(&base).unwrap();
+    }
+
+    #[test]
+    fn hash_ignore_skips_same_content_copies_until_restored() {
+        let (base, lib, state) = test_state("remove-ignore-hash");
+        let original = lib.join("original.png");
+        write_test_image(&original, [5, 6, 7]);
+        state.scan_blocking(true).unwrap();
+
+        state
+            .remove_from_library_with_hash(std::slice::from_ref(&original))
+            .unwrap();
+        assert!(original.exists());
+        let rules = state.ignore_rules();
+        assert_eq!(rules.sha1.len(), 1);
+        assert!(rules.contains_path(&original));
+
+        // 同内容的新副本在哈希粒度上同样被跳过。
+        let copy = lib.join("copy.png");
+        std::fs::copy(&original, &copy).unwrap();
+        state.scan_blocking(true).unwrap();
+        assert_eq!(state.shared.lock().unwrap().counts.total(), 0);
+        assert_eq!(state.scan_summary().unwrap().skipped, 1);
+
+        state.restore_ignored_hashes(&rules.sha1).unwrap();
+        assert!(state.ignore_rules().sha1.is_empty());
+        state.scan_blocking(true).unwrap();
+        // 原路径仍在路径忽略列表里，只有新副本会被导入。
+        assert_eq!(state.shared.lock().unwrap().counts.total(), 1);
+        assert!(
+            state
+                .shared
+                .lock()
+                .unwrap()
+                .assets
+                .read()
+                .unwrap()
+                .iter()
+                .any(|asset| asset.path == copy)
+        );
+        std::fs::remove_dir_all(&base).unwrap();
+    }
+
+    #[test]
+    fn ignored_glob_persists_and_blocks_scan_until_restored() {
+        let (base, lib, state) = test_state("ignore-glob");
+        write_test_image(&lib.join("keep.png"), [1, 1, 1]);
+        write_test_image(&lib.join("cache").join("skip.png"), [2, 2, 2]);
+
+        assert!(state.add_ignored_glob(&lib, "cache/**").unwrap());
+        assert!(!state.add_ignored_glob(&lib, "cache/**").unwrap());
+        assert!(
+            state
+                .setting(scan_filter::IGNORE_RULES_SETTING_KEY)
+                .unwrap()
+                .contains("cache/**")
+        );
+        state.scan_blocking(true).unwrap();
+        assert_eq!(state.shared.lock().unwrap().counts.total(), 1);
+        assert!(lib.join("cache").join("skip.png").exists());
+
+        assert!(state.restore_ignored_glob(&lib, "cache/**").unwrap());
+        state.scan_blocking(true).unwrap();
+        assert_eq!(state.shared.lock().unwrap().counts.total(), 2);
+        std::fs::remove_dir_all(&base).unwrap();
     }
 
     #[test]

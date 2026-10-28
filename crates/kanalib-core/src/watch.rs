@@ -15,7 +15,7 @@ use notify::{RecommendedWatcher, RecursiveMode};
 use notify_debouncer_mini::{DebounceEventResult, Debouncer, new_debouncer};
 
 use crate::model::{ScanCounts, ScanFilterConfig, is_image};
-use crate::scan_filter::CompiledScanFilter;
+use crate::scan_filter::{CompiledIgnoreRules, CompiledScanFilter, IgnoreRules};
 use crate::state::{AppState, IndexedFile};
 
 /// 防抖窗口；批量事件会在此窗口后合并处理。
@@ -106,9 +106,27 @@ pub fn classify_watch_paths(
     root: &Path,
     config: &ScanFilterConfig,
     paths: impl IntoIterator<Item = PathBuf>,
+    probe: impl FnMut(&Path) -> WatchProbe,
+) -> Result<WatchClassification> {
+    classify_watch_paths_with_ignores(
+        root,
+        config,
+        &IgnoreRules::default(),
+        paths,
+        probe,
+    )
+}
+
+/// 同时应用 F-032 排除规则与 F-037 持久忽略列表的事件分类。
+pub fn classify_watch_paths_with_ignores(
+    root: &Path,
+    config: &ScanFilterConfig,
+    rules: &IgnoreRules,
+    paths: impl IntoIterator<Item = PathBuf>,
     mut probe: impl FnMut(&Path) -> WatchProbe,
 ) -> Result<WatchClassification> {
-    let compiled = CompiledScanFilter::new(root, config)?;
+    let ignores = CompiledIgnoreRules::new(root, rules);
+    let compiled = CompiledScanFilter::new(root, &ignores.merged_config(config))?;
     let unique = paths.into_iter().collect::<BTreeSet<_>>();
     let mut classification = WatchClassification::default();
     for path in unique {
@@ -116,16 +134,20 @@ pub fn classify_watch_paths(
             classification.ignored += 1;
             continue;
         }
+        if ignores.path_ignored(&path) {
+            classification.ignored += 1;
+            continue;
+        }
         match probe(&path) {
             WatchProbe::File(bytes) => {
-                if is_image(&path) && !compiled.excludes(&path, false, Some(bytes)) {
+                if is_image(&path) && !ignores.ignores(&compiled, &path, false, Some(bytes)) {
                     classification.changed.push(path);
                 } else {
                     classification.ignored += 1;
                 }
             }
             WatchProbe::Missing => {
-                if is_image(&path) && !compiled.excludes(&path, false, None) {
+                if is_image(&path) && !ignores.ignores(&compiled, &path, false, None) {
                     classification.missing.push(path);
                 } else {
                     classification.ignored += 1;
@@ -149,7 +171,14 @@ pub(crate) fn handle_watch_batch(state: &Arc<AppState>, root: &Path, paths: Vec<
         return;
     }
     let config = state.scan_filter(root);
-    let classification = match classify_watch_paths(root, &config, paths, probe_path) {
+    let rules = state.shared.lock().unwrap().ignore_rules.clone();
+    let classification = match classify_watch_paths_with_ignores(
+        root,
+        &config,
+        &rules,
+        paths,
+        probe_path,
+    ) {
         Ok(classification) => classification,
         Err(error) => {
             log::warn!("watch classify {}: {error:#}", root.display());
@@ -207,7 +236,7 @@ pub(crate) fn apply_watch_batch(
         match state.watch_index_file(&db, root, path) {
             Ok(outcome) => {
                 match outcome.kind {
-                    IndexedFile::Unchanged => {}
+                    IndexedFile::Unchanged | IndexedFile::Ignored => {}
                     IndexedFile::Imported | IndexedFile::Renamed => imported += 1,
                     IndexedFile::Updated => updated += 1,
                 }
@@ -362,6 +391,30 @@ mod tests {
         assert!(classification.oversized);
         assert!(classification.changed.is_empty());
         assert!(classification.missing.is_empty());
+    }
+
+    #[test]
+    fn persistent_ignore_paths_and_globs_are_skipped() {
+        let root = PathBuf::from("C:/library");
+        let path = root.join("ignored.png");
+        let mut rules = IgnoreRules::default();
+        rules.insert_path(&path);
+        rules.insert_glob(&root, "cache/**").unwrap();
+        let probes = HashMap::from([
+            (path.clone(), WatchProbe::File(10)),
+            (root.join("cache").join("x.png"), WatchProbe::File(20)),
+            (root.join("keep.png"), WatchProbe::File(30)),
+        ]);
+        let classification = classify_watch_paths_with_ignores(
+            &root,
+            &config(),
+            &rules,
+            probes.keys().cloned().collect::<Vec<_>>(),
+            |path| probes.get(path).copied().unwrap_or(WatchProbe::Uncertain),
+        )
+        .unwrap();
+        assert_eq!(classification.changed, vec![root.join("keep.png")]);
+        assert_eq!(classification.ignored, 2);
     }
 
     #[test]
