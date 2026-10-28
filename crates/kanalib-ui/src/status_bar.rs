@@ -60,6 +60,8 @@ pub(crate) fn status_bar_item(
         .role(Role::Button)
         .aria_label(label.clone())
         .h_full()
+        .min_w(px(0.))
+        .overflow_hidden()
         .px(px(6.))
         .flex()
         .items_center()
@@ -95,7 +97,8 @@ impl KanalibApp {
         width: Pixels,
         colors: UiColors,
     ) -> AnyElement {
-        let compact = width < px(1100.);
+        // 有错误时错误行会占掉大半宽度，其余项一律走紧凑写法，避免互相挤压。
+        let compact = width < px(1100.) || error.is_some();
         let library = self.screen == Screen::Library;
         // 扫描进度是核心线写入的只读快照；底栏只读不写，节流由核心负责。
         let (progress, summary, source_aliases) = {
@@ -114,12 +117,15 @@ impl KanalibApp {
             .gap(px(2.));
         if let Some(message) = error {
             let this_error = this.clone();
+            let first = message.lines().next().unwrap_or_default();
+            // 底栏只有一行：错误首行截到 56 字，完整信息在设置页诊断区。
+            let mut text = first.chars().take(56).collect::<String>();
+            if first.chars().count() > 56 {
+                text.push('…');
+            }
             left = left.child(status_bar_item(
                 "status-error",
-                SharedString::from(format!(
-                    "错误 · {}",
-                    message.lines().next().unwrap_or_default()
-                )),
+                SharedString::from(format!("错误 · {text}")),
                 colors.danger,
                 colors,
                 false,
