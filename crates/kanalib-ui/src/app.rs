@@ -539,13 +539,13 @@ impl Render for KanalibApp {
         }
         let visible_indices = self.view.visible_indices.clone();
         // F-004：相似结果视图使用自己的有序下标；查询/筛选/数据版本变化时才重建。
+        // 不能回写 `view.visible_indices`：它是图库的可见缓存，覆盖后返回图库会变成空列表。
         let visible_indices = if self.screen == Screen::Similar {
             if self.similar_visible_revision != revision
                 || self.similar_visible_filter != self.similar_filter
             {
                 self.rebuild_similar_visible(&assets, revision);
             }
-            self.view.visible_indices = self.similar_visible.clone();
             self.similar_visible.clone()
         } else {
             visible_indices
@@ -3276,6 +3276,7 @@ impl KanalibApp {
                     }),
             )
             .separator()
+            .item(MenuItem::submenu("分组", self.group_menu(this)))
             .item(MenuItem::submenu("显示", display))
     }
 
