@@ -673,8 +673,8 @@ impl AppState {
         action: ExcludedAssetAction,
     ) -> Result<ScanFilterApply> {
         let root = absolute(root.to_path_buf());
-        self.set_scan_filter(&root, config.clone())?;
         let impact = self.scan_filter_indexed_impact(&root, &config)?;
+        self.set_scan_filter(&root, config)?;
         let mut removed = 0usize;
         if action == ExcludedAssetAction::RemoveFromLibrary && !impact.excluded.is_empty() {
             let db = Db::open(&self.db_path)?;
@@ -1106,16 +1106,27 @@ impl AppState {
         path: &Path,
     ) -> Result<FileIndexOutcome> {
         let folder = root.to_string_lossy();
-        let rules = self.shared.lock().unwrap().ignore_rules.clone();
+        let (rules, other_roots) = {
+            let shared = self.shared.lock().unwrap();
+            (
+                shared.ignore_rules.clone(),
+                shared
+                    .roots
+                    .iter()
+                    .filter(|item| item.as_path() != root)
+                    .cloned()
+                    .collect::<Vec<_>>(),
+            )
+        };
         let ignores = CompiledIgnoreRules::new(root, &rules);
         index_file(
             self,
             db,
-            root,
             &folder,
             path,
             RenamePolicy::MissingOnDisk,
             &ignores,
+            &other_roots,
             None,
         )
     }
@@ -2861,9 +2872,21 @@ impl ScanProgressReporter {
 
     fn progress(&self) -> ScanProgress {
         let elapsed = self.phase_started.elapsed().as_secs_f32().max(0.001);
-        let throughput = self.done as f32 / elapsed;
+        let active = matches!(
+            self.phase,
+            ScanPhase::Discovering
+                | ScanPhase::Hashing
+                | ScanPhase::Thumbnails
+                | ScanPhase::Tagging
+                | ScanPhase::Reconciling
+        );
+        let throughput = if active {
+            self.done as f32 / elapsed
+        } else {
+            0.0
+        };
         let remaining = self.total.saturating_sub(self.done);
-        let eta_secs = (self.total > 0 && remaining > 0 && throughput > 0.0)
+        let eta_secs = (active && self.total > 0 && remaining > 0 && throughput > 0.0)
             .then(|| (remaining as f32 / throughput).ceil() as u64);
         ScanProgress {
             phase: self.phase,
@@ -3139,38 +3162,40 @@ fn rename_candidate_missing(
 ///
 /// 目录级重命名在同一来源内由 `rename_candidate` 逐文件按 SHA1 恢复；跨来源时
 /// 只有“旧来源可访问 + 旧路径 NotFound + 全库唯一”才采纳，避免把离线来源或
-/// 多份同内容副本误判成移动而搬走标签。
+/// 多份同内容副本误判成移动而搬走标签。查询走 `idx_assets_sha1`，不扫描全库内存。
 fn cross_source_candidate(
-    state: &Arc<AppState>,
-    folder: &Path,
+    db: &Db,
+    other_roots: &[PathBuf],
     sha1: &str,
     new_path: &Path,
 ) -> Option<PathBuf> {
-    if sha1.is_empty() {
+    if sha1.is_empty() || other_roots.is_empty() {
         return None;
     }
-    let shared = state.shared.lock().unwrap();
-    let assets = shared.assets.read().unwrap();
     let mut candidate: Option<PathBuf> = None;
-    for asset in assets.iter() {
-        if asset.library_root == folder
-            || asset.path == new_path
-            || asset.sha1.as_deref() != Some(sha1)
-        {
+    for root in other_roots {
+        // 旧来源离线/权限不足时无法判断文件是否真的消失，拒绝跨来源采纳。
+        if !root.is_dir() || std::fs::read_dir(root).is_err() {
             continue;
         }
-        if !asset.library_root.is_dir() || std::fs::read_dir(&asset.library_root).is_err() {
-            // 旧来源离线/权限不足时无法判断文件是否真的消失，拒绝跨来源采纳。
-            continue;
+        let folder = root.to_string_lossy();
+        let paths = match db.asset_paths_by_sha1(&folder, sha1) {
+            Ok(paths) => paths,
+            Err(error) => {
+                log::warn!("cross-source lookup {}: {error:#}", root.display());
+                continue;
+            }
+        };
+        for path in paths {
+            if path == new_path || !definitely_missing(&path) {
+                continue;
+            }
+            if candidate.is_some() {
+                // 存在多个候选时无法判定哪个是被移动的记录。
+                return None;
+            }
+            candidate = Some(path);
         }
-        if !definitely_missing(&asset.path) {
-            continue;
-        }
-        if candidate.is_some() {
-            // 存在多个候选时无法判定哪个是被移动的记录。
-            return None;
-        }
-        candidate = Some(asset.path.clone());
     }
     candidate
 }
@@ -3341,7 +3366,18 @@ fn index_inner(
 
     let walk_start = Instant::now();
     let config = state.scan_filter(folder);
-    let ignore_rules = state.shared.lock().unwrap().ignore_rules.clone();
+    let (ignore_rules, other_roots) = {
+        let shared = state.shared.lock().unwrap();
+        (
+            shared.ignore_rules.clone(),
+            shared
+                .roots
+                .iter()
+                .filter(|root| root.as_path() != folder)
+                .cloned()
+                .collect::<Vec<_>>(),
+        )
+    };
     let ignores = CompiledIgnoreRules::new(folder, &ignore_rules);
     let walk = scan_filter::collect_images_with_ignores(folder, &config, &ignore_rules)?;
     let files = walk.files;
@@ -3381,11 +3417,11 @@ fn index_inner(
         let outcome = match index_file(
             state,
             &db,
-            folder,
             &folder_string,
             path,
             rename_policy,
             &ignores,
+            &other_roots,
             prefetched_exif.remove(path),
         ) {
             Ok(outcome) => outcome,
@@ -3666,11 +3702,11 @@ pub(crate) struct FileIndexOutcome {
 fn index_file(
     state: &Arc<AppState>,
     db: &Db,
-    folder: &Path,
     folder_string: &str,
     path: &Path,
     rename: RenamePolicy<'_>,
     ignore: &CompiledIgnoreRules,
+    other_roots: &[PathBuf],
     prefetched_exif: Option<(media::ExifData, Option<u64>)>,
 ) -> Result<FileIndexOutcome> {
     let metadata =
@@ -3788,7 +3824,7 @@ fn index_file(
             if matches!(rename, RenamePolicy::Disabled) {
                 None
             } else {
-                cross_source_candidate(state, folder, &hashes.sha1, path)
+                cross_source_candidate(db, other_roots, &hashes.sha1, path)
             }
         });
         if let Some(old_path) = candidate {
@@ -4524,6 +4560,20 @@ mod tests {
         dir
     }
 
+    /// Windows 上 notify 句柄释放略有延迟；清理临时目录时短暂重试。
+    fn cleanup_dir(dir: &Path) {
+        for _ in 0..40 {
+            if !dir.exists() {
+                return;
+            }
+            if std::fs::remove_dir_all(dir).is_ok() {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
     #[test]
     fn evicted_thumbs_rebuild_from_source_mapping() {
         let dir = temp_dir("thumb-rebuild");
@@ -5126,6 +5176,89 @@ mod tests {
         assert!(state.restore_ignored_glob(&lib, "cache/**").unwrap());
         state.scan_blocking(true).unwrap();
         assert_eq!(state.shared.lock().unwrap().counts.total(), 2);
+        std::fs::remove_dir_all(&base).unwrap();
+    }
+
+    #[test]
+    #[ignore = "perf: 10k cold import; run with --ignored --nocapture"]
+    fn ten_thousand_cold_import_reports_phases_and_eta() {
+        let base = temp_dir("perf-10k");
+        let lib = base.join("lib");
+        std::fs::create_dir_all(&lib).unwrap();
+        let generated = Instant::now();
+        for index in 0..10_000u32 {
+            let color = [(index % 251) as u8, (index / 251) as u8, 90];
+            write_test_image(&lib.join(format!("img-{index:05}.png")), color);
+        }
+        eprintln!(
+            "PERF generated 10000 images in {:.2}s",
+            generated.elapsed().as_secs_f64()
+        );
+
+        let state = AppState::open_for_test(base.join("data"), Some(lib.clone()));
+        let stop = Arc::new(AtomicBool::new(false));
+        let seen = Arc::new(Mutex::new(Vec::<(
+            ScanPhase,
+            usize,
+            usize,
+            Option<u64>,
+            f64,
+        )>::new()));
+        let observer = {
+            let state = state.clone();
+            let stop = stop.clone();
+            let seen = seen.clone();
+            let started = Instant::now();
+            std::thread::spawn(move || {
+                while !stop.load(Ordering::SeqCst) {
+                    let progress = state.scan_progress();
+                    let mut seen = seen.lock().unwrap();
+                    let changed = seen.last().is_none_or(|last| {
+                        last.0 != progress.phase
+                            || last.1 != progress.done
+                            || last.3 != progress.eta_secs
+                    });
+                    if changed {
+                        seen.push((
+                            progress.phase,
+                            progress.done,
+                            progress.total,
+                            progress.eta_secs,
+                            started.elapsed().as_secs_f64(),
+                        ));
+                    }
+                    drop(seen);
+                    std::thread::sleep(Duration::from_millis(50));
+                }
+            })
+        };
+
+        let scan_started = Instant::now();
+        state.scan_blocking(true).unwrap();
+        let elapsed = scan_started.elapsed().as_secs_f64();
+        stop.store(true, Ordering::SeqCst);
+        observer.join().unwrap();
+
+        let summary = state.scan_summary().unwrap();
+        let seen = seen.lock().unwrap();
+        let phases = seen
+            .iter()
+            .map(|item| format!("{:?}@{:.2}s {}/{} eta={:?}", item.0, item.4, item.1, item.2, item.3))
+            .collect::<Vec<_>>();
+        eprintln!(
+            "PERF 10k cold import: {elapsed:.2}s files={} imported={} updated={} skipped={} failed={}",
+            summary.files, summary.imported, summary.updated, summary.skipped, summary.failed
+        );
+        eprintln!("PERF observed phases: {}", phases.join(" | "));
+        assert_eq!(summary.imported, 10_000);
+        assert_eq!(summary.failed, 0);
+        assert!(
+            seen.iter()
+                .any(|item| item.0 == ScanPhase::Hashing && item.3.is_some()),
+            "10k scan should expose at least one ETA while hashing"
+        );
+        drop(seen);
+        drop(state);
         std::fs::remove_dir_all(&base).unwrap();
     }
 
