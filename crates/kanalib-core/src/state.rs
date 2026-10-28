@@ -3,7 +3,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, Weak};
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, bail};
 use image::{ImageFormat, Rgb, RgbImage};
@@ -17,9 +17,9 @@ use crate::ffmpeg::{self, ThumbJob};
 use crate::media;
 use crate::model::{
     Asset, Collection, CountAccumulator, Filter, PendingCleanup, RetagSummary, SavedSearch,
-    SavedSearchView, ScanCounts, ScanFilterConfig, Shared, SourceScanStatus, TagCandidateReview,
-    TagHit, TagJobError, TagQueueStatus, TagRecomputeSummary, TagReviewState, TagSummary,
-    TagThresholds, normalize_tag_name,
+    SavedSearchView, ScanCounts, ScanFilterConfig, ScanPhase, ScanProgress, ScanSummary, Shared,
+    SourceScanStatus, TagCandidateReview, TagHit, TagJobError, TagQueueStatus, TagRecomputeSummary,
+    TagReviewState, TagSummary, TagThresholds, normalize_tag_name,
 };
 use crate::scan_filter::{self, ScanFilterPreview};
 use crate::sidecar::{Sidecar, project_root, repair_file};
@@ -418,7 +418,7 @@ impl AppState {
         let spawned = std::thread::Builder::new()
             .name("kanalib-indexer".into())
             .spawn(move || {
-                let result = scan_roots(&state, &roots, &flag, skip_tag);
+                let (summary, failure) = scan_roots(&state, &roots, &flag, skip_tag);
                 let root_strings = roots
                     .iter()
                     .map(|root| root.to_string_lossy().to_string())
@@ -433,34 +433,49 @@ impl AppState {
                         }
                     }
                 }
+                let suffix = scan_summary_suffix(&summary);
                 let mut shared = state.shared.lock().unwrap();
                 shared.refresh_dedup();
                 shared.set_queue_counts(queue.pending, queue.running, queue.error);
                 shared.scanning = false;
-                if let Err(error) = result {
+                shared.scan_summary = Some(summary.clone());
+                shared.scan_progress.done = summary.files;
+                shared.scan_progress.total = summary.files;
+                shared.scan_progress.current = None;
+                shared.scan_progress.throughput = 0.0;
+                shared.scan_progress.eta_secs = None;
+                shared.scan_progress.phase = if failure.is_some() {
+                    ScanPhase::Failed
+                } else {
+                    ScanPhase::Done
+                };
+                if let Some(error) = failure {
                     shared.error = Some(format!("{error:#}"));
                     shared.status = "索引失败".into();
-                } else if flag.load(Ordering::SeqCst) {
-                    shared.status = format!("已停止 · {} 张图片", shared.counts.total());
+                } else if summary.cancelled {
+                    shared.status = format!("已停止{suffix}");
                 } else if queue.pending > 0 {
                     shared.status = format!(
-                        "完成 · {} 张图片 · 队列 {} 张待处理 · {} 个来源",
+                        "完成 · {} 张图片 · 队列 {} 张待处理 · {} 个来源{}",
                         shared.counts.total(),
                         queue.pending,
-                        roots.len()
+                        roots.len(),
+                        suffix
                     );
                 } else if queue.error > 0 {
                     shared.status = format!(
-                        "完成 · {} 张图片 · {} 个失败待处理 · {} 个来源",
+                        "完成 · {} 张图片 · {} 个失败待处理 · {} 个来源{}",
                         shared.counts.total(),
                         queue.error,
-                        roots.len()
+                        roots.len(),
+                        suffix
                     );
                 } else {
                     shared.status = format!(
-                        "完成 · {} 张图片 · {} 个来源",
+                        "完成 · {} 张图片 · {} 个来源{}",
                         shared.counts.total(),
-                        roots.len()
+                        roots.len(),
+                        suffix
                     );
                 }
                 shared.revision = shared.revision.wrapping_add(1);
@@ -490,23 +505,57 @@ impl AppState {
             shared.status = "扫描中...".into();
         }
         let cancel = Arc::new(AtomicBool::new(false));
-        let result = scan_roots(self, &roots, &cancel, skip_tag);
+        let (summary, failure) = scan_roots(self, &roots, &cancel, skip_tag);
         {
             let mut shared = self.shared.lock().unwrap();
             shared.refresh_dedup();
             shared.scanning = false;
+            shared.scan_summary = Some(summary.clone());
+            shared.scan_progress.done = summary.files;
+            shared.scan_progress.total = summary.files;
+            shared.scan_progress.current = None;
+            shared.scan_progress.throughput = 0.0;
+            shared.scan_progress.eta_secs = None;
+            shared.scan_progress.phase = if failure.is_some() {
+                ScanPhase::Failed
+            } else {
+                ScanPhase::Done
+            };
+            if failure.is_none() {
+                shared.status = if summary.cancelled {
+                    format!("已停止{}", scan_summary_suffix(&summary))
+                } else {
+                    format!(
+                        "完成 · {} 张图片 · {} 个来源{}",
+                        shared.counts.total(),
+                        roots.len(),
+                        scan_summary_suffix(&summary)
+                    )
+                };
+            }
         }
-        if let Err(error) = &result {
+        if let Some(error) = failure {
             let mut shared = self.shared.lock().unwrap();
             shared.error = Some(format!("{error:#}"));
             shared.status = "索引失败".into();
+            return Err(error);
         }
-        result
+        Ok(())
     }
 
     /// 各来源最近扫描状态快照（按根目录排序，在线状态实时刷新）。
     pub fn source_statuses(&self) -> Vec<SourceScanStatus> {
         self.shared.lock().unwrap().refresh_source_statuses()
+    }
+
+    /// 当前扫描结构化进度快照；扫描结束后保留最后一帧（阶段 Done/Failed）。
+    pub fn scan_progress(&self) -> ScanProgress {
+        self.shared.lock().unwrap().scan_progress.clone()
+    }
+
+    /// 最近一次扫描结束后的结构化摘要；尚未扫描时为 None。
+    pub fn scan_summary(&self) -> Option<ScanSummary> {
+        self.shared.lock().unwrap().scan_summary.clone()
     }
 
     /// 读取来源排除规则；未配置时返回默认（包含隐藏文件、无排除 glob）。
@@ -648,21 +697,47 @@ impl AppState {
         shared.refresh_dedup();
         shared.set_queue_counts(queue.pending, queue.running, queue.error);
         shared.scanning = false;
+        let mut summary = ScanSummary::default();
         match &result {
-            Ok(_) => {
+            Ok(stats) => {
+                let cancelled = stats.cancelled;
+                summary.record(
+                    root,
+                    stats.scan_counts(),
+                    stats.total_secs,
+                    cancelled,
+                    None,
+                );
                 shared.status = format!(
-                    "来源扫描完成 · {} · {} 张图片",
+                    "来源扫描完成 · {} · {} 张图片{}",
                     root.file_name()
                         .map(|name| name.to_string_lossy().to_string())
                         .unwrap_or_else(|| root.display().to_string()),
-                    shared.counts.total()
+                    shared.counts.total(),
+                    scan_summary_suffix(&summary)
                 );
+                shared.scan_progress.phase = ScanPhase::Done;
             }
             Err(error) => {
+                summary.record(
+                    root,
+                    ScanCounts::default(),
+                    0.0,
+                    false,
+                    Some(format!("{error:#}")),
+                );
                 shared.error = Some(format!("{error:#}"));
                 shared.status = "来源扫描失败".into();
+                shared.scan_progress.phase = ScanPhase::Failed;
             }
         }
+        summary.elapsed_secs = summary.sources.iter().map(|item| item.elapsed_secs).sum();
+        summary.cancelled = summary.sources.iter().any(|item| item.cancelled);
+        shared.scan_summary = Some(summary);
+        shared.scan_progress.done = shared.scan_progress.total;
+        shared.scan_progress.current = None;
+        shared.scan_progress.throughput = 0.0;
+        shared.scan_progress.eta_secs = None;
         shared.revision = shared.revision.wrapping_add(1);
         let succeeded = result.is_ok();
         drop(shared);
@@ -734,7 +809,6 @@ impl AppState {
             &folder,
             path,
             RenamePolicy::MissingOnDisk,
-            None,
             None,
         )
     }
@@ -2279,6 +2353,7 @@ struct ScanStats {
     files: usize,
     imported: usize,
     unchanged: usize,
+    ignored: usize,
     updated: usize,
     removed: usize,
     metadata_errors: usize,
@@ -2317,6 +2392,7 @@ impl ScanStats {
             // `imported` 同时统计未变化文件，扣除后才是真正新增/迁入数。
             imported: self.imported.saturating_sub(self.unchanged),
             updated: self.updated,
+            skipped: self.unchanged + self.ignored,
             removed: self.removed,
             failed: self.failed(),
         }
@@ -2328,6 +2404,7 @@ fn log_scan_metrics(stats: &ScanStats) {
         "files": stats.files,
         "imported": stats.imported,
         "unchanged": stats.unchanged,
+        "ignored": stats.ignored,
         "updated": stats.updated,
         "removed": stats.removed,
         "metadata_errors": stats.metadata_errors,
@@ -2369,19 +2446,235 @@ fn log_scan_metrics(stats: &ScanStats) {
     }
 }
 
+/// 结构化扫描进度的最小刷新间隔；避免每文件写共享状态拖慢扫描。
+const SCAN_PROGRESS_INTERVAL: Duration = Duration::from_millis(200);
+
+fn source_label(root: &Path) -> String {
+    root.file_name()
+        .map(|name| name.to_string_lossy().to_string())
+        .unwrap_or_else(|| root.display().to_string())
+}
+
+fn eta_label(seconds: u64) -> String {
+    if seconds >= 120 {
+        format!("{:.1}min", seconds as f64 / 60.0)
+    } else {
+        format!("{seconds}s")
+    }
+}
+
+fn format_scan_status(progress: &ScanProgress) -> String {    let label = progress
+        .source
+        .as_deref()
+        .map(source_label)
+        .unwrap_or_else(|| "未知来源".to_string());
+    let mut status = if progress.source_total > 1 {
+        format!(
+            "扫描来源 {}/{} · {label}",
+            progress.source_index, progress.source_total
+        )
+    } else {
+        format!("扫描来源 · {label}")
+    };
+    match progress.phase {
+        ScanPhase::Idle => status.push_str(" · 空闲"),
+        ScanPhase::Discovering => status.push_str(" · 遍历中"),
+        ScanPhase::Hashing => {
+            status.push_str(&format!(" · 哈希 {}/{}", progress.done, progress.total));
+            if let Some(current) = &progress.current
+                && let Some(name) = current.file_name()
+            {
+                status.push_str(&format!(" · {}", name.to_string_lossy()));
+            }
+        }
+        ScanPhase::Thumbnails => {
+            status.push_str(&format!(
+                " · 缩略图 {}/{}",
+                progress.done, progress.total
+            ));
+        }
+        ScanPhase::Tagging => {
+            status.push_str(&format!(" · 打标 {}/{}", progress.done, progress.total));
+        }
+        ScanPhase::Reconciling => status.push_str(" · 对账中"),
+        ScanPhase::Done => status.push_str(" · 完成"),
+        ScanPhase::Failed => status.push_str(" · 失败"),
+    }
+    if progress.throughput > 0.0 {
+        status.push_str(&format!(" · {:.1}/s", progress.throughput));
+    }
+    if let Some(eta) = progress.eta_secs {
+        status.push_str(&format!(" · 剩余 {}", eta_label(eta)));
+    }
+    status
+}
+
+fn scan_summary_suffix(summary: &ScanSummary) -> String {
+    format!(
+        " · 新增 {} · 更新 {} · 跳过 {} · 失败 {} · {:.1}s",
+        summary.imported, summary.updated, summary.skipped, summary.failed, summary.elapsed_secs
+    )
+}
+
+/// 扫描进度写入器：阶段切换立即发布，逐文件推进按 [`SCAN_PROGRESS_INTERVAL`] 节流。
+struct ScanProgressReporter {
+    state: Arc<AppState>,
+    phase: ScanPhase,
+    done: usize,
+    total: usize,
+    current: Option<PathBuf>,
+    source: PathBuf,
+    source_index: usize,
+    source_total: usize,
+    phase_started: Instant,
+    last_publish: Instant,
+}
+
+impl ScanProgressReporter {
+    fn new(state: &Arc<AppState>, source: &Path, source_index: usize, source_total: usize) -> Self {
+        let now = Instant::now();
+        let mut reporter = Self {
+            state: state.clone(),
+            phase: ScanPhase::Idle,
+            done: 0,
+            total: 0,
+            current: None,
+            source: source.to_path_buf(),
+            source_index,
+            source_total,
+            phase_started: now,
+            last_publish: now,
+        };
+        reporter.set_phase(ScanPhase::Discovering, 0);
+        reporter
+    }
+
+    fn progress(&self) -> ScanProgress {
+        let elapsed = self.phase_started.elapsed().as_secs_f32().max(0.001);
+        let throughput = self.done as f32 / elapsed;
+        let remaining = self.total.saturating_sub(self.done);
+        let eta_secs = (self.total > 0 && remaining > 0 && throughput > 0.0)
+            .then(|| (remaining as f32 / throughput).ceil() as u64);
+        ScanProgress {
+            phase: self.phase,
+            done: self.done,
+            total: self.total,
+            current: self.current.clone(),
+            source: Some(self.source.clone()),
+            source_index: self.source_index,
+            source_total: self.source_total,
+            throughput,
+            eta_secs,
+        }
+    }
+
+    fn set_phase(&mut self, phase: ScanPhase, total: usize) {
+        self.phase = phase;
+        self.done = 0;
+        self.total = total;
+        self.current = None;
+        self.phase_started = Instant::now();
+        self.publish(true);
+    }
+
+    fn tick(&mut self, done: usize, current: Option<&Path>) {
+        self.done = done;
+        self.current = current.map(Path::to_path_buf);
+        self.publish(false);
+    }
+
+    fn snapshot(&mut self, done: usize) -> ScanProgress {
+        self.done = done;
+        self.current = None;
+        self.progress()
+    }
+
+    fn publish(&mut self, force: bool) {
+        if !force && self.last_publish.elapsed() < SCAN_PROGRESS_INTERVAL {
+            return;
+        }
+        self.last_publish = Instant::now();
+        let progress = self.progress();
+        let status = format_scan_status(&progress);
+        let mut shared = self.state.shared.lock().unwrap();
+        shared.scan_progress = progress;
+        shared.status = status;
+        shared.revision = shared.revision.wrapping_add(1);
+    }
+
+    /// 取消后保留已完成数量，清除 ETA，状态改为“已停止”。
+    fn cancelled(&mut self) {
+        self.current = None;
+        self.phase = ScanPhase::Done;
+        self.total = self.done;
+        self.phase_started = Instant::now();
+        let mut shared = self.state.shared.lock().unwrap();
+        shared.scan_progress = self.progress();
+        shared.scan_progress.eta_secs = None;
+        shared.status = "已停止".into();
+        shared.revision = shared.revision.wrapping_add(1);
+    }
+
+    fn failed(&mut self) {
+        self.current = None;
+        self.phase = ScanPhase::Failed;
+        self.phase_started = Instant::now();
+        let mut shared = self.state.shared.lock().unwrap();
+        shared.scan_progress = self.progress();
+        shared.scan_progress.eta_secs = None;
+        shared.status = "索引失败".into();
+        shared.revision = shared.revision.wrapping_add(1);
+    }
+
+    fn finished(&mut self, done: usize) {
+        self.done = done;
+        self.total = done;
+        self.current = None;
+        self.phase = ScanPhase::Done;
+        self.phase_started = Instant::now();
+        self.publish(true);
+    }
+}
+
 fn scan_roots(
     state: &Arc<AppState>,
     roots: &[PathBuf],
     cancel: &Arc<AtomicBool>,
     skip_tag: bool,
-) -> Result<()> {
+) -> (ScanSummary, Option<anyhow::Error>) {
+    let started = Instant::now();
+    let mut summary = ScanSummary::default();
+    let mut error = None;
     for (position, root) in roots.iter().enumerate() {
         if cancel.load(Ordering::SeqCst) {
             break;
         }
-        scan_one_root(state, root, cancel, skip_tag, position + 1, roots.len())?;
+        match scan_one_root(state, root, cancel, skip_tag, position + 1, roots.len()) {
+            Ok(stats) => summary.record(
+                root,
+                stats.scan_counts(),
+                stats.total_secs,
+                stats.cancelled || cancel.load(Ordering::SeqCst),
+                None,
+            ),
+            Err(failure) => {
+                let message = format!("{failure:#}");
+                summary.record(
+                    root,
+                    ScanCounts::default(),
+                    0.0,
+                    false,
+                    Some(message.clone()),
+                );
+                summary.failed += 1;
+                error = Some(failure);
+                break;
+            }
+        }
     }
-    Ok(())
+    summary.elapsed_secs = started.elapsed().as_secs_f64();
+    summary.cancelled |= cancel.load(Ordering::SeqCst);
+    (summary, error)
 }
 
 /// 扫描单个来源，并在结束后写回该来源的运行时状态。
@@ -2397,19 +2690,9 @@ fn scan_one_root(
         let mut shared = state.shared.lock().unwrap();
         shared.scanning = true;
         shared.status = if total > 1 {
-            format!(
-                "扫描来源 {position}/{total} · {}",
-                root.file_name()
-                    .map(|name| name.to_string_lossy().to_string())
-                    .unwrap_or_else(|| root.display().to_string())
-            )
+            format!("扫描来源 {position}/{total} · {}", source_label(root))
         } else {
-            format!(
-                "扫描来源 · {}",
-                root.file_name()
-                    .map(|name| name.to_string_lossy().to_string())
-                    .unwrap_or_else(|| root.display().to_string())
-            )
+            format!("扫描来源 · {}", source_label(root))
         };
         let online = root.is_dir();
         let status = shared.source_status_mut(root);
@@ -2422,10 +2705,21 @@ fn scan_one_root(
         }
         shared.revision = shared.revision.wrapping_add(1);
     }
-    let result = index(state, root, cancel, skip_tag);
+    let mut reporter = ScanProgressReporter::new(state, root, position, total);
+    let result = index(state, root, cancel, skip_tag, &mut reporter);
     match &result {
-        Ok(stats) => record_source_scan(state, root, stats, cancel),
-        Err(error) => record_source_error(state, root, format!("{error:#}")),
+        Ok(stats) => {
+            if stats.cancelled || cancel.load(Ordering::SeqCst) {
+                reporter.cancelled();
+            } else {
+                reporter.finished(stats.files);
+            }
+            record_source_scan(state, root, stats, cancel);
+        }
+        Err(error) => {
+            reporter.failed();
+            record_source_error(state, root, format!("{error:#}"));
+        }
     }
     result
 }
@@ -2486,10 +2780,11 @@ fn index(
     folder: &Path,
     cancel: &Arc<AtomicBool>,
     skip_tag: bool,
+    reporter: &mut ScanProgressReporter,
 ) -> Result<ScanStats> {
     let start = Instant::now();
     let mut stats = ScanStats::default();
-    let result = index_inner(state, folder, cancel, skip_tag, &mut stats);
+    let result = index_inner(state, folder, cancel, skip_tag, &mut stats, reporter);
     stats.total_secs = start.elapsed().as_secs_f64();
     log_scan_metrics(&stats);
     result.map(|()| stats)
@@ -2581,8 +2876,20 @@ fn prefetch_thumbnails(
             break;
         }
         if index % 1000 == 0 {
+            let elapsed = started.elapsed().as_secs_f32().max(0.001);
             let mut shared = state.shared.lock().unwrap();
-            shared.status = format!("检查缩略图 {}/{}", index + 1, files.len());
+            let mut progress = shared.scan_progress.clone();
+            progress.phase = ScanPhase::Thumbnails;
+            progress.done = index;
+            progress.total = files.len();
+            progress.current = Some(path.clone());
+            progress.throughput = index as f32 / elapsed;
+            progress.eta_secs = (index > 0 && files.len() > index).then(|| {
+                ((files.len() - index) as f32 / progress.throughput).ceil() as u64
+            });
+            shared.status = format_scan_status(&progress);
+            shared.scan_progress = progress;
+            shared.revision = shared.revision.wrapping_add(1);
         }
         let Ok(metadata) = std::fs::metadata(path) else {
             continue;
@@ -2620,8 +2927,20 @@ fn prefetch_thumbnails(
     }
     let total = jobs.len();
     let progress = |done: usize, total: usize| {
+        let elapsed = started.elapsed().as_secs_f32().max(0.001);
         let mut shared = state.shared.lock().unwrap();
-        shared.status = format!("预生成缩略图 {done}/{total}");
+        let mut progress = shared.scan_progress.clone();
+        progress.phase = ScanPhase::Thumbnails;
+        progress.done = done;
+        progress.total = total;
+        progress.current = None;
+        progress.throughput = done as f32 / elapsed;
+        progress.eta_secs = (done > 0 && total > done).then(|| {
+            ((total - done) as f32 / progress.throughput).ceil() as u64
+        });
+        shared.status = format_scan_status(&progress);
+        shared.scan_progress = progress;
+        shared.revision = shared.revision.wrapping_add(1);
     };
     let outcome = ffmpeg::generate_thumbnails(&jobs, cancel, &progress);
     stats.thumb_prefetch_generated = outcome.generated;
@@ -2651,6 +2970,7 @@ fn index_inner(
     cancel: &Arc<AtomicBool>,
     skip_tag: bool,
     stats: &mut ScanStats,
+    reporter: &mut ScanProgressReporter,
 ) -> Result<()> {
     let db = Db::open(&state.db_path)?;
     let folder_string = folder.to_string_lossy().to_string();
@@ -2677,11 +2997,17 @@ fn index_inner(
     stats.files = files.len();
     stats.walk_secs = walk_start.elapsed().as_secs_f64();
     stats.walk_complete = walk_complete;
-    {
-        let mut shared = state.shared.lock().unwrap();
-        shared.status = format!("发现 {} 张图片，生成缩略图...", files.len());
-    }
+    reporter.set_phase(ScanPhase::Thumbnails, files.len());
     let mut prefetched_exif = prefetch_thumbnails(state, &db, &files, cancel, stats);
+    if cancel.load(Ordering::SeqCst) {
+        stats.cancelled = true;
+        reporter.cancelled();
+        let mut shared = state.shared.lock().unwrap();
+        shared.scanning = false;
+        shared.revision = shared.revision.wrapping_add(1);
+        return Ok(());
+    }
+    reporter.set_phase(ScanPhase::Hashing, files.len());
 
     let rename_policy = if walk_complete {
         RenamePolicy::Scan(&files)
@@ -2694,9 +3020,10 @@ fn index_inner(
         if cancel.load(Ordering::SeqCst) {
             stats.cancelled = true;
             stats.import_secs = import_start.elapsed().as_secs_f64();
+            reporter.cancelled();
             let mut shared = state.shared.lock().unwrap();
-            shared.status = "已停止".into();
             shared.scanning = false;
+            shared.revision = shared.revision.wrapping_add(1);
             return Ok(());
         }
         let outcome = match index_file(
@@ -2706,13 +3033,13 @@ fn index_inner(
             &folder_string,
             path,
             rename_policy,
-            Some((index + 1, files.len())),
             prefetched_exif.remove(path),
         ) {
             Ok(outcome) => outcome,
             Err(error) => {
                 stats.metadata_errors += 1;
                 log::warn!("index {}: {error:#}", path.display());
+                reporter.tick(index + 1, Some(path));
                 continue;
             }
         };
@@ -2726,10 +3053,6 @@ fn index_inner(
             IndexedFile::Unchanged => {
                 stats.unchanged += 1;
                 stats.imported += 1;
-                if stats.unchanged % 500 == 0 {
-                    let mut shared = state.shared.lock().unwrap();
-                    shared.status = format!("校验 {}/{}", index + 1, files.len());
-                }
             }
             IndexedFile::Imported | IndexedFile::Renamed => stats.imported += 1,
             IndexedFile::Updated => {
@@ -2737,6 +3060,7 @@ fn index_inner(
                 stats.updated += 1;
             }
         }
+        reporter.tick(index + 1, Some(path));
         if stats.imported % 1000 == 0 {
             log::info!(
                 "index progress: imported={} unchanged={} elapsed={:.2}s hash={:.2}s thumb={:.2}s",
@@ -2749,6 +3073,7 @@ fn index_inner(
         }
     }
     stats.import_secs = import_start.elapsed().as_secs_f64();
+    reporter.set_phase(ScanPhase::Reconciling, 0);
 
     let folder_label = folder
         .file_name()
@@ -2944,6 +3269,7 @@ fn index_inner(
         cancel,
         stats,
         queue.pending,
+        Some(reporter),
     )?;
     Ok(())
 }
@@ -2988,13 +3314,8 @@ fn index_file(
     folder_string: &str,
     path: &Path,
     rename: RenamePolicy<'_>,
-    progress: Option<(usize, usize)>,
     prefetched_exif: Option<(media::ExifData, Option<u64>)>,
 ) -> Result<FileIndexOutcome> {
-    let name = path
-        .file_name()
-        .map(|name| name.to_string_lossy().to_string())
-        .unwrap_or_default();
     let metadata =
         std::fs::metadata(path).with_context(|| format!("读取文件信息 {}", path.display()))?;
     let bytes = metadata.len();
@@ -3043,13 +3364,6 @@ fn index_file(
             hashes
         }
         None => {
-            {
-                let mut shared = state.shared.lock().unwrap();
-                shared.status = match progress {
-                    Some((done, total)) => format!("哈希 {done}/{total} · {name}"),
-                    None => format!("监听 · 索引 {name}"),
-                };
-            }
             let started = Instant::now();
             let hashes = match media::hash_file(path) {
                 Ok(hashes) => {
@@ -3130,10 +3444,6 @@ fn index_file(
                     {
                         let mut shared = state.shared.lock().unwrap();
                         shared.move_asset(&old_path, asset);
-                        shared.status = match progress {
-                            Some((done, total)) => format!("已识别重命名 {done}/{total} · {name}"),
-                            None => format!("监听 · 已识别重命名 {name}"),
-                        };
                     }
                     log::info!(
                         "renamed asset: {} -> {}",
@@ -3174,14 +3484,6 @@ fn index_file(
     {
         let mut shared = state.shared.lock().unwrap();
         shared.upsert(asset);
-        shared.status = match progress {
-            Some((done, total)) => format!(
-                "缩略图 {done}/{total} · 已打标 {}/{}",
-                shared.counts.tagged_count(),
-                shared.counts.total()
-            ),
-            None => format!("监听 · 已索引 {name}"),
-        };
     }
     outcome.kind = if existed_before {
         IndexedFile::Updated
@@ -3199,8 +3501,12 @@ fn process_tag_queue(
     cancel: &Arc<AtomicBool>,
     stats: &mut ScanStats,
     total: usize,
+    mut reporter: Option<&mut ScanProgressReporter>,
 ) -> Result<()> {
     let tag_start = Instant::now();
+    if let Some(reporter) = reporter.as_deref_mut() {
+        reporter.set_phase(ScanPhase::Tagging, total);
+    }
     let mut done = 0usize;
     loop {
         if tag_queue_stopped(state, cancel) {
@@ -3226,6 +3532,9 @@ fn process_tag_queue(
                 total,
                 tag_start.elapsed().as_secs_f64(),
             );
+            if let Some(reporter) = reporter.as_deref_mut() {
+                shared.scan_progress = reporter.snapshot(done);
+            }
             shared.status = format!(
                 "打标中 {done}/{total} · 队列 {} · 失败 {}",
                 counts.pending, counts.error
@@ -3370,6 +3679,9 @@ fn process_tag_queue(
         total,
         tag_start.elapsed().as_secs_f64(),
     );
+    if let Some(reporter) = reporter.as_deref_mut() {
+        shared.scan_progress = reporter.snapshot(done);
+    }
     shared.sort_assets();
     shared.status = if cancel.load(Ordering::SeqCst) || shared.tag_status.cancelling {
         shared.tag_status.cancelling = false;
@@ -3484,7 +3796,16 @@ fn run_tag_worker(state: &Arc<AppState>) -> Result<()> {
         if pending == 0 {
             continue;
         }
-        process_tag_queue(state, &db, root, &mut sidecar, &cancel, &mut stats, pending)?;
+        process_tag_queue(
+            state,
+            &db,
+            root,
+            &mut sidecar,
+            &cancel,
+            &mut stats,
+            pending,
+            None,
+        )?;
     }
     Ok(())
 }
@@ -4149,6 +4470,103 @@ mod tests {
         assert!(lib.join("0.png").exists());
         assert!(lib.join("1.png").exists());
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn scan_summary_reports_imported_updated_and_skipped() {
+        let (base, lib, state) = test_state("scan-summary");
+        for index in 0..3u8 {
+            write_test_image(&lib.join(format!("{index}.png")), [index, 20, 30]);
+        }
+        state.scan_blocking(true).unwrap();
+
+        let summary = state.scan_summary().unwrap();
+        assert_eq!(summary.files, 3);
+        assert_eq!(summary.imported, 3);
+        assert_eq!(summary.updated, 0);
+        assert_eq!(summary.skipped, 0);
+        assert_eq!(summary.removed, 0);
+        assert_eq!(summary.failed, 0);
+        assert_eq!(summary.sources.len(), 1);
+        assert_eq!(summary.sources[0].root, lib);
+        assert!(summary.elapsed_secs >= 0.0);
+
+        let progress = state.scan_progress();
+        assert_eq!(progress.phase, ScanPhase::Done);
+        assert_eq!((progress.done, progress.total), (3, 3));
+        assert_eq!(progress.source.as_deref(), Some(lib.as_path()));
+        assert!(progress.eta_secs.is_none());
+
+        // 暖库重扫：全部计入“跳过”，且耗时与吞吐字段仍然可用。
+        state.scan_blocking(true).unwrap();
+        let summary = state.scan_summary().unwrap();
+        assert_eq!(summary.imported, 0);
+        assert_eq!(summary.updated, 0);
+        assert_eq!(summary.skipped, 3);
+        assert!(summary.elapsed_secs >= 0.0);
+        std::fs::remove_dir_all(&base).unwrap();
+    }
+
+    #[test]
+    fn scan_summary_keeps_each_source_separate() {
+        let (base, lib, state) = test_state("scan-summary-multi");
+        let second = base.join("lib2");
+        std::fs::create_dir_all(&second).unwrap();
+        write_test_image(&lib.join("a.png"), [1, 0, 0]);
+        write_test_image(&second.join("b.png"), [2, 0, 0]);
+        state.add_roots(vec![second.clone()]).unwrap();
+        state.scan_blocking(true).unwrap();
+
+        let summary = state.scan_summary().unwrap();
+        assert_eq!(summary.files, 2);
+        assert_eq!(summary.imported, 2);
+        assert_eq!(summary.sources.len(), 2);
+        assert!(
+            summary
+                .sources
+                .iter()
+                .any(|source| source.root == lib && source.counts.discovered == 1)
+        );
+        assert!(
+            summary
+                .sources
+                .iter()
+                .any(|source| source.root == second && source.counts.discovered == 1)
+        );
+        std::fs::remove_dir_all(&base).unwrap();
+    }
+
+    #[test]
+    fn scan_progress_reporter_throttles_updates_and_cancels_cleanly() {
+        let (base, lib, state) = test_state("scan-progress");
+        let mut reporter = ScanProgressReporter::new(&state, &lib, 2, 3);
+        let discovering = state.scan_progress();
+        assert_eq!(discovering.phase, ScanPhase::Discovering);
+        assert_eq!((discovering.source_index, discovering.source_total), (2, 3));
+
+        reporter.set_phase(ScanPhase::Hashing, 100);
+        let file = lib.join("a.png");
+        reporter.tick(1, Some(&file));
+        // 阶段切换刚发布过，同一节流窗口内的逐文件推进不应再次写共享状态。
+        assert_eq!(state.scan_progress().done, 0);
+        reporter.tick(2, None);
+        assert_eq!(state.scan_progress().done, 0);
+
+        std::thread::sleep(SCAN_PROGRESS_INTERVAL + Duration::from_millis(30));
+        reporter.tick(3, None);
+        let progress = state.scan_progress();
+        assert_eq!(progress.done, 3);
+        assert_eq!(progress.total, 100);
+        assert!(progress.eta_secs.is_some());
+
+        reporter.cancelled();
+        let progress = state.scan_progress();
+        assert_eq!(progress.phase, ScanPhase::Done);
+        assert!(progress.eta_secs.is_none());
+        assert_eq!(progress.current, None);
+        assert_eq!(state.shared.lock().unwrap().status, "已停止");
+        drop(reporter);
+        std::fs::remove_dir_all(&base).unwrap();
     }
 
     #[test]

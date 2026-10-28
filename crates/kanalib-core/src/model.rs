@@ -1320,6 +1320,10 @@ pub struct Shared {
     pub source_statuses: HashMap<PathBuf, SourceScanStatus>,
     /// 来源级扫描排除规则；键为绝对根目录，与 settings 的 `scan.filters` 同步。
     pub scan_filters: HashMap<PathBuf, ScanFilterConfig>,
+    /// 当前扫描的结构化进度；UI 只读。
+    pub scan_progress: ScanProgress,
+    /// 最近一次扫描结束后的结构化摘要。
+    pub scan_summary: Option<ScanSummary>,
     /// 磁盘上已缺失、等待用户确认是否从图库移除的批量记录。
     pub pending_cleanup: Option<PendingCleanup>,
 }
@@ -1381,6 +1385,8 @@ impl Shared {
             source_aliases: HashMap::new(),
             source_statuses,
             scan_filters: HashMap::new(),
+            scan_progress: ScanProgress::default(),
+            scan_summary: None,
             pending_cleanup: None,
         }
     }
@@ -1636,6 +1642,9 @@ pub struct ScanCounts {
     pub imported: usize,
     /// 更新（mtime/size 变化）数。
     pub updated: usize,
+    /// 未变化或命中忽略规则而跳过的文件数。
+    #[serde(default)]
+    pub skipped: usize,
     /// 磁盘缺失后从图库移除数。
     pub removed: usize,
     /// 读取/解码失败数。
@@ -1668,10 +1677,80 @@ pub struct ScanProgress {
     pub current: Option<PathBuf>,
     /// 当前来源根目录。
     pub source: Option<PathBuf>,
+    /// 当前来源在本次扫描中的序号（从 1 开始）。
+    #[serde(default)]
+    pub source_index: usize,
+    /// 本次扫描的来源总数。
+    #[serde(default)]
+    pub source_total: usize,
     /// 每秒处理文件数；无法估算时为 0。
     pub throughput: f32,
     /// 预计剩余秒数；无法估算时为 None。
     pub eta_secs: Option<u64>,
+}
+
+/// 单个来源在一次扫描结束后的结构化结果。
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ScanSourceSummary {
+    pub root: PathBuf,
+    pub counts: ScanCounts,
+    /// 该来源本次扫描耗时（秒）。
+    pub elapsed_secs: f64,
+    /// 是否因用户停止而提前结束。
+    pub cancelled: bool,
+    /// 该来源扫描错误；成功时为 None。
+    pub error: Option<String>,
+}
+
+/// 一次完整扫描（可能包含多个来源）结束后的结构化摘要。
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ScanSummary {
+    /// 遍历发现的图片文件数。
+    pub files: usize,
+    /// 新增入库数。
+    pub imported: usize,
+    /// 更新（mtime/size 变化）数。
+    pub updated: usize,
+    /// 未变化或命中忽略规则而跳过的文件数。
+    pub skipped: usize,
+    /// 磁盘缺失后从图库移除数。
+    pub removed: usize,
+    /// 读取/解码/打标失败数。
+    pub failed: usize,
+    /// 本次扫描总耗时（秒）。
+    pub elapsed_secs: f64,
+    /// 是否被用户停止。
+    pub cancelled: bool,
+    /// 按来源拆分的明细。
+    pub sources: Vec<ScanSourceSummary>,
+}
+
+impl ScanSummary {
+    /// 追加一个来源的扫描结果并累加总计。
+    pub fn record(
+        &mut self,
+        root: &Path,
+        counts: ScanCounts,
+        elapsed_secs: f64,
+        cancelled: bool,
+        error: Option<String>,
+    ) {
+        self.files += counts.discovered;
+        self.imported += counts.imported;
+        self.updated += counts.updated;
+        self.skipped += counts.skipped;
+        self.removed += counts.removed;
+        self.failed += counts.failed;
+        self.cancelled |= cancelled;
+        self.sources.push(ScanSourceSummary {
+            root: root.to_path_buf(),
+            counts,
+            elapsed_secs,
+            cancelled,
+            error,
+        });
+    }
 }
 
 /// 关键表在备份库中的行数。

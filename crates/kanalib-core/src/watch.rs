@@ -273,6 +273,7 @@ pub(crate) fn apply_watch_batch(
         discovered: batch.changed.len() + batch.missing.len(),
         imported,
         updated,
+        skipped: 0,
         removed,
         failed,
     };
