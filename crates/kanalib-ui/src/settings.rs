@@ -4,6 +4,7 @@ use crate::thumb_cache::CacheCleanup;
 use crate::format::*;
 use crate::platform::*;
 use crate::sidebar::source_label;
+use crate::status_bar::{format_scan_summary, scan_phase_label, scan_progress_counts};
 use crate::tags::group_reviews_by_asset;
 use crate::theme::*;
 
@@ -118,6 +119,18 @@ pub(crate) fn scan_filter_summary(filter: &ScanFilterConfig) -> String {
     )
 }
 
+/// 排除规则编辑器的大小输入：空串表示不限制，其余必须是整数字节数。
+pub(crate) fn parse_optional_bytes(text: &str, label: &str) -> Result<Option<u64>, String> {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+    trimmed
+        .parse::<u64>()
+        .map(Some)
+        .map_err(|_| format!("{label}必须是整数字节数（留空表示不限）"))
+}
+
 #[cfg(test)]
 mod tests {
 
@@ -166,6 +179,17 @@ mod tests {
         assert!(summary.contains("排除隐藏"));
         assert!(summary.contains("1.0 KB"));
         assert!(summary.contains("2.0 MB"));
+    }
+
+    #[test]
+    fn filter_size_input_accepts_empty_or_bytes() {
+        assert_eq!(super::parse_optional_bytes("  ", "最小大小").unwrap(), None);
+        assert_eq!(
+            super::parse_optional_bytes("2048", "最小大小").unwrap(),
+            Some(2048)
+        );
+        assert!(super::parse_optional_bytes("2MB", "最小大小").is_err());
+        assert!(super::parse_optional_bytes("-1", "最小大小").is_err());
     }
 
 }
@@ -2589,6 +2613,783 @@ impl KanalibApp {
                     .child("相似组不提供批量删除；受保护路径与只读来源不会被移入回收站。"),
             );
 
+        // ---- F-063：扫描进度与结束摘要（只读快照，底栏同步展示）。 ----
+        let scan_progress = self.state.scan_progress();
+        let scan_summary = self.state.scan_summary();
+        let scanning_now = self.state.shared.lock().unwrap().scanning;
+        let mut scan_rows = div().flex().flex_col().gap(px(4.));
+        scan_rows = scan_rows.child(info_row(
+            "当前状态",
+            if scanning_now {
+                format!(
+                    "扫描中 · {} · 吞吐 {} · ETA {}",
+                    scan_progress_counts(&scan_progress),
+                    if scan_progress.throughput > 0.0 {
+                        format!("{:.1} 张/秒", scan_progress.throughput)
+                    } else {
+                        "—".to_string()
+                    },
+                    crate::settings::format_tag_eta(scan_progress.eta_secs)
+                )
+            } else {
+                format!(
+                    "空闲 · 最近阶段 {}",
+                    scan_phase_label(scan_progress.phase)
+                )
+            },
+            if scanning_now {
+                colors.accent
+            } else {
+                colors.fg
+            },
+        ));
+        if scanning_now {
+            let source_text = scan_progress
+                .source
+                .as_ref()
+                .map(|source| {
+                    if scan_progress.source_total > 1 {
+                        format!(
+                            "{}/{} · {}",
+                            scan_progress.source_index,
+                            scan_progress.source_total,
+                            source_label(source, source_aliases)
+                        )
+                    } else {
+                        source_label(source, source_aliases)
+                    }
+                })
+                .unwrap_or_else(|| "—".to_string());
+            scan_rows = scan_rows.child(info_row("当前来源", source_text, colors.muted));
+            if let Some(current) = &scan_progress.current {
+                scan_rows = scan_rows.child(info_row(
+                    "当前文件",
+                    current
+                        .file_name()
+                        .map(|name| name.to_string_lossy().to_string())
+                        .unwrap_or_else(|| current.display().to_string()),
+                    colors.subtle,
+                ));
+            }
+        }
+        if let Some(summary) = scan_summary.as_ref() {
+            scan_rows = scan_rows.child(info_row(
+                "上次扫描",
+                format_scan_summary(summary, false),
+                if summary.failed > 0 {
+                    colors.warning
+                } else {
+                    colors.fg
+                },
+            ));
+            for source in summary.sources.iter().take(8) {
+                scan_rows = scan_rows.child(info_row(
+                    "来源",
+                    format!(
+                        "{} · 新增 {} · 更新 {} · 跳过 {} · 移除 {} · 失败 {} · {:.1}s{}{}",
+                        source_label(&source.root, source_aliases),
+                        source.counts.imported,
+                        source.counts.updated,
+                        source.counts.skipped,
+                        source.counts.removed,
+                        source.counts.failed,
+                        source.elapsed_secs,
+                        if source.cancelled { " · 已停止" } else { "" },
+                        source
+                            .error
+                            .as_ref()
+                            .map(|error| format!(" · {error}"))
+                            .unwrap_or_default()
+                    ),
+                    if source.error.is_some() {
+                        colors.danger
+                    } else {
+                        colors.muted
+                    },
+                ));
+            }
+            if summary.sources.len() > 8 {
+                scan_rows = scan_rows.child(
+                    div()
+                        .text_xs()
+                        .text_color(colors.subtle)
+                        .child(format!("另有 {} 个来源未展开", summary.sources.len() - 8)),
+                );
+            }
+        } else {
+            scan_rows = scan_rows.child(
+                div()
+                    .text_xs()
+                    .text_color(colors.subtle)
+                    .child("尚未完成扫描；结束后这里会显示新增/更新/跳过/移除/失败与耗时。"),
+            );
+        }
+        let scan_section = div()
+            .p(px(16.))
+            .rounded(px(10.))
+            .border_1()
+            .border_color(colors.border)
+            .bg(colors.surface)
+            .flex()
+            .flex_col()
+            .gap(px(6.))
+            .child(
+                div()
+                    .text_sm()
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .child("扫描进度与摘要"),
+            )
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(colors.muted)
+                    .child("进度由核心线按节流写入；底栏只读快照，刷新不会拖慢扫描。"),
+            )
+            .child(scan_rows);
+
+        // ---- F-032：来源排除/忽略规则编辑器 ----
+        let mut filter_rows = div().flex().flex_col().gap(px(8.));
+        if roots.is_empty() {
+            filter_rows = filter_rows.child(
+                div()
+                    .text_xs()
+                    .text_color(colors.subtle)
+                    .child("还没有来源；添加来源后才能配置排除规则。"),
+            );
+        }
+        for root in roots {
+            let is_open = self
+                .scan_filter_draft
+                .as_ref()
+                .is_some_and(|draft| &draft.root == root);
+            let summary = scan_filter_summary(&self.state.scan_filter(root));
+            let this_toggle = this.clone();
+            let root_toggle = root.clone();
+            filter_rows = filter_rows.child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .gap(px(8.))
+                    .px(px(10.))
+                    .py(px(6.))
+                    .rounded(px(6.))
+                    .bg(colors.sunken)
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w(px(0.))
+                            .flex()
+                            .flex_col()
+                            .gap(px(2.))
+                            .child(
+                                div()
+                                    .truncate()
+                                    .text_xs()
+                                    .text_color(colors.fg)
+                                    .child(source_label(root, source_aliases)),
+                            )
+                            .child(
+                                div()
+                                    .truncate()
+                                    .text_xs()
+                                    .text_color(colors.subtle)
+                                    .child(summary),
+                            ),
+                    )
+                    .child(
+                        Button::new(
+                            SharedString::from(format!(
+                                "edit-scan-filter-{}",
+                                root.display()
+                            )),
+                            if is_open { "收起" } else { "编辑排除规则" },
+                        )
+                        .size(ControlSize::Sm)
+                        .on_click(move |_, _, cx| {
+                            let _ = this_toggle.update(cx, |app, cx| {
+                                app.open_scan_filter_editor(root_toggle.clone(), cx);
+                            });
+                        }),
+                    ),
+            );
+            if !is_open {
+                continue;
+            }
+            let Some(draft) = self.scan_filter_draft.as_ref() else {
+                continue;
+            };
+            let globs = draft.config.exclude_globs.clone();
+            let include_hidden = draft.config.include_hidden;
+            let impact = draft.impact.clone();
+            let notice = draft.notice.clone();
+            let confirm_remove = draft.confirm_remove;
+            let excluded_count = impact.as_ref().map_or(0, |impact| impact.excluded.len());
+            let glob_field = window.use_keyed_state(
+                SharedString::from(format!("kanalib-filter-glob-{}", root.display())),
+                cx,
+                |window, cx| TextInput::new(window, cx).placeholder("排除 glob，如 **/cache/**"),
+            );
+            let min_initial = draft
+                .config
+                .min_bytes
+                .map(|value| value.to_string())
+                .unwrap_or_default();
+            let max_initial = draft
+                .config
+                .max_bytes
+                .map(|value| value.to_string())
+                .unwrap_or_default();
+            let min_holder = window.use_keyed_state(
+                SharedString::from(format!("kanalib-filter-min-{}", root.display())),
+                cx,
+                move |window, cx| {
+                    let input =
+                        cx.new(|cx| TextInput::new(window, cx).placeholder("最小字节，空=不限"));
+                    if !min_initial.is_empty() {
+                        input.update(cx, |input, cx| input.set_text(min_initial.clone(), cx));
+                    }
+                    input
+                },
+            );
+            let min_field = min_holder.read(cx).clone();
+            let max_holder = window.use_keyed_state(
+                SharedString::from(format!("kanalib-filter-max-{}", root.display())),
+                cx,
+                move |window, cx| {
+                    let input =
+                        cx.new(|cx| TextInput::new(window, cx).placeholder("最大字节，空=不限"));
+                    if !max_initial.is_empty() {
+                        input.update(cx, |input, cx| input.set_text(max_initial.clone(), cx));
+                    }
+                    input
+                },
+            );
+            let max_field = max_holder.read(cx).clone();
+            let ignore_field = window.use_keyed_state(
+                SharedString::from(format!("kanalib-ignore-glob-{}", root.display())),
+                cx,
+                |window, cx| TextInput::new(window, cx).placeholder("忽略 glob，如 *_tmp.png"),
+            );
+            let mut glob_chips = div()
+                .flex()
+                .flex_wrap()
+                .items_center()
+                .gap(px(6.));
+            if globs.is_empty() {
+                glob_chips = glob_chips.child(
+                    div()
+                        .text_xs()
+                        .text_color(colors.subtle)
+                        .child("还没有排除 glob"),
+                );
+            }
+            for (index, glob) in globs.iter().enumerate() {
+                let this_remove = this.clone();
+                glob_chips = glob_chips.child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(3.))
+                        .px(px(6.))
+                        .py(px(2.))
+                        .rounded(px(4.))
+                        .bg(colors.surface)
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(colors.fg)
+                                .child(glob.clone()),
+                        )
+                        .child(
+                            Button::new(
+                                SharedString::from(format!(
+                                    "filter-glob-remove-{}-{index}",
+                                    root.display()
+                                )),
+                                "×",
+                            )
+                            .size(ControlSize::Sm)
+                            .on_click(move |_, _, cx| {
+                                let _ = this_remove.update(cx, |app, cx| {
+                                    app.remove_scan_filter_glob(index, cx);
+                                });
+                            }),
+                        ),
+                );
+            }
+            let this_hidden = this.clone();
+            let this_add_glob = this.clone();
+            let this_preview = this.clone();
+            let this_keep = this.clone();
+            let this_remove_hits = this.clone();
+            let this_cancel = this.clone();
+            let this_add_ignore = this.clone();
+            let min_for_preview = min_field.clone();
+            let max_for_preview = max_field.clone();
+            let min_for_keep = min_field.clone();
+            let max_for_keep = max_field.clone();
+            let min_for_remove = min_field.clone();
+            let max_for_remove = max_field.clone();
+            let glob_for_add = glob_field.clone();
+            let glob_for_clear = glob_field.clone();
+            let ignore_for_add = ignore_field.clone();
+            let ignore_for_clear = ignore_field.clone();
+            let root_for_ignore = root.clone();
+            let impact_rows = impact.as_ref().map(|impact| {
+                let mut rows = div().flex().flex_col().gap(px(2.));
+                rows = rows.child(
+                    div()
+                        .text_xs()
+                        .text_color(colors.fg)
+                        .child(format!(
+                            "命中预览：已入库 {} 张 · 排除 {} 张 · 保留 {} 张",
+                            impact.indexed,
+                            impact.excluded.len(),
+                            impact.kept
+                        )),
+                );
+                for path in impact.excluded.iter().take(5) {
+                    rows = rows.child(
+                        div()
+                            .truncate()
+                            .text_xs()
+                            .text_color(colors.muted)
+                            .child(path.display().to_string()),
+                    );
+                }
+                if impact.excluded.len() > 5 {
+                    rows = rows.child(
+                        div()
+                            .text_xs()
+                            .text_color(colors.subtle)
+                            .child(format!("另有 {} 张未展开", impact.excluded.len() - 5)),
+                    );
+                }
+                rows
+            });
+            filter_rows = filter_rows.child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(6.))
+                    .px(px(10.))
+                    .py(px(8.))
+                    .rounded(px(6.))
+                    .border_1()
+                    .border_color(colors.border)
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(colors.muted)
+                            .child("草稿只影响下面的预览/保存；保存前不改动扫描配置。"),
+                    )
+                    .child(glob_chips)
+                    .child(
+                        div()
+                            .flex()
+                            .flex_wrap()
+                            .items_center()
+                            .gap(px(6.))
+                            .child(div().w(px(240.)).child(Input::new(&glob_field)))
+                            .child(
+                                Button::new("filter-glob-add", "添加 glob")
+                                    .size(ControlSize::Sm)
+                                    .on_click(move |_, _, cx| {
+                                        let text = glob_for_add.read(cx).text().to_string();
+                                        let _ = this_add_glob.update(cx, |app, cx| {
+                                            app.add_scan_filter_glob(&text, cx);
+                                        });
+                                        glob_for_clear
+                                            .update(cx, |input, cx| input.set_text("", cx));
+                                    }),
+                            )
+                            .child(
+                                Button::new(
+                                    "filter-hidden-toggle",
+                                    if include_hidden {
+                                        "隐藏文件：包含"
+                                    } else {
+                                        "隐藏文件：排除"
+                                    },
+                                )
+                                .size(ControlSize::Sm)
+                                .on_click(move |_, _, cx| {
+                                    let _ = this_hidden
+                                        .update(cx, |app, cx| app.toggle_scan_filter_hidden(cx));
+                                }),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .flex_wrap()
+                            .items_center()
+                            .gap(px(6.))
+                            .child(div().w(px(150.)).child(Input::new(&min_field)))
+                            .child(div().w(px(150.)).child(Input::new(&max_field)))
+                            .child(
+                                Button::new("filter-preview", "预览命中")
+                                    .size(ControlSize::Sm)
+                                    .icon(IconName::Eye)
+                                    .on_click(move |_, _, cx| {
+                                        let min = min_for_preview.read(cx).text().to_string();
+                                        let max = max_for_preview.read(cx).text().to_string();
+                                        let _ = this_preview.update(cx, |app, cx| {
+                                            app.preview_scan_filter_draft(&min, &max, cx);
+                                        });
+                                    }),
+                            )
+                            .child(
+                                Button::new("filter-save-keep", "保存 · 保留记录")
+                                    .size(ControlSize::Sm)
+                                    .on_click(move |_, _, cx| {
+                                        let min = min_for_keep.read(cx).text().to_string();
+                                        let max = max_for_keep.read(cx).text().to_string();
+                                        let _ = this_keep.update(cx, |app, cx| {
+                                            app.apply_scan_filter_draft(false, &min, &max, cx);
+                                        });
+                                    }),
+                            )
+                            .child(
+                                Button::new(
+                                    "filter-save-remove",
+                                    if confirm_remove {
+                                        format!("确认移出 {excluded_count} 张记录")
+                                    } else {
+                                        "保存 · 移出命中".to_string()
+                                    },
+                                )
+                                .size(ControlSize::Sm)
+                                .variant(ButtonVariant::Danger)
+                                .on_click(move |_, _, cx| {
+                                    let min = min_for_remove.read(cx).text().to_string();
+                                    let max = max_for_remove.read(cx).text().to_string();
+                                    let _ = this_remove_hits.update(cx, |app, cx| {
+                                        app.apply_scan_filter_draft(true, &min, &max, cx);
+                                    });
+                                }),
+                            )
+                            .child(
+                                Button::new("filter-editor-cancel", "取消")
+                                    .size(ControlSize::Sm)
+                                    .on_click(move |_, _, cx| {
+                                        let _ = this_cancel.update(cx, |app, cx| {
+                                            if app.scan_filter_draft.as_ref().is_some_and(|draft| {
+                                                draft.confirm_remove
+                                            }) {
+                                                app.cancel_scan_filter_remove(cx);
+                                            } else {
+                                                app.close_scan_filter_editor(cx);
+                                            }
+                                        });
+                                    }),
+                            ),
+                    )
+                    .children(impact_rows)
+                    .children(notice.map(|message| {
+                        div()
+                            .text_xs()
+                            .text_color(colors.accent)
+                            .child(message)
+                    }))
+                    .child(
+                        div()
+                            .flex()
+                            .flex_wrap()
+                            .items_center()
+                            .gap(px(6.))
+                            .child(
+                                div()
+                                    .w(px(240.))
+                                    .child(Input::new(&ignore_field).least("忽略 glob，如 *_tmp.png")),
+                            )
+                            .child(
+                                Button::new("ignore-glob-add", "加入忽略列表")
+                                    .size(ControlSize::Sm)
+                                    .on_click(move |_, _, cx| {
+                                        let text = ignore_for_add.read(cx).text().to_string();
+                                        let root = root_for_ignore.clone();
+                                        let _ = this_add_ignore.update(cx, |app, cx| {
+                                            app.add_ignored_glob(root, text, cx);
+                                        });
+                                        ignore_for_clear
+                                            .update(cx, |input, cx| input.set_text("", cx));
+                                    }),
+                            )
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(colors.subtle)
+                                    .child("忽略 glob 立即生效，可在下方「忽略列表」逐条恢复。"),
+                            ),
+                    ),
+            );
+        }
+        let filter_section = div()
+            .p(px(16.))
+            .rounded(px(10.))
+            .border_1()
+            .border_color(colors.border)
+            .bg(colors.surface)
+            .flex()
+            .flex_col()
+            .gap(px(8.))
+            .child(
+                div()
+                    .text_sm()
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .child("排除与忽略规则"),
+            )
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(colors.muted)
+                    .child("录入 glob 后先预览已入库命中，再选择保留记录或从图库移出；移出只删 DB，磁盘文件保留。"),
+            )
+            .child(filter_rows);
+
+        // ---- F-037：忽略列表查看与恢复 ----
+        let ignore_rules = self.state.ignore_rules();
+        let ignore_total = ignore_rules.paths.len()
+            + ignore_rules.sha1.len()
+            + ignore_rules.globs.values().map(Vec::len).sum::<usize>();
+        let mut ignore_rows = div().flex().flex_col().gap(px(4.));
+        if ignore_total == 0 {
+            ignore_rows = ignore_rows.child(
+                div()
+                    .text_xs()
+                    .text_color(colors.subtle)
+                    .child("忽略列表为空。移除资产或添加忽略 glob 后会出现在这里。"),
+            );
+        } else {
+            if !ignore_rules.paths.is_empty() {
+                ignore_rows = ignore_rows.child(
+                    div()
+                        .text_xs()
+                        .text_color(colors.fg)
+                        .child(format!("路径忽略 · {} 条", ignore_rules.paths.len())),
+                );
+                for (index, path) in ignore_rules.paths.iter().take(12).enumerate() {
+                    let this_restore = this.clone();
+                    let restore_path = PathBuf::from(path);
+                    ignore_rows = ignore_rows.child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .justify_between()
+                            .gap(px(8.))
+                            .px(px(8.))
+                            .py(px(3.))
+                            .rounded(px(4.))
+                            .bg(colors.sunken)
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w(px(0.))
+                                    .truncate()
+                                    .text_xs()
+                                    .text_color(colors.muted)
+                                    .child(path.clone()),
+                            )
+                            .child(
+                                Button::new(
+                                    SharedString::from(format!("restore-ignore-path-{index}")),
+                                    "恢复",
+                                )
+                                .size(ControlSize::Sm)
+                                .on_click(move |_, _, cx| {
+                                    let path = restore_path.clone();
+                                    let _ = this_restore.update(cx, |app, cx| {
+                                        app.restore_ignored_paths(vec![path], cx);
+                                    });
+                                }),
+                            ),
+                    );
+                }
+                if ignore_rules.paths.len() > 12 {
+                    ignore_rows = ignore_rows.child(
+                        div()
+                            .text_xs()
+                            .text_color(colors.subtle)
+                            .child(format!(
+                                "另有 {} 条路径未展开",
+                                ignore_rules.paths.len() - 12
+                            )),
+                    );
+                }
+            }
+            if !ignore_rules.sha1.is_empty() {
+                ignore_rows = ignore_rows.child(
+                    div()
+                        .text_xs()
+                        .text_color(colors.fg)
+                        .child(format!("内容哈希忽略 · {} 条", ignore_rules.sha1.len())),
+                );
+                for (index, hash) in ignore_rules.sha1.iter().take(8).enumerate() {
+                    let this_restore = this.clone();
+                    let restore_hash = hash.clone();
+                    let short = hash.chars().take(12).collect::<String>();
+                    ignore_rows = ignore_rows.child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .justify_between()
+                            .gap(px(8.))
+                            .px(px(8.))
+                            .py(px(3.))
+                            .rounded(px(4.))
+                            .bg(colors.sunken)
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w(px(0.))
+                                    .truncate()
+                                    .text_xs()
+                                    .text_color(colors.muted)
+                                    .child(format!("{short}…")),
+                            )
+                            .child(
+                                Button::new(
+                                    SharedString::from(format!("restore-ignore-hash-{index}")),
+                                    "恢复",
+                                )
+                                .size(ControlSize::Sm)
+                                .on_click(move |_, _, cx| {
+                                    let hash = restore_hash.clone();
+                                    let _ = this_restore.update(cx, |app, cx| {
+                                        app.restore_ignored_hashes(vec![hash], cx);
+                                    });
+                                }),
+                            ),
+                    );
+                }
+                if ignore_rules.sha1.len() > 8 {
+                    ignore_rows = ignore_rows.child(
+                        div()
+                            .text_xs()
+                            .text_color(colors.subtle)
+                            .child(format!(
+                                "另有 {} 条哈希未展开",
+                                ignore_rules.sha1.len() - 8
+                            )),
+                    );
+                }
+            }
+            for (root, globs) in &ignore_rules.globs {
+                let root_path = PathBuf::from(root);
+                ignore_rows = ignore_rows.child(
+                    div()
+                        .truncate()
+                        .text_xs()
+                        .text_color(colors.fg)
+                        .child(format!(
+                            "忽略 glob · {}（{} 条）",
+                            source_label(&root_path, source_aliases),
+                            globs.len()
+                        )),
+                );
+                for (index, glob) in globs.iter().take(12).enumerate() {
+                    let this_restore = this.clone();
+                    let restore_root = root_path.clone();
+                    let restore_glob = glob.clone();
+                    ignore_rows = ignore_rows.child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .justify_between()
+                            .gap(px(8.))
+                            .px(px(8.))
+                            .py(px(3.))
+                            .rounded(px(4.))
+                            .bg(colors.sunken)
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w(px(0.))
+                                    .truncate()
+                                    .text_xs()
+                                    .text_color(colors.muted)
+                                    .child(glob.clone()),
+                            )
+                            .child(
+                                Button::new(
+                                    SharedString::from(format!(
+                                        "restore-ignore-glob-{}-{index}",
+                                        root_path.display()
+                                    )),
+                                    "恢复",
+                                )
+                                .size(ControlSize::Sm)
+                                .on_click(move |_, _, cx| {
+                                    let root = restore_root.clone();
+                                    let glob = restore_glob.clone();
+                                    let _ = this_restore.update(cx, |app, cx| {
+                                        app.restore_ignored_glob(root, glob, cx);
+                                    });
+                                }),
+                            ),
+                    );
+                }
+                if globs.len() > 12 {
+                    ignore_rows = ignore_rows.child(
+                        div()
+                            .text_xs()
+                            .text_color(colors.subtle)
+                            .child(format!("另有 {} 条 glob 未展开", globs.len() - 12)),
+                    );
+                }
+            }
+            let this_restore_all = this.clone();
+            let this_rescan = this.clone();
+            ignore_rows = ignore_rows.child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(6.))
+                    .child(
+                        Button::new("restore-all-ignores", "全部恢复")
+                            .size(ControlSize::Sm)
+                            .on_click(move |_, _, cx| {
+                                let _ = this_restore_all
+                                    .update(cx, |app, cx| app.restore_all_ignores(cx));
+                            }),
+                    )
+                    .child(
+                        Button::new("ignores-rescan", "重新扫描图库")
+                            .size(ControlSize::Sm)
+                            .icon(IconName::RefreshCw)
+                            .on_click(move |_, _, cx| {
+                                let _ = this_rescan.update(cx, |app, cx| {
+                                    app.request_rescan(RescanOrigin::Library, cx)
+                                });
+                            }),
+                    ),
+            );
+        }
+        let ignore_section = div()
+            .p(px(16.))
+            .rounded(px(10.))
+            .border_1()
+            .border_color(colors.border)
+            .bg(colors.surface)
+            .flex()
+            .flex_col()
+            .gap(px(4.))
+            .child(
+                div()
+                    .text_sm()
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .child("忽略列表"),
+            )
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(colors.muted)
+                    .child("路径 / 内容哈希 / glob 三种粒度持久化在 settings JSON；恢复后需重扫才会重新导入，磁盘文件从未被删除。"),
+            )
+            .child(ignore_rows);
+
         let column_width = (width - page_padding * 2.).min(px(SETTINGS_MAX_WIDTH));
 
         div()
@@ -2658,7 +3459,10 @@ impl KanalibApp {
                             .child(diagnostics_section)
                             .child(safety_section)
                             .child(shortcut_section)
-                            .child(rules_section),
+                            .child(rules_section)
+                            .child(scan_section)
+                            .child(filter_section)
+                            .child(ignore_section),
                     ),
             )
             .into_any_element()

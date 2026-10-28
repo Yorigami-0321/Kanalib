@@ -1,6 +1,51 @@
 use crate::*;
 use crate::app::KanalibApp;
+use crate::settings::format_tag_eta;
+use crate::sidebar::source_label;
 use crate::theme::*;
+use kanalib_core::model::{ScanPhase, ScanProgress, ScanSummary};
+
+/// 扫描阶段的中文标签；底栏与设置页共用。
+pub(crate) fn scan_phase_label(phase: ScanPhase) -> &'static str {
+    match phase {
+        ScanPhase::Idle => "空闲",
+        ScanPhase::Discovering => "遍历",
+        ScanPhase::Hashing => "哈希",
+        ScanPhase::Thumbnails => "缩略图",
+        ScanPhase::Tagging => "打标",
+        ScanPhase::Reconciling => "对账",
+        ScanPhase::Done => "完成",
+        ScanPhase::Failed => "失败",
+    }
+}
+
+/// 当前扫描的快照地址（阶段 done/total）。
+pub(crate) fn scan_progress_counts(progress: &ScanProgress) -> String {
+    let phase = scan_phase_label(progress.phase);
+    if progress.total > 0 {
+        format!("{phase} {}/{}", progress.done, progress.total)
+    } else {
+        phase.to_string()
+    }
+}
+
+/// 扫描结束摘要的一行文本；`compact` 时只保留新增数，避免底栏被挤满。
+pub(crate) fn format_scan_summary(summary: &ScanSummary, compact: bool) -> String {
+    if compact {
+        return format!("上次扫描 · 新增 {}", summary.imported);
+    }
+    let cancelled = if summary.cancelled { " · 已停止" } else { "" };
+    format!(
+        "上次扫描 · 新增 {} · 更新 {} · 跳过 {} · 移除 {} · 失败 {} · {:.1}s{}",
+        summary.imported,
+        summary.updated,
+        summary.skipped,
+        summary.removed,
+        summary.failed,
+        summary.elapsed_secs,
+        cancelled
+    )
+}
 
 pub(crate) fn status_bar_item(
     id: &'static str,
@@ -52,6 +97,15 @@ impl KanalibApp {
     ) -> AnyElement {
         let compact = width < px(1100.);
         let library = self.screen == Screen::Library;
+        // 扫描进度是核心线写入的只读快照；底栏只读不写，节流由核心负责。
+        let (progress, summary, source_aliases) = {
+            let shared = self.state.shared.lock().unwrap();
+            (
+                shared.scan_progress.clone(),
+                shared.scan_summary.clone(),
+                shared.source_aliases.clone(),
+            )
+        };
         let mut left = div()
             .flex_1()
             .min_w(px(0.))
@@ -88,6 +142,59 @@ impl KanalibApp {
                     });
                 },
             ));
+            // F-063：阶段、done/total、吞吐、ETA 与当前来源都来自结构化进度快照。
+            left = left.child(
+                div()
+                    .px(px(6.))
+                    .text_xs()
+                    .text_color(colors.accent)
+                    .child(SharedString::from(scan_progress_counts(&progress))),
+            );
+            if progress.throughput > 0.0 && !compact {
+                left = left.child(
+                    div()
+                        .px(px(6.))
+                        .text_xs()
+                        .text_color(colors.muted)
+                        .child(SharedString::from(format!(
+                            "{:.1} 张/秒",
+                            progress.throughput
+                        ))),
+                );
+            }
+            if let Some(eta) = progress.eta_secs {
+                left = left.child(
+                    div()
+                        .px(px(6.))
+                        .text_xs()
+                        .text_color(colors.muted)
+                        .child(SharedString::from(format!(
+                            "剩余 {}",
+                            format_tag_eta(Some(eta))
+                        ))),
+                );
+            }
+            if let Some(source) = &progress.source {
+                let label = if progress.source_total > 1 {
+                    format!(
+                        "来源 {}/{} · {}",
+                        progress.source_index,
+                        progress.source_total,
+                        source_label(source, &source_aliases)
+                    )
+                } else {
+                    format!("来源 · {}", source_label(source, &source_aliases))
+                };
+                left = left.child(
+                    div()
+                        .max_w(px(if compact { 150. } else { 240. }))
+                        .truncate()
+                        .px(px(6.))
+                        .text_xs()
+                        .text_color(colors.subtle)
+                        .child(SharedString::from(label)),
+                );
+            }
         } else {
             left = left.child(
                 div()
@@ -98,6 +205,24 @@ impl KanalibApp {
                     .text_color(colors.muted)
                     .child(status.to_string()),
             );
+        }
+        if let Some(summary) = summary.as_ref().filter(|_| !scanning) {
+            // 扫描结束摘要（新增/更新/跳过/移除/失败/耗时）；点击进入设置页的进度区。
+            let this_summary = this.clone();
+            left = left.child(status_bar_item(
+                "status-scan-summary",
+                SharedString::from(format_scan_summary(summary, compact)),
+                if summary.failed > 0 {
+                    colors.warning
+                } else {
+                    colors.subtle
+                },
+                colors,
+                false,
+                move |_, _, cx| {
+                    let _ = this_summary.update(cx, |app, cx| app.open_settings(cx));
+                },
+            ));
         }
         if self.search_running {
             left = left.child(
@@ -251,10 +376,30 @@ impl KanalibApp {
             }));
         right = right.child(palette);
 
+        let progress_fraction = if scanning {
+            if progress.total > 0 {
+                (progress.done as f32 / progress.total as f32).clamp(0.0, 1.0)
+            } else {
+                0.0
+            }
+        } else {
+            0.0
+        };
+        let progress_line = (progress_fraction > 0.0).then(|| {
+            div()
+                .absolute()
+                .top(px(0.))
+                .left(px(0.))
+                .h(px(2.))
+                .w(px(width.as_f32() * progress_fraction))
+                .bg(colors.accent)
+        });
+
         div()
             .flex_none()
             .w_full()
             .h(px(STATUS_BAR_HEIGHT))
+            .relative()
             .px(px(8.))
             .flex()
             .items_center()
@@ -264,6 +409,7 @@ impl KanalibApp {
             .border_t_1()
             .border_color(colors.border)
             .text_xs()
+            .children(progress_line)
             .child(left)
             .child(right)
             .into_any_element()

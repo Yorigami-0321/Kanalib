@@ -1,6 +1,7 @@
 use crate::*;
 use crate::format::*;
 use crate::search::{SearchBundle, query_wants_duplicates};
+use crate::settings::parse_optional_bytes;
 use crate::sidebar::{
     SIDEBAR_DEFAULT_WIDTH, SIDEBAR_MAX_WIDTH, SIDEBAR_MIN_WIDTH, SIDEBAR_SECTIONS, source_label,
     source_menu,
@@ -11,6 +12,8 @@ use crate::thumb_cache::watch_enabled;
 use crate::theme::*;
 use crate::viewer::VIEWER_CONTEXT;
 use crate::views::{GRID_CONTEXT, grid_columns};
+use gpui::ExternalPaths;
+use kanalib_core::model::{ExcludedAssetAction, ScanFilterImpact, is_image};
 
 pub(crate) fn rating_rank(rating: &str) -> u64 {
     match rating.to_ascii_lowercase().as_str() {
@@ -179,6 +182,15 @@ pub struct KanalibApp {
     pub(crate) frame_probe: Option<FrameProbe>,
     #[cfg(feature = "frame-profiler")]
     pub(crate) probe_watch: Option<Task<()>>,
+    // ---- F-032 / F-036 / F-037（第三轮 G3）：全部加在结构体末尾，便于并行合并。 ----
+    /// 设置页正在编辑的来源排除规则草稿；保存前不影响扫描。
+    pub(crate) scan_filter_draft: Option<ScanFilterDraft>,
+    /// 「从图库移除」的二次确认；确认后只删 DB 记录。
+    pub(crate) remove_assets_confirm: Option<RemoveAssetsRequest>,
+    /// 拖拽导入待确认的路径（文件夹/来源外的图片父目录）。
+    pub(crate) drop_prompt: Option<DropPrompt>,
+    /// 外部文件拖拽进入窗口时的高亮遮罩；离开/释放后立即清除。
+    pub(crate) drop_highlight: bool,
 }
 
 impl Render for KanalibApp {
@@ -894,6 +906,19 @@ impl Render for KanalibApp {
                     Command::new("view:folder", "添加文件夹").icon(IconName::FolderOpen),
                 ],
             )
+            .group(
+                "图库运维",
+                [
+                    Command::new("library:remove-selected", "从图库移除选中（不删磁盘）")
+                        .icon(IconName::Trash2),
+                    Command::new(
+                        "library:remove-selected-hash",
+                        "从图库移除选中并忽略内容哈希",
+                    )
+                    .icon(IconName::Ban),
+                    Command::new("library:open-ignores", "查看忽略列表").icon(IconName::EyeOff),
+                ],
+            )
             .on_run(move |value, _, cx| {
                 let _ = run.update(cx, |app, cx| app.run_palette_command(value, cx));
             })
@@ -1225,6 +1250,117 @@ impl Render for KanalibApp {
             })
             .into_any_element()
         });
+        let remove_assets_dialog = self.remove_assets_confirm.clone().map(|request| {
+            let close = this.clone();
+            let confirm = this.clone();
+            let count = request.paths.len();
+            let hash_note = if request.remember_hash {
+                "\n\n同时忽略这些图片的内容哈希：同内容副本重扫时也不会重新导入。"
+            } else {
+                "\n\n同时忽略这些路径：重扫不会重新导入；可在设置页的忽略列表恢复。"
+            };
+            ConfirmDialog::new(
+                "remove-assets-dialog",
+                "从图库移除？",
+                format!(
+                    "将从图库移除 {count} 张图片。{hash_note}\n只删除图库记录，磁盘文件原样保留。"
+                ),
+                move |_, cx| {
+                    let _ = close.update(cx, |app, cx| {
+                        app.remove_assets_confirm = None;
+                        cx.notify();
+                    });
+                },
+            )
+            .confirm("从图库移除")
+            .destructive()
+            .on_confirm(move |_, cx| {
+                let _ = confirm.update(cx, |app, cx| app.confirm_remove_from_library(cx));
+            })
+            .into_any_element()
+        });
+        let drop_dialog = self.drop_prompt.clone().map(|prompt| {
+            let DropPrompt::AddSources { dirs, parents } = prompt;
+            let mut lines = Vec::new();
+            if !dirs.is_empty() {
+                lines.push(format!("添加 {} 个文件夹为来源：", dirs.len()));
+                for dir in dirs.iter().take(4) {
+                    lines.push(format!("· {}", dir.display()));
+                }
+                if dirs.len() > 4 {
+                    lines.push(format!("· …另有 {} 个", dirs.len() - 4));
+                }
+            }
+            if !parents.is_empty() {
+                if !lines.is_empty() {
+                    lines.push(String::new());
+                }
+                lines.push(format!(
+                    "为来源外的 {} 张图片添加所在文件夹：",
+                    parents.len()
+                ));
+                for path in parents.iter().take(4) {
+                    lines.push(format!("· {}", path.display()));
+                }
+                if parents.len() > 4 {
+                    lines.push(format!("· …另有 {} 个", parents.len() - 4));
+                }
+            }
+            lines.push(String::new());
+            lines.push("只建立索引，不复制、不移动磁盘文件。".to_string());
+            let close = this.clone();
+            let confirm = this.clone();
+            ConfirmDialog::new(
+                "drop-import-dialog",
+                "拖拽导入？",
+                lines.join("\n"),
+                move |_, cx| {
+                    let _ = close.update(cx, |app, cx| {
+                        app.drop_prompt = None;
+                        cx.notify();
+                    });
+                },
+            )
+            .confirm("添加为来源")
+            .on_confirm(move |_, cx| {
+                let _ = confirm.update(cx, |app, cx| app.confirm_drop_prompt(cx));
+            })
+            .into_any_element()
+        });
+        let drop_overlay = self.drop_highlight.then(|| {
+            div()
+                .absolute()
+                .top(px(0.))
+                .left(px(0.))
+                .size_full()
+                .bg(colors.accent.opacity(0.10))
+                .border_2()
+                .border_color(colors.accent)
+                .flex()
+                .flex_col()
+                .items_center()
+                .justify_center()
+                .gap(px(6.))
+                .child(
+                    Icon::new(IconName::FolderPlus)
+                        .size(IconSize::Lg)
+                        .color(colors.accent),
+                )
+                .child(
+                    div()
+                        .text_lg()
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(colors.fg)
+                        .child("松开以导入到图库"),
+                )
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(colors.muted)
+                        .child("文件夹 → 添加为来源 · 来源内的图片 → 定位选中 · 其他图片 → 询问父目录"),
+                )
+                .into_any_element()
+        });
         let source_context_menu = self.source_menu.as_ref().map(|state| {
             ContextMenu::new(
                 "source-context-global",
@@ -1290,6 +1426,9 @@ impl Render for KanalibApp {
             .children(source_rename_dialog)
             .children(source_context_menu)
             .children(cleanup_dialog)
+            .children(remove_assets_dialog)
+            .children(drop_dialog)
+            .children(drop_overlay)
             .child(ToastViewport::new("kanalib-toasts", &self.toaster))
             .on_action(cx.listener(|this, _: &OpenPalette, _, cx| {
                 if !this.palette_open && this.viewer_at.is_some() {
@@ -1343,7 +1482,38 @@ impl Render for KanalibApp {
             }))
             .on_action(cx.listener(|this, _: &ViewContent, _, cx| {
                 this.set_view_mode(ViewMode::Content, cx)
-            }));
+            }))
+            // F-036：外部文件拖拽。进入时显示遮罩，释放时按路径类型分流；
+            // 取消（Esc/离开窗口）只清除遮罩，不产生任何副作用。
+            .on_drop::<ExternalPaths>({
+                let this_drop = this.clone();
+                move |paths: &ExternalPaths, _, cx| {
+                    let paths = paths.paths().to_vec();
+                    let _ = this_drop.update(cx, |app, cx| app.handle_external_drop(paths, cx));
+                }
+            })
+            .on_drag_move::<ExternalPaths>({
+                let this_enter = this.clone();
+                move |_event, _, cx| {
+                    let _ = this_enter.update(cx, |app, cx| {
+                        if !app.drop_highlight {
+                            app.drop_highlight = true;
+                            cx.notify();
+                        }
+                    });
+                }
+            })
+            .on_file_drop_exit({
+                let this_exit = this.clone();
+                move |_event, _, cx| {
+                    let _ = this_exit.update(cx, |app, cx| {
+                        if app.drop_highlight {
+                            app.drop_highlight = false;
+                            cx.notify();
+                        }
+                    });
+                }
+            });
         if self.focus_viewer_pending && self.viewer_at.is_some() {
             window.focus(&self.viewer_focus, cx);
             self.focus_viewer_pending = false;
@@ -1694,6 +1864,11 @@ impl KanalibApp {
             frame_probe,
             #[cfg(feature = "frame-profiler")]
             probe_watch: None,
+            scan_filter_draft: None,
+            remove_assets_confirm: None,
+            drop_prompt: None,
+            // 仅供自动化截取拖拽高亮遮罩；正常启动保持关闭，真实拖拽仍走 on_drop。
+            drop_highlight: std::env::var_os("KANALIB_DROP_PREVIEW").is_some(),
         }
     }
 
@@ -2661,6 +2836,14 @@ impl KanalibApp {
             "sort:fav" => self.choose_sort_mode(SortMode::Favorite, cx),
             "sort:rating" => self.choose_sort_mode(SortMode::Rating, cx),
             "sort:toggle" => self.set_sort_ascending(!self.sort_ascending, cx),
+            // F-037：从图库移除（只删 DB）与忽略列表入口。
+            "library:remove-selected" => self.request_remove_from_library(false, cx),
+            "library:remove-selected-hash" => self.request_remove_from_library(true, cx),
+            "library:open-ignores" => {
+                self.open_settings(cx);
+                self.settings_notice = Some("忽略列表位于设置页底部「忽略列表」".to_string());
+                cx.notify();
+            }
             _ => {}
         }
         cx.notify();
@@ -3038,4 +3221,747 @@ impl KanalibApp {
         bar.into_any_element()
     }
 
+    // ---- F-036 拖拽导入 ----
+
+    /// 处理一次外部文件拖放：文件夹提示「添加为来源」，来源内图片定位选中，
+    /// 来源外图片询问是否添加父目录；非图片与重复来源只提示，不产生副作用。
+    pub(crate) fn handle_external_drop(
+        &mut self,
+        paths: Vec<PathBuf>,
+        cx: &mut Context<Self>,
+    ) {
+        self.drop_highlight = false;
+        if paths.is_empty() {
+            cx.notify();
+            return;
+        }
+        let roots = self.state.shared.lock().unwrap().roots.clone();
+        let mut dirs = Vec::new();
+        let mut locate = Vec::new();
+        let mut parents = Vec::new();
+        let mut existing = 0usize;
+        let mut unsupported = 0usize;
+        let mut seen = HashSet::new();
+        for path in paths {
+            let key = path_key(&path);
+            if !seen.insert(key) {
+                continue;
+            }
+            let is_dir = path.is_dir();
+            let image = is_image(&path);
+            match classify_drop_path(&path, is_dir, image, &roots) {
+                DropPathKind::NewSource => dirs.push(path),
+                DropPathKind::ExistingSource => existing += 1,
+                DropPathKind::Locate => locate.push(path),
+                DropPathKind::AskParent => parents.push(path),
+                DropPathKind::Unsupported => unsupported += 1,
+            }
+        }
+        if existing > 0 {
+            push_toast(
+                &self.toaster,
+                cx,
+                format!("{existing} 个路径已在图库来源中"),
+                Severity::Warning,
+            );
+        }
+        if unsupported > 0 {
+            push_toast(
+                &self.toaster,
+                cx,
+                format!("{unsupported} 个路径不是支持的图片格式"),
+                Severity::Warning,
+            );
+        }
+        if !dirs.is_empty() || !parents.is_empty() {
+            self.drop_prompt = Some(DropPrompt::AddSources { dirs, parents });
+        }
+        if !locate.is_empty() {
+            self.locate_dropped_paths(locate, cx);
+        }
+        cx.notify();
+    }
+
+    /// 拖拽询问的确认：添加文件夹/父目录为来源并开始扫描；取消时没有任何改动。
+    pub(crate) fn confirm_drop_prompt(&mut self, cx: &mut Context<Self>) {
+        let Some(prompt) = self.drop_prompt.take() else {
+            return;
+        };
+        let DropPrompt::AddSources { dirs, parents } = prompt;
+        let mut targets = dirs;
+        for path in parents {
+            if let Some(parent) = path.parent() {
+                targets.push(parent.to_path_buf());
+            }
+        }
+        targets.sort();
+        targets.dedup();
+        if targets.is_empty() {
+            cx.notify();
+            return;
+        }
+        match self.state.add_roots(targets) {
+            Ok(0) => push_toast(
+                &self.toaster,
+                cx,
+                "所选文件夹已在图库中",
+                Severity::Warning,
+            ),
+            Ok(added) => {
+                push_toast(
+                    &self.toaster,
+                    cx,
+                    format!("已添加 {added} 个来源并开始扫描"),
+                    Severity::Success,
+                );
+                if let Some(search) = &self.search_input {
+                    search.update(cx, |input, cx| input.set_text("", cx));
+                }
+                self.state.set_filter(Filter::All);
+                self.state.start_scan();
+                self.reset_search();
+                self.screen = Screen::Library;
+                self.dedup_selected = None;
+                self.dedup_confirm = None;
+                self.source_remove_confirm = None;
+                self.clear_multi_selection();
+                self.focus_grid_pending = true;
+                self.auto_select_pending = true;
+                self.grid_scroll.scroll_to_item(0, ScrollStrategy::Top);
+            }
+            Err(error) => {
+                self.state.set_error(format!("添加来源失败：{error:#}"));
+                push_toast(
+                    &self.toaster,
+                    cx,
+                    format!("添加来源失败：{error:#}"),
+                    Severity::Danger,
+                );
+            }
+        }
+        cx.notify();
+    }
+
+    /// 拖入来源内图片：清空搜索/筛选并选中这些图片，下一帧滚动到选中项。
+    pub(crate) fn locate_dropped_paths(
+        &mut self,
+        paths: Vec<PathBuf>,
+        cx: &mut Context<Self>,
+    ) {
+        if paths.is_empty() {
+            return;
+        }
+        self.screen = Screen::Library;
+        if let Some(search) = &self.search_input {
+            search.update(cx, |input, cx| input.set_text("", cx));
+        }
+        self.reset_search();
+        self.state.set_filter(Filter::All);
+        self.schedule_search(cx);
+        let found = {
+            let shared = self.state.shared.lock().unwrap();
+            let assets = shared.assets.read().unwrap();
+            paths
+                .iter()
+                .filter(|path| assets.iter().any(|asset| &asset.path == *path))
+                .cloned()
+                .collect::<Vec<_>>()
+        };
+        if found.is_empty() {
+            push_toast(
+                &self.toaster,
+                cx,
+                "图片尚未入库（可能已被忽略），请先重扫来源",
+                Severity::Warning,
+            );
+            cx.notify();
+            return;
+        }
+        let missing = paths.len().saturating_sub(found.len());
+        self.selection = Arc::new(found.iter().cloned().collect());
+        self.selection_anchor = found.first().cloned();
+        self.state.select(found.first().cloned());
+        self.auto_select_pending = false;
+        self.focus_grid_pending = true;
+        // 查询是防抖异步的：等结果刷新后再按可见位置滚动，避免用到旧索引。
+        let weak = cx.entity().downgrade();
+        cx.spawn(async move |_, cx| {
+            cx.background_executor()
+                .timer(Duration::from_millis(
+                    crate::search::SEARCH_DEBOUNCE_MS + 120,
+                ))
+                .await;
+            let _ = weak.update(cx, |app, cx| {
+                app.pending_scroll_position = Some(app.selected_visible_position());
+                cx.notify();
+            });
+        })
+        .detach();
+        push_toast(
+            &self.toaster,
+            cx,
+            format!("已定位 {} 张图片", found.len()),
+            Severity::Success,
+        );
+        if missing > 0 {
+            push_toast(
+                &self.toaster,
+                cx,
+                format!("另有 {missing} 张未入库（可能已被忽略）"),
+                Severity::Warning,
+            );
+        }
+        cx.notify();
+    }
+
+    // ---- F-037 从图库移除与忽略列表 ----
+
+    pub(crate) fn request_remove_from_library(
+        &mut self,
+        remember_hash: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let mut paths = self.selected_paths();
+        if paths.is_empty() {
+            push_toast(&self.toaster, cx, "先选择图片", Severity::Warning);
+            return;
+        }
+        paths.sort();
+        self.remove_assets_confirm = Some(RemoveAssetsRequest {
+            paths,
+            remember_hash,
+        });
+        cx.notify();
+    }
+
+    pub(crate) fn confirm_remove_from_library(&mut self, cx: &mut Context<Self>) {
+        let Some(request) = self.remove_assets_confirm.take() else {
+            return;
+        };
+        let result = if request.remember_hash {
+            self.state.remove_from_library_with_hash(&request.paths)
+        } else {
+            self.state.remove_from_library(&request.paths)
+        };
+        match result {
+            Ok(removed) => {
+                let current = self
+                    .viewer_at
+                    .and_then(|at| self.viewer_slides.get(at))
+                    .map(|(path, _)| path.clone());
+                if current.is_some_and(|path| request.paths.contains(&path)) {
+                    self.close_viewer(cx);
+                }
+                self.clear_multi_selection();
+                self.state.select(None);
+                self.auto_select_pending = true;
+                push_toast(
+                    &self.toaster,
+                    cx,
+                    format!("已从图库移除 {removed} 张 · 磁盘文件未删除"),
+                    Severity::Success,
+                );
+            }
+            Err(error) => {
+                self.state
+                    .set_error(format!("从图库移除失败：{error:#}"));
+                push_toast(
+                    &self.toaster,
+                    cx,
+                    format!("从图库移除失败：{error:#}"),
+                    Severity::Danger,
+                );
+            }
+        }
+        cx.notify();
+    }
+
+    // ---- F-032 排除/忽略规则编辑器 ----
+
+    pub(crate) fn open_scan_filter_editor(&mut self, root: PathBuf, cx: &mut Context<Self>) {
+        let same = self
+            .scan_filter_draft
+            .as_ref()
+            .is_some_and(|draft| draft.root == root);
+        self.scan_filter_draft = if same {
+            None
+        } else {
+            Some(ScanFilterDraft {
+                config: self.state.scan_filter(&root),
+                root,
+                impact: None,
+                notice: None,
+                confirm_remove: false,
+            })
+        };
+        cx.notify();
+    }
+
+    pub(crate) fn close_scan_filter_editor(&mut self, cx: &mut Context<Self>) {
+        self.scan_filter_draft = None;
+        cx.notify();
+    }
+
+    pub(crate) fn add_scan_filter_glob(&mut self, glob: &str, cx: &mut Context<Self>) {
+        let Some(draft) = self.scan_filter_draft.as_mut() else {
+            return;
+        };
+        let glob = glob.trim();
+        if glob.is_empty() {
+            draft.notice = Some("排除规则不能为空".to_string());
+        } else if draft.config.exclude_globs.iter().any(|item| item == glob) {
+            draft.notice = Some(format!("规则已存在：{glob}"));
+        } else {
+            draft.config.exclude_globs.push(glob.to_string());
+            draft.impact = None;
+            draft.confirm_remove = false;
+            draft.notice = Some("已加入草稿；点击「预览命中」由核心校验并统计。".to_string());
+        }
+        cx.notify();
+    }
+
+    pub(crate) fn remove_scan_filter_glob(&mut self, index: usize, cx: &mut Context<Self>) {
+        let Some(draft) = self.scan_filter_draft.as_mut() else {
+            return;
+        };
+        if index < draft.config.exclude_globs.len() {
+            draft.config.exclude_globs.remove(index);
+            draft.impact = None;
+            draft.confirm_remove = false;
+            draft.notice = Some("已从草稿移除该规则（尚未保存）".to_string());
+        }
+        cx.notify();
+    }
+
+    pub(crate) fn toggle_scan_filter_hidden(&mut self, cx: &mut Context<Self>) {
+        let Some(draft) = self.scan_filter_draft.as_mut() else {
+            return;
+        };
+        draft.config.include_hidden = !draft.config.include_hidden;
+        draft.impact = None;
+        draft.confirm_remove = false;
+        cx.notify();
+    }
+
+    /// 用核心的 `scan_filter_indexed_impact` 计算「已入库但会被排除」的资产。
+    pub(crate) fn preview_scan_filter_draft(
+        &mut self,
+        min_text: &str,
+        max_text: &str,
+        cx: &mut Context<Self>,
+    ) {
+        let Some((root, mut config)) = self.scan_filter_draft.as_ref().map(|draft| {
+            (draft.root.clone(), draft.config.clone())
+        }) else {
+            return;
+        };
+        match filter_limits(min_text, max_text) {
+            Ok((min, max)) => {
+                config.min_bytes = min;
+                config.max_bytes = max;
+            }
+            Err(message) => {
+                self.draft_notice(message);
+                cx.notify();
+                return;
+            }
+        }
+        let result = self.state.scan_filter_indexed_impact(&root, &config);
+        if let Some(draft) = self.scan_filter_draft.as_mut() {
+            draft.config = config;
+            draft.confirm_remove = false;
+            match result {
+                Ok(impact) => {
+                    draft.notice = Some(format!(
+                        "预览：已入库 {} 张 · 命中排除 {} 张 · 保留 {} 张（保存前不会生效）",
+                        impact.indexed,
+                        impact.excluded.len(),
+                        impact.kept
+                    ));
+                    draft.impact = Some(impact);
+                }
+                Err(error) => {
+                    draft.notice = Some(format!("规则无效：{error:#}"));
+                    draft.impact = None;
+                }
+            }
+        }
+        cx.notify();
+    }
+
+    /// 保存草稿。`remove` 首次点击只进入二次确认；再次点击才移出命中的 DB 记录。
+    pub(crate) fn apply_scan_filter_draft(
+        &mut self,
+        remove: bool,
+        min_text: &str,
+        max_text: &str,
+        cx: &mut Context<Self>,
+    ) {
+        let Some((root, mut config, confirmed)) = self.scan_filter_draft.as_ref().map(|draft| {
+            (draft.root.clone(), draft.config.clone(), draft.confirm_remove)
+        }) else {
+            return;
+        };
+        match filter_limits(min_text, max_text) {
+            Ok((min, max)) => {
+                config.min_bytes = min;
+                config.max_bytes = max;
+            }
+            Err(message) => {
+                self.draft_notice(message);
+                cx.notify();
+                return;
+            }
+        }
+        if remove && !confirmed {
+            // 先算影响面并展示确认文案，避免误点直接移出。
+            let impact = self.state.scan_filter_indexed_impact(&root, &config);
+            if let Some(draft) = self.scan_filter_draft.as_mut() {
+                draft.config = config;
+                match impact {
+                    Ok(impact) => {
+                        draft.notice = Some(format!(
+                            "确认从图库移出 {} 张记录？只删 DB，磁盘文件保留；再次点击「确认移出」执行。",
+                            impact.excluded.len()
+                        ));
+                        draft.impact = Some(impact);
+                        draft.confirm_remove = true;
+                    }
+                    Err(error) => {
+                        draft.notice = Some(format!("规则无效：{error:#}"));
+                        draft.impact = None;
+                        draft.confirm_remove = false;
+                    }
+                }
+            }
+            cx.notify();
+            return;
+        }
+        let action = if remove {
+            ExcludedAssetAction::RemoveFromLibrary
+        } else {
+            ExcludedAssetAction::Keep
+        };
+        match self.state.apply_scan_filter(&root, config.clone(), action) {
+            Ok(apply) => {
+                if let Some(draft) = self.scan_filter_draft.as_mut() {
+                    draft.config = config;
+                    draft.impact = Some(apply.impact.clone());
+                    draft.confirm_remove = false;
+                    draft.notice = Some(if remove {
+                        format!(
+                            "已保存规则并从图库移出 {} 张（磁盘文件未删除）；重扫后这些文件仍会被规则排除。",
+                            apply.removed
+                        )
+                    } else {
+                        format!(
+                            "已保存规则；已入库命中 {} 张保留记录，后续扫描会跳过。",
+                            apply.impact.excluded.len()
+                        )
+                    });
+                }
+                push_toast(
+                    &self.toaster,
+                    cx,
+                    if remove {
+                        format!("排除规则已保存 · 移出 {} 张记录", apply.removed)
+                    } else {
+                        "排除规则已保存 · 保留命中记录".to_string()
+                    },
+                    Severity::Success,
+                );
+            }
+            Err(error) => {
+                if let Some(draft) = self.scan_filter_draft.as_mut() {
+                    draft.notice = Some(format!("保存失败：{error:#}"));
+                    draft.confirm_remove = false;
+                }
+                push_toast(
+                    &self.toaster,
+                    cx,
+                    format!("保存排除规则失败：{error:#}"),
+                    Severity::Danger,
+                );
+            }
+        }
+        cx.notify();
+    }
+
+    pub(crate) fn cancel_scan_filter_remove(&mut self, cx: &mut Context<Self>) {
+        if let Some(draft) = self.scan_filter_draft.as_mut() {
+            draft.confirm_remove = false;
+            draft.notice = Some("已取消移出；规则仍可继续编辑".to_string());
+        }
+        cx.notify();
+    }
+
+    fn draft_notice(&mut self, message: String) {
+        if let Some(draft) = self.scan_filter_draft.as_mut() {
+            draft.notice = Some(message);
+        }
+    }
+
+    // ---- F-037 忽略列表 ----
+
+    pub(crate) fn add_ignored_glob(&mut self, root: PathBuf, pattern: String, cx: &mut Context<Self>) {
+        match self.state.add_ignored_glob(&root, &pattern) {
+            Ok(true) => {
+                let message = format!("已添加忽略规则 · {pattern}（只影响后续扫描，不删除文件）");
+                self.draft_notice(message.clone());
+                self.settings_notice = Some(message);
+                push_toast(&self.toaster, cx, "已添加忽略规则", Severity::Success);
+            }
+            Ok(false) => {
+                let message = format!("忽略规则已存在：{pattern}");
+                self.draft_notice(message.clone());
+                self.settings_notice = Some(message);
+            }
+            Err(error) => {
+                let message = format!("忽略规则无效：{error:#}");
+                self.draft_notice(message.clone());
+                self.settings_notice = Some(message);
+            }
+        }
+        cx.notify();
+    }
+
+    pub(crate) fn restore_ignored_paths(
+        &mut self,
+        paths: Vec<PathBuf>,
+        cx: &mut Context<Self>,
+    ) {
+        match self.state.restore_ignored_paths(&paths) {
+            Ok(restored) => {
+                let message = format!("已恢复 {restored} 条路径忽略项 · 重扫后重新导入");
+                self.settings_notice = Some(message.clone());
+                push_toast(&self.toaster, cx, message, Severity::Success);
+            }
+            Err(error) => {
+                self.settings_notice = Some(format!("恢复忽略路径失败：{error:#}"));
+            }
+        }
+        cx.notify();
+    }
+
+    pub(crate) fn restore_ignored_hashes(
+        &mut self,
+        hashes: Vec<String>,
+        cx: &mut Context<Self>,
+    ) {
+        match self.state.restore_ignored_hashes(&hashes) {
+            Ok(restored) => {
+                let message = format!("已恢复 {restored} 条哈希忽略项 · 重扫后重新导入");
+                self.settings_notice = Some(message.clone());
+                push_toast(&self.toaster, cx, message, Severity::Success);
+            }
+            Err(error) => {
+                self.settings_notice = Some(format!("恢复哈希忽略项失败：{error:#}"));
+            }
+        }
+        cx.notify();
+    }
+
+    pub(crate) fn restore_ignored_glob(
+        &mut self,
+        root: PathBuf,
+        pattern: String,
+        cx: &mut Context<Self>,
+    ) {
+        match self.state.restore_ignored_glob(&root, &pattern) {
+            Ok(true) => {
+                let message = format!("已恢复忽略规则 · {pattern} · 重扫后重新导入");
+                self.settings_notice = Some(message.clone());
+                push_toast(&self.toaster, cx, message, Severity::Success);
+            }
+            Ok(false) => {
+                self.settings_notice = Some(format!("忽略规则不存在：{pattern}"));
+            }
+            Err(error) => {
+                self.settings_notice = Some(format!("恢复忽略规则失败：{error:#}"));
+            }
+        }
+        cx.notify();
+    }
+
+    pub(crate) fn restore_all_ignores(&mut self, cx: &mut Context<Self>) {
+        let rules = self.state.ignore_rules();
+        let mut restored = 0usize;
+        if !rules.paths.is_empty() {
+            let paths = rules
+                .paths
+                .iter()
+                .map(PathBuf::from)
+                .collect::<Vec<_>>();
+            restored += self.state.restore_ignored_paths(&paths).unwrap_or(0);
+        }
+        if !rules.sha1.is_empty() {
+            restored += self.state.restore_ignored_hashes(&rules.sha1).unwrap_or(0);
+        }
+        for (root, globs) in &rules.globs {
+            for glob in globs {
+                if self
+                    .state
+                    .restore_ignored_glob(Path::new(root), glob)
+                    .unwrap_or(false)
+                {
+                    restored += 1;
+                }
+            }
+        }
+        let message = if restored > 0 {
+            format!("已恢复 {restored} 条忽略项 · 重扫后重新导入")
+        } else {
+            "忽略列表已经是空的".to_string()
+        };
+        self.settings_notice = Some(message.clone());
+        push_toast(&self.toaster, cx, message, Severity::Success);
+        cx.notify();
+    }
+}
+
+/// 设置页正在编辑的来源排除规则；保存前只影响草稿。
+#[derive(Clone)]
+pub(crate) struct ScanFilterDraft {
+    pub(crate) root: PathBuf,
+    pub(crate) config: ScanFilterConfig,
+    pub(crate) impact: Option<ScanFilterImpact>,
+    pub(crate) notice: Option<String>,
+    /// 第一次点击「移出命中」后置位；二次确认才真正执行。
+    pub(crate) confirm_remove: bool,
+}
+
+/// 「从图库移除」的待确认请求；只删 DB，不删磁盘。
+#[derive(Clone)]
+pub(crate) struct RemoveAssetsRequest {
+    pub(crate) paths: Vec<PathBuf>,
+    pub(crate) remember_hash: bool,
+}
+
+/// 拖拽导入待确认的内容；取消即丢弃，没有副作用。
+#[derive(Clone)]
+pub(crate) enum DropPrompt {
+    AddSources {
+        dirs: Vec<PathBuf>,
+        parents: Vec<PathBuf>,
+    },
+}
+
+/// 单个拖入路径的处理方式。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DropPathKind {
+    /// 新文件夹：询问是否添加为来源。
+    NewSource,
+    /// 已是来源或位于某个来源内：只提示，不重复添加。
+    ExistingSource,
+    /// 来源内的图片：定位选中。
+    Locate,
+    /// 来源外的图片：询问是否添加父目录为来源。
+    AskParent,
+    /// 非图片文件：忽略并提示。
+    Unsupported,
+}
+
+fn path_key(path: &Path) -> String {
+    path.to_string_lossy()
+        .replace('/', "\\")
+        .trim_end_matches('\\')
+        .to_ascii_lowercase()
+}
+
+/// `path` 是否位于 `root` 之下（大小写不敏感，按路径分隔符边界判断）。
+pub(crate) fn path_within(root: &Path, path: &Path) -> bool {
+    let root = path_key(root);
+    let path = path_key(path);
+    if root.is_empty() || path == root {
+        return false;
+    }
+    path.strip_prefix(&root)
+        .is_some_and(|rest| rest.starts_with('\\'))
+}
+
+fn classify_drop_path(
+    path: &Path,
+    is_dir: bool,
+    is_image: bool,
+    roots: &[PathBuf],
+) -> DropPathKind {
+    if is_dir {
+        let known = roots
+            .iter()
+            .any(|root| path_key(root) == path_key(path) || path_within(root, path));
+        if known {
+            DropPathKind::ExistingSource
+        } else {
+            DropPathKind::NewSource
+        }
+    } else if !is_image {
+        DropPathKind::Unsupported
+    } else if roots.iter().any(|root| path_within(root, path)) {
+        DropPathKind::Locate
+    } else {
+        DropPathKind::AskParent
+    }
+}
+
+/// 解析规则编辑器的最小/最大字节输入；空串表示不限制。
+fn filter_limits(min_text: &str, max_text: &str) -> Result<(Option<u64>, Option<u64>), String> {
+    let min = parse_optional_bytes(min_text, "最小大小")?;
+    let max = parse_optional_bytes(max_text, "最大大小")?;
+    if let (Some(min), Some(max)) = (min, max)
+        && min > max
+    {
+        return Err("最小大小不能大于最大大小".to_string());
+    }
+    Ok((min, max))
+}
+
+#[cfg(test)]
+mod drop_tests {
+    use super::{DropPathKind, classify_drop_path, path_within};
+    use std::path::{Path, PathBuf};
+
+    fn roots() -> Vec<PathBuf> {
+        vec![PathBuf::from(r"C:\Library")]
+    }
+
+    #[test]
+    fn path_within_respects_separator_and_case() {
+        let root = Path::new(r"C:\Library");
+        assert!(path_within(root, Path::new(r"c:\library\2026\a.png")));
+        assert!(!path_within(root, Path::new(r"C:\Library2\a.png")));
+        assert!(!path_within(root, Path::new(r"C:\Library")));
+        assert!(!path_within(root, Path::new(r"D:\Library\a.png")));
+    }
+
+    #[test]
+    fn folders_are_sources_or_already_known() {
+        assert_eq!(
+            classify_drop_path(Path::new(r"C:\New Pics"), true, false, &roots()),
+            DropPathKind::NewSource
+        );
+        assert_eq!(
+            classify_drop_path(Path::new(r"c:\library\sub"), true, false, &roots()),
+            DropPathKind::ExistingSource
+        );
+        assert_eq!(
+            classify_drop_path(Path::new(r"C:\Library"), true, false, &roots()),
+            DropPathKind::ExistingSource
+        );
+    }
+
+    #[test]
+    fn images_locate_inside_and_ask_parent_outside() {
+        assert_eq!(
+            classify_drop_path(Path::new(r"C:\Library\a.png"), false, true, &roots()),
+            DropPathKind::Locate
+        );
+        assert_eq!(
+            classify_drop_path(Path::new(r"D:\Elsewhere\a.png"), false, true, &roots()),
+            DropPathKind::AskParent
+        );
+        assert_eq!(
+            classify_drop_path(Path::new(r"C:\Library\notes.txt"), false, false, &roots()),
+            DropPathKind::Unsupported
+        );
+    }
 }
