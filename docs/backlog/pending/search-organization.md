@@ -36,16 +36,9 @@
 
 ## F-013 智能集合可编辑
 
-- **依据**：`PLAN.md` §8.1 智能集合；`SavedSearch` 原本只有 `name/filter/query`。
-- **已完成（第三轮核心，`6c461c2`，schema v9）**：`saved_searches` 增 9 列（`sort_key`/`sort_ascending`/`view_mode`/`pane_mode`/`show_sidebar`/`show_extensions`/`pinned`/`position`/`updated_at`）；新增 `SavedSearchView` 与 `create_saved_search`/`load_saved_search`/`rename_saved_search`/`update_saved_search`/`set_saved_search_pinned`/`reorder_saved_searches`；同名冲突返回 `DuplicateNameError`（`OrganizationKind` 区分集合/相册），旧行按默认视图读取。迁移前自动备份 `kanalib.db.bak-v8-<ts>`。
-- **剩余**：侧栏「智能集合」的编辑/用当前视图更新/重命名/置顶与拖动排序入口，以及应用集合时恢复排序/视图/窗格——属任务 G1，未做。
-- **验收（剩余）**：重命名后 ID 不变；应用集合恢复排序与视图；重启后顺序与置顶保持。
-- **依赖/风险**：`query_json` 保持向后兼容；UI 消费新增字段时注意空字符串语义是「沿用当前」而非缺失。
+> 第三轮已实现（schema v9 + 侧栏编辑入口），见 [implemented.md](../implemented.md)。
 
 ## F-014 手动相册/集合
 
-- **依据**：`PLAN.md` §5 的 `collections`/`collection_assets`；digiKam 的相册、Eagle 的文件夹。
-- **已完成（第三轮核心，`6c461c2`）**：`Collection` 结构与相册 CRUD（`create/rename/delete_collection`）、批量加入/移出（`add_assets_to_collection`/`remove_assets_from_collection`）、计数（`collection_asset_count`）、按相册列举（`collection_paths`/`load_collection_assets`）、反查所属相册（`asset_collections`）、导出路径清单（`export_collection_paths`，拒绝覆盖且不复制文件）；同一资产可属多个相册；删除相册只删关系；资产删除与来源移除级联清理关系行。
-- **剩余**：侧栏「相册」分区（新建/重命名/删除、加入/移出、计数与所属相册展示）——属任务 G1，未做。**侧栏现有分区 id `collections` 指智能集合**，新分区必须另起 id（如 `albums`）。
-- **验收（剩余）**：侧栏增删即时刷新计数；重启保留；不移动磁盘文件。
-- **依赖/风险**：与 F-013 的命名/排序交互；多选批量加入的 UI 入口。
+> 第三轮已实现（核心相册 CRUD + 侧栏 `albums` 分区），见 [implemented.md](../implemented.md)。
+
