@@ -13,7 +13,7 @@ use crate::theme::*;
 use crate::viewer::VIEWER_CONTEXT;
 use crate::views::{GRID_CONTEXT, grid_columns};
 use gpui::ExternalPaths;
-use kanalib_core::model::{ExcludedAssetAction, ScanFilterImpact, is_image};
+use kanalib_core::model::{ExcludedAssetAction, SavedSearchView, ScanFilterImpact, is_image};
 
 pub(crate) fn rating_rank(rating: &str) -> u64 {
     match rating.to_ascii_lowercase().as_str() {
@@ -191,6 +191,11 @@ pub struct KanalibApp {
     pub(crate) drop_prompt: Option<DropPrompt>,
     /// 外部文件拖拽进入窗口时的高亮遮罩；离开/释放后立即清除。
     pub(crate) drop_highlight: bool,
+    /// 组织对象（智能集合重命名 / 相册增删改）弹窗状态；见 `sidebar::render_org_dialog`。
+    pub(crate) org_dialog: Option<crate::sidebar::OrgDialog>,
+    pub(crate) org_dialog_epoch: u64,
+    /// 相册列表与归属缓存；侧栏/检查器只读，按 `shared.revision` 失效。
+    pub(crate) album_cache: std::cell::RefCell<crate::sidebar::AlbumCache>,
 }
 
 impl Render for KanalibApp {
@@ -919,6 +924,14 @@ impl Render for KanalibApp {
                     Command::new("library:open-ignores", "查看忽略列表").icon(IconName::EyeOff),
                 ],
             )
+            .group(
+                "组织",
+                [
+                    Command::new("org:new-album", "新建相册").icon(IconName::FolderPlus),
+                    Command::new("org:save-collection", "保存当前视图为智能集合")
+                        .icon(IconName::Plus),
+                ],
+            )
             .on_run(move |value, _, cx| {
                 let _ = run.update(cx, |app, cx| app.run_palette_command(value, cx));
             })
@@ -1370,6 +1383,8 @@ impl Render for KanalibApp {
             .child(div().size(px(0.)))
             .into_any_element()
         });
+        // 组织弹窗（智能集合重命名 / 相册增删改）：与其它弹窗一样挂在根节点。
+        let org_dialog = self.render_org_dialog(window, cx, &this);
         let titlebar = self.render_titlebar(
             &this,
             window,
@@ -1429,6 +1444,7 @@ impl Render for KanalibApp {
             .children(remove_assets_dialog)
             .children(drop_dialog)
             .children(drop_overlay)
+            .children(org_dialog)
             .child(ToastViewport::new("kanalib-toasts", &self.toaster))
             .on_action(cx.listener(|this, _: &OpenPalette, _, cx| {
                 if !this.palette_open && this.viewer_at.is_some() {
@@ -1544,6 +1560,195 @@ impl Render for KanalibApp {
         image_cache(self.thumb_cache.clone())
             .size_full()
             .child(shell)
+    }
+}
+
+impl KanalibApp {
+    /// 当前视图状态：保存/更新智能集合时一起落库。
+    pub(crate) fn current_saved_search_view(&self) -> SavedSearchView {
+        SavedSearchView {
+            sort_key: self.sort.key().to_string(),
+            sort_ascending: self.sort_ascending,
+            view_mode: self.view_mode.key().to_string(),
+            pane_mode: self.pane_mode.key().to_string(),
+            show_sidebar: self.show_sidebar,
+            show_extensions: self.show_extensions,
+        }
+    }
+
+    /// 应用智能集合：恢复筛选、搜索、排序、视图模式与窗格/侧栏开关。
+    ///
+    /// 旧集合（迁移前的行）`sort_key`/`view_mode`/`pane_mode` 为空字符串，语义是
+    /// 「沿用当前」，这里逐项判断，不做静默覆盖。
+    pub(crate) fn apply_saved_search_with_view(
+        &mut self,
+        saved: &SavedSearch,
+        search: &Entity<TextInput>,
+        cx: &mut Context<Self>,
+    ) {
+        search.update(cx, |input, cx| input.set_text(saved.query.clone(), cx));
+        self.state.set_filter(saved.filter.clone());
+        if let Some(mode) = SortMode::from_key(&saved.view.sort_key) {
+            self.sort = mode;
+            self.persist_setting("ui.sort", mode.key());
+        }
+        self.sort_ascending = saved.view.sort_ascending;
+        self.persist_setting("ui.sort_ascending", self.sort_ascending.to_string());
+        if let Some(mode) = ViewMode::from_key(&saved.view.view_mode) {
+            self.view_mode = mode;
+            self.persist_setting("ui.view_mode", mode.key());
+        }
+        if !saved.view.pane_mode.is_empty() {
+            let mode = PaneMode::from_key(&saved.view.pane_mode);
+            self.pane_mode = mode;
+            self.persist_setting("ui.pane_mode", mode.key());
+        }
+        self.show_sidebar = saved.view.show_sidebar;
+        self.persist_setting("ui.show_sidebar", self.show_sidebar.to_string());
+        self.show_extensions = saved.view.show_extensions;
+        self.persist_setting("ui.show_extensions", self.show_extensions.to_string());
+        self.screen = Screen::Library;
+        self.dedup_confirm = None;
+        self.clear_multi_selection();
+        self.focus_grid_pending = true;
+        self.auto_select_pending = true;
+        self.grid_scroll.scroll_to_item(0, ScrollStrategy::Top);
+        self.schedule_search(cx);
+        cx.notify();
+    }
+
+    /// 用当前筛选/搜索/排序/视图覆盖集合内容；集合 id 与名称不变。
+    pub(crate) fn update_saved_search_from_current(&mut self, id: i64, cx: &mut Context<Self>) {
+        let filter = self.state.shared.lock().unwrap().filter.clone();
+        let query = self.last_search.clone();
+        let view = self.current_saved_search_view();
+        match self.state.update_saved_search(id, &filter, &query, &view) {
+            Ok(saved) => push_toast(
+                &self.toaster,
+                cx,
+                format!(
+                    "已用当前视图更新「{}」（筛选/搜索/排序/视图/窗格）",
+                    saved.name
+                ),
+                Severity::Success,
+            ),
+            Err(error) => push_toast(
+                &self.toaster,
+                cx,
+                format!("更新智能集合失败：{error:#}"),
+                Severity::Danger,
+            ),
+        }
+        cx.notify();
+    }
+
+    pub(crate) fn toggle_saved_search_pin(&mut self, id: i64, cx: &mut Context<Self>) {
+        let pinned = self
+            .state
+            .shared
+            .lock()
+            .unwrap()
+            .saved_searches
+            .iter()
+            .find(|saved| saved.id == id)
+            .map(|saved| saved.pinned)
+            .unwrap_or(false);
+        match self.state.set_saved_search_pinned(id, !pinned) {
+            Ok(saved) => push_toast(
+                &self.toaster,
+                cx,
+                if saved.pinned {
+                    format!("已置顶「{}」，重启后保持", saved.name)
+                } else {
+                    format!("已取消置顶「{}」", saved.name)
+                },
+                Severity::Success,
+            ),
+            Err(error) => push_toast(
+                &self.toaster,
+                cx,
+                format!("置顶失败：{error:#}"),
+                Severity::Danger,
+            ),
+        }
+        cx.notify();
+    }
+
+    /// 上下移动智能集合；置顶组与普通组不互相跨越（先取消置顶再移动）。
+    pub(crate) fn move_saved_search(&mut self, id: i64, delta: isize, cx: &mut Context<Self>) {
+        let searches = self.state.shared.lock().unwrap().saved_searches.clone();
+        let Some(index) = searches.iter().position(|saved| saved.id == id) else {
+            return;
+        };
+        let target = index as isize + delta;
+        if target < 0 || target as usize >= searches.len() {
+            return;
+        }
+        let target = target as usize;
+        if searches[index].pinned != searches[target].pinned {
+            push_toast(
+                &self.toaster,
+                cx,
+                "置顶集合与普通集合不能互相跨越；先取消置顶再移动",
+                Severity::Warning,
+            );
+            return;
+        }
+        let mut ordered = searches.iter().map(|saved| saved.id).collect::<Vec<_>>();
+        ordered.swap(index, target);
+        match self.state.reorder_saved_searches(&ordered) {
+            Ok(()) => push_toast(&self.toaster, cx, "已调整智能集合顺序", Severity::Success),
+            Err(error) => push_toast(
+                &self.toaster,
+                cx,
+                format!("调整顺序失败：{error:#}"),
+                Severity::Danger,
+            ),
+        }
+        cx.notify();
+    }
+
+    /// 保存智能集合时同时记录排序/视图/窗格；同名冲突用核心的 `DuplicateNameError` 判定，
+    /// 弹窗保持打开，绝不静默覆盖。
+    pub(crate) fn confirm_save_search_with_view(&mut self, name: &str, cx: &mut Context<Self>) {
+        let filter = self.state.shared.lock().unwrap().filter.clone();
+        let query = self.last_search.clone();
+        let view = self.current_saved_search_view();
+        match self
+            .state
+            .save_saved_search_with_view(name, &filter, &query, &view)
+        {
+            Ok(saved) => {
+                self.save_search_open = false;
+                push_toast(
+                    &self.toaster,
+                    cx,
+                    format!("已保存智能集合「{}」", saved.name),
+                    Severity::Success,
+                );
+            }
+            Err(error) => {
+                if error
+                    .downcast_ref::<kanalib_core::model::DuplicateNameError>()
+                    .is_some()
+                {
+                    push_toast(
+                        &self.toaster,
+                        cx,
+                        crate::sidebar::duplicate_name_message(name),
+                        Severity::Warning,
+                    );
+                } else {
+                    push_toast(
+                        &self.toaster,
+                        cx,
+                        format!("保存失败：{error:#}"),
+                        Severity::Danger,
+                    );
+                }
+            }
+        }
+        cx.notify();
     }
 }
 
@@ -1869,6 +2074,9 @@ impl KanalibApp {
             drop_prompt: None,
             // 仅供自动化截取拖拽高亮遮罩；正常启动保持关闭，真实拖拽仍走 on_drop。
             drop_highlight: std::env::var_os("KANALIB_DROP_PREVIEW").is_some(),
+            org_dialog: None,
+            org_dialog_epoch: 0,
+            album_cache: std::cell::RefCell::new(crate::sidebar::AlbumCache::default()),
         }
     }
 
@@ -2842,6 +3050,14 @@ impl KanalibApp {
             "library:open-ignores" => {
                 self.open_settings(cx);
                 self.settings_notice = Some("忽略列表位于设置页底部「忽略列表」".to_string());
+                cx.notify();
+            }
+            "org:new-album" => {
+                self.open_org_dialog(crate::sidebar::OrgDialog::NewAlbum, cx);
+            }
+            "org:save-collection" => {
+                self.save_search_open = true;
+                self.focus_grid_pending = false;
                 cx.notify();
             }
             _ => {}

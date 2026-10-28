@@ -2,20 +2,69 @@ use crate::*;
 use crate::app::{KanalibApp, push_toast};
 use crate::platform::*;
 use crate::theme::*;
+use kanalib_core::model::{Collection, DuplicateNameError};
 
 pub(crate) const SIDEBAR_MIN_WIDTH: f32 = 200.;
 pub(crate) const SIDEBAR_MAX_WIDTH: f32 = 420.;
 pub(crate) const SIDEBAR_DEFAULT_WIDTH: f32 = 260.;
 
-pub(crate) const SIDEBAR_SECTIONS: [&str; 7] = [
+/// 侧栏分区 id。注意：`collections` 是「智能集合」（`saved_searches` 表），
+/// 手动相册用独立的 `albums`（`collections`/`collection_assets` 表），两者不可混用。
+pub(crate) const SIDEBAR_SECTIONS: [&str; 8] = [
     "sources",
     "filters",
     "collections",
+    "albums",
     "organize",
     "ratings",
     "groups",
     "tags",
 ];
+
+/// 组织对象的新建/重命名/删除弹窗；命名冲突由核心 `DuplicateNameError` 判定。
+#[derive(Clone, Debug)]
+pub(crate) enum OrgDialog {
+    RenameSavedSearch { id: i64, name: String },
+    NewAlbum,
+    RenameAlbum { id: i64, name: String },
+    DeleteAlbum {
+        id: i64,
+        name: String,
+        count: usize,
+    },
+}
+
+/// 相册列表与「资产属于哪些相册」的只读缓存。
+///
+/// 侧栏/检查器每帧渲染都读它，只在 `shared.revision` 变化（增删资产、增删相册关系、
+/// 重命名等）时才重新查库，避免每帧打开数据库。
+pub(crate) struct AlbumCache {
+    revision: u64,
+    albums: Vec<Collection>,
+    membership_revision: u64,
+    membership: HashMap<PathBuf, Vec<Collection>>,
+}
+
+impl Default for AlbumCache {
+    fn default() -> Self {
+        Self {
+            // `u64::MAX` 保证首帧就会加载一次。
+            revision: u64::MAX,
+            albums: Vec::new(),
+            membership_revision: u64::MAX,
+            membership: HashMap::new(),
+        }
+    }
+}
+
+pub(crate) fn canonicalize_org_name(name: &str) -> String {
+    name.trim().to_string()
+}
+
+/// 同名冲突提示统一文案；判定始终来自核心 `DuplicateNameError`，不看错误字符串。
+pub(crate) fn duplicate_name_message(name: &str) -> String {
+    format!("名称「{}」已被占用；未覆盖已有条目，请换一个名称", name.trim())
+}
 
 pub(crate) fn source_label(root: &Path, aliases: &HashMap<PathBuf, String>) -> String {
     aliases
@@ -723,10 +772,11 @@ impl KanalibApp {
                 .child(
                     IconButton::new("save-saved-search", IconName::Plus)
                         .size(ControlSize::Sm)
-                        .tooltip("保存当前视图")
+                        .tooltip("保存当前视图为智能集合")
                         .on_click(move |_, _, cx| {
                             let _ = this_save_search.update(cx, |app, cx| {
                                 app.save_search_open = true;
+                                app.focus_grid_pending = false;
                                 cx.notify();
                             });
                         }),
@@ -740,69 +790,55 @@ impl KanalibApp {
                         .pb(px(4.))
                         .text_xs()
                         .text_color(colors.subtle)
-                        .child("保存筛选与搜索，随时回来"),
+                        .child("保存筛选、搜索与排序，随时回来"),
                 );
             } else {
                 for saved in saved_searches {
-                let name = saved.name.clone();
-                let detail = if saved.query.is_empty() {
-                    saved.filter.label()
-                } else {
-                    format!("{} · {}", saved.filter.label(), saved.query)
-                };
-                let saved_for_apply = saved.clone();
-                let search_for_apply = search.clone();
-                let this_apply = this.clone();
-                let this_delete = this.clone();
-                let id = saved.id;
+                    body = body.child(self.saved_search_row(saved, search, this, colors));
+                }
+            }
+        }
+
+        // 手动相册：独立分区 id `albums`，与上面的智能集合（`collections`）是两套概念。
+        let albums = self.albums_snapshot();
+        let selected_count = self.selected_count();
+        let this_new_album = this.clone();
+        body = body.child(
+            div()
+                .flex()
+                .items_center()
+                .child(self.sidebar_section_header(
+                    "albums",
+                    "相册",
+                    Some(albums.len()),
+                    this,
+                    colors,
+                ))
+                .child(
+                    IconButton::new("new-album", IconName::FolderPlus)
+                        .size(ControlSize::Sm)
+                        .tooltip("新建相册")
+                        .on_click(move |_, _, cx| {
+                            let _ = this_new_album.update(cx, |app, cx| {
+                                app.open_org_dialog(OrgDialog::NewAlbum, cx);
+                            });
+                        }),
+                ),
+        );
+        if self.sidebar_section_open("albums") {
+            if albums.is_empty() {
                 body = body.child(
                     div()
-                        .id(SharedString::from(format!("saved-search-{id}")))
-                        .role(Role::Button)
-                        .aria_label(name.clone())
-                        .flex()
-                        .items_center()
-                        .gap(px(4.))
                         .px(px(8.))
-                        .py(px(4.))
-                        .rounded(px(6.))
-                        .cursor_pointer()
-                        .hover(move |style| style.bg(colors.hover))
-                        .on_click(move |_, _, cx| {
-                            let _ = this_apply.update(cx, |app, cx| {
-                                app.apply_saved_search(&saved_for_apply, &search_for_apply, cx)
-                            });
-                        })
-                        .child(
-                            div()
-                                .flex_1()
-                                .min_w(px(0.))
-                                .flex()
-                                .flex_col()
-                                .child(div().truncate().text_xs().text_color(colors.fg).child(name))
-                                .child(
-                                    div()
-                                        .truncate()
-                                        .text_xs()
-                                        .text_color(colors.subtle)
-                                        .child(detail),
-                                ),
-                        )
-                        .child(
-                            IconButton::new(
-                                SharedString::from(format!("delete-saved-search-{id}")),
-                                IconName::X,
-                            )
-                            .size(ControlSize::Sm)
-                            .tooltip("删除智能集合")
-                            .on_click(move |_, _, cx| {
-                                cx.stop_propagation();
-                                let _ = this_delete
-                                    .update(cx, |app, cx| app.delete_saved_search(id, cx));
-                            }),
-                        ),
+                        .pb(px(4.))
+                        .text_xs()
+                        .text_color(colors.subtle)
+                        .child("新建相册把选中图片归档，不移动磁盘文件"),
                 );
-            }
+            } else {
+                for album in &albums {
+                    body = body.child(self.album_row(album, selected_count, this, colors));
+                }
             }
         }
 
@@ -1337,4 +1373,702 @@ impl KanalibApp {
             .child(panel)
     }
 
+    /// 当前选中数量；智能集合/相册的批量菜单用来显示将要作用的张数。
+    pub(crate) fn selected_count(&self) -> usize {
+        if !self.selection.is_empty() {
+            return self.selection.len();
+        }
+        usize::from(self.state.shared.lock().unwrap().selected.is_some())
+    }
+
+    /// 相册列表快照：只在 `shared.revision` 变化时重查，避免每帧打开数据库。
+    pub(crate) fn albums_snapshot(&self) -> Vec<Collection> {
+        let revision = self.state.shared.lock().unwrap().revision;
+        let mut cache = self.album_cache.borrow_mut();
+        if cache.revision != revision {
+            cache.revision = revision;
+            match self.state.collections() {
+                Ok(albums) => cache.albums = albums,
+                Err(error) => log::warn!("load albums: {error:#}"),
+            }
+        }
+        cache.albums.clone()
+    }
+
+    /// 某资产所属的相册（含计数）；同样按 revision 失效。
+    pub(crate) fn asset_album_names(&self, path: &Path) -> Vec<Collection> {
+        let revision = self.state.shared.lock().unwrap().revision;
+        let mut cache = self.album_cache.borrow_mut();
+        if cache.membership_revision != revision {
+            cache.membership_revision = revision;
+            cache.membership.clear();
+        }
+        if let Some(found) = cache.membership.get(path) {
+            return found.clone();
+        }
+        let found = match self.state.asset_collections(path) {
+            Ok(found) => found,
+            Err(error) => {
+                log::warn!("load asset albums: {error:#}");
+                Vec::new()
+            }
+        };
+        cache.membership.insert(path.to_path_buf(), found.clone());
+        found
+    }
+
+    pub(crate) fn open_org_dialog(&mut self, dialog: OrgDialog, cx: &mut Context<Self>) {
+        self.org_dialog = Some(dialog);
+        self.org_dialog_epoch = self.org_dialog_epoch.wrapping_add(1);
+        self.focus_grid_pending = false;
+        cx.notify();
+    }
+
+    /// 智能集合行：点击名称应用集合（恢复筛选/搜索/排序/视图/窗格）；菜单提供更新、
+    /// 重命名、置顶、上下移动与删除。
+    fn saved_search_row(
+        &self,
+        saved: &SavedSearch,
+        search: &Entity<TextInput>,
+        this: &Entity<Self>,
+        colors: UiColors,
+    ) -> AnyElement {
+        let id = saved.id;
+        let name = saved.name.clone();
+        let pinned = saved.pinned;
+        let detail = if saved.query.is_empty() {
+            saved.filter.label()
+        } else {
+            format!("{} · {}", saved.filter.label(), saved.query)
+        };
+        let saved_for_apply = saved.clone();
+        let search_for_apply = search.clone();
+        let this_apply = this.clone();
+
+        let menu_update = this.clone();
+        let menu_rename = this.clone();
+        let menu_pin = this.clone();
+        let menu_up = this.clone();
+        let menu_down = this.clone();
+        let menu_delete = this.clone();
+        let rename_name = name.clone();
+        let menu = Menu::new()
+            .item(
+                MenuItem::new("用当前视图更新")
+                    .icon(IconName::RefreshCw)
+                    .on_click(move |_, cx| {
+                        let _ = menu_update.update(cx, |app, cx| {
+                            app.update_saved_search_from_current(id, cx);
+                        });
+                    }),
+            )
+            .item(
+                MenuItem::new("重命名…")
+                    .icon(IconName::Pencil)
+                    .on_click(move |_, cx| {
+                        let dialog = OrgDialog::RenameSavedSearch {
+                            id,
+                            name: rename_name.clone(),
+                        };
+                        let _ = menu_rename
+                            .update(cx, |app, cx| app.open_org_dialog(dialog, cx));
+                    }),
+            )
+            .item(
+                MenuItem::new(if pinned { "取消置顶" } else { "置顶" })
+                    .icon(IconName::Pin)
+                    .on_click(move |_, cx| {
+                        let _ = menu_pin.update(cx, |app, cx| {
+                            app.toggle_saved_search_pin(id, cx);
+                        });
+                    }),
+            )
+            .separator()
+            .item(
+                MenuItem::new("上移")
+                    .icon(IconName::ArrowUp)
+                    .on_click(move |_, cx| {
+                        let _ = menu_up.update(cx, |app, cx| {
+                            app.move_saved_search(id, -1, cx);
+                        });
+                    }),
+            )
+            .item(
+                MenuItem::new("下移")
+                    .icon(IconName::ArrowDown)
+                    .on_click(move |_, cx| {
+                        let _ = menu_down.update(cx, |app, cx| {
+                            app.move_saved_search(id, 1, cx);
+                        });
+                    }),
+            )
+            .separator()
+            .item(
+                MenuItem::new("删除")
+                    .icon(IconName::Trash2)
+                    .on_click(move |_, cx| {
+                        let _ = menu_delete.update(cx, |app, cx| {
+                            app.delete_saved_search(id, cx);
+                        });
+                    }),
+            );
+
+        div()
+            .id(SharedString::from(format!("saved-search-row-{id}")))
+            .flex()
+            .items_center()
+            .gap(px(2.))
+            .px(px(4.))
+            .py(px(2.))
+            .rounded(px(6.))
+            .hover(move |style| style.bg(colors.hover))
+            .child(
+                div()
+                    .id(SharedString::from(format!("saved-search-{id}")))
+                    .role(Role::Button)
+                    .aria_label(name.clone())
+                    .flex_1()
+                    .min_w(px(0.))
+                    .flex()
+                    .items_center()
+                    .gap(px(4.))
+                    .px(px(4.))
+                    .py(px(2.))
+                    .rounded(px(4.))
+                    .cursor_pointer()
+                    .on_click(move |_, _, cx| {
+                        let _ = this_apply.update(cx, |app, cx| {
+                            app.apply_saved_search(&saved_for_apply, &search_for_apply, cx)
+                        });
+                    })
+                    .children(pinned.then(|| {
+                        Icon::new(IconName::Pin)
+                            .size(IconSize::Xs)
+                            .color(colors.accent)
+                    }))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w(px(0.))
+                            .flex()
+                            .flex_col()
+                            .child(div().truncate().text_xs().text_color(colors.fg).child(name))
+                            .child(
+                                div()
+                                    .truncate()
+                                    .text_xs()
+                                    .text_color(colors.subtle)
+                                    .child(detail),
+                            ),
+                    ),
+            )
+            .child(
+                OverflowMenu::new(
+                    SharedString::from(format!("saved-search-menu-{id}")),
+                    menu,
+                )
+                .tooltip("管理智能集合"),
+            )
+            .into_any_element()
+    }
+
+    /// 相册行：显示名称与计数；菜单提供加入/移出选中、重命名与删除。
+    fn album_row(
+        &self,
+        album: &Collection,
+        selected_count: usize,
+        this: &Entity<Self>,
+        colors: UiColors,
+    ) -> AnyElement {
+        let id = album.id;
+        let name = album.name.clone();
+        let count = album.asset_count;
+        let add = this.clone();
+        let remove = this.clone();
+        let rename = this.clone();
+        let delete = this.clone();
+        let rename_name = name.clone();
+        let delete_name = name.clone();
+        let menu = Menu::new()
+            .item(
+                MenuItem::new(format!("把选中加入（{selected_count} 张）"))
+                    .icon(IconName::FolderPlus)
+                    .disabled(selected_count == 0)
+                    .on_click(move |_, cx| {
+                        let _ = add.update(cx, |app, cx| {
+                            app.add_selection_to_album(id, cx);
+                        });
+                    }),
+            )
+            .item(
+                MenuItem::new(format!("从相册移出选中（{selected_count} 张）"))
+                    .icon(IconName::FolderOpen)
+                    .disabled(selected_count == 0)
+                    .on_click(move |_, cx| {
+                        let _ = remove.update(cx, |app, cx| {
+                            app.remove_selection_from_album(id, cx);
+                        });
+                    }),
+            )
+            .separator()
+            .item(
+                MenuItem::new("重命名…")
+                    .icon(IconName::Pencil)
+                    .on_click(move |_, cx| {
+                        let dialog = OrgDialog::RenameAlbum {
+                            id,
+                            name: rename_name.clone(),
+                        };
+                        let _ = rename.update(cx, |app, cx| app.open_org_dialog(dialog, cx));
+                    }),
+            )
+            .item(
+                MenuItem::new("删除相册…")
+                    .icon(IconName::Trash2)
+                    .on_click(move |_, cx| {
+                        let dialog = OrgDialog::DeleteAlbum {
+                            id,
+                            name: delete_name.clone(),
+                            count,
+                        };
+                        let _ = delete.update(cx, |app, cx| app.open_org_dialog(dialog, cx));
+                    }),
+            );
+
+        div()
+            .id(SharedString::from(format!("album-row-{id}")))
+            .flex()
+            .items_center()
+            .gap(px(2.))
+            .px(px(4.))
+            .py(px(2.))
+            .rounded(px(6.))
+            .hover(move |style| style.bg(colors.hover))
+            .child(
+                div()
+                    .id(SharedString::from(format!("album-{id}")))
+                    .role(Role::Button)
+                    .aria_label(format!("相册 {name}"))
+                    .flex_1()
+                    .min_w(px(0.))
+                    .flex()
+                    .items_center()
+                    .gap(px(4.))
+                    .px(px(4.))
+                    .py(px(2.))
+                    .child(Icon::new(IconName::Folder).size(IconSize::Xs).color(colors.subtle))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w(px(0.))
+                            .truncate()
+                            .text_xs()
+                            .text_color(colors.fg)
+                            .child(name),
+                    )
+                    .child(
+                        div()
+                            .flex_none()
+                            .text_xs()
+                            .text_color(colors.subtle)
+                            .child(count.to_string()),
+                    ),
+            )
+            .child(
+                OverflowMenu::new(
+                    SharedString::from(format!("album-menu-{id}")),
+                    menu,
+                )
+                .tooltip("管理相册"),
+            )
+            .into_any_element()
+    }
+
+    /// 组织弹窗统一在 `app.rs` 的根节点挂载，避免被侧栏/检查器的滚动容器裁切。
+    pub(crate) fn render_org_dialog(
+        &self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+        this: &Entity<Self>,
+    ) -> Option<AnyElement> {
+        let dialog = self.org_dialog.clone()?;
+        let epoch = self.org_dialog_epoch;
+        let mut prompt = |title: &'static str,
+                      placeholder: &'static str,
+                      initial: String,
+                      label: String,
+                      submit_label: &'static str,
+                      target: OrgDialog,
+                      close: Entity<Self>,
+                      submit: Entity<Self>| {
+            let holder = window.use_keyed_state(
+                SharedString::from(format!("kanalib-org-field-{epoch}")),
+                cx,
+                move |window, cx| {
+                    let input = cx.new(|cx| TextInput::new(window, cx).placeholder(placeholder));
+                    if !initial.is_empty() {
+                        input.update(cx, |input, cx| input.set_text(initial, cx));
+                    }
+                    input
+                },
+            );
+            let field = holder.read(cx).clone();
+            PromptDialog::new(
+                SharedString::from(format!("kanalib-org-dialog-{epoch}")),
+                title,
+                &field,
+                move |_, cx| {
+                    let _ = close.update(cx, |app, cx| {
+                        app.org_dialog = None;
+                        cx.notify();
+                    });
+                },
+            )
+            .label(label)
+            .submit(submit_label)
+            .check(|text| {
+                if canonicalize_org_name(text).is_empty() {
+                    Err("名称不能为空".into())
+                } else {
+                    Ok(())
+                }
+            })
+            .on_submit(move |text, _, cx| {
+                // PromptDialog 会先执行关闭回调，不能依赖 `self.org_dialog`，目标随闭包传入。
+                let target = target.clone();
+                let _ = submit.update(cx, |app, cx| app.submit_org_dialog(target, text, cx));
+            })
+            .into_any_element()
+        };
+        Some(match dialog.clone() {
+            OrgDialog::RenameSavedSearch { name, .. } => prompt(
+                "重命名智能集合",
+                "智能集合名称",
+                name,
+                "重命名不改集合 ID，图标与排序保持不变".into(),
+                "保存",
+                dialog,
+                this.clone(),
+                this.clone(),
+            ),
+            OrgDialog::NewAlbum => prompt(
+                "新建相册",
+                "相册名称",
+                String::new(),
+                "相册只记录图片归属，不移动、不复制磁盘文件".into(),
+                "新建",
+                dialog,
+                this.clone(),
+                this.clone(),
+            ),
+            OrgDialog::RenameAlbum { name, .. } => prompt(
+                "重命名相册",
+                "相册名称",
+                name,
+                "重命名不改相册 ID，已归入的图片保持不变".into(),
+                "保存",
+                dialog,
+                this.clone(),
+                this.clone(),
+            ),
+            OrgDialog::DeleteAlbum { id, name, count } => {
+                let close = this.clone();
+                let confirm = this.clone();
+                ConfirmDialog::new(
+                    SharedString::from(format!("kanalib-delete-album-{epoch}")),
+                    "删除相册？",
+                    format!(
+                        "将删除相册「{name}」与它的归属关系（{count} 张）。\n图片仍保留在图库和磁盘上，不会被删除。"
+                    ),
+                    move |_, cx| {
+                        let _ = close.update(cx, |app, cx| {
+                            app.org_dialog = None;
+                            cx.notify();
+                        });
+                    },
+                )
+                .confirm("删除相册")
+                .destructive()
+                .on_confirm(move |_, cx| {
+                    let _ = confirm.update(cx, |app, cx| app.delete_album(id, &name, cx));
+                })
+                .into_any_element()
+            }
+        })
+    }
+
+    pub(crate) fn submit_org_dialog(
+        &mut self,
+        dialog: OrgDialog,
+        text: &str,
+        cx: &mut Context<Self>,
+    ) {
+        let name = canonicalize_org_name(text);
+        if name.is_empty() {
+            push_toast(&self.toaster, cx, "名称不能为空", Severity::Warning);
+            return;
+        }
+        match dialog {
+            OrgDialog::RenameSavedSearch { id, .. } => self.rename_saved_search_checked(id, &name, cx),
+            OrgDialog::NewAlbum => self.create_album(&name, cx),
+            OrgDialog::RenameAlbum { id, .. } => self.rename_album(id, &name, cx),
+            OrgDialog::DeleteAlbum { .. } => {}
+        }
+    }
+
+    pub(crate) fn rename_saved_search_checked(
+        &mut self,
+        id: i64,
+        name: &str,
+        cx: &mut Context<Self>,
+    ) {
+        match self.state.rename_saved_search(id, name) {
+            Ok(saved) => {
+                self.org_dialog = None;
+                push_toast(
+                    &self.toaster,
+                    cx,
+                    format!("已将智能集合重命名为「{}」（ID 不变）", saved.name),
+                    Severity::Success,
+                );
+            }
+            Err(error) => {
+                if error.downcast_ref::<DuplicateNameError>().is_some() {
+                    push_toast(
+                        &self.toaster,
+                        cx,
+                        duplicate_name_message(name),
+                        Severity::Warning,
+                    );
+                } else {
+                    push_toast(
+                        &self.toaster,
+                        cx,
+                        format!("重命名智能集合失败：{error:#}"),
+                        Severity::Danger,
+                    );
+                }
+            }
+        }
+        cx.notify();
+    }
+
+    pub(crate) fn create_album(&mut self, name: &str, cx: &mut Context<Self>) {
+        match self.state.create_collection(name) {
+            Ok(album) => {
+                self.org_dialog = None;
+                push_toast(
+                    &self.toaster,
+                    cx,
+                    format!("已新建相册「{}」", album.name),
+                    Severity::Success,
+                );
+            }
+            Err(error) => {
+                if error.downcast_ref::<DuplicateNameError>().is_some() {
+                    push_toast(
+                        &self.toaster,
+                        cx,
+                        duplicate_name_message(name),
+                        Severity::Warning,
+                    );
+                } else {
+                    push_toast(
+                        &self.toaster,
+                        cx,
+                        format!("新建相册失败：{error:#}"),
+                        Severity::Danger,
+                    );
+                }
+            }
+        }
+        cx.notify();
+    }
+
+    pub(crate) fn rename_album(&mut self, id: i64, name: &str, cx: &mut Context<Self>) {
+        match self.state.rename_collection(id, name) {
+            Ok(album) => {
+                self.org_dialog = None;
+                push_toast(
+                    &self.toaster,
+                    cx,
+                    format!("已将相册重命名为「{}」（ID 不变）", album.name),
+                    Severity::Success,
+                );
+            }
+            Err(error) => {
+                if error.downcast_ref::<DuplicateNameError>().is_some() {
+                    push_toast(
+                        &self.toaster,
+                        cx,
+                        duplicate_name_message(name),
+                        Severity::Warning,
+                    );
+                } else {
+                    push_toast(
+                        &self.toaster,
+                        cx,
+                        format!("重命名相册失败：{error:#}"),
+                        Severity::Danger,
+                    );
+                }
+            }
+        }
+        cx.notify();
+    }
+
+    pub(crate) fn delete_album(&mut self, id: i64, name: &str, cx: &mut Context<Self>) {
+        match self.state.delete_collection(id) {
+            Ok(()) => {
+                self.org_dialog = None;
+                push_toast(
+                    &self.toaster,
+                    cx,
+                    format!("已删除相册「{name}」；图片仍在图库，仅移除了归属关系"),
+                    Severity::Success,
+                );
+            }
+            Err(error) => push_toast(
+                &self.toaster,
+                cx,
+                format!("删除相册失败：{error:#}"),
+                Severity::Danger,
+            ),
+        }
+        cx.notify();
+    }
+
+    pub(crate) fn add_selection_to_album(&mut self, id: i64, cx: &mut Context<Self>) {
+        let paths = self.selected_paths();
+        if paths.is_empty() {
+            push_toast(&self.toaster, cx, "先在网格里选择图片", Severity::Warning);
+            return;
+        }
+        self.add_paths_to_album(id, paths, cx);
+    }
+
+    pub(crate) fn add_paths_to_album(
+        &mut self,
+        id: i64,
+        paths: Vec<PathBuf>,
+        cx: &mut Context<Self>,
+    ) {
+        let wanted = paths.len();
+        match self.state.add_assets_to_collection(id, &paths) {
+            Ok(added) => push_toast(
+                &self.toaster,
+                cx,
+                if added == 0 {
+                    format!("没有新增：{wanted} 张已在相册中或不在图库")
+                } else {
+                    format!("已加入相册 {added} 张（选中 {wanted} 张）")
+                },
+                if added == 0 {
+                    Severity::Warning
+                } else {
+                    Severity::Success
+                },
+            ),
+            Err(error) => push_toast(
+                &self.toaster,
+                cx,
+                format!("加入相册失败：{error:#}"),
+                Severity::Danger,
+            ),
+        }
+        cx.notify();
+    }
+
+    pub(crate) fn remove_selection_from_album(&mut self, id: i64, cx: &mut Context<Self>) {
+        let paths = self.selected_paths();
+        if paths.is_empty() {
+            push_toast(&self.toaster, cx, "先在网格里选择图片", Severity::Warning);
+            return;
+        }
+        self.remove_paths_from_album(id, paths, cx);
+    }
+
+    pub(crate) fn remove_paths_from_album(
+        &mut self,
+        id: i64,
+        paths: Vec<PathBuf>,
+        cx: &mut Context<Self>,
+    ) {
+        let wanted = paths.len();
+        match self.state.remove_assets_from_collection(id, &paths) {
+            Ok(removed) => push_toast(
+                &self.toaster,
+                cx,
+                if removed == 0 {
+                    format!("没有移出：{wanted} 张不在该相册中")
+                } else {
+                    format!("已从相册移出 {removed} 张（选中 {wanted} 张）")
+                },
+                if removed == 0 {
+                    Severity::Warning
+                } else {
+                    Severity::Success
+                },
+            ),
+            Err(error) => push_toast(
+                &self.toaster,
+                cx,
+                format!("移出相册失败：{error:#}"),
+                Severity::Danger,
+            ),
+        }
+        cx.notify();
+    }
+
+    pub(crate) fn remove_path_from_album(
+        &mut self,
+        id: i64,
+        path: PathBuf,
+        cx: &mut Context<Self>,
+    ) {
+        match self.state.remove_assets_from_collection(id, &[path]) {
+            Ok(removed) => push_toast(
+                &self.toaster,
+                cx,
+                if removed == 0 {
+                    "这张图片不在该相册中".to_string()
+                } else {
+                    "已从相册移出 1 张".to_string()
+                },
+                if removed == 0 {
+                    Severity::Warning
+                } else {
+                    Severity::Success
+                },
+            ),
+            Err(error) => push_toast(
+                &self.toaster,
+                cx,
+                format!("移出相册失败：{error:#}"),
+                Severity::Danger,
+            ),
+        }
+        cx.notify();
+    }
+}
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn organization_sections_use_distinct_ids() {
+        assert!(SIDEBAR_SECTIONS.contains(&"collections"));
+        assert!(SIDEBAR_SECTIONS.contains(&"albums"));
+        let unique = SIDEBAR_SECTIONS.iter().collect::<HashSet<_>>();
+        assert_eq!(unique.len(), SIDEBAR_SECTIONS.len());
+    }
+
+    #[test]
+    fn org_names_are_trimmed_for_conflict_checks() {
+        assert_eq!(canonicalize_org_name("  旅行  "), "旅行");
+        assert!(canonicalize_org_name(" \t ").is_empty());
+        assert!(duplicate_name_message("旅行").contains("旅行"));
+    }
 }

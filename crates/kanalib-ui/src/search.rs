@@ -195,21 +195,14 @@ impl KanalibApp {
         cx.notify();
     }
 
+    /// 兼容入口：应用集合时同时恢复排序/视图/窗格（实现见 `app.rs`）。
     pub(crate) fn apply_saved_search(
         &mut self,
         saved: &SavedSearch,
         search: &Entity<TextInput>,
         cx: &mut Context<Self>,
     ) {
-        search.update(cx, |input, cx| input.set_text(saved.query.clone(), cx));
-        self.state.set_filter(saved.filter.clone());
-        self.screen = Screen::Library;
-        self.dedup_confirm = None;
-        self.clear_multi_selection();
-        self.focus_grid_pending = true;
-        self.auto_select_pending = true;
-        self.grid_scroll.scroll_to_item(0, ScrollStrategy::Top);
-        cx.notify();
+        self.apply_saved_search_with_view(saved, search, cx);
     }
 
     pub(crate) fn delete_saved_search(&mut self, id: i64, cx: &mut Context<Self>) {
@@ -226,26 +219,7 @@ impl KanalibApp {
     }
 
     pub(crate) fn confirm_save_search(&mut self, name: &str, cx: &mut Context<Self>) {
-        let filter = self.state.shared.lock().unwrap().filter.clone();
-        let query = self.last_search.clone();
-        match self.state.save_saved_search(name, &filter, &query) {
-            Ok(saved) => {
-                self.save_search_open = false;
-                push_toast(
-                    &self.toaster,
-                    cx,
-                    format!("已保存智能集合「{}」", saved.name),
-                    Severity::Success,
-                );
-            }
-            Err(error) => push_toast(
-                &self.toaster,
-                cx,
-                format!("保存失败：{error:#}"),
-                Severity::Danger,
-            ),
-        }
-        cx.notify();
+        self.confirm_save_search_with_view(name, cx);
     }
 
 }

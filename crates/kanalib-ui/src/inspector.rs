@@ -802,6 +802,109 @@ impl KanalibApp {
                     )
             });
 
+            let albums = self.asset_album_names(&asset.path);
+            let album_path = asset.path.clone();
+            let album_this = this.clone();
+            let mut album_section = div()
+                .flex()
+                .flex_col()
+                .gap(px(4.))
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .justify_between()
+                        .child(
+                            div()
+                                .text_xs()
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .text_color(colors.subtle)
+                                .child("所属相册"),
+                        )
+                        .children((!albums.is_empty()).then(|| {
+                            let mut menu = Menu::new();
+                            let mut entries = self.albums_snapshot();
+                            entries
+                                .sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+                            for album in entries {
+                                let add_this = album_this.clone();
+                                let add_path = album_path.clone();
+                                menu = menu.item(
+                                    MenuItem::new(album.name.clone())
+                                        .icon(IconName::Folder)
+                                        .on_click(move |_, cx| {
+                                            let _ = add_this.update(cx, |app, cx| {
+                                                app.add_paths_to_album(
+                                                    album.id,
+                                                    vec![add_path.clone()],
+                                                    cx,
+                                                );
+                                            });
+                                        }),
+                                );
+                            }
+                            OverflowMenu::new(
+                                SharedString::from(format!(
+                                    "inspector-album-more-{}",
+                                    album_path.display()
+                                )),
+                                menu,
+                            )
+                            .tooltip("加入相册")
+                        })),
+                );
+            if albums.is_empty() {
+                album_section = album_section.child(
+                    div()
+                        .text_xs()
+                        .text_color(colors.subtle)
+                        .child("未加入相册；用「加入相册」菜单归档，不移动文件"),
+                );
+            } else {
+                let mut chips = div().flex().flex_wrap().gap(px(4.));
+                for album in albums {
+                    let remove_this = this.clone();
+                    let remove_id = album.id;
+                    let chip_label = album.name.clone();
+                    let remove_path = album_path.clone();
+                    chips = chips.child(
+                        div()
+                            .id(SharedString::from(format!(
+                                "inspector-album-{}-{}",
+                                album.id,
+                                album_path.display()
+                            )))
+                            .flex()
+                            .items_center()
+                            .gap(px(2.))
+                            .px(px(6.))
+                            .py(px(1.))
+                            .rounded(px(4.))
+                            .bg(colors.sunken)
+                            .child(div().text_xs().text_color(colors.fg).child(chip_label))
+                            .child(
+                                IconButton::new(
+                                    SharedString::from(format!(
+                                        "inspector-album-remove-{}-{}",
+                                        album.id,
+                                        album_path.display()
+                                    )),
+                                    IconName::X,
+                                )
+                                .size(ControlSize::Sm)
+                                .tooltip("从该相册移出")
+                                .on_click(move |_, _, cx| {
+                                    let path = remove_path.clone();
+                                    let _ = remove_this.update(cx, |app, cx| {
+                                        app.remove_path_from_album(remove_id, path.clone(), cx);
+                                    });
+                                }),
+                            ),
+                    );
+                }
+                album_section = album_section.child(chips);
+            }
+
             div()
                 .flex()
                 .flex_col()
@@ -853,6 +956,7 @@ impl KanalibApp {
                             format_capability_note(&asset.path)
                         )),
                 )
+                .child(album_section)
                 .children(exif_panel(asset, colors))
                 .child(div().text_xs().text_color(colors.subtle).child(
                     match (&asset.sha1, &asset.blake3) {
