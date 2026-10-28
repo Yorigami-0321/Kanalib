@@ -225,6 +225,22 @@ pub struct KanalibApp {
     pub(crate) similar_preview_running: bool,
     pub(crate) similar_preview_epoch: u64,
     pub(crate) similar_preview_task: Option<Task<()>>,
+    // ---- F-003（第三轮 G2b2）：图片对比状态，字段全部追加在末尾。 ----
+    /// 当前对比的 2–4 张；进入时克隆一次，离开即清空，不新开缓存。
+    pub(crate) compare_items: Vec<Asset>,
+    /// 进入对比前的视图与滚动偏移；Esc 返回时恢复。
+    pub(crate) compare_origin: Screen,
+    pub(crate) compare_origin_scroll: Option<gpui::Point<gpui::Pixels>>,
+    /// 所有栏共享的缩放倍数（1 = 适配）与平移像素。
+    pub(crate) compare_zoom: f32,
+    pub(crate) compare_pan: (f32, f32),
+    /// 仅 UI 的保留标记；不写库、不动文件。
+    pub(crate) compare_keeper: Option<PathBuf>,
+    pub(crate) compare_original: bool,
+    pub(crate) compare_focus: FocusHandle,
+    pub(crate) compare_focus_pending: bool,
+    /// 自动化截图用：启动后预选可见列表前 N 张（PostMessage 无法合成 Ctrl+点击）。
+    pub(crate) demo_select_first: Option<usize>,
 }
 
 impl Render for KanalibApp {
@@ -579,6 +595,28 @@ impl Render for KanalibApp {
                 }
             }
         }
+        // 自动化截图用：PostMessage 合成的点击带不上 Ctrl，允许启动时预选前 N 张；
+        // 正常启动不设置该环境变量，不影响手动多选。
+        if let Some(count) = self.demo_select_first {
+            let ready = visible_indices.len() >= count || (!scanning && !visible_indices.is_empty());
+            if ready {
+                let paths = {
+                    let assets = assets.read().unwrap();
+                    visible_indices
+                        .iter()
+                        .take(count)
+                        .filter_map(|&index| assets.get(index).map(|asset| asset.path.clone()))
+                        .collect::<Vec<_>>()
+                };
+                if !paths.is_empty() {
+                    self.selection = Arc::new(paths.iter().cloned().collect());
+                    self.selection_anchor = paths.last().cloned();
+                    self.state.select(paths.last().cloned());
+                    selected = paths.last().cloned();
+                }
+                self.demo_select_first = None;
+            }
+        }
         if let Some(origin_filter) = self.viewer_origin_filter.clone()
             && self.viewer_at.is_some()
             && (origin_filter != filter || self.viewer_origin_search != search_text)
@@ -810,6 +848,11 @@ impl Render for KanalibApp {
                 colors,
             )
             .into_any_element()
+        } else if self.screen == Screen::Compare {
+            // F-003：只渲染当前 2–4 张；与其它整页视图同宽，不加载全库缩略图。
+            let compare_width = (window_width - sidebar_width).max(px(640.));
+            self.render_compare(&this, window, cx, compare_width, colors)
+                .into_any_element()
         } else {
             self.render_main(
                 &this,
@@ -939,6 +982,8 @@ impl Render for KanalibApp {
                     Command::new("tag:add", "添加标签…").icon(IconName::Tag),
                     Command::new("tag:remove", "移除标签…").icon(IconName::X),
                     Command::new("similar:find", "查找相似").icon(IconName::Search),
+                    Command::new("compare:selected", "图片对比（选中 2–4 张）")
+                        .icon(IconName::Columns2),
                 ],
             )
             .group(
@@ -1985,6 +2030,43 @@ impl KanalibApp {
             KeyBinding::new("left", ViewerPrev, Some(VIEWER_CONTEXT)),
             KeyBinding::new("right", ViewerNext, Some(VIEWER_CONTEXT)),
             KeyBinding::new("f", ViewerFullscreen, Some(VIEWER_CONTEXT)),
+            KeyBinding::new(
+                "escape",
+                CompareClose,
+                Some(crate::compare::COMPARE_CONTEXT),
+            ),
+            KeyBinding::new(
+                "+",
+                CompareZoomIn,
+                Some(crate::compare::COMPARE_CONTEXT),
+            ),
+            KeyBinding::new(
+                "=",
+                CompareZoomIn,
+                Some(crate::compare::COMPARE_CONTEXT),
+            ),
+            KeyBinding::new(
+                "-",
+                CompareZoomOut,
+                Some(crate::compare::COMPARE_CONTEXT),
+            ),
+            KeyBinding::new("0", CompareFit, Some(crate::compare::COMPARE_CONTEXT)),
+            KeyBinding::new(
+                "left",
+                ComparePanLeft,
+                Some(crate::compare::COMPARE_CONTEXT),
+            ),
+            KeyBinding::new(
+                "right",
+                ComparePanRight,
+                Some(crate::compare::COMPARE_CONTEXT),
+            ),
+            KeyBinding::new("up", ComparePanUp, Some(crate::compare::COMPARE_CONTEXT)),
+            KeyBinding::new(
+                "down",
+                ComparePanDown,
+                Some(crate::compare::COMPARE_CONTEXT),
+            ),
         ]);
         let state = AppState::new(folder);
         let initial_selected = state.shared.lock().unwrap().selected.clone();
@@ -2188,6 +2270,19 @@ impl KanalibApp {
             similar_preview_running: false,
             similar_preview_epoch: 0,
             similar_preview_task: None,
+            compare_items: Vec::new(),
+            compare_origin: Screen::Library,
+            compare_origin_scroll: None,
+            compare_zoom: 1.0,
+            compare_pan: (0., 0.),
+            compare_keeper: None,
+            compare_original: false,
+            compare_focus: cx.focus_handle(),
+            compare_focus_pending: false,
+            demo_select_first: std::env::var("KANALIB_SELECT_FIRST")
+                .ok()
+                .and_then(|value| value.parse::<usize>().ok())
+                .filter(|count| *count > 0),
         }
     }
 
@@ -3179,6 +3274,8 @@ impl KanalibApp {
             "group:rating" => self.set_group_mode(GroupMode::Rating, cx),
             // F-004：以当前选中图为锚点查找相似。
             "similar:find" => self.open_similar_selected(cx),
+            // F-003：从选中 2–4 张进入图片对比。
+            "compare:selected" => self.open_compare_selected(cx),
             _ => {}
         }
         cx.notify();
@@ -3452,6 +3549,7 @@ impl KanalibApp {
                 Screen::Settings => "设置",
                 Screen::Duplicates => "重复项",
                 Screen::Similar => "查找相似",
+                Screen::Compare => "图片对比",
                 Screen::Library => "",
             };
             left = left.child(

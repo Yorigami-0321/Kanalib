@@ -112,7 +112,7 @@ pub(crate) fn asset_row_shell(
         .on_mouse_down(MouseButton::Right, move |_, window, cx| {
             window.focus(&focus_right, cx);
             let _ = this_right.update(cx, |app, cx| {
-                app.select_single_path(path_right.clone(), cx);
+                app.handle_tile_right_click(path_right.clone(), cx);
             });
         })
         .child(
@@ -191,6 +191,7 @@ pub(crate) fn asset_context_menu(asset: &Asset, this: &Entity<KanalibApp>) -> Me
     let quick_path = path.clone();
     let similar_this = this.clone();
     let similar_path = path.clone();
+    let compare_this = this.clone();
     let favorite_this = this.clone();
     let favorite_path = path.clone();
     let prompt_this = this.clone();
@@ -217,6 +218,13 @@ pub(crate) fn asset_context_menu(asset: &Asset, this: &Entity<KanalibApp>) -> Me
                     let _ = similar_this.update(cx, |app, cx| {
                         app.open_similar(similar_path.clone(), cx);
                     });
+                }),
+        )
+        .item(
+            MenuItem::new("对比选中（2–4 张）")
+                .icon(IconName::Columns2)
+                .on_click(move |_, cx| {
+                    let _ = compare_this.update(cx, |app, cx| app.open_compare_selected(cx));
                 }),
         )
         .item(

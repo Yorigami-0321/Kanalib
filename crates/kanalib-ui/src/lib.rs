@@ -47,6 +47,7 @@ pub use app::KanalibApp;
 pub use thumb_cache::{CacheCleanup, ThumbCache};
 
 mod app;
+mod compare;
 mod dedup;
 mod format;
 mod inspector;
@@ -94,6 +95,14 @@ gpui::actions!(
         ViewerPrev,
         ViewerNext,
         ViewerFullscreen,
+        CompareClose,
+        CompareZoomIn,
+        CompareZoomOut,
+        CompareFit,
+        ComparePanLeft,
+        ComparePanRight,
+        ComparePanUp,
+        ComparePanDown,
     ]
 );
 
@@ -372,6 +381,8 @@ enum Screen {
     Library,
     /// F-004：单锚点相似查询的临时结果视图；只保留当前一次查询，不写库。
     Similar,
+    /// F-003：图片对比；只加载当前 2–4 张，保留标记仅存内存。
+    Compare,
     Duplicates,
     Tags,
     Settings,

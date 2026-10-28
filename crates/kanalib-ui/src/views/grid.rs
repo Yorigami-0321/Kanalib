@@ -197,7 +197,7 @@ pub(crate) fn tile(
         .on_mouse_down(MouseButton::Right, move |_, window, cx| {
             window.focus(&focus_right, cx);
             let _ = this_right.update(cx, |app, cx| {
-                app.select_single_path(path_right.clone(), cx);
+                app.handle_tile_right_click(path_right.clone(), cx);
             });
         })
         .child(

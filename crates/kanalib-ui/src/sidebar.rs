@@ -1115,6 +1115,7 @@ impl KanalibApp {
         let screen_title = match screen {
             Screen::Library => "资源管理器",
             Screen::Similar => "查找相似",
+            Screen::Compare => "图片对比",
             Screen::Duplicates => "重复项",
             Screen::Tags => "标签管理",
             Screen::Settings => "设置",

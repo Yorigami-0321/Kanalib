@@ -207,6 +207,7 @@ impl KanalibApp {
             let path_for_open = asset.path.clone();
             let similar_this = this.clone();
             let similar_path = asset.path.clone();
+            let compare_this = this.clone();
             let favorite = asset.favorite;
             let star = asset.star;
             let rating = asset.rating.to_uppercase();
@@ -294,6 +295,15 @@ impl KanalibApp {
                                     let _ = similar_this.update(cx, |app, cx| {
                                         app.open_similar(similar_path.clone(), cx);
                                     });
+                                }),
+                        )
+                        .child(
+                            Button::new("preview-compare", "对比选中")
+                                .size(ControlSize::Sm)
+                                .icon(IconName::Columns2)
+                                .on_click(move |_, _, cx| {
+                                    let _ = compare_this
+                                        .update(cx, |app, cx| app.open_compare_selected(cx));
                                 }),
                         ),
                 )
@@ -627,6 +637,13 @@ impl KanalibApp {
                     let _ = similar_this.update(cx, |app, cx| {
                         app.open_similar(similar_path.clone(), cx);
                     });
+                });
+            let compare_this = this.clone();
+            let compare = Button::new("inspector-compare", "对比选中")
+                .size(ControlSize::Sm)
+                .icon(IconName::Columns2)
+                .on_click(move |_, _, cx| {
+                    let _ = compare_this.update(cx, |app, cx| app.open_compare_selected(cx));
                 });
             let favorite = asset.favorite;
             let favorite_state = state.clone();
@@ -1003,6 +1020,7 @@ impl KanalibApp {
                         .child(favorite_button)
                         .child(quick)
                         .child(find_similar)
+                        .child(compare)
                         .child(open),
                 )
                 .child(

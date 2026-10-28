@@ -1317,6 +1317,23 @@ impl KanalibApp {
             let path = asset.path.clone();
             Button::new("dedup-open", "打开保留项").on_click(move |_, _, _| open_path(&path))
         });
+        let this_compare = this.clone();
+        let group_for_compare = group.clone();
+        let compare_button = (group.assets.len() >= 2).then(|| {
+            let group = group_for_compare.clone();
+            let this = this_compare.clone();
+            Button::new(
+                "dedup-compare-open",
+                if group.assets.len() > 4 {
+                    "对比前 4 张"
+                } else {
+                    "对比此组"
+                },
+            )
+            .on_click(move |_, _, cx| {
+                let _ = this.update(cx, |app, cx| app.open_compare_group(&group, cx));
+            })
+        });
 
         let header = div()
             .flex_none()
@@ -1377,6 +1394,7 @@ impl KanalibApp {
                         }),
                     )
                     .children(open)
+                    .children(compare_button)
                     .children((group.assets.len() > DEDUP_MAX_VISIBLE).then(|| {
                         Button::new(
                             "dedup-show-all",
