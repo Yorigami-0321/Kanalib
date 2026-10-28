@@ -11,16 +11,17 @@ use serde::Deserialize;
 
 use crate::db::{Db, JobCounts, SearchPage, SearchPageRequest, StoredMeta};
 use crate::dedup::{
-    DEFAULT_SIMILAR_THRESHOLD, DuplicateReview, GroupKind, ReviewState, is_protected,
+    DEFAULT_SIMILAR_THRESHOLD, DuplicateReview, GroupKind, ReviewState, clamp_similar_threshold,
+    is_protected,
 };
 use crate::ffmpeg::{self, ThumbJob};
 use crate::media;
 use crate::model::{
     Asset, Collection, CountAccumulator, ExcludedAssetAction, Filter, PendingCleanup, RetagSummary,
     SavedSearch, SavedSearchView, ScanCounts, ScanFilterApply, ScanFilterConfig, ScanFilterImpact,
-    ScanPhase, ScanProgress, ScanSummary, Shared, SourceScanStatus, TagCandidateReview, TagHit,
-    TagJobError, TagQueueStatus, TagRecomputeSummary, TagReviewState, TagSummary, TagThresholds,
-    normalize_tag_name,
+    ScanPhase, ScanProgress, ScanSummary, Shared, SimilarQueryResult, SimilarThresholdPreview,
+    SourceScanStatus, TagCandidateReview, TagHit, TagJobError, TagQueueStatus, TagRecomputeSummary,
+    TagReviewState, TagSummary, TagThresholds, normalize_tag_name,
 };
 use crate::scan_filter::{self, CompiledIgnoreRules, IgnoreRules, ScanFilterPreview};
 use crate::sidecar::{Sidecar, project_root, repair_file};
@@ -137,7 +138,7 @@ impl AppState {
                     .ok()
                     .flatten()
                     .and_then(|value| value.parse::<u8>().ok())
-                    .map(|value| value.clamp(2, 24))
+                    .map(clamp_similar_threshold)
                     .unwrap_or(DEFAULT_SIMILAR_THRESHOLD);
                 let protected_paths = db
                     .setting("dedup.protected_paths")
@@ -2246,7 +2247,7 @@ impl AppState {
     }
 
     pub fn set_similar_threshold(&self, threshold: u8) -> u8 {
-        let threshold = threshold.clamp(2, 24);
+        let threshold = clamp_similar_threshold(threshold);
         {
             let mut shared = self.shared.lock().unwrap();
             shared.dedup.similar_threshold = threshold;
@@ -2258,6 +2259,29 @@ impl AppState {
             log::warn!("save similar threshold: {error:#}");
         }
         threshold
+    }
+
+    /// 以当前图库中已存的 `phash` 查找单张锚点的相似图：不重新解码，也不触发扫描。
+    /// 只读取内存快照；阈值收敛到 0–32，锚点不存在或没有 pHash 时返回可判定的错误。
+    pub fn similar_to_anchor(
+        &self,
+        path: &Path,
+        threshold: u8,
+        limit: usize,
+    ) -> Result<SimilarQueryResult> {
+        let assets = self.shared.lock().unwrap().assets.clone();
+        let snapshot = assets.read().unwrap();
+        crate::dedup::similar_to_anchor(&snapshot, path, threshold, limit)
+    }
+
+    /// 预览候选阈值下的相似组数/成员数；只读估算，不改阈值、分组与既有评审状态。
+    ///
+    /// 密集链式库会退回精确全扫（与现有相似扫描同量级，10 万库约 2–3s），
+    /// 因此 UI 侧应在后台线程调用，不要占着渲染线程。
+    pub fn preview_similar_threshold(&self, threshold: u8) -> SimilarThresholdPreview {
+        let assets = self.shared.lock().unwrap().assets.clone();
+        let snapshot = assets.read().unwrap();
+        crate::dedup::preview_similar_threshold(&snapshot, threshold)
     }
 
     pub fn add_protected_path(&self, path: PathBuf) -> Result<()> {

@@ -1888,6 +1888,58 @@ pub struct DiagnosticSnapshot {
     pub sidecar_device: Option<String>,
 }
 
+/// 以单张图为锚点的相似查询结果项。
+///
+/// `distance` 是 64 位 pHash 的汉明距离，`similarity_pct` 与去重视图共用
+/// [`crate::dedup::similarity_pct_from_distance`] 的映射（距离 0 → 100，32 → 50）。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SimilarHit {
+    pub path: PathBuf,
+    pub distance: u32,
+    pub similarity_pct: u32,
+}
+
+/// 单张锚点相似查询的完整结果。
+///
+/// `distance` 是「与锚点的直接距离」，不是传递闭包：结果不做链式合并，
+/// 也不与全库相似分组共享组件语义。`scanned` 为参与比较的已存 pHash 数（含锚点）。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SimilarQueryResult {
+    pub anchor: PathBuf,
+    pub threshold: u8,
+    pub scanned: usize,
+    /// 除锚点外、距离 ≤ `threshold` 的命中，按距离升序、同距离按路径升序。
+    pub hits: Vec<SimilarHit>,
+    /// 命中数超过调用方给定的 `limit` 时为真（`hits` 已截断到 `limit`）。
+    pub truncated: bool,
+}
+
+/// 候选相似阈值的预览结果。
+///
+/// 图库不超过 [`crate::dedup::PREVIEW_EXACT_LIMIT`] 张已存 pHash 时与全库分组完全一致
+/// （`sampled_assets == total_assets`）；更大的图库按
+/// [`crate::dedup::PREVIEW_SAMPLE_LIMIT`] 个种子抽样估算，`sampled_assets` 给出实际
+/// 参与抽样的资产数，调用方可据此显示采样比例。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SimilarThresholdPreview {
+    /// 已收敛到 0–32 的候选阈值。
+    pub threshold: u8,
+    /// 预估相似组数（成员数 ≥ 2 的连通分量）。
+    pub group_count: usize,
+    /// 预估落在相似组里的资产数（各组尺寸之和）。
+    pub member_count: usize,
+    /// 是否观察到链式合并：组内存在两个成员之间的直接距离仍大于阈值。
+    pub chain_risk: bool,
+    /// 观察到链式合并的组数（抽样时为样本内计数）。
+    pub chain_groups: usize,
+    /// 实际参与抽样的资产数；精确计算时等于 `total_assets`。
+    pub sampled_assets: usize,
+    /// 拥有 pHash 的资产总数。
+    pub total_assets: usize,
+    /// 预览是否使用了抽样（`sampled_assets < total_assets`）。
+    pub sampled: bool,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
