@@ -29,6 +29,9 @@
 | F-032 | 扫描排除规则：已入库命中影响面 `scan_filter_indexed_impact` + `apply_scan_filter`（保留/移出，只动 DB）；设置页规则编辑器（glob 录入、隐藏文件、字节上下限、命中预览、保存·保留记录 / 保存·移出命中、二次确认）；忽略 glob 与忽略列表同源 | core 单测 `scan_filter_impact_batches_keep_and_remove_existing_assets`；UI 实测展开编辑器与预览字段，`.kanalib/r3_g3_rules4.png` |
 | F-037 | 从图库移除：`remove_from_library` 只删 DB 记录，磁盘文件保留；持久忽略列表支持路径/SHA1/glob，存 `settings` JSON（不加迁移）；重扫与监听共用同一忽略判定，恢复后重新导入 | core 单测（移除→重扫跳过→恢复再导入）；UI 忽略列表空态与恢复入口实测，`.kanalib/r3_g3_rules3.png` |
 | F-063 | 扫描进度：`ScanProgress`/`ScanPhase`/`ScanSummary` 接入遍历/哈希/缩略图/打标/对账；按 `SCAN_PROGRESS_INTERVAL` 节流，仅活跃阶段算吞吐/ETA；结束摘要含新增/更新/跳过/移除/失败/耗时与逐来源；底栏与设置页只读展示 | core 单测（摘要/多来源/节流与取消）；UI 底栏与「扫描进度与摘要」实测，`.kanalib/r3_g3_settings3.png` |
+| F-004 | 以图找相似：`similar_to_anchor` 复用库内 phash（不解码），按汉明距离升序返回 `SimilarHit { path, distance, similarity_pct }`，与全库分组解耦；UI 独立「查找相似」结果视图（距离/相似度、本地筛选、全选可见/清除/快速查看），无 pHash 资产给出明确失败提示 | core 单测（排序/边界/锚点缺失）；10 万库 p95 15–18ms；UI 实测 `.kanalib/r3_g2_similar3.png`；修复返回图库空列表（`982a078`） |
+| F-045 | 相似阈值预览：阈值统一 0–32（6/10/14 快捷档），`preview_similar_threshold` 返回预估组数/成员数/链式风险；≤4096 张精确，更大库抽 4096 种子（10 万 4.1%），检测链式合并时回退精确全扫；改阈值不清空评审状态 | core 单测（预览与全扫一致/边界/风险标记）；UI 滑杆 + 临时值/默认值 + 预估与风险实测 `.kanalib/r3_g2_preview2_top.png` |
+| F-005 | 分组浏览：按修改时间/拍摄时间/来源/评级分组，组头显示名称与数量、滚动吸顶、可折叠；`ui.group_by` 持久化；保持行级虚拟化与 6 种视图固定格尺寸；「查看 → 分组」菜单 + 命令面板 | 单测（分组布局/折叠/映射 6 项）；UI 实测分组、计数、折叠与吸顶 `.kanalib/r3_g2_grouped.png`、`r3_g2_collapsed.png`；10 万库滚动未实测 |
 
 验证汇总：`cargo test --workspace` core 32 + UI 5 通过（4 项按需忽略）；ffmpeg 4 项、视图收敛 6 项通过。10k 冷导入缩略图 ffmpeg 52.2s vs image 124.3s，总 152.3s vs 230.9s；100k 缩略图 738.7s（历史 1130s），总 42.3min（历史 49.3min）。历史 100k 滚动 151.5fps、present p99 15.84ms、峰值 329MB；搜索 p95 284ms（目标 <150ms）。所有 UI 冒烟使用隔离数据根，未触碰真实图库。
 
