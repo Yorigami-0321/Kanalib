@@ -1,0 +1,2667 @@
+use crate::*;
+use crate::app::{KanalibApp, push_toast};
+use crate::thumb_cache::CacheCleanup;
+use crate::format::*;
+use crate::platform::*;
+use crate::sidebar::source_label;
+use crate::tags::group_reviews_by_asset;
+use crate::theme::*;
+
+pub(crate) const SETTINGS_MAX_WIDTH: f32 = 1080.;
+pub(crate) const TAG_ROW_HEIGHT: f32 = 54.;
+
+/// 设置页阈值编辑器按 sidecar 的类别顺序展示；未知类别不会出现在这里。
+pub(crate) const TAG_CATEGORY_LABELS: [(&str, &str); 6] = [
+    ("general", "通用"),
+    ("character", "角色"),
+    ("copyright", "版权"),
+    ("style", "风格"),
+    ("meta", "元数据"),
+    ("rating", "分级"),
+];
+
+/// 重打标超过这个数量先弹确认，避免误点把整个视图重新入队。
+pub(crate) const TAG_RETAG_CONFIRM_THRESHOLD: usize = 500;
+
+/// 队列区块最多展示的失败任务数。
+pub(crate) const TAG_JOB_ERROR_LIMIT: usize = 5;
+
+pub(crate) fn tag_category_label(category: &str) -> &'static str {
+    TAG_CATEGORY_LABELS
+        .iter()
+        .find(|(key, _)| *key == category)
+        .map(|(_, label)| *label)
+        .unwrap_or("未知类别")
+}
+
+/// 阈值按钮按 0.01 步进；保留两位小数并夹在 0–1，避免浮点累积成 0.18000001。
+pub(crate) fn threshold_step(current: f32, delta: f32) -> f32 {
+    (((current + delta).clamp(0.0, 1.0)) * 100.0).round() / 100.0
+}
+
+pub(crate) fn parse_tag_threshold_text(text: &str) -> Result<f32, String> {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return Err("请输入 0–1 之间的阈值".to_string());
+    }
+    let value = trimmed
+        .parse::<f32>()
+        .map_err(|_| "阈值必须是数字".to_string())?;
+    if !value.is_finite() {
+        return Err("阈值必须是有限数字".to_string());
+    }
+    if !(0.0..=1.0).contains(&value) {
+        return Err("阈值需在 0–1 之间".to_string());
+    }
+    Ok(value)
+}
+
+pub(crate) fn tag_queue_phase(status: &TagQueueStatus) -> &'static str {
+    if status.cancelling {
+        "取消中"
+    } else if status.paused {
+        "已暂停"
+    } else if status.running > 0 {
+        "运行中"
+    } else if status.pending > 0 {
+        "等待中"
+    } else if status.error > 0 {
+        "有空闲失败"
+    } else {
+        "空闲"
+    }
+}
+
+pub(crate) fn format_tag_throughput(rate: f32) -> String {
+    if rate > 0.0 && rate.is_finite() {
+        format!("{rate:.1} 张/秒")
+    } else {
+        "—".to_string()
+    }
+}
+
+pub(crate) fn format_tag_eta(eta: Option<u64>) -> String {
+    match eta {
+        None => "—".to_string(),
+        Some(0) => "0 秒".to_string(),
+        Some(seconds) if seconds < 60 => format!("{seconds} 秒"),
+        Some(seconds) if seconds < 3_600 => {
+            format!("{} 分 {:02} 秒", seconds / 60, seconds % 60)
+        }
+        Some(seconds) => format!("{} 小时 {:02} 分", seconds / 3_600, (seconds % 3_600) / 60),
+    }
+}
+
+/// Debug 覆盖全部展示字段；只用于判断 1s 轮询结果是否有变化，避免空闲时反复重绘。
+pub(crate) fn tag_queue_signature(status: &TagQueueStatus) -> String {
+    format!("{status:?}")
+}
+
+/// 来源排除规则的一行只读摘要。
+pub(crate) fn scan_filter_summary(filter: &ScanFilterConfig) -> String {
+    let hidden = if filter.include_hidden {
+        "包含隐藏"
+    } else {
+        "排除隐藏"
+    };
+    let min = filter
+        .min_bytes
+        .map(format_bytes)
+        .unwrap_or_else(|| "不限".to_string());
+    let max = filter
+        .max_bytes
+        .map(format_bytes)
+        .unwrap_or_else(|| "不限".to_string());
+    format!(
+        "排除规则：{} 条 glob · {hidden} · 大小 {min} – {max}",
+        filter.exclude_globs.len()
+    )
+}
+
+#[cfg(test)]
+mod tests {
+
+    #[test]
+    fn tag_threshold_step_rounds_and_clamps() {
+        assert_eq!(super::threshold_step(0.17, 0.01), 0.18);
+        assert_eq!(super::threshold_step(0.005, -0.01), 0.0);
+        assert_eq!(super::threshold_step(0.99, 0.01), 1.0);
+        assert_eq!(super::threshold_step(0.0, -0.01), 0.0);
+    }
+
+    #[test]
+    fn tag_threshold_input_rejects_invalid_values() {
+        assert_eq!(super::parse_tag_threshold_text("0.5").unwrap(), 0.5);
+        assert_eq!(super::parse_tag_threshold_text(" 1 ").unwrap(), 1.0);
+        for bad in ["", "-0.01", "1.01", "nan", "abc"] {
+            assert!(
+                super::parse_tag_threshold_text(bad).is_err(),
+                "expected error for {bad:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn tag_eta_and_category_labels_are_stable() {
+        assert_eq!(super::format_tag_eta(None), "—");
+        assert_eq!(super::format_tag_eta(Some(0)), "0 秒");
+        assert_eq!(super::format_tag_eta(Some(12)), "12 秒");
+        assert_eq!(super::format_tag_eta(Some(65)), "1 分 05 秒");
+        assert_eq!(super::format_tag_eta(Some(3_700)), "1 小时 01 分");
+        assert_eq!(super::tag_category_label("general"), "通用");
+        assert_eq!(super::tag_category_label("rating"), "分级");
+        assert_eq!(super::tag_category_label("unknown"), "未知类别");
+    }
+
+    #[test]
+    fn scan_filter_summary_reports_config() {
+        let filter = kanalib_core::model::ScanFilterConfig {
+            exclude_globs: vec!["**/.git/**".into(), "*_cache".into()],
+            include_hidden: false,
+            min_bytes: Some(1024),
+            max_bytes: Some(2 * 1024 * 1024),
+        };
+        let summary = super::scan_filter_summary(&filter);
+        assert!(summary.contains("2 条 glob"));
+        assert!(summary.contains("排除隐藏"));
+        assert!(summary.contains("1.0 KB"));
+        assert!(summary.contains("2.0 MB"));
+    }
+
+}
+
+impl KanalibApp {
+    /// 读取阈值、队列状态、CPU 开关与最近失败；设置页打开/操作后/轮询时调用。
+    pub(crate) fn refresh_tag_settings(&mut self, cx: &mut Context<Self>) {
+        match self.state.tag_thresholds() {
+            Ok(thresholds) => self.tag_thresholds = Some(thresholds),
+            Err(error) => {
+                log::warn!("tag thresholds: {error:#}");
+                self.tag_settings_notice = Some(format!("读取打标阈值失败：{error:#}"));
+            }
+        }
+        self.tag_cpu_allowed = self.state.allow_cpu_tagging();
+        self.refresh_tag_queue_status(cx);
+        self.refresh_tag_job_errors();
+        cx.notify();
+    }
+
+    /// 只刷新队列快照与失败首条；状态签名不变时不触发重绘。
+    pub(crate) fn refresh_tag_queue_status(&mut self, cx: &mut Context<Self>) {
+        let status = self.state.tag_queue_status();
+        let signature = tag_queue_signature(&status);
+        let changed = self.tag_queue_signature.as_deref() != Some(signature.as_str());
+        self.tag_queue_status = Some(status);
+        self.tag_queue_signature = Some(signature);
+        if changed {
+            cx.notify();
+        }
+    }
+
+    pub(crate) fn refresh_tag_job_errors(&mut self) {
+        match self.state.tag_job_errors(TAG_JOB_ERROR_LIMIT) {
+            Ok(errors) => self.tag_job_errors = errors,
+            Err(error) => log::warn!("tag job errors: {error:#}"),
+        }
+    }
+
+    pub(crate) fn category_threshold_value(&self, category: &str) -> f32 {
+        self.tag_thresholds
+            .as_ref()
+            .and_then(|thresholds| thresholds.categories.get(category).copied())
+            .unwrap_or_else(|| {
+                default_category_thresholds()
+                    .get(category)
+                    .copied()
+                    .unwrap_or(0.2)
+            })
+    }
+
+    pub(crate) fn apply_category_threshold(
+        &mut self,
+        category: &str,
+        value: f32,
+        cx: &mut Context<Self>,
+    ) {
+        if !TAG_CATEGORY_LABELS
+            .iter()
+            .any(|(key, _)| *key == category)
+        {
+            self.tag_settings_notice = Some(format!("未知标签类别：{category}"));
+            cx.notify();
+            return;
+        }
+        match self.state.set_category_threshold(category, value) {
+            Ok(saved) => {
+                self.tag_settings_notice = Some(format!(
+                    "{} 阈值已保存为 {saved:.2}；点击“重算”后应用到已存候选",
+                    tag_category_label(category)
+                ));
+            }
+            Err(error) => {
+                let message = format!("设置 {} 阈值失败：{error:#}", tag_category_label(category));
+                self.tag_settings_notice = Some(message.clone());
+                push_toast(&self.toaster, cx, message, Severity::Danger);
+            }
+        }
+        self.refresh_tag_settings(cx);
+        cx.notify();
+    }
+
+    pub(crate) fn step_category_threshold(&mut self, category: &str, delta: f32, cx: &mut Context<Self>) {
+        let current = self.category_threshold_value(category);
+        let next = threshold_step(current, delta);
+        if (next - current).abs() < 0.0005 {
+            self.tag_settings_notice = Some(format!(
+                "{} 阈值已在 {current:.2}，无法继续调整（范围 0–1）",
+                tag_category_label(category)
+            ));
+            cx.notify();
+            return;
+        }
+        self.apply_category_threshold(category, next, cx);
+    }
+
+    pub(crate) fn reset_category_threshold(&mut self, category: &str, cx: &mut Context<Self>) {
+        let default = default_category_thresholds()
+            .get(category)
+            .copied()
+            .unwrap_or(0.2);
+        self.apply_category_threshold(category, default, cx);
+    }
+
+    pub(crate) fn apply_tag_override(&mut self, name: &str, value: &str, cx: &mut Context<Self>) {
+        let tag = normalize_tag_name(name);
+        if tag.is_empty() {
+            self.tag_settings_notice = Some("请输入要覆盖的标签名".to_string());
+            push_toast(
+                &self.toaster,
+                cx,
+                "请输入要覆盖的标签名",
+                Severity::Warning,
+            );
+            cx.notify();
+            return;
+        }
+        let value = match parse_tag_threshold_text(value) {
+            Ok(value) => value,
+            Err(message) => {
+                self.tag_settings_notice = Some(format!("单标签阈值无效：{message}"));
+                push_toast(
+                    &self.toaster,
+                    cx,
+                    format!("单标签阈值无效：{message}"),
+                    Severity::Warning,
+                );
+                cx.notify();
+                return;
+            }
+        };
+        match self.state.set_tag_threshold(&tag, Some(value)) {
+            Ok(saved) => {
+                self.tag_settings_notice = Some(format!(
+                    "标签 #{tag} 阈值已设为 {:.2}；重算后生效",
+                    saved.unwrap_or(value)
+                ));
+            }
+            Err(error) => {
+                let message = format!("设置标签 #{tag} 阈值失败：{error:#}");
+                self.tag_settings_notice = Some(message.clone());
+                push_toast(&self.toaster, cx, message, Severity::Danger);
+            }
+        }
+        self.refresh_tag_settings(cx);
+        cx.notify();
+    }
+
+    pub(crate) fn clear_tag_override(&mut self, tag: &str, cx: &mut Context<Self>) {
+        match self.state.set_tag_threshold(tag, None) {
+            Ok(_) => {
+                self.tag_settings_notice = Some(format!("标签 #{tag} 已恢复类别阈值；重算后生效"));
+            }
+            Err(error) => {
+                let message = format!("清除标签 #{tag} 覆盖失败：{error:#}");
+                self.tag_settings_notice = Some(message.clone());
+                push_toast(&self.toaster, cx, message, Severity::Danger);
+            }
+        }
+        self.refresh_tag_settings(cx);
+        cx.notify();
+    }
+
+    /// 重算/重打标的目标路径：选中优先，否则当前可见视图。
+    pub(crate) fn tag_target_paths(&self) -> (Vec<PathBuf>, &'static str) {
+        let selected = self.selected_paths();
+        if selected.is_empty() {
+            let mut paths = self.visible_paths();
+            paths.sort();
+            paths.dedup();
+            (paths, "当前视图")
+        } else {
+            let mut paths = selected;
+            paths.sort();
+            paths.dedup();
+            (paths, "选中")
+        }
+    }
+
+    pub(crate) fn start_recompute_tag_thresholds(&mut self, cx: &mut Context<Self>) {
+        if self.tag_recompute_running {
+            return;
+        }
+        let (paths, scope) = self.tag_target_paths();
+        if paths.is_empty() {
+            self.tag_settings_notice =
+                Some("没有可重算的图片：先选择图片或打开有内容的视图".to_string());
+            push_toast(
+                &self.toaster,
+                cx,
+                "没有可重算的图片",
+                Severity::Warning,
+            );
+            cx.notify();
+            return;
+        }
+        let count = paths.len();
+        self.tag_recompute_running = true;
+        self.tag_settings_notice = Some(format!("正在按候选重算{scope} {count} 张的阈值…"));
+        let state = self.state.clone();
+        let task = cx
+            .background_executor()
+            .spawn(async move { state.recompute_tag_thresholds(&paths) });
+        let weak = cx.entity().downgrade();
+        cx.spawn(async move |_, cx| {
+            let result = task.await;
+            let _ = weak.update(cx, |app, cx| {
+                app.tag_recompute_running = false;
+                match result {
+                    Ok(TagRecomputeSummary { updated, skipped }) => {
+                        let message = format!(
+                            "阈值重算完成（{scope}）：更新 {updated} 张 · 跳过 {skipped} 张；跳过项可能缺候选或超出已存 top-K，需要重打标"
+                        );
+                        app.tag_settings_notice = Some(message.clone());
+                        push_toast(&app.toaster, cx, message, Severity::Success);
+                    }
+                    Err(error) => {
+                        let message = format!("阈值重算失败：{error:#}");
+                        app.tag_settings_notice = Some(message.clone());
+                        push_toast(&app.toaster, cx, message, Severity::Danger);
+                    }
+                }
+                app.refresh_tag_settings(cx);
+                cx.notify();
+            });
+        })
+        .detach();
+        cx.notify();
+    }
+
+    pub(crate) fn request_retag(&mut self, selected_only: bool, cx: &mut Context<Self>) {
+        let (mut paths, scope) = if selected_only {
+            (self.selected_paths(), "选中")
+        } else {
+            (self.visible_paths(), "当前视图")
+        };
+        paths.sort();
+        paths.dedup();
+        if paths.is_empty() {
+            let message = if selected_only {
+                "先选择要重打标的图片"
+            } else {
+                "当前视图没有可重打标的图片"
+            };
+            self.tag_settings_notice = Some(message.to_string());
+            push_toast(&self.toaster, cx, message, Severity::Warning);
+            cx.notify();
+            return;
+        }
+        if paths.len() >= TAG_RETAG_CONFIRM_THRESHOLD {
+            self.tag_retag_confirm = Some(TagRetagConfirm { paths, scope });
+        } else {
+            self.start_retag(paths, scope, cx);
+        }
+        cx.notify();
+    }
+
+    pub(crate) fn start_retag(&mut self, paths: Vec<PathBuf>, scope: &'static str, cx: &mut Context<Self>) {
+        if self.tag_retag_running {
+            self.tag_settings_notice = Some("已有重打标任务在运行，请稍候".to_string());
+            cx.notify();
+            return;
+        }
+        let count = paths.len();
+        self.tag_retag_running = true;
+        self.tag_settings_notice = Some(format!(
+            "正在重打标{scope} {count} 张；已有候选的按阈值重算，缺候选的入队…"
+        ));
+        let state = self.state.clone();
+        let task = cx
+            .background_executor()
+            .spawn(async move { state.retag_paths(&paths) });
+        let weak = cx.entity().downgrade();
+        cx.spawn(async move |_, cx| {
+            let result = task.await;
+            let _ = weak.update(cx, |app, cx| {
+                app.tag_retag_running = false;
+                match result {
+                    Ok(RetagSummary {
+                        recomputed,
+                        queued,
+                        missing,
+                    }) => {
+                        let message = format!(
+                            "重打标完成（{scope}）：按候选重算 {recomputed} 张 · 入队 {queued} 张 · 缺失 {missing} 张；手工标签已保留"
+                        );
+                        app.tag_settings_notice = Some(message.clone());
+                        push_toast(&app.toaster, cx, message, Severity::Success);
+                    }
+                    Err(error) => {
+                        let message = format!("重打标失败：{error:#}");
+                        app.tag_settings_notice = Some(message.clone());
+                        push_toast(&app.toaster, cx, message, Severity::Danger);
+                    }
+                }
+                app.refresh_tag_settings(cx);
+                cx.notify();
+            });
+        })
+        .detach();
+        cx.notify();
+    }
+
+    pub(crate) fn prioritize_selected(&mut self, cx: &mut Context<Self>) {
+        let mut paths = self.selected_paths();
+        paths.sort();
+        paths.dedup();
+        if paths.is_empty() {
+            self.tag_settings_notice = Some("先选择图片，再提升打标优先级".to_string());
+            push_toast(
+                &self.toaster,
+                cx,
+                "先选择图片，再提升打标优先级",
+                Severity::Warning,
+            );
+            cx.notify();
+            return;
+        }
+        match self.state.prioritize_tag_jobs(&paths, 100) {
+            Ok(0) => {
+                self.tag_settings_notice =
+                    Some("选中图片没有等待中的打标任务（可能已完成或正在运行）".to_string());
+            }
+            Ok(count) => {
+                self.tag_settings_notice =
+                    Some(format!("已把 {count} 个打标任务提升到高优先级"));
+            }
+            Err(error) => {
+                let message = format!("提升打标优先级失败：{error:#}");
+                self.tag_settings_notice = Some(message.clone());
+                push_toast(&self.toaster, cx, message, Severity::Danger);
+            }
+        }
+        self.refresh_tag_settings(cx);
+        cx.notify();
+    }
+
+    pub(crate) fn toggle_tag_queue(&mut self, cx: &mut Context<Self>) {
+        let paused = self.state.shared.lock().unwrap().tag_status.paused;
+        if paused {
+            match self.state.resume_tag_queue() {
+                Ok(()) => {
+                    self.tag_settings_notice = Some("已继续打标队列".to_string());
+                }
+                Err(error) => {
+                    let message = format!("继续打标失败：{error:#}");
+                    self.tag_settings_notice = Some(message.clone());
+                    push_toast(&self.toaster, cx, message, Severity::Danger);
+                }
+            }
+        } else {
+            self.state.pause_tag_queue();
+            self.tag_settings_notice =
+                Some("已暂停打标；当前批完成后不再认领新任务".to_string());
+        }
+        self.refresh_tag_settings(cx);
+        cx.notify();
+    }
+
+    pub(crate) fn cancel_tag_queue(&mut self, cx: &mut Context<Self>) {
+        self.state.cancel_tag_queue();
+        self.tag_settings_notice =
+            Some("正在取消打标；已完成的结果会保留".to_string());
+        self.refresh_tag_settings(cx);
+        cx.notify();
+    }
+
+    pub(crate) fn toggle_cpu_tagging(&mut self, cx: &mut Context<Self>) {
+        let allow = !self.tag_cpu_allowed;
+        match self.state.set_allow_cpu_tagging(allow) {
+            Ok(()) => {
+                self.tag_settings_notice = Some(if allow {
+                    "已允许 CPU 慢速打标；继续队列后生效".to_string()
+                } else {
+                    "已关闭 CPU 慢速打标；GPU 不可用时队列会暂停".to_string()
+                });
+            }
+            Err(error) => {
+                let message = format!("更新 CPU 打标设置失败：{error:#}");
+                self.tag_settings_notice = Some(message.clone());
+                push_toast(&self.toaster, cx, message, Severity::Danger);
+            }
+        }
+        self.refresh_tag_settings(cx);
+        cx.notify();
+    }
+
+    pub(crate) fn refresh_cache_stats(&mut self, cx: &mut Context<Self>) {
+        match self.state.cache_stats() {
+            Ok(stats) => self.cache_stats = Some(stats),
+            Err(error) => {
+                log::warn!("cache stats: {error:#}");
+                push_toast(
+                    &self.toaster,
+                    cx,
+                    format!("读取缓存统计失败：{error:#}"),
+                    Severity::Danger,
+                );
+            }
+        }
+        cx.notify();
+    }
+
+    /// 采集只读诊断快照；包含资产/队列/来源/错误/日志路径。
+    pub(crate) fn refresh_diagnostics(&mut self) {
+        let db_path = self.state.db_path();
+        let Some(data_dir) = db_path.parent().map(Path::to_path_buf) else {
+            return;
+        };
+        let (asset_count, queue_pending, queue_running, queue_error, last_error, sidecar_device) = {
+            let shared = self.state.shared.lock().unwrap();
+            (
+                shared.counts.total(),
+                shared.queue_pending,
+                shared.queue_running,
+                shared.queue_error,
+                shared.error.clone(),
+                shared.sidecar_device.clone(),
+            )
+        };
+        let log_path = std::env::var_os("KANALIB_LOG_FILE").map(PathBuf::from);
+        let context = DiagnosticsContext {
+            asset_count: Some(asset_count),
+            queue_pending: Some(queue_pending),
+            queue_running: Some(queue_running),
+            queue_error: Some(queue_error),
+            sources: self.state.source_statuses(),
+            last_scan: None,
+            last_error,
+            sidecar_device,
+            log_path,
+        };
+        match diagnostics::collect(&data_dir, context) {
+            Ok(snapshot) => self.diagnostic_snapshot = Some(snapshot),
+            Err(error) => log::warn!("diagnostics: {error:#}"),
+        }
+        self.sync_source_statuses();
+    }
+
+    /// 立即备份数据库；阻塞的备份在后台执行器上跑，不占 UI 线程。
+    pub(crate) fn start_backup(&mut self, cx: &mut Context<Self>) {
+        if self.backup_running {
+            return;
+        }
+        if self.state.shared.lock().unwrap().scanning {
+            self.settings_notice = Some("图库正在扫描，完成后再备份。".to_string());
+            push_toast(
+                &self.toaster,
+                cx,
+                "扫描进行中，完成后再备份",
+                Severity::Warning,
+            );
+            cx.notify();
+            return;
+        }
+        let data_dir = self.data_dir();
+        let db_path = self.state.db_path();
+        self.backup_running = true;
+        self.settings_notice = Some("正在备份数据库…".to_string());
+        let task = cx.background_executor().spawn(async move {
+            backup::ensure_backups_dir(&data_dir)?;
+            let destination = backup::default_backup_path(&data_dir);
+            backup::backup_database(&db_path, &destination, false)
+        });
+        let weak = cx.entity().downgrade();
+        cx.spawn(async move |_, cx| {
+            let result = task.await;
+            let _ = weak.update(cx, |app, cx| {
+                app.backup_running = false;
+                match result {
+                    Ok(report) => {
+                        let mut summary = format!(
+                            "最近备份：{} · {} · 耗时 {} ms · 完整性 {}",
+                            report.destination.display(),
+                            format_bytes(report.bytes),
+                            report.elapsed_ms,
+                            if report.integrity_ok { "通过" } else { "异常" }
+                        );
+                        if !report.warnings.is_empty() {
+                            summary.push_str(&format!(
+                                " · 警告：{}",
+                                report.warnings.join("；")
+                            ));
+                        }
+                        app.last_backup = Some(summary);
+                        app.settings_notice = Some(format!(
+                            "备份完成：{}",
+                            report.destination.display()
+                        ));
+                        app.refresh_diagnostics();
+                    }
+                    Err(error) => {
+                        app.last_backup = Some(format!("最近备份失败：{error:#}"));
+                        app.settings_notice = Some(format!("备份失败：{error:#}"));
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+        cx.notify();
+    }
+
+    pub(crate) fn open_backups_dir(&mut self, cx: &mut Context<Self>) {
+        let data_dir = self.data_dir();
+        match backup::ensure_backups_dir(&data_dir) {
+            Ok(dir) => open_path(&dir),
+            Err(error) => {
+                self.settings_notice = Some(format!("打开备份目录失败：{error:#}"));
+            }
+        }
+        cx.notify();
+    }
+
+    pub(crate) fn copy_diagnostics(&mut self, cx: &mut Context<Self>) {
+        self.refresh_diagnostics();
+        let text = self
+            .diagnostic_snapshot
+            .as_ref()
+            .map(DiagnosticSnapshot::to_text);
+        match text {
+            Some(text) => {
+                cx.write_to_clipboard(ClipboardItem::new_string(text));
+                self.settings_notice = Some("诊断信息已复制到剪贴板".to_string());
+            }
+            None => {
+                self.settings_notice = Some("诊断信息采集失败，暂无法复制".to_string());
+            }
+        }
+        cx.notify();
+    }
+
+    pub(crate) fn open_log_dir(&mut self, cx: &mut Context<Self>) {
+        let log_path = diagnostics::default_log_path(&self.data_dir());
+        if let Some(dir) = log_path.parent().map(Path::to_path_buf) {
+            let _ = std::fs::create_dir_all(&dir);
+            open_path(&dir);
+        }
+        cx.notify();
+    }
+
+    pub(crate) fn cleanup_cache(&mut self, cx: &mut Context<Self>) {
+        if self.state.shared.lock().unwrap().scanning {
+            push_toast(
+                &self.toaster,
+                cx,
+                "扫描进行中，完成后再清理缓存",
+                Severity::Warning,
+            );
+            return;
+        }
+        match self.state.cleanup_orphan_thumbs() {
+            Ok((files, bytes)) => {
+                push_toast(
+                    &self.toaster,
+                    cx,
+                    format!("已清理 {files} 个孤儿缩略图 · {}", format_bytes(bytes)),
+                    Severity::Success,
+                );
+                self.refresh_cache_stats(cx);
+            }
+            Err(error) => push_toast(
+                &self.toaster,
+                cx,
+                format!("清理缓存失败：{error:#}"),
+                Severity::Danger,
+            ),
+        }
+        cx.notify();
+    }
+
+    pub(crate) fn set_thumb_budget(&mut self, gb: u64, cx: &mut Context<Self>) {
+        self.thumb_budget_gb = gb.clamp(1, 1000);
+        self.persist_setting("cache.thumb_budget_gb", self.thumb_budget_gb.to_string());
+        cx.notify();
+    }
+
+    pub(crate) fn run_cache_budget_cleanup(
+        &mut self,
+        manual: bool,
+        cx: &mut Context<Self>,
+    ) -> Option<CacheCleanup> {
+        if self.state.shared.lock().unwrap().scanning {
+            if manual {
+                push_toast(
+                    &self.toaster,
+                    cx,
+                    "扫描进行中，完成后再清理缓存",
+                    Severity::Warning,
+                );
+            }
+            return None;
+        }
+        let budget = self.thumb_budget_gb.saturating_mul(1024 * 1024 * 1024);
+        let report = self
+            .thumb_cache
+            .update(cx, |cache, cx| cache.cleanup_to_budget(budget, cx));
+        self.cache_last_cleanup = Some(format!(
+            "最近清理 {} 个文件 · {} · 剩余 {} / 预算 {}",
+            report.removed_files,
+            format_bytes(report.removed_bytes),
+            format_bytes(report.after_bytes),
+            format_bytes(report.budget_bytes)
+        ));
+        if report.removed_files > 0 && let Ok(stats) = self.state.cache_stats() {
+            self.cache_stats = Some(stats);
+        }
+        if manual {
+            push_toast(
+                &self.toaster,
+                cx,
+                if report.removed_files == 0 {
+                    format!(
+                        "缓存未超预算 · {} / {}",
+                        format_bytes(report.after_bytes),
+                        format_bytes(report.budget_bytes)
+                    )
+                } else {
+                    format!(
+                        "已淘汰 {} 个缩略图 · {}",
+                        report.removed_files,
+                        format_bytes(report.removed_bytes)
+                    )
+                },
+                Severity::Success,
+            );
+            cx.notify();
+        }
+        Some(report)
+    }
+
+    pub(crate) fn render_settings(
+        &self,
+        this: &Entity<Self>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+        roots: &[PathBuf],
+        source_aliases: &HashMap<PathBuf, String>,
+        protected_paths: &[PathBuf],
+        similar_threshold: u8,
+        queue_pending: usize,
+        queue_running: usize,
+        queue_error: usize,
+        status: &str,
+        error: Option<&str>,
+        cache_hits: u64,
+        cache_misses: u64,
+        width: Pixels,
+        colors: UiColors,
+    ) -> AnyElement {
+        let page_padding = px(24.);
+        let tag_override_name = window.use_keyed_state(
+            "kanalib-tag-override-name",
+            cx,
+            |window, cx| TextInput::new(window, cx).placeholder("标签名，如 long_hair"),
+        );
+        let tag_override_value = window.use_keyed_state(
+            "kanalib-tag-override-value",
+            cx,
+            |window, cx| TextInput::new(window, cx).placeholder("0.00–1.00"),
+        );
+        let this_back = this.clone();
+        let this_add = this.clone();
+        let this_refresh_cache = this.clone();
+        let this_cleanup_cache = this.clone();
+        let this_budget_less = this.clone();
+        let this_budget_more = this.clone();
+        let this_budget_cleanup = this.clone();
+        let this_backup = this.clone();
+        let this_open_backups = this.clone();
+        let this_restore = this.clone();
+        let this_copy_diagnostics = this.clone();
+        let this_open_logs = this.clone();
+        let cache_stats = self.cache_stats.clone();
+        let thumb_budget_gb = self.thumb_budget_gb;
+        let cache_last_cleanup = self.cache_last_cleanup.clone();
+        let cache_hit_rate = if cache_hits + cache_misses == 0 {
+            0.0
+        } else {
+            cache_hits as f64 * 100.0 / (cache_hits + cache_misses) as f64
+        };
+        let db_path = self.state.db_path();
+        let cache_dir = self.state.cache_dir();
+        let db_bytes = std::fs::metadata(&db_path)
+            .map(|meta| meta.len())
+            .unwrap_or(0);
+        let cache_summary = cache_stats
+            .as_ref()
+            .map(|stats| {
+                format!(
+                    "{} 个文件 · {} · 孤儿 {} 个 · {}",
+                    stats.files,
+                    format_bytes(stats.bytes),
+                    stats.orphan_files,
+                    format_bytes(stats.orphan_bytes)
+                )
+            })
+            .unwrap_or_else(|| "尚未统计，点击“刷新统计”".to_string());
+        let orphan_count = cache_stats.as_ref().map_or(0, |stats| stats.orphan_files);
+        let data_dir = db_path
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| db_path.clone());
+        let data_dir_for_open = data_dir.clone();
+        let notice = self
+            .settings_notice
+            .clone()
+            .or_else(|| Some(status.to_string()));
+        let banner = error
+            .map(|message| (message.to_string(), colors.danger))
+            .or_else(|| notice.map(|message| (message, colors.muted)))
+            .map(|(message, color)| {
+                div()
+                    .px(page_padding)
+                    .py(px(8.))
+                    .border_b_1()
+                    .border_color(colors.border)
+                    .bg(colors.sunken)
+                    .text_xs()
+                    .text_color(color)
+                    .child(message)
+                    .into_any_element()
+            });
+
+        let protected_rows = if protected_paths.is_empty() {
+            div()
+                .text_xs()
+                .text_color(colors.subtle)
+                .child("尚未设置保护路径。保护路径下的文件永远不会被移入回收站。")
+                .into_any_element()
+        } else {
+            let mut list = div().flex().flex_col().gap(px(6.));
+            for path in protected_paths {
+                let path = path.clone();
+                let this_remove = this.clone();
+                list = list.child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .justify_between()
+                        .gap(px(10.))
+                        .px(px(10.))
+                        .py(px(7.))
+                        .rounded(px(6.))
+                        .bg(colors.sunken)
+                        .child(
+                            div()
+                                .truncate()
+                                .text_xs()
+                                .text_color(colors.fg)
+                                .child(path.display().to_string()),
+                        )
+                        .child(
+                            Button::new(
+                                SharedString::from(format!("remove-protected-{}", path.display())),
+                                "移除",
+                            )
+                            .on_click(move |_, _, cx| {
+                                let path = path.clone();
+                                let _ = this_remove.update(cx, |app, cx| {
+                                    match app.state.remove_protected_path(&path) {
+                                        Ok(()) => {
+                                            app.settings_notice =
+                                                Some(format!("已移除保护路径：{}", path.display()));
+                                        }
+                                        Err(error) => {
+                                            app.settings_notice =
+                                                Some(format!("移除失败: {error:#}"));
+                                        }
+                                    }
+                                    cx.notify();
+                                });
+                            }),
+                        ),
+                );
+            }
+            list.into_any_element()
+        };
+
+        let protected_section = div()
+            .p(px(16.))
+            .rounded(px(10.))
+            .border_1()
+            .border_color(colors.border)
+            .bg(colors.surface)
+            .flex()
+            .flex_col()
+            .gap(px(10.))
+            .child(
+                div()
+                    .text_sm()
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .child("去重保护路径"),
+            )
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(colors.muted)
+                    .child("保护路径优先作为保留项；其下文件不会被移入回收站。"),
+            )
+            .child(protected_rows)
+            .child(
+                div().flex().child(
+                    Button::new("add-protected", "添加保护文件夹")
+                        .primary()
+                        .on_click(move |_, _, cx| {
+                            let weak = this_add.downgrade();
+                            cx.spawn(async move |cx| {
+                                let Some(handle) = rfd::AsyncFileDialog::new().pick_folder().await
+                                else {
+                                    return;
+                                };
+                                let folder = handle.path().to_path_buf();
+                                let _ = weak.update(cx, |app, cx| {
+                                    match app.state.add_protected_path(folder) {
+                                        Ok(()) => {
+                                            app.settings_notice =
+                                                Some("已添加保护路径".to_string());
+                                        }
+                                        Err(error) => {
+                                            app.settings_notice =
+                                                Some(format!("添加失败: {error:#}"));
+                                        }
+                                    }
+                                    cx.notify();
+                                });
+                            })
+                            .detach();
+                        }),
+                ),
+            );
+
+        let mut threshold_row = div().flex().items_center().gap(px(6.));
+        for (value, label) in [(6u8, "严格 ≤6"), (10u8, "标准 ≤10"), (14u8, "宽松 ≤14")]
+        {
+            let this_threshold = this.clone();
+            threshold_row = threshold_row.child(
+                Button::new(
+                    SharedString::from(format!("settings-threshold-{value}")),
+                    label,
+                )
+                .variant(if similar_threshold == value {
+                    ButtonVariant::Primary
+                } else {
+                    ButtonVariant::Secondary
+                })
+                .on_click(move |_, _, cx| {
+                    let _ = this_threshold.update(cx, |app, cx| {
+                        let saved = app.state.set_similar_threshold(value);
+                        app.settings_notice = Some(format!("相似阈值默认值已设为 ≤{saved}"));
+                        cx.notify();
+                    });
+                }),
+            );
+        }
+        let similar_section = div()
+            .p(px(16.))
+            .rounded(px(10.))
+            .border_1()
+            .border_color(colors.border)
+            .bg(colors.surface)
+            .flex()
+            .flex_col()
+            .gap(px(10.))
+            .child(
+                div()
+                    .text_sm()
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .child("相似图片"),
+            )
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(colors.muted)
+                    .child("默认阈值用于相似扫描；去重页也可临时切换。当前："),
+            )
+            .child(threshold_row);
+
+        let path_row = |label: &'static str, value: PathBuf, colors: UiColors| {
+            div()
+                .flex()
+                .items_center()
+                .justify_between()
+                .gap(px(10.))
+                .px(px(10.))
+                .py(px(6.))
+                .rounded(px(6.))
+                .bg(colors.sunken)
+                .child(
+                    div()
+                        .flex_none()
+                        .text_xs()
+                        .text_color(colors.subtle)
+                        .child(label),
+                )
+                .child(
+                    div()
+                        .truncate()
+                        .text_xs()
+                        .text_color(colors.fg)
+                        .child(value.display().to_string()),
+                )
+        };
+        let info_row = |label: &'static str, value: String, color: Hsla| {
+            div()
+                .flex()
+                .items_center()
+                .justify_between()
+                .gap(px(10.))
+                .px(px(10.))
+                .py(px(6.))
+                .rounded(px(6.))
+                .bg(colors.sunken)
+                .child(
+                    div()
+                        .flex_none()
+                        .text_xs()
+                        .text_color(colors.subtle)
+                        .child(label),
+                )
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w(px(0.))
+                        .truncate()
+                        .text_xs()
+                        .text_color(color)
+                        .child(value),
+                )
+        };
+        let this_add_source = this.clone();
+        let mut source_rows = div().flex().flex_col().gap(px(6.));
+        if roots.is_empty() {
+            source_rows = source_rows.child(
+                div()
+                    .text_xs()
+                    .text_color(colors.subtle)
+                    .child("还没有图库文件夹，添加后开始扫描。"),
+            );
+        } else {
+            for root in roots {
+                let root_for_remove = root.clone();
+                let root_for_rename = root.clone();
+                let root_for_rescan = root.clone();
+                let this_remove = this.clone();
+                let this_rename = this.clone();
+                let this_rescan = this.clone();
+                let status = self
+                    .source_statuses
+                    .iter()
+                    .find(|status| &status.root == root)
+                    .cloned()
+                    .unwrap_or_else(|| SourceScanStatus {
+                        root: root.clone(),
+                        online: root.is_dir(),
+                        ..SourceScanStatus::default()
+                    });
+                let last_scan_text = status
+                    .last_scan
+                    .map(relative_time)
+                    .unwrap_or_else(|| "从未".to_string());
+                let scan_counts_text = format!(
+                    "最近 新增 {} · 更新 {} · 移除 {} · 失败 {}",
+                    status.counts.imported,
+                    status.counts.updated,
+                    status.counts.removed,
+                    status.counts.failed
+                );
+                let filter_summary = scan_filter_summary(&self.state.scan_filter(root));
+                let asset_count = status.asset_count;
+                let online = status.online;
+                let error = status.error.clone();
+                source_rows = source_rows.child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .justify_between()
+                        .gap(px(8.))
+                        .px(px(10.))
+                        .py(px(6.))
+                        .rounded(px(6.))
+                        .bg(colors.sunken)
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w(px(0.))
+                                .flex()
+                                .flex_col()
+                                .gap(px(2.))
+                                .child(
+                                    div()
+                                        .flex()
+                                        .items_center()
+                                        .gap(px(5.))
+                                        .children((!online).then(|| {
+                                            div()
+                                                .flex_none()
+                                                .flex()
+                                                .items_center()
+                                                .gap(px(3.))
+                                                .child(
+                                                    div()
+                                                        .size(px(6.))
+                                                        .rounded_full()
+                                                        .bg(colors.danger),
+                                                )
+                                                .child(
+                                                    div()
+                                                        .text_xs()
+                                                        .text_color(colors.danger)
+                                                        .child("离线"),
+                                                )
+                                        }))
+                                        .child(
+                                            div()
+                                                .flex_1()
+                                                .min_w(px(0.))
+                                                .truncate()
+                                                .text_xs()
+                                                .text_color(colors.fg)
+                                                .child(source_label(root, source_aliases)),
+                                        ),
+                                )
+                                .child(
+                                    div()
+                                        .truncate()
+                                        .text_xs()
+                                        .text_color(colors.subtle)
+                                        .child(root.display().to_string()),
+                                )
+                                .child(
+                                    div()
+                                        .flex()
+                                        .flex_wrap()
+                                        .items_center()
+                                        .gap(px(6.))
+                                        .child(
+                                            div()
+                                                .text_xs()
+                                                .text_color(if online {
+                                                    colors.subtle
+                                                } else {
+                                                    colors.danger
+                                                })
+                                                .child(format!("上次扫描 {last_scan_text}")),
+                                        )
+                                        .child(
+                                            div()
+                                                .text_xs()
+                                                .text_color(colors.subtle)
+                                                .child(format!("· {asset_count} 个资产")),
+                                        )
+                                        .child(
+                                            div()
+                                                .text_xs()
+                                                .text_color(colors.subtle)
+                                                .child(scan_counts_text),
+                                        ),
+                                )
+                                .children(error.map(|error| {
+                                    div()
+                                        .truncate()
+                                        .text_xs()
+                                        .text_color(colors.danger)
+                                        .child(format!("错误：{error}"))
+                                }))
+                                .child(
+                                    div()
+                                        .truncate()
+                                        .text_xs()
+                                        .text_color(colors.subtle)
+                                        .child(filter_summary),
+                                ),
+                        )
+                        .child(
+                            div()
+                                .flex_none()
+                                .flex()
+                                .items_center()
+                                .gap(px(4.))
+                                .child(
+                                    Button::new(
+                                        SharedString::from(format!(
+                                            "rescan-source-{}",
+                                            root.display()
+                                        )),
+                                        "重扫",
+                                    )
+                                    .size(ControlSize::Sm)
+                                    .on_click(move |_, _, cx| {
+                                        let _ = this_rescan.update(cx, |app, cx| {
+                                            app.rescan_source(root_for_rescan.clone(), cx);
+                                        });
+                                    }),
+                                )
+                                .child(
+                                    Button::new(
+                                        SharedString::from(format!(
+                                            "rename-source-{}",
+                                            root.display()
+                                        )),
+                                        "重命名",
+                                    )
+                                    .size(ControlSize::Sm)
+                                    .on_click(move |_, _, cx| {
+                                        let _ = this_rename.update(cx, |app, cx| {
+                                            app.open_source_rename(
+                                                root_for_rename.clone(),
+                                                cx,
+                                            );
+                                        });
+                                    }),
+                                )
+                                .child(
+                                    Button::new(
+                                        SharedString::from(format!(
+                                            "remove-source-{}",
+                                            root.display()
+                                        )),
+                                        "移除",
+                                    )
+                                    .size(ControlSize::Sm)
+                                    .on_click(move |_, _, cx| {
+                                        let _ = this_remove.update(cx, |app, cx| {
+                                            app.source_remove_confirm =
+                                                Some(root_for_remove.clone());
+                                            cx.notify();
+                                        });
+                                    }),
+                                ),
+                        ),
+                );
+            }
+        }
+        let sources_section = div()
+            .p(px(16.))
+            .rounded(px(10.))
+            .border_1()
+            .border_color(colors.border)
+            .bg(colors.surface)
+            .flex()
+            .flex_col()
+            .gap(px(10.))
+            .child(
+                div()
+                    .text_sm()
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .child("本地来源"),
+            )
+            .child(source_rows)
+            .child(
+                div()
+                    .flex()
+                    .child(
+                        Button::new("add-source", "添加文件夹")
+                            .primary()
+                            .on_click(move |_, _, cx| {
+                                let _ = this_add_source
+                                    .update(cx, |app, cx| app.choose_folder(cx));
+                            }),
+                    ),
+            )
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(colors.muted)
+                    .child("移除来源只影响图库视图，不会删除磁盘文件。"),
+            );
+
+        let thresholds = self.tag_thresholds.clone().unwrap_or_default();
+        let thresholds_loaded = self.tag_thresholds.is_some();
+        let threshold_defaults = default_category_thresholds();
+        let mut threshold_rows = div()
+            .id("tag-thresholds")
+            .aria_label("打标类别阈值")
+            .flex()
+            .flex_col()
+            .gap(px(3.));
+        for (category, label) in TAG_CATEGORY_LABELS {
+            let current = thresholds
+                .categories
+                .get(category)
+                .copied()
+                .or_else(|| threshold_defaults.get(category).copied())
+                .unwrap_or(0.2);
+            let default = threshold_defaults.get(category).copied().unwrap_or(0.2);
+            let minus_category = category.to_string();
+            let plus_category = category.to_string();
+            let reset_category = category.to_string();
+            let this_minus = this.clone();
+            let this_plus = this.clone();
+            let this_reset = this.clone();
+            threshold_rows = threshold_rows.child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(6.))
+                    .child(
+                        div()
+                            .w(px(64.))
+                            .text_xs()
+                            .text_color(colors.fg)
+                            .child(label),
+                    )
+                    .child(
+                        div()
+                            .id(SharedString::from(format!("tag-threshold-{category}")))
+                            .aria_label(format!("{label}类别阈值 {current:.2}"))
+                            .w(px(44.))
+                            .text_xs()
+                            .text_color(colors.muted)
+                            .child(format!("{current:.2}")),
+                    )
+                    .child(
+                        Button::new(
+                            SharedString::from(format!("tag-threshold-{category}-minus")),
+                            "−0.01",
+                        )
+                        .size(ControlSize::Sm)
+                        .disabled(current <= 0.0)
+                        .on_click(move |_, _, cx| {
+                            let _ = this_minus.update(cx, |app, cx| {
+                                app.step_category_threshold(&minus_category, -0.01, cx);
+                            });
+                        }),
+                    )
+                    .child(
+                        Button::new(
+                            SharedString::from(format!("tag-threshold-{category}-plus")),
+                            "+0.01",
+                        )
+                        .size(ControlSize::Sm)
+                        .disabled(current >= 1.0)
+                        .on_click(move |_, _, cx| {
+                            let _ = this_plus.update(cx, |app, cx| {
+                                app.step_category_threshold(&plus_category, 0.01, cx);
+                            });
+                        }),
+                    )
+                    .child(
+                        Button::new(
+                            SharedString::from(format!("tag-threshold-{category}-reset")),
+                            "重置",
+                        )
+                        .size(ControlSize::Sm)
+                        .disabled((current - default).abs() < 0.0005)
+                        .on_click(move |_, _, cx| {
+                            let _ = this_reset.update(cx, |app, cx| {
+                                app.reset_category_threshold(&reset_category, cx);
+                            });
+                        }),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(colors.subtle)
+                            .child(format!("默认 {default:.2}")),
+                    ),
+            );
+        }
+
+        let mut overrides = thresholds.overrides.iter().collect::<Vec<_>>();
+        overrides.sort_by(|(left, _), (right, _)| left.cmp(right));
+        let override_count = overrides.len();
+        let override_rows: AnyElement = if overrides.is_empty() {
+            div()
+                .text_xs()
+                .text_color(colors.subtle)
+                .child("暂无单标签覆盖；所有标签使用类别阈值。")
+                .into_any_element()
+        } else {
+            let mut rows = div().flex().flex_col().gap(px(3.));
+            for (tag, value) in overrides.into_iter().take(8) {
+                let this_clear = this.clone();
+                let tag_name = tag.clone();
+                rows = rows.child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .justify_between()
+                        .gap(px(8.))
+                        .px(px(8.))
+                        .py(px(3.))
+                        .rounded(px(4.))
+                        .bg(colors.sunken)
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w(px(0.))
+                                .truncate()
+                                .text_xs()
+                                .text_color(colors.fg)
+                                .child(format!("#{tag} · {value:.2}")),
+                        )
+                        .child(
+                            Button::new(
+                                SharedString::from(format!("tag-override-clear-{tag}")),
+                                "清除",
+                            )
+                            .size(ControlSize::Sm)
+                            .on_click(move |_, _, cx| {
+                                let _ = this_clear.update(cx, |app, cx| {
+                                    app.clear_tag_override(&tag_name, cx);
+                                });
+                            }),
+                        ),
+                );
+            }
+            if override_count > 8 {
+                rows = rows.child(
+                    div()
+                        .text_xs()
+                        .text_color(colors.subtle)
+                        .child(format!("另有 {} 条覆盖未展开", override_count - 8)),
+                );
+            }
+            rows.into_any_element()
+        };
+
+        let selected_target_count = if !self.selection.is_empty() {
+            self.selection.len()
+        } else if self.state.shared.lock().unwrap().selected.is_some() {
+            1
+        } else {
+            0
+        };
+        let target_count = if selected_target_count > 0 {
+            selected_target_count
+        } else {
+            self.view.visible_indices.len()
+        };
+        let this_recompute = this.clone();
+        let this_apply_override = this.clone();
+        let this_clear_override = this.clone();
+        let override_name_field = tag_override_name.clone();
+        let override_value_field = tag_override_value.clone();
+        let clear_name_field = tag_override_name.clone();
+        let override_inputs = div()
+            .flex()
+            .flex_wrap()
+            .items_center()
+            .gap(px(6.))
+            .child(
+                div()
+                    .w(px(220.))
+                    .child(Input::new(&tag_override_name).least("标签名，如 long_hair")),
+            )
+            .child(
+                div()
+                    .w(px(110.))
+                    .child(Input::new(&tag_override_value).least("0.00–1.00")),
+            )
+            .child(
+                Button::new("tag-override-apply", "应用覆盖")
+                    .size(ControlSize::Sm)
+                    .on_click(move |_, _, cx| {
+                        let name = override_name_field.read(cx).text().to_string();
+                        let value = override_value_field.read(cx).text().to_string();
+                        let _ = this_apply_override.update(cx, |app, cx| {
+                            app.apply_tag_override(&name, &value, cx);
+                        });
+                    }),
+            )
+            .child(
+                Button::new("tag-override-clear", "按标签名清除")
+                    .size(ControlSize::Sm)
+                    .on_click(move |_, _, cx| {
+                        let name = clear_name_field.read(cx).text().to_string();
+                        let _ = this_clear_override.update(cx, |app, cx| {
+                            app.clear_tag_override(&name, cx);
+                        });
+                    }),
+            );
+
+        let queue = self.tag_queue_status.clone().unwrap_or_default();
+        let queue_phase = tag_queue_phase(&queue);
+        let queue_gpu = match queue.gpu_available {
+            Some(true) => "GPU 可用",
+            Some(false) => "GPU 不可用",
+            None => "GPU 状态未知",
+        };
+        let queue_device = queue
+            .device
+            .clone()
+            .unwrap_or_else(|| "未加载".to_string());
+        let queue_status_rows = div()
+            .id("tag-queue-status")
+            .aria_label("打标队列状态")
+            .flex()
+            .flex_col()
+            .gap(px(4.))
+            .child(info_row(
+                "状态",
+                format!(
+                    "{queue_phase} · 等待 {} · 运行 {} · 失败 {} · 完成 {}",
+                    queue.pending, queue.running, queue.error, queue.done
+                ),
+                if queue.error > 0 {
+                    colors.warning
+                } else {
+                    colors.fg
+                },
+            ))
+            .child(info_row(
+                "本轮",
+                format!(
+                    "完成 {} / {} · 失败 {} · 吞吐 {} · ETA {}",
+                    queue.completed,
+                    queue.total,
+                    queue.failed,
+                    format_tag_throughput(queue.throughput_per_sec),
+                    format_tag_eta(queue.eta_secs)
+                ),
+                colors.fg,
+            ))
+            .child(info_row(
+                "设备",
+                format!("{queue_device} · {queue_gpu}"),
+                colors.muted,
+            ));
+        let queue_message = queue.message.clone().map(|message| {
+            div()
+                .text_xs()
+                .text_color(colors.accent)
+                .child(message)
+        });
+        let queue_last_error = queue.last_error.clone().map(|error| {
+            let path = queue
+                .last_error_path
+                .as_ref()
+                .map(|path| path.display().to_string())
+                .unwrap_or_else(|| "未知路径".to_string());
+            div()
+                .truncate()
+                .text_xs()
+                .text_color(colors.danger)
+                .child(format!("最近错误 · {path} · {error}"))
+        });
+
+        let this_pause = this.clone();
+        let this_cancel = this.clone();
+        let this_queue_refresh = this.clone();
+        let this_cpu = this.clone();
+        let this_retry = this.clone();
+        let this_prioritize = this.clone();
+        let this_retag_selected = this.clone();
+        let this_retag_view = this.clone();
+        let queue_actions = div()
+            .flex()
+            .flex_wrap()
+            .items_center()
+            .gap(px(6.))
+            .child(
+                Button::new(
+                    "tag-queue-pause",
+                    if queue.paused {
+                        "继续打标"
+                    } else {
+                        "暂停打标"
+                    },
+                )
+                .primary()
+                .disabled(queue.cancelling)
+                .on_click(move |_, _, cx| {
+                    let _ = this_pause.update(cx, |app, cx| app.toggle_tag_queue(cx));
+                }),
+            )
+            .child(
+                Button::new("tag-queue-cancel", "取消打标")
+                    .size(ControlSize::Sm)
+                    .disabled(queue.cancelling)
+                    .on_click(move |_, _, cx| {
+                        let _ = this_cancel.update(cx, |app, cx| app.cancel_tag_queue(cx));
+                    }),
+            )
+            .child(
+                Button::new("tag-queue-refresh", "刷新队列")
+                    .size(ControlSize::Sm)
+                    .icon(IconName::RefreshCw)
+                    .on_click(move |_, _, cx| {
+                        let _ = this_queue_refresh
+                            .update(cx, |app, cx| app.refresh_tag_settings(cx));
+                    }),
+            )
+            .child(
+                Button::new(
+                    "tag-queue-cpu-toggle",
+                    if self.tag_cpu_allowed {
+                        "允许 CPU 慢速打标：开"
+                    } else {
+                        "允许 CPU 慢速打标：关"
+                    },
+                )
+                .size(ControlSize::Sm)
+                .on_click(move |_, _, cx| {
+                    let _ = this_cpu.update(cx, |app, cx| app.toggle_cpu_tagging(cx));
+                }),
+            )
+            .child(
+                Button::new("tag-queue-retry-failed", "重试失败")
+                    .size(ControlSize::Sm)
+                    .on_click(move |_, _, cx| {
+                        let _ = this_retry.update(cx, |app, cx| app.retry_failed(cx));
+                    }),
+            )
+            .child(
+                Button::new("tag-prioritize-selected", "提升选中优先级")
+                    .size(ControlSize::Sm)
+                    .icon(IconName::ArrowUp)
+                    .on_click(move |_, _, cx| {
+                        let _ = this_prioritize
+                            .update(cx, |app, cx| app.prioritize_selected(cx));
+                    }),
+            )
+            .child(
+                Button::new("tag-retag-selected", "重打标选中")
+                    .size(ControlSize::Sm)
+                    .icon(IconName::WandSparkles)
+                    .on_click(move |_, _, cx| {
+                        let _ = this_retag_selected
+                            .update(cx, |app, cx| app.request_retag(true, cx));
+                    }),
+            )
+            .child(
+                Button::new("tag-retag-view", "重打标当前视图")
+                    .size(ControlSize::Sm)
+                    .on_click(move |_, _, cx| {
+                        let _ = this_retag_view
+                            .update(cx, |app, cx| app.request_retag(false, cx));
+                    }),
+            );
+
+        let error_rows: AnyElement = if self.tag_job_errors.is_empty() {
+            div()
+                .text_xs()
+                .text_color(colors.subtle)
+                .child("最近失败：无")
+                .into_any_element()
+        } else {
+            let mut rows = div().flex().flex_col().gap(px(3.));
+            for error in &self.tag_job_errors {
+                let file_name = error
+                    .path
+                    .file_name()
+                    .map(|name| name.to_string_lossy().to_string())
+                    .unwrap_or_else(|| error.path.display().to_string());
+                rows = rows.child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap(px(1.))
+                        .px(px(8.))
+                        .py(px(3.))
+                        .rounded(px(4.))
+                        .bg(colors.sunken)
+                        .child(
+                            div()
+                                .truncate()
+                                .text_xs()
+                                .text_color(colors.fg)
+                                .child(format!(
+                                    "#{} · 尝试 {} 次 · {}",
+                                    error.job_id, error.attempts, file_name
+                                )),
+                        )
+                        .child(
+                            div()
+                                .truncate()
+                                .text_xs()
+                                .text_color(colors.danger)
+                                .child(
+                                    error
+                                        .last_error
+                                        .clone()
+                                        .unwrap_or_else(|| "没有错误详情".to_string()),
+                                ),
+                        ),
+                );
+            }
+            rows.into_any_element()
+        };
+
+        let tag_section = div()
+            .p(px(16.))
+            .rounded(px(10.))
+            .border_1()
+            .border_color(colors.border)
+            .bg(colors.surface)
+            .flex()
+            .flex_col()
+            .gap(px(8.))
+            .child(
+                div()
+                    .text_sm()
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .child("打标与队列"),
+            )
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(colors.muted)
+                    .child(if thresholds_loaded {
+                        "阈值改动只持久化设置；点击“重算”才按已存候选更新标签。"
+                    } else {
+                        "尚未读取到阈值，当前显示模型默认值；点击“刷新队列”重试。"
+                    }),
+            )
+            .children(self.tag_settings_notice.clone().map(|notice| {
+                div()
+                    .text_xs()
+                    .text_color(colors.accent)
+                    .child(notice)
+            }))
+            .child(
+                div()
+                    .text_xs()
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .child("类别阈值"),
+            )
+            .child(threshold_rows)
+            .child(
+                div()
+                    .flex()
+                    .flex_wrap()
+                    .items_center()
+                    .gap(px(6.))
+                    .child(
+                        Button::new(
+                            "tag-recompute",
+                            if self.tag_recompute_running {
+                                "重算中…"
+                            } else {
+                                "重算当前视图/选中"
+                            },
+                        )
+                        .size(ControlSize::Sm)
+                        .disabled(self.tag_recompute_running)
+                        .on_click(move |_, _, cx| {
+                            let _ = this_recompute.update(cx, |app, cx| {
+                                app.start_recompute_tag_thresholds(cx)
+                            });
+                        }),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(colors.subtle)
+                            .child(format!("目标 {target_count} 张（选中优先）")),
+                    ),
+            )
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(colors.subtle)
+                    .child(format!(
+                        "候选只保存分数 ≥ {TAG_CANDIDATE_MIN_SCORE:.3} 的每类前若干名；阈值低于候选下限或超出已存 top-K 的资产需要重打标。"
+                    )),
+            )
+            .child(
+                div()
+                    .text_xs()
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .child(format!("单标签覆盖（{override_count}）")),
+            )
+            .child(override_inputs)
+            .child(override_rows)
+            .child(div().h(px(1.)).bg(colors.border))
+            .child(
+                div()
+                    .text_sm()
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .child("打标队列"),
+            )
+            .child(queue_status_rows)
+            .children(queue_message)
+            .children(queue_last_error)
+            .child(queue_actions)
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(colors.subtle)
+                    .child("暂停在当前批完成后生效；取消保留已完成结果；重打标会保留手工标签。"),
+            )
+            .child(error_rows);
+
+        // 低置信度审核：按资产分组展示待审候选，支持单条与整张处理。
+        let review_groups = group_reviews_by_asset(&self.tag_reviews);
+        let review_total = self.tag_reviews.len();
+        let this_review_refresh = this.clone();
+        let review_actions = div()
+            .flex()
+            .flex_wrap()
+            .items_center()
+            .gap(px(6.))
+            .child(
+                Button::new(
+                    "tag-review-refresh",
+                    if self.tag_review_running {
+                        "读取中…"
+                    } else {
+                        "刷新待审候选"
+                    },
+                )
+                .size(ControlSize::Sm)
+                .icon(IconName::RefreshCw)
+                .disabled(self.tag_review_running)
+                .on_click(move |_, _, cx| {
+                    let _ = this_review_refresh
+                        .update(cx, |app, cx| app.refresh_tag_reviews(cx));
+                }),
+            )
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(colors.subtle)
+                    .child(format!("待审候选 {review_total} 条")),
+            );
+        let review_rows: AnyElement = if review_groups.is_empty() {
+            div()
+                .text_xs()
+                .text_color(colors.subtle)
+                .child(if self.tag_review_running {
+                    "正在读取待审候选…"
+                } else {
+                    "没有待审候选：所有低于阈值的候选都已处理。"
+                })
+                .into_any_element()
+        } else {
+            let mut rows = div().flex().flex_col().gap(px(6.));
+            for (path, candidates) in review_groups {
+                let file_name = path
+                    .file_name()
+                    .map(|name| name.to_string_lossy().to_string())
+                    .unwrap_or_else(|| path.display().to_string());
+                let mut tag_rows = div().flex().flex_col().gap(px(2.));
+                for candidate in &candidates {
+                    let this_accept = this.clone();
+                    let this_ignore = this.clone();
+                    let accept_path = path.clone();
+                    let accept_tag = candidate.tag.clone();
+                    let ignore_path = path.clone();
+                    let ignore_tag = candidate.tag.clone();
+                    let score = candidate.score;
+                    let threshold = candidate.threshold;
+                    let tag_name = candidate.tag.clone();
+                    let category = candidate.category.clone();
+                    tag_rows = tag_rows.child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(px(8.))
+                            .px(px(8.))
+                            .py(px(2.))
+                            .rounded(px(4.))
+                            .bg(colors.sunken)
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w(px(0.))
+                                    .truncate()
+                                    .text_xs()
+                                    .text_color(colors.fg)
+                                    .child(format!("#{tag_name} · {}", tag_category_label(&category))),
+                            )
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(colors.muted)
+                                    .child(format!("分数 {score:.3} / 阈值 {threshold:.3}")),
+                            )
+                            .child(
+                                Button::new(
+                                    SharedString::from(format!(
+                                        "tag-review-accept-{}-{accept_tag}",
+                                        file_name
+                                    )),
+                                    "接受",
+                                )
+                                .size(ControlSize::Sm)
+                                .on_click(move |_, _, cx| {
+                                    let _ = this_accept.update(cx, |app, cx| {
+                                        app.apply_tag_review(
+                                            accept_path.clone(),
+                                            accept_tag.clone(),
+                                            TagReviewState::Accepted,
+                                            cx,
+                                        );
+                                    });
+                                }),
+                            )
+                            .child(
+                                Button::new(
+                                    SharedString::from(format!(
+                                        "tag-review-ignore-{}-{ignore_tag}",
+                                        file_name
+                                    )),
+                                    "忽略",
+                                )
+                                .size(ControlSize::Sm)
+                                .on_click(move |_, _, cx| {
+                                    let _ = this_ignore.update(cx, |app, cx| {
+                                        app.apply_tag_review(
+                                            ignore_path.clone(),
+                                            ignore_tag.clone(),
+                                            TagReviewState::Ignored,
+                                            cx,
+                                        );
+                                    });
+                                }),
+                            ),
+                    );
+                }
+                let this_accept_all = this.clone();
+                let this_ignore_all = this.clone();
+                let accept_all_path = path.clone();
+                let ignore_all_path = path.clone();
+                let candidate_count = candidates.len();
+                rows = rows.child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap(px(4.))
+                        .px(px(8.))
+                        .py(px(6.))
+                        .rounded(px(6.))
+                        .border_1()
+                        .border_color(colors.border)
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .justify_between()
+                                .gap(px(8.))
+                                .child(
+                                    div()
+                                        .flex_1()
+                                        .min_w(px(0.))
+                                        .truncate()
+                                        .text_xs()
+                                        .font_weight(FontWeight::SEMIBOLD)
+                                        .text_color(colors.fg)
+                                        .child(format!("{file_name} · {candidate_count} 条")),
+                                )
+                                .child(
+                                    Button::new(
+                                        SharedString::from(format!(
+                                            "tag-review-accept-all-{file_name}"
+                                        )),
+                                        "整张接受",
+                                    )
+                                    .size(ControlSize::Sm)
+                                    .on_click(move |_, _, cx| {
+                                        let _ = this_accept_all.update(cx, |app, cx| {
+                                            app.apply_asset_review(
+                                                accept_all_path.clone(),
+                                                TagReviewState::Accepted,
+                                                cx,
+                                            );
+                                        });
+                                    }),
+                                )
+                                .child(
+                                    Button::new(
+                                        SharedString::from(format!(
+                                            "tag-review-ignore-all-{file_name}"
+                                        )),
+                                        "整张忽略",
+                                    )
+                                    .size(ControlSize::Sm)
+                                    .on_click(move |_, _, cx| {
+                                        let _ = this_ignore_all.update(cx, |app, cx| {
+                                            app.apply_asset_review(
+                                                ignore_all_path.clone(),
+                                                TagReviewState::Ignored,
+                                                cx,
+                                            );
+                                        });
+                                    }),
+                                ),
+                        )
+                        .child(tag_rows),
+                );
+            }
+            rows.into_any_element()
+        };
+        let review_section = div()
+            .p(px(16.))
+            .rounded(px(10.))
+            .border_1()
+            .border_color(colors.border)
+            .bg(colors.surface)
+            .flex()
+            .flex_col()
+            .gap(px(8.))
+            .child(
+                div()
+                    .text_sm()
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .child("低置信度审核"),
+            )
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(colors.muted)
+                    .child("分数低于有效阈值、尚未处理的候选。接受会写入标签，忽略会标记为已处理。"),
+            )
+            .children(self.tag_review_notice.clone().map(|notice| {
+                div()
+                    .text_xs()
+                    .text_color(colors.accent)
+                    .child(notice)
+            }))
+            .child(review_actions)
+            .child(review_rows);
+
+        let data_section = div()
+            .p(px(16.))
+            .rounded(px(10.))
+            .border_1()
+            .border_color(colors.border)
+            .bg(colors.surface)
+            .flex()
+            .flex_col()
+            .gap(px(10.))
+            .child(
+                div()
+                    .text_sm()
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .child("数据与缓存"),
+            )
+            .child(path_row("数据库", db_path, colors))
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(colors.subtle)
+                    .child(format!("数据库大小 {}", format_bytes(db_bytes))),
+            )
+            .child(path_row("缩略图缓存", cache_dir, colors))
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(colors.muted)
+                    .child(cache_summary),
+            )
+            .child({
+                let (label, color) = match kanalib_core::ffmpeg::status() {
+                    Some(build) if build.license == kanalib_core::ffmpeg::License::Gpl => (
+                        format!(
+                            "FFmpeg · {} · GPL · 仅限本机使用，勿随包分发",
+                            build.version
+                        ),
+                        colors.warning,
+                    ),
+                    Some(build) => (
+                        format!(
+                            "FFmpeg · {} · {}",
+                            build.version,
+                            build.license.label()
+                        ),
+                        colors.muted,
+                    ),
+                    None => ("FFmpeg · 未找到 · 使用内置解码回退".to_string(), colors.subtle),
+                };
+                div().text_xs().text_color(color).child(label)
+            })
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(colors.subtle)
+                    .child("超过磁盘预算时淘汰最少使用的缩略图组；当前可见页与最近访问的图不会被删，缺失的缓存会在滚动时按需重建。"),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_wrap()
+                    .items_center()
+                    .gap(px(6.))
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(colors.muted)
+                            .child("磁盘预算"),
+                    )
+                    .child(
+                        Button::new("thumb-budget-less", "−")
+                            .size(ControlSize::Sm)
+                            .disabled(thumb_budget_gb <= 1)
+                            .on_click(move |_, _, cx| {
+                                let _ = this_budget_less.update(cx, |app, cx| {
+                                    let value = app.thumb_budget_gb.saturating_sub(1);
+                                    app.set_thumb_budget(value, cx);
+                                });
+                            }),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(colors.fg)
+                            .child(format!("{thumb_budget_gb} GB")),
+                    )
+                    .child(
+                        Button::new("thumb-budget-more", "+")
+                            .size(ControlSize::Sm)
+                            .disabled(thumb_budget_gb >= 1000)
+                            .on_click(move |_, _, cx| {
+                                let _ = this_budget_more.update(cx, |app, cx| {
+                                    let value = app.thumb_budget_gb.saturating_add(1);
+                                    app.set_thumb_budget(value, cx);
+                                });
+                            }),
+                    )
+                    .child(
+                        Button::new("thumb-budget-cleanup", "清理到预算")
+                            .size(ControlSize::Sm)
+                            .on_click(move |_, _, cx| {
+                                let _ = this_budget_cleanup.update(cx, |app, cx| {
+                                    app.run_cache_budget_cleanup(true, cx);
+                                });
+                            }),
+                    ),
+            )
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(colors.subtle)
+                    .child(format!(
+                        "内存缩略图命中率 {cache_hit_rate:.1}% · {} 次命中 / {} 次未命中",
+                        cache_hits, cache_misses
+                    )),
+            )
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(colors.subtle)
+                    .child(
+                        cache_last_cleanup
+                            .unwrap_or_else(|| "尚未执行预算淘汰".to_string()),
+                    ),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_wrap()
+                    .items_center()
+                    .gap(px(6.))
+                    .child(Button::new("open-data-dir", "打开数据目录").on_click(
+                        move |_, _, _| {
+                            open_path(&data_dir_for_open);
+                        },
+                    ))
+                    .child(
+                        Button::new("refresh-cache", "刷新统计")
+                            .size(ControlSize::Sm)
+                            .icon(IconName::RefreshCw)
+                            .on_click(move |_, _, cx| {
+                                let _ = this_refresh_cache
+                                    .update(cx, |app, cx| app.refresh_cache_stats(cx));
+                            }),
+                    )
+                    .child(
+                        Button::new("cleanup-cache", "清理孤儿")
+                            .size(ControlSize::Sm)
+                            .disabled(orphan_count == 0)
+                            .on_click(move |_, _, cx| {
+                                let _ = this_cleanup_cache
+                                    .update(cx, |app, cx| app.cleanup_cache(cx));
+                            }),
+                    ),
+            );
+
+        let backup_section = div()
+            .p(px(16.))
+            .rounded(px(10.))
+            .border_1()
+            .border_color(colors.border)
+            .bg(colors.surface)
+            .flex()
+            .flex_col()
+            .gap(px(10.))
+            .child(
+                div()
+                    .text_sm()
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .child("数据库备份"),
+            )
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(colors.muted)
+                    .child("立即把数据库复制到数据目录下的 backups 子目录，并校验完整性；备份不包含缩略图缓存。"),
+            )
+            .child(path_row("备份目录", backup::backups_dir(&data_dir), colors))
+            .child(
+                div()
+                    .flex()
+                    .flex_wrap()
+                    .items_center()
+                    .gap(px(6.))
+                    .child(
+                        Button::new(
+                            "backup-now",
+                            if self.backup_running {
+                                "备份中…"
+                            } else {
+                                "立即备份"
+                            },
+                        )
+                        .primary()
+                        .disabled(self.backup_running)
+                        .on_click(move |_, _, cx| {
+                            let _ = this_backup.update(cx, |app, cx| app.start_backup(cx));
+                        }),
+                    )
+                    .child(
+                        Button::new("open-backups", "打开备份目录")
+                            .size(ControlSize::Sm)
+                            .icon(IconName::FolderOpen)
+                            .on_click(move |_, _, cx| {
+                                let _ =
+                                    this_open_backups.update(cx, |app, cx| app.open_backups_dir(cx));
+                            }),
+                    )
+                    .child(
+                        Button::new("restore-backup", "恢复备份…")
+                            .size(ControlSize::Sm)
+                            .on_click(move |_, _, cx| {
+                                let _ = this_restore.update(cx, |app, cx| {
+                                    app.settings_notice =
+                                        Some("恢复流程将在后续版本提供".to_string());
+                                    cx.notify();
+                                });
+                            }),
+                    ),
+            )
+            .children(self.last_backup.clone().map(|summary| {
+                div()
+                    .text_xs()
+                    .text_color(colors.muted)
+                    .child(summary)
+            }))
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(colors.subtle)
+                    .child("备份只复制数据库；恢复流程将在后续版本提供。"),
+            );
+
+        let diagnostics_rows: AnyElement = if let Some(snapshot) = &self.diagnostic_snapshot {
+            let mut rows = div().flex().flex_col().gap(px(4.));
+            rows = rows.child(info_row("版本", snapshot.app_version.clone(), colors.fg));
+            rows = rows.child(info_row(
+                "数据目录",
+                snapshot.data_dir.display().to_string(),
+                colors.fg,
+            ));
+            rows = rows.child(info_row(
+                "数据库",
+                format!(
+                    "{} · {}",
+                    snapshot.db_path.display(),
+                    format_bytes(snapshot.db_bytes)
+                ),
+                colors.fg,
+            ));
+            rows = rows.child(info_row(
+                "缩略图缓存",
+                format!(
+                    "{} · {}",
+                    snapshot.thumb_cache_dir.display(),
+                    format_bytes(snapshot.thumb_cache_bytes)
+                ),
+                colors.fg,
+            ));
+            rows = rows.child(info_row(
+                "资产总数",
+                snapshot.asset_count.to_string(),
+                colors.fg,
+            ));
+            rows = rows.child(info_row(
+                "打标队列",
+                format!(
+                    "等待 {} · 运行 {} · 失败 {}",
+                    snapshot.queue_pending, snapshot.queue_running, snapshot.queue_error
+                ),
+                colors.fg,
+            ));
+            rows = rows.child(info_row(
+                "推理设备",
+                snapshot
+                    .sidecar_device
+                    .clone()
+                    .unwrap_or_else(|| "未知".to_string()),
+                colors.fg,
+            ));
+            rows = rows.child(info_row(
+                "最近扫描",
+                snapshot
+                    .last_scan
+                    .map(|seconds| {
+                        format!("{}（{}）", relative_time(seconds), format_date(seconds))
+                    })
+                    .unwrap_or_else(|| "从未".to_string()),
+                colors.fg,
+            ));
+            rows = rows.child(info_row(
+                "最近错误",
+                snapshot
+                    .last_error
+                    .clone()
+                    .unwrap_or_else(|| "无".to_string()),
+                if snapshot.last_error.is_some() {
+                    colors.danger
+                } else {
+                    colors.fg
+                },
+            ));
+            rows = rows.child(info_row(
+                "日志",
+                snapshot
+                    .log_path
+                    .as_ref()
+                    .map(|path| path.display().to_string())
+                    .unwrap_or_else(|| "未启用".to_string()),
+                colors.fg,
+            ));
+            if snapshot.sources.is_empty() {
+                rows = rows.child(info_row("来源", "无".to_string(), colors.fg));
+            } else {
+                for source in &snapshot.sources {
+                    let mut text = format!(
+                        "{} · {} 个资产 · {}",
+                        source_label(&source.root, source_aliases),
+                        source.asset_count,
+                        source
+                            .last_scan
+                            .map(relative_time)
+                            .unwrap_or_else(|| "从未扫描".to_string())
+                    );
+                    if !source.online {
+                        text.push_str(" · 离线");
+                    }
+                    if let Some(error) = &source.error {
+                        text.push_str(&format!(" · 错误：{error}"));
+                    }
+                    rows = rows.child(info_row(
+                        "来源",
+                        text,
+                        if source.online && source.error.is_none() {
+                            colors.fg
+                        } else {
+                            colors.danger
+                        },
+                    ));
+                }
+            }
+            rows.into_any_element()
+        } else {
+            div()
+                .text_xs()
+                .text_color(colors.subtle)
+                .child("诊断信息尚未采集；重新打开设置页或点击“复制诊断信息”会刷新。")
+                .into_any_element()
+        };
+        let diagnostics_section = div()
+            .p(px(16.))
+            .rounded(px(10.))
+            .border_1()
+            .border_color(colors.border)
+            .bg(colors.surface)
+            .flex()
+            .flex_col()
+            .gap(px(8.))
+            .child(
+                div()
+                    .text_sm()
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .child("诊断信息"),
+            )
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(colors.muted)
+                    .child("只读快照：版本、数据目录、数据库与缓存大小、队列、来源状态与最近错误。"),
+            )
+            .child(diagnostics_rows)
+            .child(
+                div()
+                    .flex()
+                    .flex_wrap()
+                    .items_center()
+                    .gap(px(6.))
+                    .child(
+                        Button::new("copy-diagnostics", "复制诊断信息")
+                            .size(ControlSize::Sm)
+                            .icon(IconName::Copy)
+                            .on_click(move |_, _, cx| {
+                                let _ = this_copy_diagnostics
+                                    .update(cx, |app, cx| app.copy_diagnostics(cx));
+                            }),
+                    )
+                    .child(
+                        Button::new("open-log-dir", "打开日志目录")
+                            .size(ControlSize::Sm)
+                            .icon(IconName::FolderOpen)
+                            .on_click(move |_, _, cx| {
+                                let _ =
+                                    this_open_logs.update(cx, |app, cx| app.open_log_dir(cx));
+                            }),
+                    ),
+            )
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(colors.subtle)
+                    .child("诊断信息不包含凭据或完整环境变量；日志路径受 KANALIB_LOG_FILE 影响时以快照为准。"),
+            );
+
+        let safety_section = div()
+            .p(px(16.))
+            .rounded(px(10.))
+            .border_1()
+            .border_color(colors.border)
+            .bg(colors.surface)
+            .flex()
+            .flex_col()
+            .gap(px(6.))
+            .child(
+                div()
+                    .text_sm()
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .child("任务队列"),
+            )
+            .child(div().text_xs().text_color(colors.muted).child(format!(
+                "等待 {queue_pending} · 运行 {queue_running} · 失败 {queue_error}"
+            )))
+            .child(div().text_xs().text_color(colors.muted).child(
+                "打标任务持久化在 jobs 表；重启后自动恢复未完成任务，失败项可用侧栏“重试失败”。",
+            ));
+
+        let mut shortcut_rows = div().flex().flex_col().gap(px(4.));
+        for (keys, description) in [
+            ("Ctrl+K", "命令面板"),
+            ("Ctrl+F", "聚焦搜索"),
+            ("方向键 / Home / End", "移动选中项"),
+            ("Enter / Space", "快速查看"),
+            ("F", "切换收藏"),
+            ("1–5 / 0", "设置 / 清除星级"),
+            ("Ctrl+A", "全选当前可见"),
+            ("Ctrl+Shift+1–8", "切换 8 种视图"),
+            ("Esc", "清空选择"),
+            ("双击 / 右键", "快速查看 / 上下文菜单"),
+        ] {
+            shortcut_rows = shortcut_rows.child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .gap(px(12.))
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(colors.fg)
+                            .child(description),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(colors.subtle)
+                            .child(keys),
+                    ),
+            );
+        }
+        let shortcut_section = div()
+            .p(px(16.))
+            .rounded(px(10.))
+            .border_1()
+            .border_color(colors.border)
+            .bg(colors.surface)
+            .flex()
+            .flex_col()
+            .gap(px(6.))
+            .child(
+                div()
+                    .text_sm()
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .child("键盘与鼠标"),
+            )
+            .child(shortcut_rows)
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(colors.muted)
+                    .child("快捷键已绑定；方向键与快捷操作以网格获得焦点时生效。"),
+            );
+
+        let rules_section = div()
+            .p(px(16.))
+            .rounded(px(10.))
+            .border_1()
+            .border_color(colors.border)
+            .bg(colors.surface)
+            .flex()
+            .flex_col()
+            .gap(px(6.))
+            .child(
+                div()
+                    .text_sm()
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .child("安全规则"),
+            )
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(colors.muted)
+                    .child("去重绝不自动删除；删除只进 Windows 系统回收站，且仅支持本地固定磁盘。"),
+            )
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(colors.muted)
+                    .child("相似组不提供批量删除；受保护路径与只读来源不会被移入回收站。"),
+            );
+
+        let column_width = (width - page_padding * 2.).min(px(SETTINGS_MAX_WIDTH));
+
+        div()
+            .w(width)
+            .h_full()
+            .flex()
+            .flex_col()
+            .bg(colors.bg)
+            .child(
+                div()
+                    .h(px(58.))
+                    .px(page_padding)
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .border_b_1()
+                    .border_color(colors.border)
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap(px(2.))
+                            .child(
+                                div()
+                                    .text_lg()
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .child("设置"),
+                            )
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(colors.muted)
+                                    .child("数据、去重与安全"),
+                            ),
+                    )
+                    .child(
+                        Button::new("settings-back", "返回图库").on_click(move |_, _, cx| {
+                            let _ = this_back.update(cx, |app, cx| {
+                                app.screen = Screen::Library;
+                                cx.notify();
+                            });
+                        }),
+                    ),
+            )
+            .children(banner)
+            .child(
+                div()
+                    .id("settings-scroll")
+                    .flex_1()
+                    .min_h(px(0.))
+                    .overflow_y_scroll()
+                    .px(page_padding)
+                    .py(px(24.))
+                    .child(
+                        div()
+                            .w(column_width)
+                            .flex()
+                            .flex_col()
+                            .gap(px(12.))
+                            .child(tag_section)
+                            .child(review_section)
+                            .child(sources_section)
+                            .child(protected_section)
+                            .child(similar_section)
+                            .child(data_section)
+                            .child(backup_section)
+                            .child(diagnostics_section)
+                            .child(safety_section)
+                            .child(shortcut_section)
+                            .child(rules_section),
+                    ),
+            )
+            .into_any_element()
+    }
+
+}
