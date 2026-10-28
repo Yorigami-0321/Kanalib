@@ -196,6 +196,15 @@ pub struct KanalibApp {
     pub(crate) org_dialog_epoch: u64,
     /// 相册列表与归属缓存；侧栏/检查器只读，按 `shared.revision` 失效。
     pub(crate) album_cache: std::cell::RefCell<crate::sidebar::AlbumCache>,
+    // ---- F-005（第三轮 G2b1）：分组浏览状态，全部追加在末尾。 ----
+    /// 当前分组维度（`ui.group_by`，默认关闭）。
+    pub(crate) group_by: GroupMode,
+    /// 已折叠的分组键；不持久化。
+    pub(crate) collapsed_groups: HashSet<String>,
+    /// 分组布局缓存；只在数据版本/维度/列数/折叠变化时重建。
+    pub(crate) group_cache: crate::views::GroupCache,
+    /// 折叠后待定位的组；布局重建后把该组组头滚到顶部。
+    pub(crate) pending_reveal_group: Option<String>,
 }
 
 impl Render for KanalibApp {
@@ -930,6 +939,16 @@ impl Render for KanalibApp {
                     Command::new("org:new-album", "新建相册").icon(IconName::FolderPlus),
                     Command::new("org:save-collection", "保存当前视图为智能集合")
                         .icon(IconName::Plus),
+                ],
+            )
+            .group(
+                "分组",
+                [
+                    Command::new("group:none", "分组 · 关闭").icon(IconName::LayoutGrid),
+                    Command::new("group:modified", "分组 · 修改时间").icon(IconName::Clock),
+                    Command::new("group:captured", "分组 · 拍摄时间").icon(IconName::Camera),
+                    Command::new("group:source", "分组 · 来源").icon(IconName::FolderOpen),
+                    Command::new("group:rating", "分组 · 评级").icon(IconName::Star),
                 ],
             )
             .on_run(move |value, _, cx| {
@@ -1953,6 +1972,7 @@ impl KanalibApp {
         let cache_dir = state.cache_dir();
         let db_path = state.db_path();
         let source_statuses = state.source_statuses();
+        let group_by = crate::views::initial_group_mode(&state);
         let access_path = db_path
             .parent()
             .map(|dir| dir.join("thumb_access.json"))
@@ -2077,6 +2097,10 @@ impl KanalibApp {
             org_dialog: None,
             org_dialog_epoch: 0,
             album_cache: std::cell::RefCell::new(crate::sidebar::AlbumCache::default()),
+            group_by,
+            collapsed_groups: HashSet::new(),
+            group_cache: crate::views::GroupCache::default(),
+            pending_reveal_group: None,
         }
     }
 
@@ -3060,6 +3084,12 @@ impl KanalibApp {
                 self.focus_grid_pending = false;
                 cx.notify();
             }
+            // F-005：分组维度切换（菜单/命令面板同一入口）。
+            "group:none" => self.set_group_mode(GroupMode::None, cx),
+            "group:modified" => self.set_group_mode(GroupMode::Modified, cx),
+            "group:captured" => self.set_group_mode(GroupMode::Captured, cx),
+            "group:source" => self.set_group_mode(GroupMode::Source, cx),
+            "group:rating" => self.set_group_mode(GroupMode::Rating, cx),
             _ => {}
         }
         cx.notify();
@@ -3097,6 +3127,7 @@ impl KanalibApp {
     pub(crate) fn display_menu(&self, this: &Entity<Self>) -> Menu {
         let sidebar = this.clone();
         let extensions = this.clone();
+        let group = self.group_menu(this);
         Menu::new()
             .item(
                 MenuItem::check("侧栏", self.show_sidebar)
@@ -3116,6 +3147,8 @@ impl KanalibApp {
                         });
                     }),
             )
+            .separator()
+            .item(MenuItem::submenu("分组", group))
     }
 
     pub(crate) fn view_menu(&self, this: &Entity<Self>) -> Menu {

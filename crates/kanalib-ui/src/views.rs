@@ -4,16 +4,23 @@ use crate::format::*;
 use crate::theme::*;
 use crate::platform::*;
 use crate::thumb_cache::ThumbCache;
+use std::rc::Rc;
 
 mod content;
 mod details;
 mod grid;
+mod grouped;
 mod list;
 
 use self::content::content_row_content;
-use self::details::{detail_columns, details_header, details_row_content};
+use self::details::{DetailColumns, detail_columns, details_header, details_row_content};
 use self::grid::tile;
+use self::grouped::{
+    GroupLayout, GroupedList, HeaderRender, RowRender, group_header,
+};
 use self::list::list_row_content;
+
+pub(crate) use self::grouped::{GroupCache, initial_group_mode};
 
 pub(crate) const GRID_GAP: f32 = 12.;
 pub(crate) const GRID_PADDING: f32 = 16.;
@@ -248,7 +255,7 @@ pub(crate) fn asset_context_menu(asset: &Asset, this: &Entity<KanalibApp>) -> Me
 
 impl KanalibApp {
     pub(crate) fn render_main(
-        &self,
+        &mut self,
         this: &Entity<Self>,
         assets: Arc<RwLock<Vec<Asset>>>,
         visible_indices: Arc<Vec<usize>>,
@@ -310,11 +317,15 @@ impl KanalibApp {
         let tile_width = grid_tile_width(width.as_f32(), columns);
         let image_height = self.view_mode.image_height();
         let row_height = self.view_mode.row_height();
+        // 分组只重排可见资产；返回的顺序同时用于渲染、框选与键盘导航。
+        let visible_indices =
+            self.refresh_group_view(visible_indices, columns, row_height, &assets);
+        let group_layout = self.grouped_layout();
         let visible = visible_indices.len();
-        let row_count = if is_grid {
-            visible.div_ceil(columns)
-        } else {
-            visible
+        let row_count = match &group_layout {
+            Some(layout) => layout.total_rows,
+            None if is_grid => visible.div_ceil(columns),
+            None => visible,
         };
         let assets_for_list = assets;
         let rows_for_list = visible_indices;
@@ -343,6 +354,24 @@ impl KanalibApp {
                         }),
                 )
                 .into_any_element()
+        } else if let Some(layout) = group_layout.clone() {
+            self.render_grouped_list(
+                this,
+                layout,
+                assets_for_list,
+                rows_for_list,
+                selection.clone(),
+                view_mode,
+                columns,
+                tile_width,
+                image_height,
+                row_height,
+                detail_columns,
+                show_extensions,
+                sort_mode,
+                sort_ascending,
+                colors,
+            )
         } else if is_grid {
             let this_for_list = this.clone();
             let thumb_cache_for_list = self.thumb_cache.clone();
@@ -601,4 +630,163 @@ impl KanalibApp {
             .child(grid_area)
     }
 
+    /// F-005：分组视图。行只按可见范围构建，组头由 `GroupedList` 自己绘制并吸顶。
+    #[allow(clippy::too_many_arguments)]
+    fn render_grouped_list(
+        &mut self,
+        this: &Entity<Self>,
+        layout: Arc<GroupLayout>,
+        assets: Arc<RwLock<Vec<Asset>>>,
+        ordered: Arc<Vec<usize>>,
+        selection: Arc<HashSet<PathBuf>>,
+        view_mode: ViewMode,
+        columns: usize,
+        tile_width: f32,
+        image_height: f32,
+        row_height: f32,
+        detail_columns: DetailColumns,
+        show_extensions: bool,
+        sort_mode: SortMode,
+        sort_ascending: bool,
+        colors: UiColors,
+    ) -> AnyElement {
+        let reveal_row = self.pending_reveal_group.take().and_then(|key| {
+            layout
+                .groups
+                .iter()
+                .position(|group| group.key == key)
+                .map(|index| layout.groups[index].start_row)
+        });
+        let is_grid = view_mode.is_grid();
+        let prefer_large = view_mode.prefers_large_thumb();
+        let item = self.thumb_cache.clone();
+        let focus = self.grid_focus.clone();
+        let row_layout = layout.clone();
+        let row_ordered = ordered.clone();
+        let row_assets = assets.clone();
+        let row_selection = selection.clone();
+        let row_this = this.clone();
+        let row_thumb = item.clone();
+        let row_focus = focus.clone();
+        let render_row: RowRender = Rc::new(move |display_row, _window, _cx| {
+            let Some((group_index, local_row)) = row_layout.content_row_of_display(display_row)
+            else {
+                return div().into_any_element();
+            };
+            let group = &row_layout.groups[group_index];
+            let Ok(assets) = row_assets.read() else {
+                return div().into_any_element();
+            };
+            if is_grid {
+                let start = group.start_asset + local_row * columns;
+                let end = (start + columns).min(group.start_asset + group.count);
+                let mut line = div()
+                    .w_full()
+                    .h(px(row_height))
+                    .flex()
+                    .gap(px(GRID_GAP))
+                    .px(px(GRID_PADDING))
+                    .pt(px(ROW_PADDING))
+                    .pb(px(ROW_PADDING));
+                for position in start..end {
+                    let Some(&index) = row_ordered.get(position) else {
+                        break;
+                    };
+                    let asset = &assets[index];
+                    let is_selected = row_selection.contains(&asset.path);
+                    line = line.child(tile(
+                        asset.clone(),
+                        is_selected,
+                        row_this.clone(),
+                        row_thumb.clone(),
+                        tile_width,
+                        image_height,
+                        row_focus.clone(),
+                        colors,
+                        prefer_large,
+                        show_extensions,
+                    ));
+                }
+                line.into_any_element()
+            } else {
+                let position = group.start_asset + local_row;
+                let Some(&index) = row_ordered.get(position) else {
+                    return div().into_any_element();
+                };
+                let asset = &assets[index];
+                let is_selected = row_selection.contains(&asset.path);
+                let content = match view_mode {
+                    ViewMode::Details => details_row_content(
+                        asset,
+                        detail_columns,
+                        show_extensions,
+                        &row_thumb,
+                        colors,
+                    ),
+                    ViewMode::Content => {
+                        content_row_content(asset, show_extensions, &row_thumb, colors)
+                    }
+                    _ => list_row_content(asset, show_extensions, &row_thumb, colors),
+                };
+                asset_row_shell(
+                    asset,
+                    is_selected,
+                    row_this.clone(),
+                    row_focus.clone(),
+                    colors,
+                    row_height,
+                    view_mode == ViewMode::Details,
+                    content,
+                )
+                .into_any_element()
+            }
+        });
+        let header_layout = layout.clone();
+        let header_this = this.clone();
+        let render_header: HeaderRender = Rc::new(move |group_index, pinned, _window, _cx| {
+            group_header(
+                &header_layout.groups[group_index],
+                pinned,
+                &header_this,
+                colors,
+            )
+        });
+        let list_id = match view_mode {
+            ViewMode::Details => "asset-details-grouped",
+            ViewMode::Content => "asset-content-grouped",
+            _ if is_grid => "asset-grid-grouped",
+            _ => "asset-list-grouped",
+        };
+        let list = GroupedList::new(
+            list_id,
+            layout,
+            row_height,
+            reveal_row,
+            render_row,
+            render_header,
+        )
+        .track_scroll(&self.grid_scroll)
+        .flex_1()
+        .w_full()
+        .min_h(px(0.));
+        if view_mode == ViewMode::Details {
+            div()
+                .flex_1()
+                .min_h(px(0.))
+                .w_full()
+                .flex()
+                .flex_col()
+                .child(details_header(
+                    this.clone(),
+                    detail_columns,
+                    sort_mode,
+                    sort_ascending,
+                    colors,
+                ))
+                .child(list)
+                .into_any_element()
+        } else {
+            list.into_any_element()
+        }
+    }
 }

@@ -271,6 +271,58 @@ impl ViewMode {
     }
 }
 
+/// F-005 分组浏览的维度；`None` 表示平铺（默认，旧行为）。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+enum GroupMode {
+    #[default]
+    None,
+    Modified,
+    Captured,
+    Source,
+    Rating,
+}
+
+impl GroupMode {
+    const ALL: [GroupMode; 5] = [
+        Self::None,
+        Self::Modified,
+        Self::Captured,
+        Self::Source,
+        Self::Rating,
+    ];
+
+    fn key(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::Modified => "modified",
+            Self::Captured => "captured",
+            Self::Source => "source",
+            Self::Rating => "rating",
+        }
+    }
+
+    fn from_key(value: &str) -> Option<Self> {
+        Some(match value {
+            "none" => Self::None,
+            "modified" => Self::Modified,
+            "captured" => Self::Captured,
+            "source" => Self::Source,
+            "rating" => Self::Rating,
+            _ => return None,
+        })
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::None => "不分组",
+            Self::Modified => "修改时间",
+            Self::Captured => "拍摄时间",
+            Self::Source => "来源",
+            Self::Rating => "评级",
+        }
+    }
+}
+
 fn resolve_view_mode(saved: Option<&str>, legacy_density: Option<&str>) -> ViewMode {
     saved
         .and_then(ViewMode::from_key)
@@ -460,4 +512,14 @@ mod tests {
         assert_eq!(ViewMode::IconsMedium.icon().name(), "layout-grid");
     }
 
+    #[test]
+    fn group_mode_keys_round_trip_and_default_off() {
+        use super::GroupMode;
+        for mode in GroupMode::ALL {
+            assert_eq!(GroupMode::from_key(mode.key()), Some(mode));
+        }
+        assert_eq!(GroupMode::from_key("unknown"), None);
+        assert_eq!(GroupMode::default(), GroupMode::None);
+        assert_eq!(GroupMode::None.label(), "不分组");
+    }
 }
