@@ -6,7 +6,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use ely_gpui_component::{
     buttons::{Button, ButtonVariant, IconButton},
     feedback::{Toast, ToastViewport, Toaster},
-    forms::{Choice, Input, Rating, TagInput, TextInput},
+    forms::{Choice, Input, Rating, Slider, TagInput, TextInput},
     media::ImageViewer,
     menus::{ContextMenu, DropdownMenu, Menu, MenuItem, OverflowMenu},
     navigation::{Command, CommandPalette},
@@ -74,6 +74,7 @@ gpui::actions!(
         SelectNextRow,
         SelectFirst,
         SelectLast,
+        CloseSimilar,
         OpenQuickView,
         ToggleFavorite,
         Rate0,
@@ -369,6 +370,8 @@ impl PaneMode {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Screen {
     Library,
+    /// F-004：单锚点相似查询的临时结果视图；只保留当前一次查询，不写库。
+    Similar,
     Duplicates,
     Tags,
     Settings,

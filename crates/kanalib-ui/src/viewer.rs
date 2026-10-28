@@ -46,7 +46,10 @@ impl KanalibApp {
         };
         if let Some(at) = at {
             self.palette_open = false;
-            self.screen = Screen::Library;
+            // 相似结果视图里快速查看后按 Esc 要回到结果，而不是跳回图库。
+            if self.screen != Screen::Similar {
+                self.screen = Screen::Library;
+            }
             self.viewer_viewed.clear();
             if let Some((path, _)) = slides.get(at) {
                 self.viewer_viewed.insert(path.clone());
@@ -255,14 +258,21 @@ impl KanalibApp {
                             .items_center()
                             .gap(px(8.))
                             .child(
-                                Button::new("viewer-back", "返回图库")
-                                    .icon(IconName::ChevronLeft)
-                                    .size(ControlSize::Sm)
-                                    .variant(ButtonVariant::Ghost)
-                                    .on_click(move |_, _, cx| {
-                                        let _ = back_button
-                                            .update(cx, |app, cx| app.close_viewer(cx));
-                                    }),
+                                Button::new(
+                                    "viewer-back",
+                                    if self.screen == Screen::Similar {
+                                        "返回结果"
+                                    } else {
+                                        "返回图库"
+                                    },
+                                )
+                                .icon(IconName::ChevronLeft)
+                                .size(ControlSize::Sm)
+                                .variant(ButtonVariant::Ghost)
+                                .on_click(move |_, _, cx| {
+                                    let _ =
+                                        back_button.update(cx, |app, cx| app.close_viewer(cx));
+                                }),
                             )
                             .child(
                                 div()

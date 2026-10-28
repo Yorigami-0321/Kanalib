@@ -3,11 +3,31 @@ use crate::app::KanalibApp;
 use crate::format::*;
 use crate::platform::*;
 use crate::theme::*;
+use crate::views::GRID_CONTEXT;
+use kanalib_core::model::{SimilarHit, SimilarThresholdPreview};
 
 pub(crate) const DEDUP_RAIL_WIDTH: f32 = 272.;
 pub(crate) const DEDUP_GROUP_ROW_HEIGHT: f32 = 78.;
 pub(crate) const DEDUP_CARD_WIDTH: f32 = 214.;
 pub(crate) const DEDUP_MAX_VISIBLE: usize = 4;
+
+/// 单次锚点查询保留的结果上限；结果视图只保存这一份，不写库、不新开缓存。
+pub(crate) const SIMILAR_RESULT_LIMIT: usize = 500;
+const SIMILAR_ROW_HEIGHT: f32 = 64.;
+const SIMILAR_REFRESH_DEBOUNCE_MS: u64 = 180;
+const SIMILAR_PREVIEW_DEBOUNCE_MS: u64 = 220;
+
+/// F-004：一次单锚点相似查询的临时结果；离开视图即丢弃。
+#[derive(Clone)]
+pub(crate) struct SimilarView {
+    pub(crate) anchor: PathBuf,
+    pub(crate) threshold: u8,
+    pub(crate) scanned: usize,
+    pub(crate) truncated: bool,
+    /// 核心已按距离升序、同距离按路径升序返回。
+    pub(crate) hits: Vec<SimilarHit>,
+    pub(crate) error: Option<String>,
+}
 
 pub(crate) fn dedup_filter_chip(
     filter: DedupFilter,
@@ -76,33 +96,6 @@ pub(crate) fn dedup_tab(
             let _ = this.update(cx, |app, cx| app.open_dedup_mode(mode, cx));
         })
         .child(label)
-        .into_any_element()
-}
-
-pub(crate) fn similar_preset_button(
-    threshold: u8,
-    label: &'static str,
-    active: bool,
-    disabled: bool,
-    this: Entity<KanalibApp>,
-) -> AnyElement {
-    Button::new(SharedString::from(format!("sim-preset-{threshold}")), label)
-        .variant(if active {
-            ButtonVariant::Primary
-        } else {
-            ButtonVariant::Secondary
-        })
-        .disabled(disabled)
-        .on_click(move |_, _, cx| {
-            let _ = this.update(cx, |app, cx| {
-                app.state.set_similar_threshold(threshold);
-                app.state.start_similar_scan();
-                app.dedup_selected = None;
-                app.dedup_confirm = None;
-                app.dedup_notice = None;
-                cx.notify();
-            });
-        })
         .into_any_element()
 }
 
@@ -797,6 +790,7 @@ impl KanalibApp {
         self.dedup_confirm = None;
         self.dedup_show_all = false;
         self.dedup_notice = None;
+        self.dedup_threshold_draft = None;
         self.dedup_scroll.scroll_to_item(0, ScrollStrategy::Top);
         cx.notify();
     }
@@ -1050,51 +1044,15 @@ impl KanalibApp {
             div()
                 .px(px(16.))
                 .py(px(6.))
-                .flex()
-                .items_center()
-                .gap(px(5.))
                 .border_b_1()
                 .border_color(colors.border)
-                .child(div().text_xs().text_color(colors.subtle).child("相似阈值"))
-                .child(similar_preset_button(
-                    6,
-                    "严格 ≤6",
-                    similar_threshold == 6,
-                    busy,
-                    this.clone(),
-                ))
-                .child(similar_preset_button(
-                    10,
-                    "标准 ≤10",
-                    similar_threshold == 10,
-                    busy,
-                    this.clone(),
-                ))
-                .child(similar_preset_button(
-                    14,
-                    "宽松 ≤14",
-                    similar_threshold == 14,
-                    busy,
-                    this.clone(),
-                ))
-                .child(div().text_xs().text_color(colors.subtle).child(format!(
-                    "当前 ≤{} · 约 {}% 相似",
+                .child(self.render_threshold_editor(
+                    this,
                     similar_threshold,
-                    similarity_pct_from_distance(similar_threshold as u32)
-                )))
-                .child(div().flex_1())
-                .child(
-                    div()
-                        .text_xs()
-                        .text_color(colors.subtle)
-                        .child(if similar_scanning {
-                            "计算中...".to_string()
-                        } else if similar_scanned {
-                            format!("已扫 {} 组", similar_summary.total)
-                        } else {
-                            "尚未扫描".to_string()
-                        }),
-                )
+                    self.dedup_threshold_draft,
+                    false,
+                    colors,
+                ))
                 .into_any_element()
         });
 
@@ -1953,4 +1911,1020 @@ impl KanalibApp {
         Some(overlay)
     }
 
+}
+
+/// 结果视图内的本地筛选：名称、路径、自动标签与手工标签，大小写不敏感。
+fn similar_filter_matches(asset: &Asset, filter_lower: &str) -> bool {
+    asset.title().to_lowercase().contains(filter_lower)
+        || asset
+            .path
+            .display()
+            .to_string()
+            .to_lowercase()
+            .contains(filter_lower)
+        || asset
+            .all_tags()
+            .any(|tag| tag.tag.to_lowercase().contains(filter_lower))
+}
+
+/// 阈值预览的采样说明；精确计算时不写「抽样」。
+fn preview_sample_note(preview: &SimilarThresholdPreview) -> String {
+    if preview.sampled {
+        let pct = if preview.total_assets > 0 {
+            preview.sampled_assets as f64 * 100.0 / preview.total_assets as f64
+        } else {
+            0.0
+        };
+        format!(
+            "抽样 {} / {} 张（约 {pct:.1}%）",
+            preview.sampled_assets, preview.total_assets
+        )
+    } else {
+        format!("全量 {} 张", preview.total_assets)
+    }
+}
+
+/// 结果行：缩略图 + 名称/路径 + 距离/相似度；整行可点选，右键复用图库菜单。
+fn similar_hit_row(
+    asset: &Asset,
+    distance: u32,
+    similarity_pct: u32,
+    selected: bool,
+    this: Entity<KanalibApp>,
+    thumb_cache: Entity<ThumbCache>,
+    focus: FocusHandle,
+    colors: UiColors,
+) -> AnyElement {
+    let path = asset.path.clone();
+    let title = asset.title();
+    let path_text = path.display().to_string();
+    let menu = crate::views::asset_context_menu(asset, &this);
+    let thumb = asset.tile_thumb.clone().or_else(|| asset.thumb.clone());
+    let media: AnyElement = match thumb {
+        Some(thumb) => img(thumb)
+            .image_cache(&thumb_cache)
+            .w(px(52.))
+            .h(px(52.))
+            .flex_none()
+            .rounded(px(6.))
+            .object_fit(ObjectFit::Cover)
+            .into_any_element(),
+        None => div()
+            .w(px(52.))
+            .h(px(52.))
+            .flex_none()
+            .rounded(px(6.))
+            .bg(colors.sunken)
+            .into_any_element(),
+    };
+    let this_click = this.clone();
+    let path_click = path.clone();
+    let focus_click = focus.clone();
+    let this_right = this.clone();
+    let path_right = path.clone();
+    let focus_right = focus.clone();
+    let row = div()
+        .id(SharedString::from(format!(
+            "similar-hit-{}",
+            path.display()
+        )))
+        .role(Role::Button)
+        .aria_label(title.clone())
+        .w_full()
+        .h(px(SIMILAR_ROW_HEIGHT))
+        .px(px(12.))
+        .rounded(px(7.))
+        .cursor_pointer()
+        .bg(if selected { colors.selection } else { colors.bg })
+        .hover(move |style| style.bg(colors.hover))
+        .on_click(move |event, window, cx| {
+            window.focus(&focus_click, cx);
+            let (modifiers, click_count) = match event {
+                ClickEvent::Mouse(event) => (event.down.modifiers, event.down.click_count),
+                ClickEvent::Keyboard(_) | ClickEvent::Touch(_) => (Modifiers::default(), 1),
+            };
+            let path = path_click.clone();
+            let _ =
+                this_click.update(cx, |app, cx| app.handle_tile_click(path, modifiers, click_count, cx));
+        })
+        .on_mouse_down(MouseButton::Right, move |_, window, cx| {
+            window.focus(&focus_right, cx);
+            let _ = this_right.update(cx, |app, cx| {
+                app.select_single_path(path_right.clone(), cx);
+            });
+        })
+        .flex()
+        .items_center()
+        .gap(px(10.))
+        .child(media)
+        .child(
+            div()
+                .flex_1()
+                .min_w(px(0.))
+                .flex()
+                .flex_col()
+                .gap(px(2.))
+                .child(
+                    div()
+                        .truncate()
+                        .text_xs()
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .child(title),
+                )
+                .child(
+                    div()
+                        .truncate()
+                        .text_xs()
+                        .text_color(colors.subtle)
+                        .child(path_text),
+                ),
+        )
+        .child(small_badge(
+            format!("距离 {distance}"),
+            colors.warning,
+            colors.warning_subtle,
+        ))
+        .child(small_badge(
+            format!("相似 {similarity_pct}%"),
+            colors.accent,
+            colors.selection,
+        ));
+    div()
+        .w_full()
+        .child(
+            ContextMenu::new(
+                SharedString::from(format!("similar-context-{}", path.display())),
+                menu,
+            )
+            .w_full()
+            .child(row),
+        )
+        .into_any_element()
+}
+
+impl KanalibApp {
+    // ---- F-004：检查器 / 右键 / 命令面板「查找相似」 ----
+
+    /// 以 `anchor` 为锚点打开临时结果视图；默认沿用已保存的相似阈值。
+    pub(crate) fn open_similar(&mut self, anchor: PathBuf, cx: &mut Context<Self>) {
+        let threshold = {
+            let shared = self.state.shared.lock().unwrap();
+            shared.dedup.similar_threshold
+        };
+        self.similar_view = Some(SimilarView {
+            anchor,
+            threshold,
+            scanned: 0,
+            truncated: false,
+            hits: Vec::new(),
+            error: None,
+        });
+        self.similar_filter.clear();
+        if let Some(input) = &self.similar_filter_input {
+            input.update(cx, |input, cx| input.set_text("", cx));
+        }
+        self.similar_visible = Arc::new(Vec::new());
+        self.similar_visible_revision = u64::MAX;
+        self.similar_visible_filter.clear();
+        self.screen = Screen::Similar;
+        self.dedup_confirm = None;
+        self.clear_multi_selection();
+        self.state.select(None);
+        self.auto_select_pending = true;
+        self.focus_grid_pending = true;
+        self.grid_scroll.scroll_to_item(0, ScrollStrategy::Top);
+        self.refresh_similar_query(cx);
+    }
+
+    /// 命令面板入口：以当前选中（或可见第一张）为锚点。
+    pub(crate) fn open_similar_selected(&mut self, cx: &mut Context<Self>) {
+        let path = self
+            .state
+            .shared
+            .lock()
+            .unwrap()
+            .selected
+            .clone()
+            .or_else(|| self.selection.iter().next().cloned())
+            .or_else(|| self.visible_paths().first().cloned());
+        match path {
+            Some(path) => self.open_similar(path, cx),
+            None => crate::app::push_toast(
+                &self.toaster,
+                cx,
+                "先选择一张图片再查找相似",
+                Severity::Warning,
+            ),
+        }
+    }
+
+    /// 离开临时结果视图并丢弃结果；不写库、不留缓存。
+    pub(crate) fn close_similar(&mut self, cx: &mut Context<Self>) {
+        self.screen = Screen::Library;
+        self.similar_view = None;
+        self.similar_visible = Arc::new(Vec::new());
+        self.similar_visible_revision = u64::MAX;
+        self.similar_visible_filter.clear();
+        self.similar_refresh_task = None;
+        self.clear_multi_selection();
+        self.state.select(None);
+        self.auto_select_pending = true;
+        self.focus_grid_pending = true;
+        self.grid_scroll.scroll_to_item(0, ScrollStrategy::Top);
+        cx.notify();
+    }
+
+    /// 重新执行当前锚点查询；失败信息留在视图内，不弹全局错误。
+    pub(crate) fn refresh_similar_query(&mut self, cx: &mut Context<Self>) {
+        let Some((anchor, threshold)) = self
+            .similar_view
+            .as_ref()
+            .map(|view| (view.anchor.clone(), view.threshold))
+        else {
+            return;
+        };
+        match self
+            .state
+            .similar_to_anchor(&anchor, threshold, SIMILAR_RESULT_LIMIT)
+        {
+            Ok(result) => {
+                if let Some(view) = self.similar_view.as_mut() {
+                    view.threshold = result.threshold;
+                    view.scanned = result.scanned;
+                    view.truncated = result.truncated;
+                    view.hits = result.hits;
+                    view.error = None;
+                }
+            }
+            Err(error) => {
+                if let Some(view) = self.similar_view.as_mut() {
+                    view.hits.clear();
+                    view.scanned = 0;
+                    view.truncated = false;
+                    view.error = Some(format!("查找相似失败：{error:#}"));
+                }
+            }
+        }
+        self.similar_visible_revision = u64::MAX;
+        self.clear_multi_selection();
+        self.auto_select_pending = true;
+        self.grid_scroll.scroll_to_item(0, ScrollStrategy::Top);
+        cx.notify();
+    }
+
+    /// 结果视图的阈值入口：只改这一次查询的临时阈值，不写默认值、不清空评审状态。
+    pub(crate) fn set_similar_view_threshold(&mut self, threshold: u8, cx: &mut Context<Self>) {
+        let threshold = threshold.min(32);
+        let Some(view) = self.similar_view.as_mut() else {
+            return;
+        };
+        if view.threshold == threshold {
+            return;
+        }
+        view.threshold = threshold;
+        let weak = cx.entity().downgrade();
+        self.similar_refresh_task = Some(cx.spawn(async move |_, cx| {
+            cx.background_executor()
+                .timer(Duration::from_millis(SIMILAR_REFRESH_DEBOUNCE_MS))
+                .await;
+            let _ = weak.update(cx, |app, cx| app.refresh_similar_query(cx));
+        }));
+        cx.notify();
+    }
+
+    /// 把当前查询命中映射成资产下标；只在查询/筛选/数据版本变化时调用。
+    pub(crate) fn rebuild_similar_visible(
+        &mut self,
+        assets: &Arc<RwLock<Vec<Asset>>>,
+        revision: u64,
+    ) {
+        let hits = self
+            .similar_view
+            .as_ref()
+            .map(|view| view.hits.clone())
+            .unwrap_or_default();
+        let filter = self.similar_filter.trim().to_lowercase();
+        let mut visible = Vec::new();
+        {
+            let assets = assets.read().unwrap();
+            if !hits.is_empty() {
+                let index_of = assets
+                    .iter()
+                    .enumerate()
+                    .map(|(index, asset)| (asset.path.as_path(), index))
+                    .collect::<HashMap<&Path, usize>>();
+                for hit in &hits {
+                    let Some(&index) = index_of.get(hit.path.as_path()) else {
+                        continue;
+                    };
+                    if filter.is_empty() || similar_filter_matches(&assets[index], &filter) {
+                        visible.push(index);
+                    }
+                }
+            }
+        }
+        self.similar_visible = Arc::new(visible);
+        self.similar_visible_revision = revision;
+        self.similar_visible_filter = self.similar_filter.clone();
+    }
+}
+
+impl KanalibApp {
+    // ---- F-045：0–32 滑杆、临时值/默认值与后台预览 ----
+
+    pub(crate) fn set_settings_threshold_draft(&mut self, threshold: u8, cx: &mut Context<Self>) {
+        let value = threshold.min(32);
+        self.settings_threshold_draft = Some(value);
+        self.schedule_threshold_preview(value, cx);
+        cx.notify();
+    }
+
+    pub(crate) fn set_dedup_threshold_draft(&mut self, threshold: u8, cx: &mut Context<Self>) {
+        let value = threshold.min(32);
+        self.dedup_threshold_draft = Some(value);
+        self.schedule_threshold_preview(value, cx);
+        cx.notify();
+    }
+
+    /// 放弃临时值，回到已保存的默认阈值并刷新预览。
+    pub(crate) fn discard_threshold_draft(&mut self, settings: bool, cx: &mut Context<Self>) {
+        if settings {
+            self.settings_threshold_draft = None;
+        } else {
+            self.dedup_threshold_draft = None;
+        }
+        let default = self.state.shared.lock().unwrap().dedup.similar_threshold;
+        self.schedule_threshold_preview(default, cx);
+        cx.notify();
+    }
+
+    /// 把候选阈值保存为默认值；只写设置，不清空任何评审状态。
+    pub(crate) fn apply_threshold_default(&mut self, threshold: u8, cx: &mut Context<Self>) {
+        let saved = self.state.set_similar_threshold(threshold);
+        self.settings_threshold_draft = None;
+        self.dedup_threshold_draft = None;
+        self.schedule_threshold_preview(saved, cx);
+        crate::app::push_toast(
+            &self.toaster,
+            cx,
+            format!("相似阈值默认值已设为 ≤{saved}；已有审核状态保留"),
+            Severity::Success,
+        );
+        cx.notify();
+    }
+
+    /// 去重页：应用阈值并重新扫描相似组；`start_similar_scan` 会复用既有评审状态。
+    pub(crate) fn apply_threshold_and_scan(&mut self, threshold: u8, cx: &mut Context<Self>) {
+        let saved = self.state.set_similar_threshold(threshold);
+        self.dedup_threshold_draft = None;
+        self.state.start_similar_scan();
+        self.dedup_selected = None;
+        self.dedup_confirm = None;
+        self.dedup_notice = Some(format!(
+            "已用 ≤{saved} 重新扫描相似图片；已审核状态保留，扫描期间仍可查看旧分组"
+        ));
+        self.schedule_threshold_preview(saved, cx);
+        cx.notify();
+    }
+
+    /// 预览在后台线程执行（同步调用在大库可能 1.8–2.6s），并带 220ms 防抖。
+    pub(crate) fn schedule_threshold_preview(&mut self, threshold: u8, cx: &mut Context<Self>) {
+        let threshold = threshold.min(32);
+        if self.similar_preview_running && self.similar_preview_threshold == Some(threshold) {
+            return;
+        }
+        self.similar_preview_epoch = self.similar_preview_epoch.wrapping_add(1);
+        let epoch = self.similar_preview_epoch;
+        self.similar_preview_running = true;
+        self.similar_preview_threshold = Some(threshold);
+        let state = self.state.clone();
+        let weak = cx.entity().downgrade();
+        self.similar_preview_task = Some(cx.spawn(async move |_, cx| {
+            cx.background_executor()
+                .timer(Duration::from_millis(SIMILAR_PREVIEW_DEBOUNCE_MS))
+                .await;
+            let task = cx
+                .background_executor()
+                .spawn(async move { state.preview_similar_threshold(threshold) });
+            let preview = task.await;
+            let _ = weak.update(cx, |app, cx| {
+                if app.similar_preview_epoch != epoch {
+                    return;
+                }
+                app.similar_preview_running = false;
+                app.similar_preview_threshold = Some(preview.threshold);
+                app.similar_preview = Some(preview);
+                cx.notify();
+            });
+        }));
+    }
+
+    /// 进入设置页/去重页后按需预览一次；渲染路径只在这里触发后台任务。
+    pub(crate) fn maybe_schedule_threshold_preview(&mut self, cx: &mut Context<Self>) {
+        let default = self.state.shared.lock().unwrap().dedup.similar_threshold;
+        let threshold = match self.screen {
+            Screen::Settings => self.settings_threshold_draft.unwrap_or(default),
+            Screen::Duplicates => self.dedup_threshold_draft.unwrap_or(default),
+            _ => return,
+        };
+        if self.similar_preview_running || self.similar_preview_threshold == Some(threshold) {
+            return;
+        }
+        self.schedule_threshold_preview(threshold, cx);
+    }
+}
+
+impl KanalibApp {
+    /// 设置页与去重页共用的阈值编辑器：滑杆 + 6/10/14 快捷档 + 预估 + 链式风险。
+    pub(crate) fn render_threshold_editor(
+        &self,
+        this: &Entity<Self>,
+        default: u8,
+        draft: Option<u8>,
+        settings: bool,
+        colors: UiColors,
+    ) -> AnyElement {
+        let effective = draft.unwrap_or(default);
+        let prefix = if settings { "settings" } else { "dedup" };
+        let mut presets = div().flex().items_center().gap(px(5.));
+        for (value, label) in [(6u8, "严格 ≤6"), (10u8, "标准 ≤10"), (14u8, "宽松 ≤14")] {
+            let this_preset = this.clone();
+            presets = presets.child(
+                Button::new(
+                    SharedString::from(format!("{prefix}-sim-preset-{value}")),
+                    label,
+                )
+                .size(ControlSize::Sm)
+                .variant(if effective == value {
+                    ButtonVariant::Primary
+                } else {
+                    ButtonVariant::Secondary
+                })
+                .on_click(move |_, _, cx| {
+                    let _ = this_preset.update(cx, |app, cx| {
+                        if settings {
+                            app.set_settings_threshold_draft(value, cx);
+                        } else {
+                            app.set_dedup_threshold_draft(value, cx);
+                        }
+                    });
+                }),
+            );
+        }
+        let this_slider = this.clone();
+        let slider = div().w(px(200.)).child(
+            Slider::new(
+                SharedString::from(format!("{prefix}-similar-threshold-slider")),
+                effective as f64,
+            )
+            .range(0., 32.)
+            .step(1.)
+            .on_change(move |value, _, cx| {
+                let value = value.round().clamp(0., 32.) as u8;
+                let _ = this_slider.update(cx, |app, cx| {
+                    if settings {
+                        app.set_settings_threshold_draft(value, cx);
+                    } else {
+                        app.set_dedup_threshold_draft(value, cx);
+                    }
+                });
+            }),
+        );
+
+        let draft_label: AnyElement = match draft {
+            Some(value) if value != default => div()
+                .text_xs()
+                .text_color(colors.warning)
+                .child(format!("临时 ≤{value}（未保存；默认 ≤{default}）"))
+                .into_any_element(),
+            Some(value) => div()
+                .text_xs()
+                .text_color(colors.muted)
+                .child(format!("临时 ≤{value}（与默认相同）"))
+                .into_any_element(),
+            None => div()
+                .text_xs()
+                .text_color(colors.muted)
+                .child(format!("使用默认 ≤{default}"))
+                .into_any_element(),
+        };
+
+        let preview_note: AnyElement = if self.similar_preview_running
+            && self.similar_preview_threshold == Some(effective)
+        {
+            div()
+                .text_xs()
+                .text_color(colors.accent)
+                .child("预览中…（大库可能 1.8–2.6 秒）")
+                .into_any_element()
+        } else if let Some(preview) = self
+            .similar_preview
+            .as_ref()
+            .filter(|preview| preview.threshold == effective)
+        {
+            let mut row = div()
+                .flex()
+                .items_center()
+                .flex_wrap()
+                .gap(px(5.))
+                .child(div().text_xs().text_color(colors.fg).child(format!(
+                    "预估 {} 组 · {} 张入组",
+                    preview.group_count, preview.member_count
+                )))
+                .child(small_badge(
+                    preview_sample_note(preview),
+                    colors.muted,
+                    colors.sunken,
+                ));
+            if preview.chain_risk {
+                row = row
+                    .child(small_badge(
+                        format!("链式合并风险 · {} 组", preview.chain_groups),
+                        colors.danger,
+                        colors.sunken,
+                    ))
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(colors.warning)
+                            .child("低阈值会把间接相似的图串成一组，建议逐组确认或提高阈值。"),
+                    );
+            }
+            row.into_any_element()
+        } else {
+            div()
+                .text_xs()
+                .text_color(colors.subtle)
+                .child(if self.similar_preview_running {
+                    "正在预览其它阈值…"
+                } else {
+                    "尚无该阈值的预览；拖动滑杆或点「刷新预览」。"
+                })
+                .into_any_element()
+        };
+
+        let this_refresh = this.clone();
+        let this_apply = this.clone();
+        let this_scan = this.clone();
+        let this_discard = this.clone();
+        let refresh = Button::new(
+            SharedString::from(format!("{prefix}-sim-preview-refresh")),
+            "刷新预览",
+        )
+        .size(ControlSize::Sm)
+        .on_click(move |_, _, cx| {
+            let _ = this_refresh.update(cx, |app, cx| {
+                app.schedule_threshold_preview(effective, cx);
+            });
+        });
+        let apply = Button::new(
+            SharedString::from(format!("{prefix}-sim-apply-default")),
+            format!("设为默认 ≤{effective}"),
+        )
+        .size(ControlSize::Sm)
+        .variant(ButtonVariant::Primary)
+        .on_click(move |_, _, cx| {
+            let _ = this_apply.update(cx, |app, cx| app.apply_threshold_default(effective, cx));
+        });
+        let scan = (!settings).then(|| {
+            Button::new("dedup-sim-apply-scan", format!("应用并扫描 ≤{effective}"))
+                .size(ControlSize::Sm)
+                .variant(ButtonVariant::Primary)
+                .on_click(move |_, _, cx| {
+                    let _ = this_scan
+                        .update(cx, |app, cx| app.apply_threshold_and_scan(effective, cx));
+                })
+        });
+        let discard = draft.map(|_| {
+            Button::new(
+                SharedString::from(format!("{prefix}-sim-discard-draft")),
+                "放弃临时值",
+            )
+            .size(ControlSize::Sm)
+            .on_click(move |_, _, cx| {
+                let _ =
+                    this_discard.update(cx, |app, cx| app.discard_threshold_draft(settings, cx));
+            })
+        });
+
+        div()
+            .flex()
+            .flex_col()
+            .gap(px(6.))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .flex_wrap()
+                    .gap(px(10.))
+                    .child(
+                        div()
+                            .text_xs()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .child(format!(
+                                "相似阈值 ≤{effective} · 约 {}% 相似",
+                                similarity_pct_from_distance(effective as u32)
+                            )),
+                    )
+                    .child(draft_label)
+                    .child(slider)
+                    .child(presets),
+            )
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .flex_wrap()
+                    .gap(px(6.))
+                    .child(preview_note)
+                    .child(div().flex_1())
+                    .child(refresh)
+                    .child(apply)
+                    .children(scan)
+                    .children(discard),
+            )
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(colors.subtle)
+                    .child("改动阈值只影响预览与扫描，不清空已审核状态；所有操作都不删除磁盘文件。"),
+            )
+            .into_any_element()
+    }
+}
+
+impl KanalibApp {
+    // ---- F-004：临时结果视图 ----
+
+    pub(crate) fn render_similar(
+        &mut self,
+        this: &Entity<Self>,
+        assets: Arc<RwLock<Vec<Asset>>>,
+        visible_indices: Arc<Vec<usize>>,
+        selection: Arc<HashSet<PathBuf>>,
+        filter_input: &Entity<TextInput>,
+        width: Pixels,
+        colors: UiColors,
+    ) -> AnyElement {
+        let Some(view) = self.similar_view.as_ref() else {
+            return div().into_any_element();
+        };
+        let anchor = view.anchor.clone();
+        let threshold = view.threshold;
+        let scanned = view.scanned;
+        let truncated = view.truncated;
+        let total_hits = view.hits.len();
+        let error = view.error.clone();
+        let scanning = self.state.shared.lock().unwrap().scanning;
+        let distances = view
+            .hits
+            .iter()
+            .map(|hit| (hit.path.clone(), (hit.distance, hit.similarity_pct)))
+            .collect::<HashMap<PathBuf, (u32, u32)>>();
+
+        let this_back = this.clone();
+        let this_refresh = this.clone();
+        let this_all = this.clone();
+        let this_clear = this.clone();
+        let this_quick = this.clone();
+        let mut preset_row = div().flex().items_center().gap(px(5.));
+        for (value, label) in [(6u8, "严格 ≤6"), (10u8, "标准 ≤10"), (14u8, "宽松 ≤14")] {
+            let this_preset = this.clone();
+            preset_row = preset_row.child(
+                Button::new(
+                    SharedString::from(format!("similar-view-preset-{value}")),
+                    label,
+                )
+                .size(ControlSize::Sm)
+                .variant(if threshold == value {
+                    ButtonVariant::Primary
+                } else {
+                    ButtonVariant::Secondary
+                })
+                .on_click(move |_, _, cx| {
+                    let _ = this_preset.update(cx, |app, cx| {
+                        app.set_similar_view_threshold(value, cx);
+                    });
+                }),
+            );
+        }
+        let this_slider = this.clone();
+        let slider = div().w(px(180.)).child(
+            Slider::new("similar-view-threshold-slider", threshold as f64)
+                .range(0., 32.)
+                .step(1.)
+                .on_change(move |value, _, cx| {
+                    let value = value.round().clamp(0., 32.) as u8;
+                    let _ = this_slider.update(cx, |app, cx| {
+                        app.set_similar_view_threshold(value, cx);
+                    });
+                }),
+        );
+
+        let header = div()
+            .flex_none()
+            .px(px(16.))
+            .py(px(10.))
+            .flex()
+            .flex_col()
+            .gap(px(8.))
+            .border_b_1()
+            .border_color(colors.border)
+            .bg(colors.surface)
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(8.))
+                    .child(
+                        Button::new("similar-back", "返回图库")
+                            .size(ControlSize::Sm)
+                            .icon(IconName::ChevronLeft)
+                            .variant(ButtonVariant::Ghost)
+                            .on_click(move |_, _, cx| {
+                                let _ = this_back.update(cx, |app, cx| app.close_similar(cx));
+                            }),
+                    )
+                    .child(
+                        div()
+                            .text_sm()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .child("查找相似"),
+                    )
+                    .child(
+                        div()
+                            .min_w(px(0.))
+                            .truncate()
+                            .text_xs()
+                            .text_color(colors.muted)
+                            .child(anchor.display().to_string()),
+                    )
+                    .child(div().flex_1())
+                    .child(small_badge(
+                        format!("已比较 {scanned} 张 pHash"),
+                        colors.muted,
+                        colors.sunken,
+                    ))
+                    .child(small_badge(
+                        format!("{total_hits} 个结果 · 距离升序"),
+                        colors.accent,
+                        colors.selection,
+                    ))
+                    .children(truncated.then(|| {
+                        small_badge(
+                            format!("仅显示前 {SIMILAR_RESULT_LIMIT} 条"),
+                            colors.warning,
+                            colors.warning_subtle,
+                        )
+                    })),
+            )
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .flex_wrap()
+                    .gap(px(10.))
+                    .child(div().text_xs().text_color(colors.subtle).child(format!(
+                        "阈值 ≤{threshold} · 相似度 ≥{}%",
+                        similarity_pct_from_distance(threshold as u32)
+                    )))
+                    .child(slider)
+                    .child(preset_row)
+                    .child(
+                        Button::new("similar-refresh", "重新查找")
+                            .size(ControlSize::Sm)
+                            .on_click(move |_, _, cx| {
+                                let _ = this_refresh
+                                    .update(cx, |app, cx| app.refresh_similar_query(cx));
+                            }),
+                    )
+                    .child(div().flex_1())
+                    .child(div().text_xs().text_color(colors.subtle).child(if scanning {
+                        "图库扫描中，结果可能滞后".to_string()
+                    } else {
+                        "只读查询 · 不删除/移动文件 · 调整阈值不清空审核状态".to_string()
+                    })),
+            )
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(8.))
+                    .child(
+                        div()
+                            .w(px(280.))
+                            .on_mouse_down(MouseButton::Left, |_, window, _| {
+                                window.prevent_default()
+                            })
+                            .child(
+                                Input::new(filter_input)
+                                    .clearable()
+                                    .least("筛选相似结果（名称/标签/路径）"),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(colors.muted)
+                            .child(format!("{} / {total_hits} 条", visible_indices.len())),
+                    )
+                    .children((!selection.is_empty()).then(|| {
+                        div()
+                            .text_xs()
+                            .text_color(colors.accent)
+                            .child(format!("已选 {} 张", selection.len()))
+                    }))
+                    .child(div().flex_1())
+                    .child(
+                        Button::new("similar-select-all", "全选可见")
+                            .size(ControlSize::Sm)
+                            .on_click(move |_, _, cx| {
+                                let _ = this_all.update(cx, |app, cx| app.select_all_visible(cx));
+                            }),
+                    )
+                    .child(
+                        Button::new("similar-clear-selection", "清除选择")
+                            .size(ControlSize::Sm)
+                            .on_click(move |_, _, cx| {
+                                let _ = this_clear.update(cx, |app, cx| app.clear_selection(cx));
+                            }),
+                    )
+                    .child(
+                        Button::new("similar-quick-view", "快速查看")
+                            .size(ControlSize::Sm)
+                            .icon(IconName::Maximize2)
+                            .on_click(move |_, _, cx| {
+                                let _ = this_quick.update(cx, |app, cx| app.open_quick_view(cx));
+                            }),
+                    ),
+            );
+
+        let body: AnyElement = if visible_indices.is_empty() {
+            div()
+                .flex_1()
+                .p(px(24.))
+                .text_sm()
+                .text_color(colors.muted)
+                .child(
+                    error
+                        .clone()
+                        .unwrap_or_else(|| "没有相似图片；可以放宽阈值或清除筛选。".to_string()),
+                )
+                .into_any_element()
+        } else {
+            let assets_for_list = assets.clone();
+            let indices_for_list = visible_indices.clone();
+            let selection_for_list = selection.clone();
+            let this_for_list = this.clone();
+            let thumb_cache = self.thumb_cache.clone();
+            let focus = self.grid_focus.clone();
+            let distances = Arc::new(distances);
+            uniform_list("similar-hits", indices_for_list.len(), move |range, _, _| {
+                let Ok(assets) = assets_for_list.read() else {
+                    return Vec::new();
+                };
+                range
+                    .map(|row| {
+                        let index = indices_for_list[row];
+                        let Some(asset) = assets.get(index) else {
+                            return div().into_any_element();
+                        };
+                        let (distance, pct) =
+                            distances.get(&asset.path).copied().unwrap_or((0, 100));
+                        similar_hit_row(
+                            asset,
+                            distance,
+                            pct,
+                            selection_for_list.contains(&asset.path),
+                            this_for_list.clone(),
+                            thumb_cache.clone(),
+                            focus.clone(),
+                            colors,
+                        )
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .track_scroll(&self.grid_scroll)
+            .flex_1()
+            .w_full()
+            .min_h(px(0.))
+            .into_any_element()
+        };
+
+        let banner: Option<AnyElement> =
+            error
+                .filter(|_| !visible_indices.is_empty())
+                .map(|message| {
+                    div()
+                        .px(px(16.))
+                        .py(px(6.))
+                        .text_xs()
+                        .text_color(colors.danger)
+                        .child(message)
+                        .into_any_element()
+                });
+
+        div()
+            .w(width)
+            .h_full()
+            .flex()
+            .flex_col()
+            .overflow_hidden()
+            .bg(colors.bg)
+            .child(header)
+            .children(banner)
+            .child(
+                div()
+                    .id("similar-results")
+                    .flex_1()
+                    .min_h(px(0.))
+                    .w_full()
+                    .px(px(8.))
+                    .py(px(6.))
+                    .flex()
+                    .flex_col()
+                    .key_context(GRID_CONTEXT)
+                    .track_focus(&self.grid_focus)
+                    .on_mouse_down(MouseButton::Left, {
+                        let focus = self.grid_focus.clone();
+                        move |_, window, cx| window.focus(&focus, cx)
+                    })
+                    .child(body),
+            )
+            .into_any_element()
+    }
+}
+
+#[cfg(test)]
+mod similar_ui_tests {
+    use super::{preview_sample_note, similar_filter_matches};
+
+    fn hit(tag: &str) -> kanalib_core::model::TagHit {
+        kanalib_core::model::TagHit {
+            tag: tag.to_string(),
+            category: "general".into(),
+            score: 0.9,
+            vocab_index: None,
+        }
+    }
+
+    fn asset(path: &str) -> kanalib_core::model::Asset {
+        kanalib_core::model::Asset {
+            path: std::path::PathBuf::from(path),
+            library_root: std::path::PathBuf::from(r"C:\pics"),
+            thumb: None,
+            tile_thumb: None,
+            width: 1,
+            height: 1,
+            group: String::new(),
+            rating: String::new(),
+            favorite: false,
+            star: 0,
+            tags: vec![hit("long_hair")],
+            manual_tags: Vec::new(),
+            tagged: false,
+            tag_attempts: 0,
+            error: None,
+            damage: None,
+            sha1: None,
+            blake3: None,
+            phash: None,
+            bytes: 1,
+            mtime: 0,
+            captured_at: None,
+            metadata_json: String::new(),
+        }
+    }
+
+    #[test]
+    fn preview_sample_note_marks_sampled_and_exact() {
+        let sampled = kanalib_core::model::SimilarThresholdPreview {
+            threshold: 10,
+            group_count: 3,
+            member_count: 9,
+            chain_risk: false,
+            chain_groups: 0,
+            sampled_assets: 4096,
+            total_assets: 100_000,
+            sampled: true,
+        };
+        assert!(preview_sample_note(&sampled).contains("抽样 4096 / 100000"));
+        assert!(preview_sample_note(&sampled).contains("4.1%"));
+        let exact = kanalib_core::model::SimilarThresholdPreview {
+            sampled_assets: 12,
+            total_assets: 12,
+            sampled: false,
+            ..sampled
+        };
+        assert_eq!(preview_sample_note(&exact), "全量 12 张");
+    }
+
+    #[test]
+    fn similar_filter_matches_title_path_and_tags() {
+        let asset = asset(r"C:\pics\Hatsune_Miku.png");
+        assert!(similar_filter_matches(&asset, "miku"));
+        assert!(similar_filter_matches(&asset, "long_hair"));
+        assert!(similar_filter_matches(&asset, r"c:\pics"));
+        assert!(!similar_filter_matches(&asset, "kagamine"));
+    }
 }

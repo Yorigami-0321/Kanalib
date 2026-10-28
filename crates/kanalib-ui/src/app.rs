@@ -205,6 +205,26 @@ pub struct KanalibApp {
     pub(crate) group_cache: crate::views::GroupCache,
     /// 折叠后待定位的组；布局重建后把该组组头滚到顶部。
     pub(crate) pending_reveal_group: Option<String>,
+    // ---- F-004 / F-045（第三轮 G2）：相似结果与阈值预览，字段统一加在末尾。 ----
+    /// 当前单锚点相似查询；进入新查询时整体替换，离开视图即丢弃。
+    pub(crate) similar_view: Option<crate::dedup::SimilarView>,
+    /// 结果视图内的本地筛选输入（名称/标签/路径）。
+    pub(crate) similar_filter_input: Option<Entity<TextInput>>,
+    pub(crate) similar_filter: String,
+    /// 当前查询结果映射到资产下标；只在查询/筛选/数据版本变化时重建。
+    pub(crate) similar_visible: Arc<Vec<usize>>,
+    pub(crate) similar_visible_revision: u64,
+    pub(crate) similar_visible_filter: String,
+    pub(crate) similar_refresh_task: Option<Task<()>>,
+    /// 设置页与去重页的临时阈值；None 表示沿用已保存的默认值。
+    pub(crate) settings_threshold_draft: Option<u8>,
+    pub(crate) dedup_threshold_draft: Option<u8>,
+    /// 阈值预览结果；`similar_preview_threshold` 标记它对应的候选值。
+    pub(crate) similar_preview: Option<kanalib_core::model::SimilarThresholdPreview>,
+    pub(crate) similar_preview_threshold: Option<u8>,
+    pub(crate) similar_preview_running: bool,
+    pub(crate) similar_preview_epoch: u64,
+    pub(crate) similar_preview_task: Option<Task<()>>,
 }
 
 impl Render for KanalibApp {
@@ -223,6 +243,21 @@ impl Render for KanalibApp {
         if input_text != self.search_pending {
             self.search_pending = input_text;
             self.schedule_search(cx);
+        }
+        // F-004：结果视图内的本地筛选输入；变化时只重建结果下标，不触发图库查询。
+        let similar_filter = window.use_keyed_state("kanalib-similar-filter", cx, |window, cx| {
+            TextInput::new(window, cx).placeholder("筛选相似结果（名称/标签/路径）")
+        });
+        if self.similar_filter_input.is_none() {
+            self.similar_filter_input = Some(similar_filter.clone());
+        }
+        let similar_filter_text = similar_filter.read(cx).text().to_string();
+        if similar_filter_text != self.similar_filter {
+            self.similar_filter = similar_filter_text;
+            self.similar_visible_revision = u64::MAX;
+            // 筛选变化后隐藏的选中项不应继续计数；下一帧自动选中首个可见结果。
+            self.clear_multi_selection();
+            self.auto_select_pending = self.screen == Screen::Similar;
         }
         // 结果由“已应用”的查询驱动；输入框还在防抖窗口内时先显示上一次的结果。
         let search_text = self.last_search.clone();
@@ -503,6 +538,18 @@ impl Render for KanalibApp {
             }
         }
         let visible_indices = self.view.visible_indices.clone();
+        // F-004：相似结果视图使用自己的有序下标；查询/筛选/数据版本变化时才重建。
+        let visible_indices = if self.screen == Screen::Similar {
+            if self.similar_visible_revision != revision
+                || self.similar_visible_filter != self.similar_filter
+            {
+                self.rebuild_similar_visible(&assets, revision);
+            }
+            self.view.visible_indices = self.similar_visible.clone();
+            self.similar_visible.clone()
+        } else {
+            visible_indices
+        };
         let visible_count = visible_indices.len();
         if self.auto_select_pending {
             self.auto_select_pending = false;
@@ -687,12 +734,16 @@ impl Render for KanalibApp {
             div().flex_none().into_any_element()
         };
         let (cache_hits, cache_misses) = self.thumb_cache.read(cx).access_stats();
-        let viewer_content = (self.screen == Screen::Library)
+        let viewer_content = (self.screen == Screen::Library || self.screen == Screen::Similar)
             .then(|| {
                 self.viewer_at
                     .and_then(|at| self.render_viewer(&this, at, colors))
             })
             .flatten();
+        // F-045：设置页/去重页进入或切换阈值时，后台计算一次预览（同步调用可能 1.8–2.6s）。
+        if matches!(self.screen, Screen::Settings | Screen::Duplicates) {
+            self.maybe_schedule_threshold_preview(cx);
+        }
         let content: AnyElement = if let Some(viewer) = viewer_content {
             viewer
         } else if self.screen == Screen::Tags {
@@ -743,6 +794,19 @@ impl Render for KanalibApp {
                 error.as_deref(),
                 scanning,
                 dedup_width,
+                colors,
+            )
+            .into_any_element()
+        } else if self.screen == Screen::Similar {
+            // F-004：临时结果视图，宽度与其它整页视图一致；不渲染检查器。
+            let similar_width = (window_width - sidebar_width).max(px(640.));
+            self.render_similar(
+                &this,
+                assets,
+                visible_indices,
+                self.selection.clone(),
+                &similar_filter,
+                similar_width,
                 colors,
             )
             .into_any_element()
@@ -874,6 +938,7 @@ impl Render for KanalibApp {
                     Command::new("act:copy-paths", "复制选中路径").icon(IconName::Copy),
                     Command::new("tag:add", "添加标签…").icon(IconName::Tag),
                     Command::new("tag:remove", "移除标签…").icon(IconName::X),
+                    Command::new("similar:find", "查找相似").icon(IconName::Search),
                 ],
             )
             .group(
@@ -1492,6 +1557,14 @@ impl Render for KanalibApp {
                 this.select_all_visible(cx);
             }))
             .on_action(cx.listener(|this, _: &ClearSelection, _, cx| this.clear_selection(cx)))
+            // F-004：结果视图里 Esc 先关快速查看，再回到图库；图库里仍是清除选择。
+            .on_action(cx.listener(|this, _: &CloseSimilar, _, cx| {
+                if this.screen == Screen::Similar && this.viewer_at.is_none() {
+                    this.close_similar(cx);
+                } else {
+                    this.clear_selection(cx);
+                }
+            }))
             .on_action(cx.listener(|this, _: &OpenQuickView, _, cx| this.open_quick_view(cx)))
             .on_action(cx.listener(|this, _: &ToggleFavorite, _, cx| this.toggle_favorite(cx)))
             .on_action(cx.listener(|this, _: &Rate0, _, cx| this.apply_star(0, cx)))
@@ -1554,7 +1627,7 @@ impl Render for KanalibApp {
             self.focus_viewer_pending = false;
         }
         if self.focus_grid_pending
-            && self.screen == Screen::Library
+            && (self.screen == Screen::Library || self.screen == Screen::Similar)
             && !self.palette_open
             && self.viewer_at.is_none()
             && !self.save_search_open
@@ -1901,7 +1974,7 @@ impl KanalibApp {
             KeyBinding::new("4", Rate4, Some(GRID_CONTEXT)),
             KeyBinding::new("5", Rate5, Some(GRID_CONTEXT)),
             KeyBinding::new("ctrl-a", SelectAllVisible, Some(GRID_CONTEXT)),
-            KeyBinding::new("escape", ClearSelection, Some(GRID_CONTEXT)),
+            KeyBinding::new("escape", CloseSimilar, Some(GRID_CONTEXT)),
             KeyBinding::new("ctrl-shift-1", ViewIconsLarge, None),
             KeyBinding::new("ctrl-shift-3", ViewIconsMedium, None),
             KeyBinding::new("ctrl-shift-4", ViewIconsSmall, None),
@@ -2101,6 +2174,20 @@ impl KanalibApp {
             collapsed_groups: HashSet::new(),
             group_cache: crate::views::GroupCache::default(),
             pending_reveal_group: None,
+            similar_view: None,
+            similar_filter_input: None,
+            similar_filter: String::new(),
+            similar_visible: Arc::new(Vec::new()),
+            similar_visible_revision: u64::MAX,
+            similar_visible_filter: String::new(),
+            similar_refresh_task: None,
+            settings_threshold_draft: None,
+            dedup_threshold_draft: None,
+            similar_preview: None,
+            similar_preview_threshold: None,
+            similar_preview_running: false,
+            similar_preview_epoch: 0,
+            similar_preview_task: None,
         }
     }
 
@@ -3090,6 +3177,8 @@ impl KanalibApp {
             "group:captured" => self.set_group_mode(GroupMode::Captured, cx),
             "group:source" => self.set_group_mode(GroupMode::Source, cx),
             "group:rating" => self.set_group_mode(GroupMode::Rating, cx),
+            // F-004：以当前选中图为锚点查找相似。
+            "similar:find" => self.open_similar_selected(cx),
             _ => {}
         }
         cx.notify();
@@ -3361,6 +3450,7 @@ impl KanalibApp {
                 Screen::Tags => "标签管理",
                 Screen::Settings => "设置",
                 Screen::Duplicates => "重复项",
+                Screen::Similar => "查找相似",
                 Screen::Library => "",
             };
             left = left.child(

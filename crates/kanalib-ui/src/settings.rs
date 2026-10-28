@@ -1022,29 +1022,14 @@ impl KanalibApp {
                 ),
             );
 
-        let mut threshold_row = div().flex().items_center().gap(px(6.));
-        for (value, label) in [(6u8, "严格 ≤6"), (10u8, "标准 ≤10"), (14u8, "宽松 ≤14")]
-        {
-            let this_threshold = this.clone();
-            threshold_row = threshold_row.child(
-                Button::new(
-                    SharedString::from(format!("settings-threshold-{value}")),
-                    label,
-                )
-                .variant(if similar_threshold == value {
-                    ButtonVariant::Primary
-                } else {
-                    ButtonVariant::Secondary
-                })
-                .on_click(move |_, _, cx| {
-                    let _ = this_threshold.update(cx, |app, cx| {
-                        let saved = app.state.set_similar_threshold(value);
-                        app.settings_notice = Some(format!("相似阈值默认值已设为 ≤{saved}"));
-                        cx.notify();
-                    });
-                }),
-            );
-        }
+        // F-045：0–32 滑杆（保留 6/10/14 快捷档）+ 临时值/默认值 + 后台预估。
+        let threshold_editor = self.render_threshold_editor(
+            this,
+            similar_threshold,
+            self.settings_threshold_draft,
+            true,
+            colors,
+        );
         let similar_section = div()
             .p(px(16.))
             .rounded(px(10.))
@@ -1064,9 +1049,9 @@ impl KanalibApp {
                 div()
                     .text_xs()
                     .text_color(colors.muted)
-                    .child("默认阈值用于相似扫描；去重页也可临时切换。当前："),
+                    .child("默认阈值用于相似扫描与「查找相似」；滑杆先给临时值，确认后再设为默认。"),
             )
-            .child(threshold_row);
+            .child(threshold_editor);
 
         let path_row = |label: &'static str, value: PathBuf, colors: UiColors| {
             div()

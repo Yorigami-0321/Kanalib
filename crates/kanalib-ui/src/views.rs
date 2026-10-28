@@ -189,6 +189,8 @@ pub(crate) fn asset_context_menu(asset: &Asset, this: &Entity<KanalibApp>) -> Me
     };
     let quick_this = this.clone();
     let quick_path = path.clone();
+    let similar_this = this.clone();
+    let similar_path = path.clone();
     let favorite_this = this.clone();
     let favorite_path = path.clone();
     let prompt_this = this.clone();
@@ -205,6 +207,15 @@ pub(crate) fn asset_context_menu(asset: &Asset, this: &Entity<KanalibApp>) -> Me
                     let _ = quick_this.update(cx, |app, cx| {
                         app.select_single_path(quick_path.clone(), cx);
                         app.open_quick_view(cx);
+                    });
+                }),
+        )
+        .item(
+            MenuItem::new("查找相似")
+                .icon(IconName::Search)
+                .on_click(move |_, cx| {
+                    let _ = similar_this.update(cx, |app, cx| {
+                        app.open_similar(similar_path.clone(), cx);
                     });
                 }),
         )

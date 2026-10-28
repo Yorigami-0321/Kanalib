@@ -205,6 +205,8 @@ impl KanalibApp {
             };
             let this_quick = this.clone();
             let path_for_open = asset.path.clone();
+            let similar_this = this.clone();
+            let similar_path = asset.path.clone();
             let favorite = asset.favorite;
             let star = asset.star;
             let rating = asset.rating.to_uppercase();
@@ -283,6 +285,16 @@ impl KanalibApp {
                             Button::new("preview-open-file", "打开文件")
                                 .size(ControlSize::Sm)
                                 .on_click(move |_, _, _| open_path(&path_for_open)),
+                        )
+                        .child(
+                            Button::new("preview-find-similar", "查找相似")
+                                .size(ControlSize::Sm)
+                                .icon(IconName::Search)
+                                .on_click(move |_, _, cx| {
+                                    let _ = similar_this.update(cx, |app, cx| {
+                                        app.open_similar(similar_path.clone(), cx);
+                                    });
+                                }),
                         ),
                 )
                 .into_any_element()
@@ -605,6 +617,16 @@ impl KanalibApp {
                 .icon(IconName::Maximize2)
                 .on_click(move |_, _, cx| {
                     let _ = this_quick.update(cx, |app, cx| app.open_quick_view(cx));
+                });
+            let similar_this = this.clone();
+            let similar_path = path.clone();
+            let find_similar = Button::new("inspector-find-similar", "查找相似")
+                .size(ControlSize::Sm)
+                .icon(IconName::Search)
+                .on_click(move |_, _, cx| {
+                    let _ = similar_this.update(cx, |app, cx| {
+                        app.open_similar(similar_path.clone(), cx);
+                    });
                 });
             let favorite = asset.favorite;
             let favorite_state = state.clone();
@@ -980,6 +1002,7 @@ impl KanalibApp {
                         .gap(px(6.))
                         .child(favorite_button)
                         .child(quick)
+                        .child(find_similar)
                         .child(open),
                 )
                 .child(
