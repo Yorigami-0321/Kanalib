@@ -48,6 +48,8 @@ pub struct AppState {
     similar_scan_id: Mutex<u64>,
     /// 每个来源一个防抖监听器；清空即停止监听。
     watchers: Mutex<HashMap<PathBuf, watch::WatchHandle>>,
+    /// 离线来源的监听重试开关；None 表示重试线程未运行。
+    watch_retry: Mutex<Option<Arc<AtomicBool>>>,
     /// 自身弱引用；`add_roots`/`remove_root` 只有 `&self`，启动监听时需要升级为 Arc。
     self_ref: Mutex<Weak<AppState>>,
     /// 是否允许启动文件监听（headless / KANALIB_DISABLE_WATCH 或测试时为 false）。
@@ -228,6 +230,7 @@ impl AppState {
             cancel: Mutex::new(None),
             similar_scan_id: Mutex::new(0),
             watchers: Mutex::new(HashMap::new()),
+            watch_retry: Mutex::new(None),
             self_ref: Mutex::new(Weak::new()),
             watch_allowed,
             tag_worker: Mutex::new(false),
@@ -245,6 +248,15 @@ impl AppState {
     #[cfg(test)]
     pub(crate) fn open_for_test(data_root: PathBuf, folder: Option<PathBuf>) -> Arc<Self> {
         Self::open(data_root, folder, false)
+    }
+
+    /// 测试用：隔离数据根目录，但启用真实 `notify` 监听（headless 可跑）。
+    #[cfg(test)]
+    pub(crate) fn open_for_test_with_watch(
+        data_root: PathBuf,
+        folder: Option<PathBuf>,
+    ) -> Arc<Self> {
+        Self::open(data_root, folder, true)
     }
 
     pub fn add_roots(&self, paths: Vec<PathBuf>) -> Result<usize> {
@@ -985,40 +997,100 @@ impl AppState {
         if !self.watch_allowed {
             return;
         }
+        self.ensure_watchers();
+        self.ensure_watch_retry_loop();
+    }
+
+    /// 为尚未挂上监听的来源补建 watcher；已存在的 watcher 原样保留。
+    fn ensure_watchers(&self) {
         let Some(state) = self.self_ref.lock().unwrap().clone().upgrade() else {
             return;
         };
         let roots = self.shared.lock().unwrap().roots.clone();
-        // 先把旧监听器移到临时表：重建成功后统一替换，单个来源失败时保留其旧监听器。
-        let mut previous = std::mem::take(&mut *self.watchers.lock().unwrap());
-        let mut handles = HashMap::new();
+        let mut watchers = self.watchers.lock().unwrap();
+        watchers.retain(|root, _| roots.contains(root));
         for root in roots {
+            if watchers.contains_key(&root) {
+                continue;
+            }
             match watch::spawn(&state, root.clone()) {
                 Ok(handle) => {
-                    handles.insert(root, handle);
+                    watchers.insert(root.clone(), handle);
+                    let mut shared = state.shared.lock().unwrap();
+                    let status = shared.source_status_mut(&root);
+                    let recovered = status
+                        .error
+                        .as_deref()
+                        .is_some_and(|error| error.contains("监听") || error.contains("离线"));
+                    status.online = true;
+                    if recovered {
+                        status.error = None;
+                        shared.status = format!("来源已恢复监听 · {}", source_label(&root));
+                        shared.revision = shared.revision.wrapping_add(1);
+                    }
                 }
                 Err(error) => {
                     log::warn!("watch {}: {error:#}", root.display());
-                    if let Some(handle) = previous.remove(&root) {
-                        handles.insert(root, handle);
-                        continue;
-                    }
-                    let mut shared = self.shared.lock().unwrap();
+                    let online = root.is_dir();
+                    let message = if online {
+                        format!("无法监听来源：{error:#}；将在后台自动重试")
+                    } else {
+                        format!("来源离线，恢复后自动重试监听：{}", root.display())
+                    };
+                    let mut shared = state.shared.lock().unwrap();
                     let status = shared.source_status_mut(&root);
-                    status.online = root.is_dir();
-                    status.error =
-                        Some(format!("无法监听来源：{error:#}；请手动重新扫描"));
-                    shared.status = format!("文件监听失败 · {}", root.display());
-                    shared.revision = shared.revision.wrapping_add(1);
+                    status.online = online;
+                    if status.error.as_deref() != Some(message.as_str()) {
+                        status.error = Some(message);
+                        shared.status = format!("文件监听失败 · {}", root.display());
+                        shared.revision = shared.revision.wrapping_add(1);
+                    }
                 }
             }
         }
-        let mut watchers = self.watchers.lock().unwrap();
-        *watchers = handles;
+    }
+
+    fn ensure_watch_retry_loop(&self) {
+        let stop = {
+            let mut guard = self.watch_retry.lock().unwrap();
+            if guard.is_some() {
+                return;
+            }
+            let stop = Arc::new(AtomicBool::new(false));
+            *guard = Some(stop.clone());
+            stop
+        };
+        let weak = self.self_ref.lock().unwrap().clone();
+        let spawned = std::thread::Builder::new()
+            .name("kanalib-watch-retry".into())
+            .spawn(move || {
+                loop {
+                    std::thread::sleep(WATCH_RETRY_INTERVAL);
+                    if stop.load(Ordering::SeqCst) {
+                        break;
+                    }
+                    let Some(state) = weak.upgrade() else {
+                        break;
+                    };
+                    state.ensure_watchers();
+                }
+            });
+        if spawned.is_err() {
+            log::warn!("无法创建来源监听重试线程");
+            *self.watch_retry.lock().unwrap() = None;
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn retry_watchers_once(&self) {
+        self.ensure_watchers();
     }
 
     /// 停止所有来源监听；监听线程由 `Debouncer` drop 干净退出。
     pub fn stop_watching(&self) {
+        if let Some(stop) = self.watch_retry.lock().unwrap().take() {
+            stop.store(true, Ordering::SeqCst);
+        }
         self.watchers.lock().unwrap().clear();
     }
 
@@ -2684,6 +2756,9 @@ fn log_scan_metrics(stats: &ScanStats) {
 /// 结构化扫描进度的最小刷新间隔；避免每文件写共享状态拖慢扫描。
 const SCAN_PROGRESS_INTERVAL: Duration = Duration::from_millis(200);
 
+/// 离线来源的监听重试间隔；来源恢复可访问后自动重新挂上 `notify`。
+const WATCH_RETRY_INTERVAL: Duration = Duration::from_secs(10);
+
 fn source_label(root: &Path) -> String {
     root.file_name()
         .map(|name| name.to_string_lossy().to_string())
@@ -3058,6 +3133,46 @@ fn rename_candidate_missing(
         }
     }
     Ok(None)
+}
+
+/// 跨来源移动：在其他可访问来源中寻找同 SHA1、已确认缺失且唯一的旧记录。
+///
+/// 目录级重命名在同一来源内由 `rename_candidate` 逐文件按 SHA1 恢复；跨来源时
+/// 只有“旧来源可访问 + 旧路径 NotFound + 全库唯一”才采纳，避免把离线来源或
+/// 多份同内容副本误判成移动而搬走标签。
+fn cross_source_candidate(
+    state: &Arc<AppState>,
+    folder: &Path,
+    sha1: &str,
+    new_path: &Path,
+) -> Option<PathBuf> {
+    if sha1.is_empty() {
+        return None;
+    }
+    let shared = state.shared.lock().unwrap();
+    let assets = shared.assets.read().unwrap();
+    let mut candidate: Option<PathBuf> = None;
+    for asset in assets.iter() {
+        if asset.library_root == folder
+            || asset.path == new_path
+            || asset.sha1.as_deref() != Some(sha1)
+        {
+            continue;
+        }
+        if !asset.library_root.is_dir() || std::fs::read_dir(&asset.library_root).is_err() {
+            // 旧来源离线/权限不足时无法判断文件是否真的消失，拒绝跨来源采纳。
+            continue;
+        }
+        if !definitely_missing(&asset.path) {
+            continue;
+        }
+        if candidate.is_some() {
+            // 存在多个候选时无法判定哪个是被移动的记录。
+            return None;
+        }
+        candidate = Some(asset.path.clone());
+    }
+    candidate
 }
 
 fn definitely_missing(path: &Path) -> bool {
@@ -3551,7 +3666,7 @@ pub(crate) struct FileIndexOutcome {
 fn index_file(
     state: &Arc<AppState>,
     db: &Db,
-    _folder: &Path,
+    folder: &Path,
     folder_string: &str,
     path: &Path,
     rename: RenamePolicy<'_>,
@@ -3668,7 +3783,14 @@ fn index_file(
                     }
                 }
             }
-        };
+        }
+        .or_else(|| {
+            if matches!(rename, RenamePolicy::Disabled) {
+                None
+            } else {
+                cross_source_candidate(state, folder, &hashes.sha1, path)
+            }
+        });
         if let Some(old_path) = candidate {
             match db.move_asset_media(
                 &old_path,
@@ -3691,6 +3813,7 @@ fn index_file(
                     {
                         let mut shared = state.shared.lock().unwrap();
                         shared.move_asset(&old_path, asset);
+                        shared.clear_pending_cleanup_path(&old_path);
                     }
                     log::info!(
                         "renamed asset: {} -> {}",
@@ -4717,6 +4840,128 @@ mod tests {
         assert!(lib.join("0.png").exists());
         assert!(lib.join("1.png").exists());
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn cross_source_move_preserves_tags_and_clears_pending_cleanup() {
+        let (base, lib, state) = test_state("cross-source-move");
+        let second = base.join("lib2");
+        std::fs::create_dir_all(&second).unwrap();
+        let old = lib.join("a.png");
+        write_test_image(&old, [11, 22, 33]);
+        state.scan_blocking(true).unwrap();
+        state.add_tags(std::slice::from_ref(&old), "cross-keep").unwrap();
+
+        let moved = second.join("moved.png");
+        std::fs::rename(&old, &moved).unwrap();
+        state.add_roots(vec![second.clone()]).unwrap();
+        state.scan_blocking(true).unwrap();
+
+        let shared = state.shared.lock().unwrap();
+        let assets = shared.assets.read().unwrap();
+        assert_eq!(assets.len(), 1, "cross-source move must not duplicate rows");
+        assert_eq!(assets[0].path, moved);
+        assert_eq!(assets[0].library_root, second);
+        assert!(
+            assets[0]
+                .all_tags()
+                .any(|tag| tag.tag == "cross-keep" && tag.category == "manual")
+        );
+        assert!(
+            shared
+                .pending_cleanup
+                .as_ref()
+                .is_none_or(|pending| !pending.paths.contains(&old))
+        );
+        drop(assets);
+        drop(shared);
+        std::fs::remove_dir_all(&base).unwrap();
+    }
+
+    #[test]
+    fn offline_source_watcher_recovers_when_directory_returns() {
+        let base = temp_dir("watch-recover");
+        let lib = base.join("lib");
+        let state = AppState::open_for_test_with_watch(base.join("data"), Some(lib.clone()));
+
+        let status = state.source_statuses().remove(0);
+        assert!(!status.online);
+        assert!(
+            status
+                .error
+                .as_deref()
+                .is_some_and(|error| error.contains("离线"))
+        );
+
+        std::fs::create_dir_all(&lib).unwrap();
+        state.retry_watchers_once();
+        let status = state.source_statuses().remove(0);
+        assert!(status.online);
+        assert!(status.error.is_none());
+        state.stop_watching();
+        drop(state);
+        std::fs::remove_dir_all(&base).unwrap();
+    }
+
+    #[test]
+    fn real_notify_indexes_renames_and_deletes_without_duplicates() {
+        let base = temp_dir("notify-integration");
+        let lib = base.join("lib");
+        std::fs::create_dir_all(&lib).unwrap();
+        let state = AppState::open_for_test_with_watch(base.join("data"), Some(lib.clone()));
+        let deadline = Instant::now() + Duration::from_secs(30);
+        let wait = |check: &dyn Fn() -> bool, label: &str| {
+            while !check() {
+                assert!(
+                    Instant::now() < deadline,
+                    "timed out waiting for {label} under {}",
+                    lib.display()
+                );
+                std::thread::sleep(Duration::from_millis(80));
+            }
+        };
+
+        // 连续写入形成事件批次，验证监听不会重复入库。
+        for index in 0..60u8 {
+            write_test_image(&lib.join(format!("burst-{index:02}.png")), [index, 40, 70]);
+        }
+        wait(
+            &|| {
+                let shared = state.shared.lock().unwrap();
+                let assets = shared.assets.read().unwrap();
+                assets.len() == 60
+                    && assets.iter().map(|asset| &asset.path).collect::<HashSet<_>>().len() == 60
+            },
+            "60 notify events",
+        );
+
+        let old = lib.join("burst-00.png");
+        let renamed = lib.join("renamed.png");
+        std::fs::rename(&old, &renamed).unwrap();
+        wait(
+            &|| {
+                let shared = state.shared.lock().unwrap();
+                let assets = shared.assets.read().unwrap();
+                assets.len() == 60
+                    && assets.iter().any(|asset| asset.path == renamed)
+                    && !assets.iter().any(|asset| asset.path == old)
+            },
+            "rename event",
+        );
+
+        std::fs::remove_file(&renamed).unwrap();
+        wait(
+            &|| {
+                let shared = state.shared.lock().unwrap();
+                let assets = shared.assets.read().unwrap();
+                assets.len() == 59 && !assets.iter().any(|asset| asset.path == renamed)
+            },
+            "delete event",
+        );
+
+        state.stop_watching();
+        drop(state);
+        std::fs::remove_dir_all(&base).unwrap();
     }
 
     #[test]

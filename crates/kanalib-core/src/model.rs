@@ -1529,8 +1529,20 @@ impl Shared {
         self.revision = self.revision.wrapping_add(1);
     }
 
-    pub fn remove_assets(&mut self, paths: &HashSet<PathBuf>) -> usize {
-        let mut removed = Vec::new();
+    /// 重命名/跨来源移动已采纳后，从待确认清理批次里移除旧路径。
+    pub fn clear_pending_cleanup_path(&mut self, path: &Path) {
+        let clear = if let Some(pending) = self.pending_cleanup.as_mut() {
+            pending.paths.remove(path);
+            pending.paths.is_empty()
+        } else {
+            false
+        };
+        if clear {
+            self.pending_cleanup = None;
+        }
+    }
+
+    pub fn remove_assets(&mut self, paths: &HashSet<PathBuf>) -> usize {        let mut removed = Vec::new();
         {
             let mut assets = self.assets.write().unwrap();
             assets.retain(|asset| {
