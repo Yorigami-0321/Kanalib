@@ -16,10 +16,11 @@ use crate::dedup::{
 use crate::ffmpeg::{self, ThumbJob};
 use crate::media;
 use crate::model::{
-    Asset, Collection, CountAccumulator, Filter, PendingCleanup, RetagSummary, SavedSearch,
-    SavedSearchView, ScanCounts, ScanFilterConfig, ScanPhase, ScanProgress, ScanSummary, Shared,
-    SourceScanStatus, TagCandidateReview, TagHit, TagJobError, TagQueueStatus, TagRecomputeSummary,
-    TagReviewState, TagSummary, TagThresholds, normalize_tag_name,
+    Asset, Collection, CountAccumulator, ExcludedAssetAction, Filter, PendingCleanup, RetagSummary,
+    SavedSearch, SavedSearchView, ScanCounts, ScanFilterApply, ScanFilterConfig, ScanFilterImpact,
+    ScanPhase, ScanProgress, ScanSummary, Shared, SourceScanStatus, TagCandidateReview, TagHit,
+    TagJobError, TagQueueStatus, TagRecomputeSummary, TagReviewState, TagSummary, TagThresholds,
+    normalize_tag_name,
 };
 use crate::scan_filter::{self, CompiledIgnoreRules, IgnoreRules, ScanFilterPreview};
 use crate::sidecar::{Sidecar, project_root, repair_file};
@@ -615,9 +616,81 @@ impl AppState {
         scan_filter::preview_scan_filter(&root, config)
     }
 
+    /// 列出已入库、但会被给定排除规则排除的资产。
+    ///
+    /// 只读：不保存规则、不删除记录。大小规则在文件缺失时无法判断，按保留处理。
+    pub fn scan_filter_indexed_impact(
+        &self,
+        root: &Path,
+        config: &ScanFilterConfig,
+    ) -> Result<ScanFilterImpact> {
+        let root = absolute(root.to_path_buf());
+        {
+            let shared = self.shared.lock().unwrap();
+            if !shared.roots.contains(&root) {
+                bail!("来源不存在: {}", root.display());
+            }
+        }
+        let compiled = scan_filter::CompiledScanFilter::new(&root, config)?;
+        let folder = root.to_string_lossy().to_string();
+        let paths = Db::open(&self.db_path)?.asset_paths(&folder)?;
+        let mut excluded = Vec::new();
+        for path in &paths {
+            let bytes = std::fs::metadata(path).ok().map(|meta| meta.len());
+            if compiled.excludes(path, false, bytes) {
+                excluded.push(path.clone());
+            }
+        }
+        excluded.sort();
+        Ok(ScanFilterImpact {
+            root,
+            indexed: paths.len(),
+            kept: paths.len().saturating_sub(excluded.len()),
+            excluded,
+        })
+    }
+
+    /// 保存排除规则，并按 `action` 处理已入库但被新规则命中的资产。
+    ///
+    /// `RemoveFromLibrary` 只删 DB 与内存记录，绝不删除磁盘文件；被移出的资产
+    /// 不会加入 F-037 忽略列表，移除规则后重扫即可重新导入。
+    pub fn apply_scan_filter(
+        &self,
+        root: &Path,
+        config: ScanFilterConfig,
+        action: ExcludedAssetAction,
+    ) -> Result<ScanFilterApply> {
+        let root = absolute(root.to_path_buf());
+        self.set_scan_filter(&root, config.clone())?;
+        let impact = self.scan_filter_indexed_impact(&root, &config)?;
+        let mut removed = 0usize;
+        if action == ExcludedAssetAction::RemoveFromLibrary && !impact.excluded.is_empty() {
+            let db = Db::open(&self.db_path)?;
+            removed = db.delete_assets(&impact.excluded)?;
+            let targets = impact.excluded.iter().cloned().collect::<HashSet<_>>();
+            let mut shared = self.shared.lock().unwrap();
+            shared.remove_assets(&targets);
+            shared.refresh_after_removal(&targets);
+            shared.error = None;
+            shared.status = format!(
+                "已保存排除规则 · 从图库移出 {} 张 · 磁盘文件未删除",
+                removed
+            );
+            shared.revision = shared.revision.wrapping_add(1);
+        } else {
+            let mut shared = self.shared.lock().unwrap();
+            shared.status = format!(
+                "已保存排除规则 · 已入库命中 {} 张 · 保留记录",
+                impact.excluded.len()
+            );
+            shared.error = None;
+            shared.revision = shared.revision.wrapping_add(1);
+        }
+        Ok(ScanFilterApply { impact, removed })
+    }
+
     /// 当前持久忽略列表快照；供设置页查看路径/哈希/glob 三种粒度。
-    pub fn ignore_rules(&self) -> IgnoreRules {
-        self.shared.lock().unwrap().ignore_rules.clone()
+    pub fn ignore_rules(&self) -> IgnoreRules {        self.shared.lock().unwrap().ignore_rules.clone()
     }
 
     /// 从图库移除所选资产（只删 DB 记录），并把路径加入持久忽略列表。
@@ -4644,6 +4717,57 @@ mod tests {
         assert!(lib.join("0.png").exists());
         assert!(lib.join("1.png").exists());
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn scan_filter_impact_batches_keep_and_remove_existing_assets() {
+        let (base, lib, state) = test_state("scan-filter-impact");
+        write_test_image(&lib.join("keep.png"), [1, 2, 3]);
+        let excluded = lib.join("cache").join("skip.png");
+        write_test_image(&excluded, [4, 5, 6]);
+        state.scan_blocking(true).unwrap();
+        assert_eq!(state.shared.lock().unwrap().counts.total(), 2);
+
+        let config = ScanFilterConfig {
+            exclude_globs: vec!["cache/**".into()],
+            ..ScanFilterConfig::default()
+        };
+        let impact = state.scan_filter_indexed_impact(&lib, &config).unwrap();
+        assert_eq!(impact.indexed, 2);
+        assert_eq!(impact.excluded, vec![excluded.clone()]);
+        assert_eq!(impact.kept, 1);
+
+        // 保留：规则只影响后续扫描，已入库记录仍在。
+        let applied = state
+            .apply_scan_filter(&lib, config.clone(), ExcludedAssetAction::Keep)
+            .unwrap();
+        assert_eq!(applied.removed, 0);
+        assert_eq!(state.shared.lock().unwrap().counts.total(), 2);
+        assert_eq!(state.scan_filter(&lib), config);
+        state.scan_blocking(true).unwrap();
+        assert_eq!(state.shared.lock().unwrap().counts.total(), 2);
+
+        // 移出：只删 DB/内存记录，磁盘文件保留；重扫不再导入。
+        let applied = state
+            .apply_scan_filter(&lib, config.clone(), ExcludedAssetAction::RemoveFromLibrary)
+            .unwrap();
+        assert_eq!(applied.removed, 1);
+        assert_eq!(state.shared.lock().unwrap().counts.total(), 1);
+        assert!(excluded.exists());
+        state.scan_blocking(true).unwrap();
+        assert_eq!(state.shared.lock().unwrap().counts.total(), 1);
+
+        let invalid = ScanFilterConfig {
+            exclude_globs: vec!["[".into()],
+            ..ScanFilterConfig::default()
+        };
+        assert!(
+            state
+                .apply_scan_filter(&lib, invalid, ExcludedAssetAction::Keep)
+                .is_err()
+        );
+        assert_eq!(state.scan_filter(&lib), config);
+        std::fs::remove_dir_all(&base).unwrap();
     }
 
     #[test]

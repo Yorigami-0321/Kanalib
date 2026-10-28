@@ -1818,6 +1818,36 @@ impl ScanFilterConfig {
     }
 }
 
+/// 已入库资产在新排除规则下的命中情况；用于「保留/移出图库」批量选择。
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct ScanFilterImpact {
+    pub root: PathBuf,
+    /// 该来源当前已入库的资产数。
+    pub indexed: usize,
+    /// 会被新规则排除、但仍留在图库中的资产路径。
+    pub excluded: Vec<PathBuf>,
+    /// 不被规则排除、继续保留的资产数。
+    pub kept: usize,
+}
+
+/// 已入库但被新规则排除时的处理方式。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ExcludedAssetAction {
+    /// 保留记录；规则只影响后续扫描。
+    #[default]
+    Keep,
+    /// 从图库移出（只删 DB 记录，不动磁盘文件）。
+    RemoveFromLibrary,
+}
+
+/// 保存排除规则并处理已入库命中资产的结果。
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct ScanFilterApply {
+    pub impact: ScanFilterImpact,
+    /// 实际从图库移出的记录数；`Keep` 时为 0。
+    pub removed: usize,
+}
+
 /// 诊断页展示的只读快照；不包含凭据与完整环境变量。
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct DiagnosticSnapshot {
