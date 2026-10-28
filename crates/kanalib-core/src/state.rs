@@ -16,10 +16,10 @@ use crate::dedup::{
 use crate::ffmpeg::{self, ThumbJob};
 use crate::media;
 use crate::model::{
-    Asset, CountAccumulator, Filter, PendingCleanup, RetagSummary, SavedSearch, ScanCounts,
-    ScanFilterConfig, Shared, SourceScanStatus, TagCandidateReview, TagHit, TagJobError,
-    TagQueueStatus, TagRecomputeSummary, TagReviewState, TagSummary, TagThresholds,
-    normalize_tag_name,
+    Asset, Collection, CountAccumulator, Filter, PendingCleanup, RetagSummary, SavedSearch,
+    SavedSearchView, ScanCounts, ScanFilterConfig, Shared, SourceScanStatus, TagCandidateReview,
+    TagHit, TagJobError, TagQueueStatus, TagRecomputeSummary, TagReviewState, TagSummary,
+    TagThresholds, normalize_tag_name,
 };
 use crate::scan_filter::{self, ScanFilterPreview};
 use crate::sidecar::{Sidecar, project_root, repair_file};
@@ -302,6 +302,13 @@ impl AppState {
             roots
         };
         self.save_roots(&roots)?;
+        // 相册关系只跟随当前图库成员：来源移除后清掉该来源的相册关系行。
+        // 资产行与磁盘文件都不动（重新加入来源时资产会重新扫描，标签/评分不丢）。
+        if let Ok(db) = Db::open(&self.db_path) {
+            if let Err(error) = db.forget_source_collections(&root.to_string_lossy()) {
+                log::warn!("clear collection links after removing root: {error:#}");
+            }
+        }
         let removed_paths = {
             let shared = self.shared.lock().unwrap();
             let assets = shared.assets.read().unwrap();
@@ -1090,49 +1097,177 @@ impl AppState {
         Ok(affected)
     }
 
+    /// 兼容旧调用：不记录视图状态，按默认视图保存。
     pub fn save_saved_search(
         &self,
         name: &str,
         filter: &Filter,
         query: &str,
     ) -> Result<SavedSearch> {
-        let name = name.trim();
-        if name.is_empty() {
-            bail!("智能集合名称不能为空");
-        }
-        if self
-            .shared
-            .lock()
-            .unwrap()
-            .saved_searches
-            .iter()
-            .any(|search| search.name == name)
-        {
-            bail!("已存在同名智能集合");
-        }
-        let id = Db::open(&self.db_path)?.save_saved_search(name, filter, query)?;
-        let saved = SavedSearch {
-            id,
-            name: name.to_string(),
-            filter: filter.clone(),
-            query: query.to_string(),
-        };
+        self.save_saved_search_with_view(name, filter, query, &SavedSearchView::default())
+    }
+
+    /// 保存集合时同时记录当前排序/视图/窗格状态；同名冲突由 DB 返回可判定错误。
+    pub fn save_saved_search_with_view(
+        &self,
+        name: &str,
+        filter: &Filter,
+        query: &str,
+        view: &SavedSearchView,
+    ) -> Result<SavedSearch> {
+        let db = Db::open(&self.db_path)?;
+        let saved = db.create_saved_search(name, filter, query, view)?;
+        let saved_searches = db.load_saved_searches()?;
         let mut shared = self.shared.lock().unwrap();
-        shared.saved_searches.push(saved.clone());
+        shared.saved_searches = saved_searches;
         shared.revision = shared.revision.wrapping_add(1);
         shared.status = format!("已保存智能集合「{}」", saved.name);
         shared.error = None;
         Ok(saved)
     }
 
-    pub fn delete_saved_search(&self, id: i64) -> Result<()> {
-        Db::open(&self.db_path)?.delete_saved_search(id)?;
+    /// 重命名不改 id，也不改手动顺序。
+    pub fn rename_saved_search(&self, id: i64, name: &str) -> Result<SavedSearch> {
+        let db = Db::open(&self.db_path)?;
+        let saved = db.rename_saved_search(id, name)?;
+        let saved_searches = db.load_saved_searches()?;
         let mut shared = self.shared.lock().unwrap();
-        shared.saved_searches.retain(|search| search.id != id);
+        shared.saved_searches = saved_searches;
+        shared.revision = shared.revision.wrapping_add(1);
+        shared.status = format!("已重命名智能集合为「{}」", saved.name);
+        shared.error = None;
+        Ok(saved)
+    }
+
+    /// 用当前筛选/搜索/视图覆盖集合内容；集合 id 与名称不变。
+    pub fn update_saved_search(
+        &self,
+        id: i64,
+        filter: &Filter,
+        query: &str,
+        view: &SavedSearchView,
+    ) -> Result<SavedSearch> {
+        let db = Db::open(&self.db_path)?;
+        let saved = db.update_saved_search(id, filter, query, view)?;
+        let saved_searches = db.load_saved_searches()?;
+        let mut shared = self.shared.lock().unwrap();
+        shared.saved_searches = saved_searches;
+        shared.revision = shared.revision.wrapping_add(1);
+        shared.status = format!("已用当前视图更新集合「{}」", saved.name);
+        shared.error = None;
+        Ok(saved)
+    }
+
+    pub fn set_saved_search_pinned(&self, id: i64, pinned: bool) -> Result<SavedSearch> {
+        let db = Db::open(&self.db_path)?;
+        let saved = db.set_saved_search_pinned(id, pinned)?;
+        let saved_searches = db.load_saved_searches()?;
+        let mut shared = self.shared.lock().unwrap();
+        shared.saved_searches = saved_searches;
+        shared.revision = shared.revision.wrapping_add(1);
+        shared.status = if pinned {
+            "已置顶智能集合".to_string()
+        } else {
+            "已取消置顶智能集合".to_string()
+        };
+        shared.error = None;
+        Ok(saved)
+    }
+
+    /// 侧栏拖动排序：必须传入全部集合 id 的新顺序。
+    pub fn reorder_saved_searches(&self, ordered_ids: &[i64]) -> Result<()> {
+        let db = Db::open(&self.db_path)?;
+        db.reorder_saved_searches(ordered_ids)?;
+        let saved_searches = db.load_saved_searches()?;
+        let mut shared = self.shared.lock().unwrap();
+        shared.saved_searches = saved_searches;
+        shared.revision = shared.revision.wrapping_add(1);
+        shared.status = "已调整智能集合顺序".into();
+        shared.error = None;
+        Ok(())
+    }
+
+    pub fn delete_saved_search(&self, id: i64) -> Result<()> {
+        let db = Db::open(&self.db_path)?;
+        db.delete_saved_search(id)?;
+        let saved_searches = db.load_saved_searches()?;
+        let mut shared = self.shared.lock().unwrap();
+        shared.saved_searches = saved_searches;
         shared.revision = shared.revision.wrapping_add(1);
         shared.status = "已删除智能集合".into();
         shared.error = None;
         Ok(())
+    }
+
+    /// 手动相册列表（含计数）；每次从 DB 现查，增删后立即可见。
+    pub fn collections(&self) -> Result<Vec<Collection>> {
+        Db::open(&self.db_path)?.load_collections()
+    }
+
+    pub fn create_collection(&self, name: &str) -> Result<Collection> {
+        let collection = Db::open(&self.db_path)?.create_collection(name)?;
+        let mut shared = self.shared.lock().unwrap();
+        shared.revision = shared.revision.wrapping_add(1);
+        shared.status = format!("已新建相册「{}」", collection.name);
+        shared.error = None;
+        Ok(collection)
+    }
+
+    pub fn rename_collection(&self, id: i64, name: &str) -> Result<Collection> {
+        let collection = Db::open(&self.db_path)?.rename_collection(id, name)?;
+        let mut shared = self.shared.lock().unwrap();
+        shared.revision = shared.revision.wrapping_add(1);
+        shared.status = format!("已重命名相册为「{}」", collection.name);
+        shared.error = None;
+        Ok(collection)
+    }
+
+    /// 删除相册只删相册与关系行，资产仍在图库中。
+    pub fn delete_collection(&self, id: i64) -> Result<()> {
+        let removed = Db::open(&self.db_path)?.delete_collection(id)?;
+        if removed == 0 {
+            bail!("相册不存在: {id}");
+        }
+        let mut shared = self.shared.lock().unwrap();
+        shared.revision = shared.revision.wrapping_add(1);
+        shared.status = "已删除相册（未删除图片）".into();
+        shared.error = None;
+        Ok(())
+    }
+
+    pub fn add_assets_to_collection(&self, id: i64, paths: &[PathBuf]) -> Result<usize> {
+        let added = Db::open(&self.db_path)?.add_assets_to_collection(id, paths)?;
+        let mut shared = self.shared.lock().unwrap();
+        shared.revision = shared.revision.wrapping_add(1);
+        shared.status = format!("已向相册加入 {added} 张图片");
+        shared.error = None;
+        Ok(added)
+    }
+
+    pub fn remove_assets_from_collection(&self, id: i64, paths: &[PathBuf]) -> Result<usize> {
+        let removed = Db::open(&self.db_path)?.remove_assets_from_collection(id, paths)?;
+        let mut shared = self.shared.lock().unwrap();
+        shared.revision = shared.revision.wrapping_add(1);
+        shared.status = format!("已从相册移出 {removed} 张图片");
+        shared.error = None;
+        Ok(removed)
+    }
+
+    pub fn collection_assets(&self, id: i64) -> Result<Vec<Asset>> {
+        Db::open(&self.db_path)?.load_collection_assets(id)
+    }
+
+    pub fn collection_paths(&self, id: i64) -> Result<Vec<PathBuf>> {
+        Db::open(&self.db_path)?.collection_paths(id)
+    }
+
+    pub fn asset_collections(&self, path: &Path) -> Result<Vec<Collection>> {
+        Db::open(&self.db_path)?.asset_collections(path)
+    }
+
+    /// 导出相册路径清单（不复制文件）；已存在的目标文件不会被覆盖。
+    pub fn export_collection_paths(&self, id: i64, destination: &Path) -> Result<usize> {
+        Db::open(&self.db_path)?.export_collection_paths(id, destination)
     }
 
     pub fn retry_failed(&self) -> Result<usize> {
@@ -3937,6 +4072,83 @@ mod tests {
         std::fs::create_dir_all(&lib).unwrap();
         let state = AppState::open_for_test(base.join("data"), Some(lib.clone()));
         (base, lib, state)
+    }
+
+    #[test]
+    fn saved_searches_and_collections_stay_in_sync_with_shared_state() {
+        use crate::model::DuplicateNameError;
+
+        let (base, lib, state) = test_state("organization");
+        for index in 0..2u8 {
+            write_test_image(&lib.join(format!("{index}.png")), [index, 0, 0]);
+        }
+        state.rescan_root_blocking(lib.clone(), true).unwrap();
+        let paths = state
+            .shared
+            .lock()
+            .unwrap()
+            .assets
+            .read()
+            .unwrap()
+            .iter()
+            .map(|asset| asset.path.clone())
+            .collect::<Vec<_>>();
+        assert_eq!(paths.len(), 2);
+
+        let saved = state
+            .save_saved_search_with_view(
+                "收藏",
+                &Filter::Favorites,
+                "is:fav",
+                &SavedSearchView {
+                    sort_key: "name".into(),
+                    ..SavedSearchView::default()
+                },
+            )
+            .unwrap();
+        let renamed = state.rename_saved_search(saved.id, "我的收藏").unwrap();
+        assert_eq!(renamed.id, saved.id);
+        assert_eq!(
+            state.shared.lock().unwrap().saved_searches[0].name,
+            "我的收藏"
+        );
+        let duplicate = state
+            .save_saved_search("我的收藏", &Filter::All, "")
+            .unwrap_err();
+        assert!(duplicate.downcast_ref::<DuplicateNameError>().is_some());
+
+        let updated = state
+            .update_saved_search(
+                saved.id,
+                &Filter::Tag("风景".into()),
+                "山",
+                &SavedSearchView::default(),
+            )
+            .unwrap();
+        assert_eq!(updated.id, saved.id);
+        assert_eq!(updated.filter, Filter::Tag("风景".into()));
+        state.set_saved_search_pinned(saved.id, true).unwrap();
+        assert!(state.shared.lock().unwrap().saved_searches[0].pinned);
+
+        let album = state.create_collection("旅行").unwrap();
+        assert_eq!(state.add_assets_to_collection(album.id, &paths).unwrap(), 2);
+        assert_eq!(state.collections().unwrap()[0].asset_count, 2);
+        assert_eq!(state.collection_assets(album.id).unwrap().len(), 2);
+        assert_eq!(state.asset_collections(&paths[0]).unwrap().len(), 1);
+        assert_eq!(
+            state
+                .remove_assets_from_collection(album.id, &paths[..1])
+                .unwrap(),
+            1
+        );
+        assert_eq!(state.collections().unwrap()[0].asset_count, 1);
+
+        // 移除来源：只清相册关系行，资产行与磁盘文件都不动。
+        assert_eq!(state.remove_root(&lib).unwrap(), 2);
+        assert_eq!(state.collections().unwrap()[0].asset_count, 0);
+        assert!(lib.join("0.png").exists());
+        assert!(lib.join("1.png").exists());
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]

@@ -1,5 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::fs;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -13,14 +14,14 @@ use serde::{Deserialize, Serialize};
 use crate::dedup::{DuplicateReview, ReviewState};
 use crate::media::ContentHashes;
 use crate::model::{
-    Asset, BackupReport, DateFilter, Filter, NumField, NumOp, NumericFilter, RetagSummary,
-    SavedSearch, SearchQuery, SearchQueryParts, TAG_CANDIDATE_MIN_SCORE, TAG_CATEGORIES,
-    TableCount, TagCandidateReview, TagHit, TagJobError, TagQueueTotals, TagRecomputeSummary,
-    TagReviewState, TagSummary, TagThresholds, candidate_limit, day_number,
-    default_category_thresholds, normalize_tag_name,
+    Asset, BackupReport, Collection, DateFilter, DuplicateNameError, Filter, NumField, NumOp,
+    NumericFilter, OrganizationKind, RetagSummary, SavedSearch, SavedSearchView, SearchQuery,
+    SearchQueryParts, TAG_CANDIDATE_MIN_SCORE, TAG_CATEGORIES, TableCount, TagCandidateReview,
+    TagHit, TagJobError, TagQueueTotals, TagRecomputeSummary, TagReviewState, TagSummary,
+    TagThresholds, candidate_limit, day_number, default_category_thresholds, normalize_tag_name,
 };
 
-const SCHEMA_VERSION: i64 = 8;
+const SCHEMA_VERSION: i64 = 9;
 const TAG_THRESHOLDS_KEY: &str = "tags.category_thresholds";
 /// 库内是否存在内置 lower() 与 Rust Unicode 小写不同的名称；避免每次打开全表探测。
 const NAME_FOLD_KEY: &str = "search.name_fold_unicode";
@@ -471,6 +472,34 @@ CREATE INDEX IF NOT EXISTS idx_asset_scores_review
 CREATE INDEX IF NOT EXISTS idx_tags_threshold_override
     ON tags(threshold_override) WHERE threshold_override IS NOT NULL;
 "#;
+
+/// v9：智能集合补齐排序/视图状态、置顶与手动顺序；手动相册补反向索引。
+///
+/// 新增列一律带默认值，v8 及更早写入的 `saved_searches` 行不需要改写：
+/// `query_json` 仍只保存 filter/query，旧行读取后视图字段就是默认语义，
+/// `updated_at = 0` 表示「迁移前的集合」。
+///
+/// `ALTER TABLE ADD COLUMN` 不是幂等语句，因此列添加放在 `ensure_saved_search_columns`
+/// 里按 `PRAGMA table_info` 守卫；本常量只保留可重复执行的索引与顺序回填。
+const SCHEMA_V9: &str = r#"
+CREATE INDEX IF NOT EXISTS idx_saved_searches_order
+    ON saved_searches(pinned DESC, position, id);
+CREATE INDEX IF NOT EXISTS idx_collection_assets_asset
+    ON collection_assets(asset_id);
+"#;
+
+/// v9 新增的集合列；顺序即写入顺序。
+const SAVED_SEARCH_V9_COLUMNS: &[(&str, &str)] = &[
+    ("sort_key", "TEXT NOT NULL DEFAULT ''"),
+    ("sort_ascending", "INTEGER NOT NULL DEFAULT 1"),
+    ("view_mode", "TEXT NOT NULL DEFAULT ''"),
+    ("pane_mode", "TEXT NOT NULL DEFAULT ''"),
+    ("show_sidebar", "INTEGER NOT NULL DEFAULT 1"),
+    ("show_extensions", "INTEGER NOT NULL DEFAULT 1"),
+    ("pinned", "INTEGER NOT NULL DEFAULT 0"),
+    ("position", "INTEGER NOT NULL DEFAULT 0"),
+    ("updated_at", "INTEGER NOT NULL DEFAULT 0"),
+];
 
 #[derive(Clone, Debug)]
 pub struct ThumbSource {
@@ -1813,42 +1842,443 @@ impl Db {
         Ok(affected.len())
     }
 
+    /// 智能集合列表：置顶优先，其次手动顺序，最后 id（旧行在迁移时按 id 回填顺序）。
     pub fn load_saved_searches(&self) -> Result<Vec<SavedSearch>> {
-        let mut statement = self
-            .conn
-            .prepare("SELECT id, name, query_json FROM saved_searches ORDER BY id")?;
-        let rows = statement.query_map([], |row| {
-            let payload: Option<SavedSearchPayload> =
-                serde_json::from_str(&row.get::<_, String>(2)?).ok();
-            Ok(SavedSearch {
-                id: row.get(0)?,
-                name: row.get(1)?,
-                filter: payload
-                    .as_ref()
-                    .map(|payload| payload.filter.clone())
-                    .unwrap_or(Filter::All),
-                query: payload.map(|payload| payload.query).unwrap_or_default(),
-            })
-        })?;
+        let mut statement = self.conn.prepare(&format!(
+            "SELECT {SAVED_SEARCH_COLUMNS} FROM saved_searches
+             ORDER BY pinned DESC, position ASC, id ASC"
+        ))?;
+        let rows = statement.query_map([], row_to_saved_search)?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
+    pub fn load_saved_search(&self, id: i64) -> Result<SavedSearch> {
+        let saved = self
+            .conn
+            .query_row(
+                &format!("SELECT {SAVED_SEARCH_COLUMNS} FROM saved_searches WHERE id = ?1"),
+                [id],
+                row_to_saved_search,
+            )
+            .optional()?;
+        match saved {
+            Some(saved) => Ok(saved),
+            None => bail!("智能集合不存在: {id}"),
+        }
+    }
+
+    /// 兼容旧调用：不记录视图状态，按默认视图创建；返回新集合 id。
     pub fn save_saved_search(&self, name: &str, filter: &Filter, query: &str) -> Result<i64> {
+        Ok(self
+            .create_saved_search(name, filter, query, &SavedSearchView::default())?
+            .id)
+    }
+
+    /// 创建集合并记录当前视图；新集合排在手动顺序末尾（置顶仍优先）。
+    /// 同名返回 `DuplicateNameError`，不覆盖已有集合。
+    pub fn create_saved_search(
+        &self,
+        name: &str,
+        filter: &Filter,
+        query: &str,
+        view: &SavedSearchView,
+    ) -> Result<SavedSearch> {
+        let name = name.trim();
+        if name.is_empty() {
+            bail!("智能集合名称不能为空");
+        }
+        self.ensure_saved_search_name_available(name, None)?;
+        let payload = SavedSearchPayload {
+            filter: filter.clone(),
+            query: query.to_string(),
+        };
+        let position: i64 = self.conn.query_row(
+            "SELECT COALESCE(MAX(position), 0) + 1 FROM saved_searches",
+            [],
+            |row| row.get(0),
+        )?;
+        self.conn.execute(
+            "INSERT INTO saved_searches(
+                name, query_json, sort_key, sort_ascending, view_mode, pane_mode,
+                show_sidebar, show_extensions, pinned, position, updated_at
+             ) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 0, ?9, unixepoch())",
+            params![
+                name,
+                serde_json::to_string(&payload)?,
+                view.sort_key,
+                view.sort_ascending as i64,
+                view.view_mode,
+                view.pane_mode,
+                view.show_sidebar as i64,
+                view.show_extensions as i64,
+                position
+            ],
+        )?;
+        self.load_saved_search(self.conn.last_insert_rowid())
+    }
+
+    /// 重命名不改 id、不改手动顺序；同名（大小写敏感）返回可判定错误。
+    pub fn rename_saved_search(&self, id: i64, name: &str) -> Result<SavedSearch> {
+        let name = name.trim();
+        if name.is_empty() {
+            bail!("智能集合名称不能为空");
+        }
+        self.load_saved_search(id)?;
+        self.ensure_saved_search_name_available(name, Some(id))?;
+        self.conn.execute(
+            "UPDATE saved_searches SET name = ?1, updated_at = unixepoch() WHERE id = ?2",
+            params![name, id],
+        )?;
+        self.load_saved_search(id)
+    }
+
+    /// 用当前筛选/搜索/视图覆盖集合内容；id 与名称保持不变。
+    pub fn update_saved_search(
+        &self,
+        id: i64,
+        filter: &Filter,
+        query: &str,
+        view: &SavedSearchView,
+    ) -> Result<SavedSearch> {
+        self.load_saved_search(id)?;
         let payload = SavedSearchPayload {
             filter: filter.clone(),
             query: query.to_string(),
         };
         self.conn.execute(
-            "INSERT INTO saved_searches(name, query_json) VALUES(?1, ?2)",
-            params![name, serde_json::to_string(&payload)?],
+            "UPDATE saved_searches
+             SET query_json = ?1, sort_key = ?2, sort_ascending = ?3, view_mode = ?4,
+                 pane_mode = ?5, show_sidebar = ?6, show_extensions = ?7,
+                 updated_at = unixepoch()
+             WHERE id = ?8",
+            params![
+                serde_json::to_string(&payload)?,
+                view.sort_key,
+                view.sort_ascending as i64,
+                view.view_mode,
+                view.pane_mode,
+                view.show_sidebar as i64,
+                view.show_extensions as i64,
+                id
+            ],
         )?;
-        Ok(self.conn.last_insert_rowid())
+        self.load_saved_search(id)
+    }
+
+    /// 置顶只改变分组（置顶在前），不改变同组内的手动顺序。
+    pub fn set_saved_search_pinned(&self, id: i64, pinned: bool) -> Result<SavedSearch> {
+        let updated = self.conn.execute(
+            "UPDATE saved_searches SET pinned = ?1 WHERE id = ?2",
+            params![pinned as i64, id],
+        )?;
+        if updated == 0 {
+            bail!("智能集合不存在: {id}");
+        }
+        self.load_saved_search(id)
+    }
+
+    /// 按给定 id 顺序重写手动顺序；必须覆盖全部集合，避免留下未定义的位置。
+    pub fn reorder_saved_searches(&self, ordered_ids: &[i64]) -> Result<usize> {
+        let existing = self.load_saved_searches()?;
+        let known = existing
+            .iter()
+            .map(|search| search.id)
+            .collect::<HashSet<_>>();
+        let requested = ordered_ids.iter().copied().collect::<HashSet<_>>();
+        if existing.len() != ordered_ids.len()
+            || requested.len() != ordered_ids.len()
+            || known != requested
+        {
+            bail!("排序列表必须包含全部智能集合");
+        }
+        let tx = self.conn.unchecked_transaction()?;
+        for (index, id) in ordered_ids.iter().enumerate() {
+            // 1 起始，与迁移回填的 `position = id` 以及新建集合的 `MAX(position)+1` 一致；
+            // 0 只表示「迁移前的旧集合」，不会再被写入。
+            tx.execute(
+                "UPDATE saved_searches SET position = ?1 WHERE id = ?2",
+                params![index as i64 + 1, id],
+            )?;
+        }
+        tx.commit()?;
+        Ok(ordered_ids.len())
+    }
+
+    fn ensure_saved_search_name_available(
+        &self,
+        name: &str,
+        exclude_id: Option<i64>,
+    ) -> Result<()> {
+        let taken: bool = self.conn.query_row(
+            "SELECT EXISTS(
+                SELECT 1 FROM saved_searches
+                WHERE name = ?1 AND (?2 IS NULL OR id <> ?2)
+             )",
+            params![name, exclude_id],
+            |row| row.get(0),
+        )?;
+        if taken {
+            return Err(anyhow::Error::new(DuplicateNameError::new(
+                OrganizationKind::SavedSearch,
+                name,
+            )));
+        }
+        Ok(())
     }
 
     pub fn delete_saved_search(&self, id: i64) -> Result<usize> {
         Ok(self
             .conn
             .execute("DELETE FROM saved_searches WHERE id = ?1", [id])?)
+    }
+
+    /// 手动相册列表（含资产数），按名称排序；计数来自同一条 SQL，增删即时可见。
+    pub fn load_collections(&self) -> Result<Vec<Collection>> {
+        let mut statement = self.conn.prepare(
+            "SELECT c.id, c.name, c.kind, COUNT(ca.asset_id)
+             FROM collections c
+             LEFT JOIN collection_assets ca ON ca.collection_id = c.id
+             GROUP BY c.id, c.name, c.kind
+             ORDER BY c.name COLLATE NOCASE, c.id",
+        )?;
+        let rows = statement.query_map([], |row| {
+            let count: i64 = row.get(3)?;
+            Ok(Collection {
+                id: row.get(0)?,
+                name: row.get(1)?,
+                kind: row.get(2)?,
+                asset_count: count.max(0) as usize,
+            })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    pub fn load_collection(&self, id: i64) -> Result<Collection> {
+        let collection = self
+            .conn
+            .query_row(
+                "SELECT c.id, c.name, c.kind,
+                        (SELECT COUNT(*) FROM collection_assets ca WHERE ca.collection_id = c.id)
+                 FROM collections c WHERE c.id = ?1",
+                [id],
+                |row| {
+                    let count: i64 = row.get(3)?;
+                    Ok(Collection {
+                        id: row.get(0)?,
+                        name: row.get(1)?,
+                        kind: row.get(2)?,
+                        asset_count: count.max(0) as usize,
+                    })
+                },
+            )
+            .optional()?;
+        match collection {
+            Some(collection) => Ok(collection),
+            None => bail!("相册不存在: {id}"),
+        }
+    }
+
+    /// 新建手动相册；同名返回 `DuplicateNameError`，不覆盖已有相册。
+    pub fn create_collection(&self, name: &str) -> Result<Collection> {
+        let name = name.trim();
+        if name.is_empty() {
+            bail!("相册名称不能为空");
+        }
+        self.ensure_collection_name_available(name, None)?;
+        self.conn.execute(
+            "INSERT INTO collections(name, kind) VALUES(?1, 'manual')",
+            [name],
+        )?;
+        self.load_collection(self.conn.last_insert_rowid())
+    }
+
+    /// 重命名不改 id，也不改关系行。
+    pub fn rename_collection(&self, id: i64, name: &str) -> Result<Collection> {
+        let name = name.trim();
+        if name.is_empty() {
+            bail!("相册名称不能为空");
+        }
+        self.load_collection(id)?;
+        self.ensure_collection_name_available(name, Some(id))?;
+        self.conn.execute(
+            "UPDATE collections SET name = ?1 WHERE id = ?2",
+            params![name, id],
+        )?;
+        self.load_collection(id)
+    }
+
+    /// 删除相册只删关系行，资产行与磁盘文件都不动；返回删除的相册数（0/1）。
+    pub fn delete_collection(&self, id: i64) -> Result<usize> {
+        let tx = self.conn.unchecked_transaction()?;
+        tx.execute(
+            "DELETE FROM collection_assets WHERE collection_id = ?1",
+            [id],
+        )?;
+        let removed = tx.execute("DELETE FROM collections WHERE id = ?1", [id])?;
+        tx.commit()?;
+        Ok(removed)
+    }
+
+    fn ensure_collection_name_available(&self, name: &str, exclude_id: Option<i64>) -> Result<()> {
+        let taken: bool = self.conn.query_row(
+            "SELECT EXISTS(
+                SELECT 1 FROM collections WHERE name = ?1 AND (?2 IS NULL OR id <> ?2)
+             )",
+            params![name, exclude_id],
+            |row| row.get(0),
+        )?;
+        if taken {
+            return Err(anyhow::Error::new(DuplicateNameError::new(
+                OrganizationKind::Collection,
+                name,
+            )));
+        }
+        Ok(())
+    }
+
+    /// 批量加入相册；同一资产可属于多个相册，重复加入幂等（不计入返回值）。
+    /// 路径不在图库中的项被静默跳过，返回值是实际新增的关系行数。
+    pub fn add_assets_to_collection(&self, id: i64, paths: &[PathBuf]) -> Result<usize> {
+        if paths.is_empty() {
+            return Ok(0);
+        }
+        self.load_collection(id)?;
+        let tx = self.conn.unchecked_transaction()?;
+        let mut added = 0;
+        for path in paths {
+            added += tx.execute(
+                "INSERT OR IGNORE INTO collection_assets(collection_id, asset_id)
+                 SELECT ?1, id FROM assets WHERE path = ?2",
+                params![id, path.to_string_lossy().to_string()],
+            )?;
+        }
+        tx.commit()?;
+        Ok(added)
+    }
+
+    /// 批量移出相册；不存在的资产或本就不在相册里的路径不计入返回值。
+    pub fn remove_assets_from_collection(&self, id: i64, paths: &[PathBuf]) -> Result<usize> {
+        if paths.is_empty() {
+            return Ok(0);
+        }
+        self.load_collection(id)?;
+        let tx = self.conn.unchecked_transaction()?;
+        let mut removed = 0;
+        for path in paths {
+            removed += tx.execute(
+                "DELETE FROM collection_assets
+                 WHERE collection_id = ?1
+                   AND asset_id IN (SELECT id FROM assets WHERE path = ?2)",
+                params![id, path.to_string_lossy().to_string()],
+            )?;
+        }
+        tx.commit()?;
+        Ok(removed)
+    }
+
+    /// 按相册计数；每次现查，加入/移出后立即反映。
+    pub fn collection_asset_count(&self, id: i64) -> Result<usize> {
+        Ok(self.load_collection(id)?.asset_count)
+    }
+
+    /// 按相册列举资产路径，按路径排序。
+    pub fn collection_paths(&self, id: i64) -> Result<Vec<PathBuf>> {
+        self.load_collection(id)?;
+        let mut statement = self.conn.prepare(
+            "SELECT a.path
+             FROM collection_assets ca
+             JOIN assets a ON a.id = ca.asset_id
+             WHERE ca.collection_id = ?1
+             ORDER BY a.path",
+        )?;
+        let rows = statement.query_map([id], |row| row.get::<_, String>(0))?;
+        Ok(rows
+            .collect::<rusqlite::Result<Vec<_>>>()?
+            .into_iter()
+            .map(PathBuf::from)
+            .collect())
+    }
+
+    /// 按相册列举资产（含手动标签），供检查器/临时视图使用。
+    pub fn load_collection_assets(&self, id: i64) -> Result<Vec<Asset>> {
+        self.load_collection(id)?;
+        let mut statement = self.conn.prepare(
+            "SELECT a.path, a.thumb, a.width, a.height, a.group_name, a.rating, a.tags_json,
+                    a.tagged, a.error, a.sha1, a.blake3, a.phash, a.tag_attempts, a.bytes,
+                    a.mtime, a.favorite, a.star, a.folder, a.damage, a.captured_at,
+                    a.metadata_json
+             FROM collection_assets ca
+             JOIN assets a ON a.id = ca.asset_id
+             WHERE ca.collection_id = ?1
+             ORDER BY a.path",
+        )?;
+        let rows = statement.query_map([id], row_to_asset)?;
+        let mut assets = rows.collect::<rusqlite::Result<Vec<_>>>()?;
+        drop(statement);
+        let folders = assets
+            .iter()
+            .map(|asset| asset.library_root.to_string_lossy().to_string())
+            .collect::<HashSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>();
+        let mut manual = self.manual_tags_for_folders(&folders)?;
+        for asset in &mut assets {
+            if let Some(tags) = manual.remove(&asset.path) {
+                asset.manual_tags = tags;
+            }
+        }
+        Ok(assets)
+    }
+
+    /// 某资产所属的相册（含各相册计数）；同一资产可属于多个相册。
+    pub fn asset_collections(&self, path: &Path) -> Result<Vec<Collection>> {
+        let mut statement = self.conn.prepare(
+            "SELECT c.id, c.name, c.kind,
+                    (SELECT COUNT(*) FROM collection_assets ca2 WHERE ca2.collection_id = c.id)
+             FROM collections c
+             JOIN collection_assets ca ON ca.collection_id = c.id
+             JOIN assets a ON a.id = ca.asset_id
+             WHERE a.path = ?1
+             ORDER BY c.name COLLATE NOCASE, c.id",
+        )?;
+        let rows = statement.query_map([path.to_string_lossy().to_string()], |row| {
+            let count: i64 = row.get(3)?;
+            Ok(Collection {
+                id: row.get(0)?,
+                name: row.get(1)?,
+                kind: row.get(2)?,
+                asset_count: count.max(0) as usize,
+            })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    /// 把相册内的路径写成每行一条的 UTF-8 清单；只写路径，不复制任何文件。
+    /// 目标已存在时拒绝覆盖（`create_new`），返回写入行数。
+    pub fn export_collection_paths(&self, id: i64, destination: &Path) -> Result<usize> {
+        let paths = self.collection_paths(id)?;
+        let mut content = String::new();
+        for path in &paths {
+            content.push_str(&path.to_string_lossy());
+            content.push('\n');
+        }
+        let mut file = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(destination)
+            .with_context(|| format!("创建相册清单 {}", destination.display()))?;
+        file.write_all(content.as_bytes())?;
+        Ok(paths.len())
+    }
+
+    /// 来源移除时清理该来源资产的相册关系行；资产行与磁盘文件都不动。
+    /// 关系只跟随「当前图库成员」，重新加入来源后需要重新加入相册。
+    pub fn forget_source_collections(&self, folder: &str) -> Result<usize> {
+        Ok(self.conn.execute(
+            "DELETE FROM collection_assets
+             WHERE asset_id IN (SELECT id FROM assets WHERE folder = ?1)",
+            [folder],
+        )?)
     }
 
     pub fn retry_failed(&self, folder: &str) -> Result<usize> {
@@ -2064,10 +2494,15 @@ impl Db {
         let tx = self.conn.unchecked_transaction()?;
         let mut deleted = 0;
         for path in paths {
-            deleted += tx.execute(
-                "DELETE FROM assets WHERE path = ?1",
-                [path.to_string_lossy().to_string()],
+            let path = path.to_string_lossy().to_string();
+            // 外键已有 ON DELETE CASCADE；这里再显式清一遍关系行，
+            // 保证即使 pragma foreign_keys 被关闭也不会留下孤儿相册关系。
+            tx.execute(
+                "DELETE FROM collection_assets
+                 WHERE asset_id IN (SELECT id FROM assets WHERE path = ?1)",
+                [&path],
             )?;
+            deleted += tx.execute("DELETE FROM assets WHERE path = ?1", [&path])?;
         }
         tx.commit()?;
         Ok(deleted)
@@ -3905,6 +4340,55 @@ struct SavedSearchPayload {
     query: String,
 }
 
+/// 集合查询列顺序必须与 `row_to_saved_search` 一一对应。
+const SAVED_SEARCH_COLUMNS: &str = "id, name, query_json, sort_key, sort_ascending, view_mode, \
+     pane_mode, show_sidebar, show_extensions, pinned, position, updated_at";
+
+/// 旧行的 `query_json` 只含 filter/query；解析失败时退回「全部 + 空搜索」而不是报错，
+/// 与 v8 之前的读取行为一致。
+fn row_to_saved_search(row: &rusqlite::Row<'_>) -> rusqlite::Result<SavedSearch> {
+    let payload: Option<SavedSearchPayload> = serde_json::from_str(&row.get::<_, String>(2)?).ok();
+    Ok(SavedSearch {
+        id: row.get(0)?,
+        name: row.get(1)?,
+        filter: payload
+            .as_ref()
+            .map(|payload| payload.filter.clone())
+            .unwrap_or(Filter::All),
+        query: payload.map(|payload| payload.query).unwrap_or_default(),
+        view: SavedSearchView {
+            sort_key: row.get(3)?,
+            sort_ascending: row.get::<_, i64>(4)? != 0,
+            view_mode: row.get(5)?,
+            pane_mode: row.get(6)?,
+            show_sidebar: row.get::<_, i64>(7)? != 0,
+            show_extensions: row.get::<_, i64>(8)? != 0,
+        },
+        pinned: row.get::<_, i64>(9)? != 0,
+        position: row.get(10)?,
+        updated_at: row.get(11)?,
+    })
+}
+
+/// v9 集合列：逐列检查后补齐，保证迁移中途失败后重开可以继续而不是报重复列。
+fn ensure_saved_search_columns(conn: &Connection) -> Result<()> {
+    let mut statement = conn.prepare("PRAGMA table_info(saved_searches)")?;
+    let columns = statement
+        .query_map([], |row| row.get::<_, String>(1))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    drop(statement);
+    for (name, declaration) in SAVED_SEARCH_V9_COLUMNS {
+        if !columns.iter().any(|column| column == name) {
+            conn.execute_batch(&format!(
+                "ALTER TABLE saved_searches ADD COLUMN {name} {declaration};"
+            ))?;
+        }
+    }
+    // 迁移前的集合没有手动顺序：用 id 作为初始顺序；新集合写入 position >= 1，不受影响。
+    conn.execute_batch("UPDATE saved_searches SET position = id WHERE position = 0;")?;
+    Ok(())
+}
+
 fn migrate(conn: &Connection) -> Result<()> {
     let version: i64 = conn
         .query_row("PRAGMA user_version", [], |row| row.get(0))
@@ -3933,6 +4417,8 @@ fn migrate(conn: &Connection) -> Result<()> {
     conn.execute_batch(SCHEMA_V4)?;
     conn.execute_batch(SCHEMA_V5)?;
     conn.execute_batch(SCHEMA_V8)?;
+    ensure_saved_search_columns(conn)?;
+    conn.execute_batch(SCHEMA_V9)?;
     conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
     Ok(())
 }
@@ -5994,4 +6480,357 @@ mod tests {
         let _ = fs::remove_dir_all(&root);
     }
 
+    #[test]
+    fn migrates_v8_to_v9_and_reads_legacy_saved_searches() {
+        use crate::model::SavedSearchView;
+
+        let root = temp_root("v8-v9");
+        let db_path = root.join("kanalib.db");
+        {
+            let conn = Connection::open(&db_path).unwrap();
+            conn.execute_batch(super::SCHEMA_V2).unwrap();
+            conn.execute_batch(super::SCHEMA_V4).unwrap();
+            conn.execute_batch(super::SCHEMA_V5).unwrap();
+            conn.execute_batch(super::SCHEMA_V8).unwrap();
+            conn.execute(
+                "INSERT INTO saved_searches(name, query_json)
+                 VALUES('旧收藏', '{\"filter\":\"Favorites\",\"query\":\"is:fav\"}')",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO saved_searches(name, query_json)
+                 VALUES('旧搜索', '{\"filter\":\"All\",\"query\":\"夕阳\"}')",
+                [],
+            )
+            .unwrap();
+            conn.pragma_update(None, "user_version", 8).unwrap();
+        }
+
+        {
+            let db = Db::open(&db_path).unwrap();
+            let saved = db.load_saved_searches().unwrap();
+            assert_eq!(saved.len(), 2);
+            // 旧行按 id 顺序读取，视图字段为默认语义，updated_at 保持 0。
+            assert_eq!(saved[0].name, "旧收藏");
+            assert_eq!(saved[0].filter, Filter::Favorites);
+            assert_eq!(saved[0].query, "is:fav");
+            assert_eq!(saved[0].view, SavedSearchView::default());
+            assert!(!saved[0].pinned);
+            assert_eq!(saved[0].position, saved[0].id);
+            assert_eq!(saved[0].updated_at, 0);
+            assert_eq!(saved[1].name, "旧搜索");
+            assert_eq!(saved[1].query, "夕阳");
+
+            let conn = Connection::open(&db_path).unwrap();
+            let version: i64 = conn
+                .query_row("PRAGMA user_version", [], |row| row.get(0))
+                .unwrap();
+            assert_eq!(version, super::SCHEMA_VERSION);
+            for column in [
+                "sort_key",
+                "sort_ascending",
+                "view_mode",
+                "pane_mode",
+                "show_sidebar",
+                "show_extensions",
+                "pinned",
+                "position",
+                "updated_at",
+            ] {
+                let present: i64 = conn
+                    .query_row(
+                        "SELECT COUNT(*) FROM pragma_table_info('saved_searches') WHERE name = ?1",
+                        [column],
+                        |row| row.get(0),
+                    )
+                    .unwrap();
+                assert_eq!(present, 1, "缺少列 {column}");
+            }
+            let reverse_index: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM sqlite_master
+                     WHERE type = 'index' AND name = 'idx_collection_assets_asset'",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(reverse_index, 1);
+            drop(conn);
+
+            // 迁移后新集合顺延在末尾，旧集合视图仍可正常使用。
+            let created = db
+                .create_saved_search(
+                    "新集合",
+                    &Filter::All,
+                    "新",
+                    &SavedSearchView {
+                        sort_key: "name".into(),
+                        ..SavedSearchView::default()
+                    },
+                )
+                .unwrap();
+            assert_eq!(created.position, 3);
+            assert_eq!(created.view.sort_key, "name");
+        }
+
+        let backups = fs::read_dir(&root)
+            .unwrap()
+            .filter_map(|entry| entry.ok())
+            .filter(|entry| entry.file_name().to_string_lossy().contains(".bak-v8-"))
+            .count();
+        assert_eq!(backups, 1);
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn saved_search_edit_rename_pin_and_reorder_keep_ids() {
+        use crate::model::{DuplicateNameError, OrganizationKind, SavedSearchView};
+
+        let root = temp_root("saved-search-edit");
+        let db_path = root.join("kanalib.db");
+        let db = Db::open(&db_path).unwrap();
+        let view = SavedSearchView {
+            sort_key: "name".into(),
+            sort_ascending: false,
+            view_mode: "icons-lg".into(),
+            pane_mode: "split".into(),
+            show_sidebar: false,
+            show_extensions: true,
+        };
+        let first = db
+            .create_saved_search("收藏", &Filter::Favorites, "is:fav", &view)
+            .unwrap();
+        assert_eq!(first.view, view);
+        assert!(first.updated_at > 0);
+        let second = db
+            .create_saved_search("全部", &Filter::All, "", &SavedSearchView::default())
+            .unwrap();
+        assert_eq!(db.load_saved_searches().unwrap()[0].id, first.id);
+
+        let error = db
+            .create_saved_search("收藏", &Filter::All, "", &SavedSearchView::default())
+            .unwrap_err();
+        let duplicate = error
+            .downcast_ref::<DuplicateNameError>()
+            .expect("duplicate");
+        assert_eq!(duplicate.kind, OrganizationKind::SavedSearch);
+        assert_eq!(duplicate.name, "收藏");
+
+        // 重命名不改 id，也不改手动顺序。
+        let renamed = db.rename_saved_search(second.id, "全部图片").unwrap();
+        assert_eq!(renamed.id, second.id);
+        assert_eq!(renamed.name, "全部图片");
+        assert_eq!(renamed.position, second.position);
+        let error = db.rename_saved_search(second.id, "收藏").unwrap_err();
+        assert_eq!(
+            error.downcast_ref::<DuplicateNameError>().map(|e| e.kind),
+            Some(OrganizationKind::SavedSearch)
+        );
+
+        // 用当前视图更新：id 与名称不变，内容与视图一起覆盖。
+        let updated = db
+            .update_saved_search(
+                first.id,
+                &Filter::Tag("风景".into()),
+                "山",
+                &SavedSearchView {
+                    view_mode: "tiles".into(),
+                    ..view.clone()
+                },
+            )
+            .unwrap();
+        assert_eq!(updated.id, first.id);
+        assert_eq!(updated.name, "收藏");
+        assert_eq!(updated.filter, Filter::Tag("风景".into()));
+        assert_eq!(updated.query, "山");
+        assert_eq!(updated.view.view_mode, "tiles");
+        assert_eq!(updated.view.sort_key, "name");
+
+        // 置顶只改分组，不改手动顺序。
+        let pinned = db.set_saved_search_pinned(second.id, true).unwrap();
+        assert!(pinned.pinned);
+        let ids = db
+            .load_saved_searches()
+            .unwrap()
+            .into_iter()
+            .map(|search| search.id)
+            .collect::<Vec<_>>();
+        assert_eq!(ids, vec![second.id, first.id]);
+        db.set_saved_search_pinned(second.id, false).unwrap();
+
+        assert_eq!(
+            db.reorder_saved_searches(&[first.id, second.id]).unwrap(),
+            2
+        );
+        assert!(db.reorder_saved_searches(&[first.id]).is_err());
+
+        // 重启后顺序、置顶与视图保持。
+        db.set_saved_search_pinned(second.id, true).unwrap();
+        drop(db);
+        let db = Db::open(&db_path).unwrap();
+        let restored = db.load_saved_searches().unwrap();
+        assert_eq!(restored[0].id, second.id);
+        assert!(restored[0].pinned);
+        assert_eq!(restored[1].id, first.id);
+        assert_eq!(restored[1].position, 1);
+        assert_eq!(restored[1].view.view_mode, "tiles");
+        assert_eq!(restored[1].query, "山");
+        assert_eq!(db.delete_saved_search(first.id).unwrap(), 1);
+        assert_eq!(db.load_saved_searches().unwrap().len(), 1);
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn collections_track_batches_counts_and_survive_asset_deletion() {
+        use crate::model::{DuplicateNameError, OrganizationKind};
+
+        let root = temp_root("collections");
+        let db_path = root.join("kanalib.db");
+        let db = Db::open(&db_path).unwrap();
+        let a = PathBuf::from("C:\\lib\\a.png");
+        let b = PathBuf::from("C:\\lib\\b.png");
+        let c = PathBuf::from("C:\\lib\\c.png");
+        for (path, seed) in [(&a, 'a'), (&b, 'b'), (&c, 'c')] {
+            db.upsert_meta("C:\\lib", path, None, 10, 20, 100, 10, &hash(seed), false)
+                .unwrap();
+        }
+
+        let trip = db.create_collection("旅行").unwrap();
+        let picks = db.create_collection("精选").unwrap();
+        assert_eq!(trip.kind, "manual");
+        assert_eq!(trip.asset_count, 0);
+        let error = db.create_collection("旅行").unwrap_err();
+        assert_eq!(
+            error.downcast_ref::<DuplicateNameError>().map(|e| e.kind),
+            Some(OrganizationKind::Collection)
+        );
+
+        assert_eq!(
+            db.add_assets_to_collection(trip.id, &[a.clone(), b.clone()])
+                .unwrap(),
+            2
+        );
+        // 重复加入幂等；同一资产可属于多个相册。
+        assert_eq!(
+            db.add_assets_to_collection(trip.id, &[a.clone()]).unwrap(),
+            0
+        );
+        assert_eq!(
+            db.add_assets_to_collection(picks.id, &[a.clone()]).unwrap(),
+            1
+        );
+        assert_eq!(db.collection_asset_count(trip.id).unwrap(), 2);
+        assert_eq!(db.collection_asset_count(picks.id).unwrap(), 1);
+        let listed = db.load_collections().unwrap();
+        assert_eq!(listed.len(), 2);
+        assert_eq!(
+            listed
+                .iter()
+                .find(|collection| collection.id == trip.id)
+                .unwrap()
+                .asset_count,
+            2
+        );
+        assert_eq!(
+            db.collection_paths(trip.id).unwrap(),
+            vec![a.clone(), b.clone()]
+        );
+        assert_eq!(db.load_collection_assets(trip.id).unwrap().len(), 2);
+        assert_eq!(db.asset_collections(&a).unwrap().len(), 2);
+
+        let renamed = db.rename_collection(trip.id, "旅行 2026").unwrap();
+        assert_eq!(renamed.id, trip.id);
+        assert_eq!(renamed.asset_count, 2);
+        assert!(db.rename_collection(picks.id, "旅行 2026").is_err());
+        assert_eq!(
+            db.remove_assets_from_collection(trip.id, &[b.clone()])
+                .unwrap(),
+            1
+        );
+        assert_eq!(db.collection_asset_count(trip.id).unwrap(), 1);
+
+        // 导出只写路径清单，已存在的目标拒绝覆盖。
+        let export = root.join("trip.txt");
+        assert_eq!(db.export_collection_paths(trip.id, &export).unwrap(), 1);
+        let content = fs::read_to_string(&export).unwrap();
+        assert_eq!(content, format!("{}\n", a.display()));
+        assert!(db.export_collection_paths(trip.id, &export).is_err());
+
+        // 删除相册只删关系，资产仍在。
+        assert_eq!(db.delete_collection(trip.id).unwrap(), 1);
+        assert_eq!(db.load_folder("C:\\lib").unwrap().len(), 3);
+        assert_eq!(db.collection_asset_count(picks.id).unwrap(), 1);
+        let orphan: i64 = db
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM collection_assets WHERE collection_id = ?1",
+                [trip.id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(orphan, 0);
+
+        // 删除资产时级联清理关系行。
+        assert_eq!(db.delete_assets(&[a.clone()]).unwrap(), 1);
+        assert_eq!(db.collection_asset_count(picks.id).unwrap(), 0);
+        let relations: i64 = db
+            .conn
+            .query_row("SELECT COUNT(*) FROM collection_assets", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(relations, 0);
+
+        // 来源移除只清关系行，资产行与相册本身保留。
+        db.add_assets_to_collection(picks.id, &[b.clone(), c.clone()])
+            .unwrap();
+        assert_eq!(db.forget_source_collections("C:\\lib").unwrap(), 2);
+        assert_eq!(db.collection_asset_count(picks.id).unwrap(), 0);
+        assert_eq!(db.load_folder("C:\\lib").unwrap().len(), 2);
+
+        drop(db);
+        // 重启后相册与计数保持。
+        let db = Db::open(&db_path).unwrap();
+        assert_eq!(db.load_collections().unwrap().len(), 1);
+        assert_eq!(db.load_collections().unwrap()[0].name, "精选");
+        assert_eq!(db.load_collections().unwrap()[0].asset_count, 0);
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn deleting_source_row_cascades_collection_links() {
+        let root = temp_root("collection-source-cascade");
+        let db_path = root.join("kanalib.db");
+        let path = PathBuf::from("C:\\lib\\a.png");
+        let collection_id = {
+            let db = Db::open(&db_path).unwrap();
+            db.upsert_meta("C:\\lib", &path, None, 10, 20, 100, 10, &hash('a'), false)
+                .unwrap();
+            let collection = db.create_collection("相册").unwrap();
+            db.add_assets_to_collection(collection.id, &[path.clone()])
+                .unwrap();
+            collection.id
+        };
+        {
+            // 直接删来源行：外键链 sources → assets → collection_assets。
+            let conn = Connection::open(&db_path).unwrap();
+            conn.pragma_update(None, "foreign_keys", "ON").unwrap();
+            conn.execute("DELETE FROM sources WHERE locator = ?1", ["C:\\lib"])
+                .unwrap();
+            let assets: i64 = conn
+                .query_row("SELECT COUNT(*) FROM assets", [], |row| row.get(0))
+                .unwrap();
+            let links: i64 = conn
+                .query_row("SELECT COUNT(*) FROM collection_assets", [], |row| {
+                    row.get(0)
+                })
+                .unwrap();
+            assert_eq!((assets, links), (0, 0));
+        }
+        let db = Db::open(&db_path).unwrap();
+        assert_eq!(db.collection_asset_count(collection_id).unwrap(), 0);
+        assert!(db.load_collections().unwrap()[0].asset_count == 0);
+        let _ = fs::remove_dir_all(&root);
+    }
 }

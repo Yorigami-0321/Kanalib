@@ -1173,13 +1173,98 @@ impl SearchQuery {
     }
 }
 
+/// 智能集合保存的视图状态；应用集合时由调用方恢复排序、视图模式与窗格开关。
+///
+/// 旧库里的集合没有这些字段：迁移后按「默认排序 / 默认视图 / 侧栏与扩展面板可见」
+/// 读取，因此空字符串与 `true` 是合法的历史语义，不是缺失值。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SavedSearchView {
+    /// 排序键；空字符串表示沿用当前排序（旧集合语义）。
+    pub sort_key: String,
+    pub sort_ascending: bool,
+    /// 6 种视图之一的键；空字符串表示沿用当前视图。
+    pub view_mode: String,
+    /// 窗格模式（`pane_mode`）；空字符串表示沿用当前窗格。
+    pub pane_mode: String,
+    pub show_sidebar: bool,
+    pub show_extensions: bool,
+}
+
+impl Default for SavedSearchView {
+    fn default() -> Self {
+        Self {
+            sort_key: String::new(),
+            sort_ascending: true,
+            view_mode: String::new(),
+            pane_mode: String::new(),
+            show_sidebar: true,
+            show_extensions: true,
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct SavedSearch {
     pub id: i64,
     pub name: String,
     pub filter: Filter,
     pub query: String,
+    /// 保存时的排序/视图/窗格状态；旧集合为默认值。
+    pub view: SavedSearchView,
+    /// 置顶的集合排在未置顶之前。
+    pub pinned: bool,
+    /// 手动顺序：数值小的在前；相同再按 id。
+    pub position: i64,
+    /// 最近一次创建、重命名或用当前视图更新的 Unix 时间（秒）；0 表示迁移前的旧集合。
+    pub updated_at: i64,
 }
+
+/// 手动相册（`collections` 表）及其资产数；同一资产可属于多个相册。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Collection {
+    pub id: i64,
+    pub name: String,
+    /// 目前只有 `manual`；保留列以便将来区分动态相册。
+    pub kind: String,
+    pub asset_count: usize,
+}
+
+/// 同名冲突发生在哪类组织对象上。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OrganizationKind {
+    SavedSearch,
+    Collection,
+}
+
+/// 同名冲突：调用方用 `downcast_ref::<DuplicateNameError>()` 判定，不依赖错误文案。
+/// 空名称等参数错误仍走普通的 `anyhow` 错误。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DuplicateNameError {
+    pub kind: OrganizationKind,
+    pub name: String,
+}
+
+impl DuplicateNameError {
+    pub fn new(kind: OrganizationKind, name: &str) -> Self {
+        Self {
+            kind,
+            name: name.to_string(),
+        }
+    }
+}
+
+impl std::fmt::Display for DuplicateNameError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self.kind {
+            OrganizationKind::SavedSearch => {
+                write!(formatter, "已存在同名智能集合「{}」", self.name)
+            }
+            OrganizationKind::Collection => write!(formatter, "已存在同名相册「{}」", self.name),
+        }
+    }
+}
+
+impl std::error::Error for DuplicateNameError {}
 
 #[derive(Clone, Debug)]
 pub struct TagSummary {
