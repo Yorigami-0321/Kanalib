@@ -131,6 +131,40 @@ pub(crate) fn parse_optional_bytes(text: &str, label: &str) -> Result<Option<u64
         .map_err(|_| format!("{label}必须是整数字节数（留空表示不限）"))
 }
 
+/// 自动备份计划的一行摘要（设置页只读展示）。
+pub(crate) fn backup_plan_summary(plan: &backup::BackupPlan) -> String {
+    if !plan.enabled {
+        return "自动备份未启用；启用后按频率在后台复制数据库并校验".to_string();
+    }
+    let mut text = format!(
+        "自动备份已启用：{} · 保留最近 {} 份",
+        plan.frequency.label(),
+        plan.keep_files
+    );
+    if let Some(days) = plan.keep_days {
+        text.push_str(&format!(" · 仅保留 {days} 天内"));
+    }
+    text
+}
+
+/// 下次备份/待恢复信息的展示文本；纯函数便于单测。
+pub(crate) fn backup_next_due_text(status: &backup::BackupStatus) -> String {
+    if let Some(pending) = &status.pending_restore {
+        return format!(
+            "已安排恢复：{} · 重启 Kanalib 后应用",
+            pending.candidate.display()
+        );
+    }
+    if !status.plan.enabled {
+        return "自动备份未启用".to_string();
+    }
+    match status.next_due {
+        Some(due) if due <= SystemTime::now() => "自动备份已到期，将在扫描/打标空闲时执行".to_string(),
+        Some(due) => format!("下次自动备份：{}", backup::format_utc_datetime(due)),
+        None => "下次备份时间待计算".to_string(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
 
@@ -190,6 +224,29 @@ mod tests {
         );
         assert!(super::parse_optional_bytes("2MB", "最小大小").is_err());
         assert!(super::parse_optional_bytes("-1", "最小大小").is_err());
+    }
+
+    #[test]
+    fn backup_summary_and_next_due_text_cover_plan_states() {
+        let mut plan = kanalib_core::backup::BackupPlan::default();
+        let mut status = kanalib_core::backup::BackupStatus::default();
+        assert!(super::backup_plan_summary(&plan).contains("未启用"));
+        assert_eq!(super::backup_next_due_text(&status), "自动备份未启用");
+
+        plan.enabled = true;
+        plan.frequency = kanalib_core::backup::BackupFrequency::Weekly;
+        plan.keep_files = 5;
+        plan.keep_days = Some(14);
+        let summary = super::backup_plan_summary(&plan);
+        assert!(summary.contains("每周"), "{summary}");
+        assert!(summary.contains("5"), "{summary}");
+        assert!(summary.contains("14"), "{summary}");
+
+        status.plan = plan;
+        status.next_due = Some(std::time::SystemTime::now() + std::time::Duration::from_secs(3600));
+        assert!(super::backup_next_due_text(&status).contains("下次自动备份"));
+        status.next_due = Some(std::time::SystemTime::UNIX_EPOCH);
+        assert!(super::backup_next_due_text(&status).contains("已到期"));
     }
 
 }
@@ -645,15 +702,12 @@ impl KanalibApp {
             cx.notify();
             return;
         }
-        let data_dir = self.data_dir();
-        let db_path = self.state.db_path();
+        let state = self.state.clone();
         self.backup_running = true;
         self.settings_notice = Some("正在备份数据库…".to_string());
-        let task = cx.background_executor().spawn(async move {
-            backup::ensure_backups_dir(&data_dir)?;
-            let destination = backup::default_backup_path(&data_dir);
-            backup::backup_database(&db_path, &destination, false)
-        });
+        let task = cx
+            .background_executor()
+            .spawn(async move { state.backup_now() });
         let weak = cx.entity().downgrade();
         cx.spawn(async move |_, cx| {
             let result = task.await;
@@ -701,6 +755,164 @@ impl KanalibApp {
                 self.settings_notice = Some(format!("打开备份目录失败：{error:#}"));
             }
         }
+        cx.notify();
+    }
+
+    fn save_backup_plan(
+        &mut self,
+        plan: backup::BackupPlan,
+        notice: String,
+        cx: &mut Context<Self>,
+    ) {
+        match self.state.set_backup_plan(&plan) {
+            Ok(()) => {
+                self.settings_notice = Some(notice);
+            }
+            Err(error) => {
+                self.settings_notice = Some(format!("保存备份计划失败：{error:#}"));
+            }
+        }
+        cx.notify();
+    }
+
+    pub(crate) fn toggle_backup_plan(&mut self, cx: &mut Context<Self>) {
+        let mut plan = self.state.backup_status().plan;
+        plan.enabled = !plan.enabled;
+        let summary = backup_plan_summary(&plan);
+        self.save_backup_plan(plan, summary, cx);
+    }
+
+    pub(crate) fn set_backup_frequency(
+        &mut self,
+        frequency: backup::BackupFrequency,
+        cx: &mut Context<Self>,
+    ) {
+        let mut plan = self.state.backup_status().plan;
+        if plan.frequency == frequency {
+            return;
+        }
+        plan.frequency = frequency;
+        let summary = backup_plan_summary(&plan);
+        self.save_backup_plan(plan, summary, cx);
+    }
+
+    pub(crate) fn adjust_backup_keep_files(&mut self, delta: i64, cx: &mut Context<Self>) {
+        let mut plan = self.state.backup_status().plan;
+        plan.keep_files = (plan.keep_files as i64 + delta).clamp(1, 365) as usize;
+        let summary = backup_plan_summary(&plan);
+        self.save_backup_plan(plan, summary, cx);
+    }
+
+    pub(crate) fn toggle_backup_keep_days(&mut self, cx: &mut Context<Self>) {
+        let mut plan = self.state.backup_status().plan;
+        plan.keep_days = if plan.keep_days.is_some() {
+            None
+        } else {
+            Some(30)
+        };
+        let summary = backup_plan_summary(&plan);
+        self.save_backup_plan(plan, summary, cx);
+    }
+
+    pub(crate) fn adjust_backup_keep_days(&mut self, delta: i64, cx: &mut Context<Self>) {
+        let mut plan = self.state.backup_status().plan;
+        let Some(days) = plan.keep_days else {
+            return;
+        };
+        plan.keep_days = Some((days as i64 + delta).clamp(1, 3_650) as u32);
+        let summary = backup_plan_summary(&plan);
+        self.save_backup_plan(plan, summary, cx);
+    }
+
+    /// 异步选择恢复候选并确认；不阻塞 UI 线程。
+    pub(crate) fn pick_restore_backup(&mut self, cx: &mut Context<Self>) {
+        if self.backup_running {
+            self.settings_notice = Some("已有备份或恢复任务在进行，请稍候".to_string());
+            cx.notify();
+            return;
+        }
+        let start_dir = backup::backups_dir(&self.data_dir());
+        let weak = cx.entity().downgrade();
+        cx.spawn(async move |_, cx| {
+            let Some(handle) = rfd::AsyncFileDialog::new()
+                .set_title("选择要恢复的数据库备份")
+                .set_directory(start_dir)
+                .add_filter("SQLite 数据库", &["db", "sqlite", "sqlite3"])
+                .pick_file()
+                .await
+            else {
+                return;
+            };
+            let candidate = handle.path().to_path_buf();
+            let confirmed = rfd::AsyncMessageDialog::new()
+                .set_level(rfd::MessageLevel::Warning)
+                .set_title("恢复数据库备份")
+                .set_description(format!(
+                    "将用以下备份替换当前图库数据库：\n{}\n\n恢复前会自动创建当前库的安全备份；恢复在重启 Kanalib 后应用。继续？",
+                    candidate.display()
+                ))
+                .set_buttons(rfd::MessageButtons::YesNo)
+                .show()
+                .await;
+            if confirmed != rfd::MessageDialogResult::Yes {
+                return;
+            }
+            let _ = weak.update(cx, |app, cx| app.begin_restore(candidate, cx));
+        })
+        .detach();
+        cx.notify();
+    }
+
+    /// 后台校验候选、创建安全备份并暂存恢复；完成后提示重启。
+    pub(crate) fn begin_restore(&mut self, candidate: PathBuf, cx: &mut Context<Self>) {
+        if self.backup_running {
+            self.settings_notice = Some("已有备份或恢复任务在进行，请稍候".to_string());
+            cx.notify();
+            return;
+        }
+        self.backup_running = true;
+        self.settings_notice = Some(format!(
+            "正在校验备份并准备恢复：{}",
+            candidate.display()
+        ));
+        let state = self.state.clone();
+        let task = cx
+            .background_executor()
+            .spawn(async move { state.restore_backup(&candidate) });
+        let weak = cx.entity().downgrade();
+        cx.spawn(async move |_, cx| {
+            let result = task.await;
+            let _ = weak.update(cx, |app, cx| {
+                app.backup_running = false;
+                match result {
+                    Ok(report) => {
+                        let safety = report
+                            .safety_backup
+                            .as_ref()
+                            .map(|path| path.display().to_string())
+                            .unwrap_or_else(|| "未创建（当前无数据库）".to_string());
+                        let mut summary = format!(
+                            "已准备恢复：{} · 安全备份：{safety} · 重启后生效",
+                            report.candidate.display()
+                        );
+                        for warning in &report.warnings {
+                            summary.push_str(&format!(" · 注意：{warning}"));
+                        }
+                        app.last_backup = Some(summary);
+                        app.settings_notice = Some(
+                            "备份校验通过；关闭并重新启动 Kanalib 后应用恢复。".to_string(),
+                        );
+                    }
+                    Err(error) => {
+                        let message = format!("恢复失败：{error:#}");
+                        app.last_backup = Some(message.clone());
+                        app.settings_notice = Some(message);
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
         cx.notify();
     }
 
@@ -861,6 +1073,14 @@ impl KanalibApp {
         let this_backup = this.clone();
         let this_open_backups = this.clone();
         let this_restore = this.clone();
+        let this_backup_toggle = this.clone();
+        let this_backup_daily = this.clone();
+        let this_backup_weekly = this.clone();
+        let this_backup_keep_less = this.clone();
+        let this_backup_keep_more = this.clone();
+        let this_backup_days_toggle = this.clone();
+        let this_backup_days_less = this.clone();
+        let this_backup_days_more = this.clone();
         let this_copy_diagnostics = this.clone();
         let this_open_logs = this.clone();
         let cache_stats = self.cache_stats.clone();
@@ -894,6 +1114,23 @@ impl KanalibApp {
             .map(Path::to_path_buf)
             .unwrap_or_else(|| db_path.clone());
         let data_dir_for_open = data_dir.clone();
+        let backup_status = self.state.backup_status();
+        let backup_plan = backup_status.plan.clone();
+        let backup_next_text = backup_next_due_text(&backup_status);
+        let backup_has_pending = backup_status.pending_restore.is_some();
+        let backup_skipped = backup_status
+            .skipped_reason
+            .as_ref()
+            .map(|reason| format!("上次自动备份已跳过：{reason}（空闲后自动重试）"));
+        let backup_error = backup_status.last_error.clone();
+        let backup_last_text = if self.last_backup.is_none() {
+            backup_status
+                .last_path
+                .as_ref()
+                .map(|path| format!("最近备份：{}", path.display()))
+        } else {
+            None
+        };
         let notice = self
             .settings_notice
             .clone()
@@ -2245,7 +2482,38 @@ impl KanalibApp {
                     ),
             );
 
-        let backup_section = div()
+        let plan_enabled = backup_plan.enabled;
+        let plan_frequency = backup_plan.frequency;
+        let plan_keep_files = backup_plan.keep_files;
+        let plan_keep_days = backup_plan.keep_days;
+        let daily_button = Button::new("backup-frequency-daily", "每天")
+            .size(ControlSize::Sm)
+            .disabled(!plan_enabled);
+        let daily_button = if plan_frequency == backup::BackupFrequency::Daily {
+            daily_button.primary()
+        } else {
+            daily_button
+        }
+        .on_click(move |_, _, cx| {
+            let _ = this_backup_daily.update(cx, |app, cx| {
+                app.set_backup_frequency(backup::BackupFrequency::Daily, cx);
+            });
+        });
+        let weekly_button = Button::new("backup-frequency-weekly", "每周")
+            .size(ControlSize::Sm)
+            .disabled(!plan_enabled);
+        let weekly_button = if plan_frequency == backup::BackupFrequency::Weekly {
+            weekly_button.primary()
+        } else {
+            weekly_button
+        }
+        .on_click(move |_, _, cx| {
+            let _ = this_backup_weekly.update(cx, |app, cx| {
+                app.set_backup_frequency(backup::BackupFrequency::Weekly, cx);
+            });
+        });
+
+        let mut backup_section = div()
             .p(px(16.))
             .rounded(px(10.))
             .border_1()
@@ -2264,9 +2532,155 @@ impl KanalibApp {
                 div()
                     .text_xs()
                     .text_color(colors.muted)
-                    .child("立即把数据库复制到数据目录下的 backups 子目录，并校验完整性；备份不包含缩略图缓存。"),
+                    .child("立即备份或按日/周自动备份数据库到数据目录下的 backups 子目录，并校验完整性；备份不包含缩略图缓存。"),
             )
             .child(path_row("备份目录", backup::backups_dir(&data_dir), colors))
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(colors.fg)
+                    .child(backup_plan_summary(&backup_plan)),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_wrap()
+                    .items_center()
+                    .gap(px(6.))
+                    .child(
+                        Button::new(
+                            "backup-plan-toggle",
+                            if plan_enabled {
+                                "自动备份：开"
+                            } else {
+                                "自动备份：关"
+                            },
+                        )
+                        .size(ControlSize::Sm)
+                        .on_click(move |_, _, cx| {
+                            let _ = this_backup_toggle
+                                .update(cx, |app, cx| app.toggle_backup_plan(cx));
+                        }),
+                    )
+                    .child(daily_button)
+                    .child(weekly_button),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_wrap()
+                    .items_center()
+                    .gap(px(6.))
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(colors.muted)
+                            .child("保留份数"),
+                    )
+                    .child(
+                        Button::new("backup-keep-less", "−")
+                            .size(ControlSize::Sm)
+                            .disabled(!plan_enabled || plan_keep_files <= 1)
+                            .on_click(move |_, _, cx| {
+                                let _ = this_backup_keep_less.update(cx, |app, cx| {
+                                    app.adjust_backup_keep_files(-1, cx);
+                                });
+                            }),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(colors.fg)
+                            .child(format!("{plan_keep_files} 份")),
+                    )
+                    .child(
+                        Button::new("backup-keep-more", "+")
+                            .size(ControlSize::Sm)
+                            .disabled(!plan_enabled || plan_keep_files >= 365)
+                            .on_click(move |_, _, cx| {
+                                let _ = this_backup_keep_more.update(cx, |app, cx| {
+                                    app.adjust_backup_keep_files(1, cx);
+                                });
+                            }),
+                    )
+                    .child(
+                        Button::new(
+                            "backup-keep-days-toggle",
+                            if plan_keep_days.is_some() {
+                                "按天清理：开"
+                            } else {
+                                "按天清理：关"
+                            },
+                        )
+                        .size(ControlSize::Sm)
+                        .disabled(!plan_enabled)
+                        .on_click(move |_, _, cx| {
+                            let _ = this_backup_days_toggle.update(cx, |app, cx| {
+                                app.toggle_backup_keep_days(cx);
+                            });
+                        }),
+                    ),
+            );
+        if let Some(days) = plan_keep_days {
+            backup_section = backup_section.child(
+                div()
+                    .flex()
+                    .flex_wrap()
+                    .items_center()
+                    .gap(px(6.))
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(colors.muted)
+                            .child("仅保留最近"),
+                    )
+                    .child(
+                        Button::new("backup-days-less", "−")
+                            .size(ControlSize::Sm)
+                            .disabled(days <= 1)
+                            .on_click(move |_, _, cx| {
+                                let _ = this_backup_days_less.update(cx, |app, cx| {
+                                    app.adjust_backup_keep_days(-7, cx);
+                                });
+                            }),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(colors.fg)
+                            .child(format!("{days} 天")),
+                    )
+                    .child(
+                        Button::new("backup-days-more", "+")
+                            .size(ControlSize::Sm)
+                            .disabled(days >= 3_650)
+                            .on_click(move |_, _, cx| {
+                                let _ = this_backup_days_more.update(cx, |app, cx| {
+                                    app.adjust_backup_keep_days(7, cx);
+                                });
+                            }),
+                    ),
+            );
+        }
+        backup_section = backup_section
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(colors.muted)
+                    .child(backup_next_text),
+            )
+            .children(backup_skipped.map(|text| {
+                div()
+                    .text_xs()
+                    .text_color(colors.muted)
+                    .child(text)
+            }))
+            .children(backup_error.map(|text| {
+                div()
+                    .text_xs()
+                    .text_color(colors.danger)
+                    .child(format!("最近备份/恢复错误：{text}"))
+            }))
             .child(
                 div()
                     .flex()
@@ -2300,15 +2714,19 @@ impl KanalibApp {
                     .child(
                         Button::new("restore-backup", "恢复备份…")
                             .size(ControlSize::Sm)
+                            .disabled(self.backup_running || backup_has_pending)
                             .on_click(move |_, _, cx| {
-                                let _ = this_restore.update(cx, |app, cx| {
-                                    app.settings_notice =
-                                        Some("恢复流程将在后续版本提供".to_string());
-                                    cx.notify();
-                                });
+                                let _ = this_restore
+                                    .update(cx, |app, cx| app.pick_restore_backup(cx));
                             }),
                     ),
             )
+            .children(backup_last_text.map(|text| {
+                div()
+                    .text_xs()
+                    .text_color(colors.muted)
+                    .child(text)
+            }))
             .children(self.last_backup.clone().map(|summary| {
                 div()
                     .text_xs()
@@ -2319,7 +2737,7 @@ impl KanalibApp {
                 div()
                     .text_xs()
                     .text_color(colors.subtle)
-                    .child("备份只复制数据库；恢复流程将在后续版本提供。"),
+                    .child("保留策略只清理本应用生成的 kanalib-*.db；安全备份与用户文件不会自动删除。恢复会先校验备份并保存当前库安全备份，重启 Kanalib 后应用。"),
             );
 
         let diagnostics_rows: AnyElement = if let Some(snapshot) = &self.diagnostic_snapshot {

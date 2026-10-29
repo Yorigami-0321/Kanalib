@@ -42,6 +42,32 @@ const BACKUP_KEY_TABLES: &[&str] = &[
     "thumb_sources",
 ];
 
+/// 只读检查数据库/备份文件的结果；恢复前用它决定是否接受候选。
+#[derive(Clone, Debug, Default)]
+pub struct BackupInspection {
+    pub path: PathBuf,
+    /// `PRAGMA integrity_check` 的原始结果，正常为 `ok`。
+    pub integrity: String,
+    /// `PRAGMA user_version`，即库的 schema 版本。
+    pub user_version: i64,
+    /// 实际存在的关键表及行数；缺失的表不会出现在这里。
+    pub tables: Vec<TableCount>,
+}
+
+impl BackupInspection {
+    pub fn integrity_ok(&self) -> bool {
+        self.integrity == "ok"
+    }
+
+    /// 关键表行数；表不存在时返回 None。
+    pub fn table_rows(&self, table: &str) -> Option<i64> {
+        self.tables
+            .iter()
+            .find(|entry| entry.table == table)
+            .map(|entry| entry.rows)
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default)]
 pub struct JobCounts {
     pub pending: usize,
@@ -787,6 +813,45 @@ impl Db {
             tables,
             integrity_ok: true,
             warnings,
+        })
+    }
+
+    /// 当前 schema 版本；恢复校验用于拒绝更新版本、提示旧版本迁移。
+    pub fn schema_version() -> i64 {
+        SCHEMA_VERSION
+    }
+
+    /// 只读检查一个数据库文件（备份或候选恢复库）。
+    ///
+    /// 只执行 `PRAGMA integrity_check`、读取 `user_version`，并统计关键表行数；
+    /// 不打开写事务、不运行迁移，也不修改文件。调用方负责判断版本是否可接受。
+    pub fn inspect_database(path: &Path) -> Result<BackupInspection> {
+        if !path.is_file() {
+            bail!("数据库文件不存在：{}", path.display());
+        }
+        let conn = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .with_context(|| format!("打开数据库 {}", path.display()))?;
+        conn.busy_timeout(Duration::from_secs(5))?;
+        let integrity: String = conn
+            .query_row("PRAGMA integrity_check", [], |row| row.get(0))
+            .with_context(|| format!("检查数据库完整性 {}", path.display()))?;
+        let user_version: i64 = conn
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .unwrap_or(0);
+        let mut tables = Vec::new();
+        for name in BACKUP_KEY_TABLES {
+            if table_exists(&conn, name)? {
+                tables.push(TableCount {
+                    table: (*name).to_string(),
+                    rows: table_row_count(&conn, name)?,
+                });
+            }
+        }
+        Ok(BackupInspection {
+            path: path.to_path_buf(),
+            integrity,
+            user_version,
+            tables,
         })
     }
 

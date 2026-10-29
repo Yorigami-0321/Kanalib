@@ -9,6 +9,7 @@ use anyhow::{Context, Result, bail};
 use image::{ImageFormat, Rgb, RgbImage};
 use serde::Deserialize;
 
+use crate::backup::{self, BackupPlan, BackupStatus};
 use crate::db::{Db, JobCounts, SearchPage, SearchPageRequest, StoredMeta};
 use crate::dedup::{
     DEFAULT_SIMILAR_THRESHOLD, DuplicateReview, GroupKind, ReviewState, clamp_similar_threshold,
@@ -57,15 +58,37 @@ pub struct AppState {
     watch_allowed: bool,
     /// 独立打标 worker（暂停后继续）是否在运行；与扫描线程互斥使用。
     tag_worker: Mutex<bool>,
+    /// 备份/恢复串行锁；同一时刻只允许一个备份或恢复准备。
+    backup_lock: Mutex<()>,
+    /// 自动备份调度线程的停止开关；None 表示线程未启动。
+    backup_scheduler: Mutex<Option<Arc<AtomicBool>>>,
+    /// 备份运行时快照；UI 通过 [`AppState::backup_status`] 只读。
+    backup_runtime: Mutex<BackupStatus>,
     db_path: PathBuf,
     cache_dir: PathBuf,
+}
+
+impl Drop for AppState {
+    fn drop(&mut self) {
+        // 通知调度线程退出；线程只持 Weak，实际退出最长约 1 秒。
+        if let Ok(mut guard) = self.backup_scheduler.lock()
+            && let Some(stop) = guard.take()
+        {
+            stop.store(true, Ordering::SeqCst);
+        }
+    }
 }
 
 impl AppState {
     pub fn new(folder: Option<PathBuf>) -> Arc<Self> {
         let watch_allowed = std::env::var_os("KANALIB_HEADLESS").is_none()
             && std::env::var_os("KANALIB_DISABLE_WATCH").is_none();
-        Self::open(project_root(), folder, watch_allowed)
+        let state = Self::open(project_root(), folder, watch_allowed);
+        // 自动备份只在正常 GUI 进程启动；headless/测试不拉起后台线程。
+        if watch_allowed && std::env::var_os("KANALIB_DISABLE_BACKUP_SCHEDULER").is_none() {
+            state.start_backup_scheduler();
+        }
+        state
     }
 
     /// 打开指定数据根目录；测试与 headless 复用同一套初始化逻辑。
@@ -74,6 +97,31 @@ impl AppState {
         let db_path = data_dir.join("kanalib.db");
         let cache_dir = data_dir.join("thumbs");
         let _ = std::fs::create_dir_all(&cache_dir);
+        // 恢复请求在打开任何数据库连接之前应用；失败会回滚到当前库。
+        let (restored_notice, restore_error) = match backup::apply_pending_restore(&data_dir) {
+            Ok(Some(applied)) => {
+                log::warn!(
+                    "pending restore applied from {} (safety: {:?})",
+                    applied.candidate.display(),
+                    applied.safety_backup
+                );
+                (
+                    Some(format!(
+                        "已应用备份 {} · 请检查图库",
+                        applied.candidate.display()
+                    )),
+                    None,
+                )
+            }
+            Ok(None) => (None, None),
+            Err(error) => {
+                log::error!("apply pending restore: {error:#}");
+                (
+                    None,
+                    Some(format!("应用待恢复备份失败：{error:#}")),
+                )
+            }
+        };
         let initial_folder = folder.map(absolute);
         let (
             roots,
@@ -199,6 +247,9 @@ impl AppState {
             }
         };
         let mut shared = Shared::new(roots, assets, reviews, similar_threshold, protected_paths);
+        if let Some(notice) = &restored_notice {
+            shared.status = notice.clone();
+        }
         shared.saved_searches = saved_searches;
         shared.blocked_tags = blocked_tags.into_iter().collect();
         shared.tag_aliases = Db::open(&db_path)
@@ -235,6 +286,12 @@ impl AppState {
             self_ref: Mutex::new(Weak::new()),
             watch_allowed,
             tag_worker: Mutex::new(false),
+            backup_lock: Mutex::new(()),
+            backup_scheduler: Mutex::new(None),
+            backup_runtime: Mutex::new(BackupStatus {
+                last_error: restore_error,
+                ..BackupStatus::default()
+            }),
             db_path,
             cache_dir,
         });
@@ -2350,6 +2407,250 @@ impl AppState {
         self.cache_dir.clone()
     }
 
+    /// `.kanalib` 数据目录；备份/恢复/待恢复标记都在这里。
+    pub fn data_dir(&self) -> PathBuf {
+        self.db_path
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| PathBuf::from("."))
+    }
+
+    /// 备份计划（来自 `settings.backup.plan`）；解析失败回退默认值。
+    pub fn backup_plan(&self) -> BackupPlan {
+        Db::open(&self.db_path)
+            .map(|db| backup::load_plan(&db))
+            .unwrap_or_default()
+    }
+
+    /// 保存备份计划；值只写 `settings` JSON，不迁移 schema。
+    pub fn set_backup_plan(&self, plan: &BackupPlan) -> Result<()> {
+        let plan = plan.clone().sanitized();
+        backup::save_plan(&Db::open(&self.db_path)?, &plan)?;
+        let now = SystemTime::now();
+        let last = backup::latest_managed_backup(&backup::backups_dir(&self.data_dir()))
+            .map(|(_, time)| time);
+        let next_due = plan.next_due_at(now, last);
+        self.update_backup_status(|status| {
+            status.plan = plan;
+            status.next_due = next_due;
+        });
+        Ok(())
+    }
+
+    /// 备份状态快照：计划、最近一次备份、跳过原因、下次到期与待恢复标记。
+    ///
+    /// UI 只读；每次调用会打开一次数据库读取计划，不要放在每帧渲染的热路径。
+    pub fn backup_status(&self) -> BackupStatus {
+        let plan = self.backup_plan();
+        let data_dir = self.data_dir();
+        let latest = backup::latest_managed_backup(&backup::backups_dir(&data_dir));
+        let last = latest.as_ref().map(|(_, time)| *time);
+        let mut status = self
+            .backup_runtime
+            .lock()
+            .map(|guard| guard.clone())
+            .unwrap_or_default();
+        status.plan = plan.clone();
+        status.next_due = plan.next_due_at(SystemTime::now(), last);
+        if status.last_path.is_none() {
+            status.last_path = latest.map(|(path, _)| path);
+            status.last_at = last;
+        }
+        status.pending_restore = backup::pending_restore(&data_dir);
+        status
+    }
+
+    /// 立即备份：串行锁、扫描中拒绝、WAL checkpoint + 备份 + 完整性/计数校验；
+    /// 计划启用时顺带按保留策略清理旧备份。可在后台线程调用。
+    pub fn backup_now(&self) -> Result<crate::model::BackupReport> {
+        let _guard = match self.backup_lock.try_lock() {
+            Ok(guard) => guard,
+            Err(_) => bail!("已有备份或恢复任务在进行，请稍候"),
+        };
+        if self.shared.lock().unwrap().scanning {
+            bail!("图库正在扫描，数据库持续写入，请等待扫描结束后再备份。");
+        }
+        self.update_backup_status(|status| {
+            status.running = true;
+            status.last_error = None;
+        });
+        let result = self.backup_now_locked();
+        self.update_backup_status(|status| {
+            status.running = false;
+            match &result {
+                Ok(report) => {
+                    status.last_at = Some(SystemTime::now());
+                    status.last_path = Some(report.destination.clone());
+                    status.last_error = None;
+                    status.skipped_reason = None;
+                    status.skipped_at = None;
+                }
+                Err(error) => {
+                    status.last_error = Some(format!("{error:#}"));
+                }
+            }
+        });
+        result
+    }
+
+    fn backup_now_locked(&self) -> Result<crate::model::BackupReport> {
+        let data_dir = self.data_dir();
+        let dir = backup::ensure_backups_dir(&data_dir)?;
+        let destination = backup::default_backup_path(&data_dir);
+        let mut report = backup::backup_database(&self.db_path, &destination, false)?;
+        let plan = self.backup_plan();
+        if plan.enabled {
+            match backup::prune_backups(&dir, &plan, SystemTime::now()) {
+                Ok(prune) => {
+                    if !prune.removed.is_empty() {
+                        log::info!("backup retention removed {} files", prune.removed.len());
+                    }
+                    report.warnings.extend(prune.warnings);
+                }
+                Err(error) => {
+                    log::warn!("backup retention: {error:#}");
+                    report
+                        .warnings
+                        .push(format!("保留策略清理失败：{error:#}"));
+                }
+            }
+        }
+        Ok(report)
+    }
+
+    /// 恢复备份：扫描/打标运行时拒绝；校验候选并创建安全备份后暂存，
+    /// 重启时由 [`AppState::open`] 应用。运行期不替换数据库。
+    pub fn restore_backup(&self, candidate: &Path) -> Result<backup::RestoreReport> {
+        let _guard = match self.backup_lock.try_lock() {
+            Ok(guard) => guard,
+            Err(_) => bail!("已有备份或恢复任务在进行，请稍候"),
+        };
+        if let Some(reason) = self.backup_block_reason() {
+            bail!("{reason}，不能恢复备份");
+        }
+        self.update_backup_status(|status| {
+            status.running = true;
+            status.last_error = None;
+        });
+        let result = backup::stage_restore(&self.data_dir(), &self.db_path, candidate);
+        self.update_backup_status(|status| {
+            status.running = false;
+            match &result {
+                Ok(report) => {
+                    status.pending_restore = backup::pending_restore(&self.data_dir());
+                    status.last_error = None;
+                    if let Some(warning) = report.warnings.first() {
+                        log::warn!("restore warning: {warning}");
+                    }
+                }
+                Err(error) => {
+                    status.last_error = Some(format!("{error:#}"));
+                }
+            }
+        });
+        result
+    }
+
+    /// 自动备份调度：计划启用且到期、当前空闲时执行一次备份。
+    ///
+    /// 扫描或打标运行中只记录 `skipped_reason` 并等待下一轮；UI 后台线程与
+    /// 测试都可以直接调用，不依赖调度线程。
+    pub fn run_scheduled_backup(&self) -> Result<Option<crate::model::BackupReport>> {
+        let plan = self.backup_plan();
+        let now = SystemTime::now();
+        if !plan.enabled {
+            self.update_backup_status(|status| {
+                status.plan = plan;
+                status.next_due = None;
+            });
+            return Ok(None);
+        }
+        let last = backup::latest_managed_backup(&backup::backups_dir(&self.data_dir()))
+            .map(|(_, time)| time);
+        let due = plan.next_due_at(now, last).unwrap_or(now);
+        self.update_backup_status(|status| {
+            status.plan = plan;
+            status.next_due = Some(due);
+        });
+        if now < due {
+            return Ok(None);
+        }
+        if let Some(reason) = self.backup_block_reason() {
+            let mut changed = false;
+            self.update_backup_status(|status| {
+                changed = status.skipped_reason.as_deref() != Some(reason);
+                status.skipped_reason = Some(reason.to_string());
+                status.skipped_at = Some(now);
+            });
+            if changed {
+                log::info!("scheduled backup skipped: {reason}");
+            }
+            return Ok(None);
+        }
+        let report = self.backup_now()?;
+        Ok(Some(report))
+    }
+
+    /// 启动轻量自动备份调度线程；已在运行或 headless 时为空操作。
+    pub fn start_backup_scheduler(self: &Arc<Self>) {
+        // `watch_allowed` 为 false 的测试/headless 路径不启动后台线程。
+        if !self.watch_allowed {
+            return;
+        }
+        let mut guard = self.backup_scheduler.lock().unwrap();
+        if guard.is_some() {
+            return;
+        }
+        let stop = Arc::new(AtomicBool::new(false));
+        *guard = Some(stop.clone());
+        let weak = self.self_ref.lock().unwrap().clone();
+        let spawned = std::thread::Builder::new()
+            .name("kanalib-backup".into())
+            .spawn(move || loop {
+                let Some(state) = weak.upgrade() else {
+                    break;
+                };
+                if let Err(error) = state.run_scheduled_backup() {
+                    log::warn!("scheduled backup: {error:#}");
+                }
+                drop(state);
+                let mut waited = 0;
+                while waited < BACKUP_SCHEDULER_INTERVAL.as_secs() {
+                    if stop.load(Ordering::SeqCst) {
+                        return;
+                    }
+                    std::thread::sleep(Duration::from_secs(1));
+                    waited += 1;
+                }
+                if stop.load(Ordering::SeqCst) {
+                    break;
+                }
+            });
+        if spawned.is_err() {
+            log::warn!("无法创建自动备份调度线程");
+            *guard = None;
+        }
+    }
+
+    /// 扫描或打标运行中返回原因；恢复与自动备份共用。
+    fn backup_block_reason(&self) -> Option<&'static str> {
+        if self.shared.lock().unwrap().scanning {
+            return Some("图库正在扫描");
+        }
+        // 打标真正在跑时 `tag_worker` 为 true；DB 里的 running 计数可能是崩溃
+        // 遗留值，不能用它永久阻止恢复。
+        if *self.tag_worker.lock().unwrap() {
+            return Some("打标队列正在运行");
+        }
+        None
+    }
+
+    fn update_backup_status(&self, update: impl FnOnce(&mut BackupStatus)) {
+        if let Ok(mut status) = self.backup_runtime.lock() {
+            update(&mut status);
+        }
+    }
+
     pub fn cache_stats(&self) -> Result<CacheStats> {
         Ok(self.scan_cache()?.0)
     }
@@ -2793,6 +3094,9 @@ const SCAN_PROGRESS_INTERVAL: Duration = Duration::from_millis(200);
 
 /// 离线来源的监听重试间隔；来源恢复可访问后自动重新挂上 `notify`。
 const WATCH_RETRY_INTERVAL: Duration = Duration::from_secs(10);
+
+/// 自动备份调度的检查间隔；计划停用时只读一次设置，开销可忽略。
+const BACKUP_SCHEDULER_INTERVAL: Duration = Duration::from_secs(30);
 
 fn source_label(root: &Path) -> String {
     root.file_name()
@@ -5593,5 +5897,183 @@ mod tests {
         drop(assets);
         drop(shared);
         std::fs::remove_dir_all(&base).unwrap();
+    }
+
+    #[test]
+    fn backup_plan_persists_and_scheduler_runs_once_per_interval() {
+        let (base, _lib, state) = test_state("backup-plan");
+        assert!(
+            state.run_scheduled_backup().unwrap().is_none(),
+            "disabled default plan must not back up"
+        );
+        let plan = BackupPlan {
+            enabled: true,
+            frequency: crate::backup::BackupFrequency::Daily,
+            keep_files: 3,
+            keep_days: None,
+        };
+        state.set_backup_plan(&plan).unwrap();
+        let stored = Db::open(&state.db_path)
+            .unwrap()
+            .setting(backup::BACKUP_PLAN_KEY)
+            .unwrap();
+        assert!(stored.is_some(), "plan should be stored in settings JSON");
+        assert_eq!(state.backup_plan(), plan);
+
+        let first = state.run_scheduled_backup().unwrap();
+        assert!(first.is_some(), "enabled plan with no backup should run now");
+        let status = state.backup_status();
+        assert!(status.last_path.is_some());
+        assert!(status.last_at.is_some());
+        assert!(status.next_due.is_some());
+        assert!(
+            state.run_scheduled_backup().unwrap().is_none(),
+            "second tick must wait for the daily interval"
+        );
+        drop(state);
+        cleanup_dir(&base);
+    }
+
+    #[test]
+    fn scheduled_backup_skips_while_scanning_or_tagging() {
+        let (base, _lib, state) = test_state("backup-skip");
+        let dir = backup::ensure_backups_dir(&state.data_dir()).unwrap();
+        std::fs::write(dir.join("kanalib-20200101-000000.db"), b"old").unwrap();
+        let plan = BackupPlan {
+            enabled: true,
+            keep_files: 5,
+            ..Default::default()
+        };
+        state.set_backup_plan(&plan).unwrap();
+
+        state.shared.lock().unwrap().scanning = true;
+        assert!(state.run_scheduled_backup().unwrap().is_none());
+        assert!(
+            state
+                .backup_status()
+                .skipped_reason
+                .as_deref()
+                .is_some_and(|reason| reason.contains("扫描"))
+        );
+        state.shared.lock().unwrap().scanning = false;
+
+        *state.tag_worker.lock().unwrap() = true;
+        assert!(state.run_scheduled_backup().unwrap().is_none());
+        assert!(
+            state
+                .backup_status()
+                .skipped_reason
+                .as_deref()
+                .is_some_and(|reason| reason.contains("打标"))
+        );
+        *state.tag_worker.lock().unwrap() = false;
+
+        assert!(state.run_scheduled_backup().unwrap().is_some());
+        assert!(state.backup_status().skipped_reason.is_none());
+        drop(state);
+        cleanup_dir(&base);
+    }
+
+    #[test]
+    fn backup_now_rejects_scanning_and_writes_when_idle() {
+        let (base, _lib, state) = test_state("backup-now");
+        state.shared.lock().unwrap().scanning = true;
+        let error = state.backup_now().unwrap_err().to_string();
+        assert!(error.contains("扫描"), "{error}");
+        state.shared.lock().unwrap().scanning = false;
+
+        let report = state.backup_now().unwrap();
+        assert!(report.integrity_ok);
+        assert!(report.destination.is_file());
+        drop(state);
+        cleanup_dir(&base);
+    }
+
+    #[test]
+    fn restore_backup_rejects_scanning_or_tagging() {
+        let base = temp_dir("restore-busy");
+        let data_root = base.join("data");
+        let db_path = data_root.join(".kanalib").join("kanalib.db");
+        {
+            let db = Db::open(&db_path).unwrap();
+            db.set_setting("k", "v").unwrap();
+        }
+        let candidate = base.join("candidate.db");
+        {
+            let db = Db::open(&candidate).unwrap();
+            db.set_setting("k", "restored").unwrap();
+        }
+        let state = AppState::open_for_test(data_root.clone(), None);
+        state.shared.lock().unwrap().scanning = true;
+        let error = state.restore_backup(&candidate).unwrap_err().to_string();
+        assert!(error.contains("扫描"), "{error}");
+        state.shared.lock().unwrap().scanning = false;
+
+        *state.tag_worker.lock().unwrap() = true;
+        let error = state.restore_backup(&candidate).unwrap_err().to_string();
+        assert!(error.contains("打标"), "{error}");
+        *state.tag_worker.lock().unwrap() = false;
+        assert!(backup::pending_restore(&state.data_dir()).is_none());
+        drop(state);
+        cleanup_dir(&base);
+    }
+
+    #[test]
+    fn restore_stages_then_applies_on_next_open_with_safety_backup() {
+        let base = temp_dir("restore-open");
+        let data_root = base.join("data");
+        let db_path = data_root.join(".kanalib").join("kanalib.db");
+        {
+            let db = Db::open(&db_path).unwrap();
+            db.set_setting("k", "v").unwrap();
+            db.set_setting("library.local_roots", "[]").unwrap();
+        }
+        let candidate = base.join("candidate.db");
+        {
+            let db = Db::open(&candidate).unwrap();
+            db.set_setting("k", "restored").unwrap();
+            db.set_setting("library.local_roots", "[]").unwrap();
+        }
+        let state = AppState::open_for_test(data_root.clone(), None);
+        let report = state.restore_backup(&candidate).unwrap();
+        assert!(report.requires_restart);
+        let safety = report.safety_backup.clone().unwrap();
+        assert!(safety.is_file(), "safety backup should exist");
+        // 运行中不替换，当前库保持旧数据。
+        assert_eq!(
+            Db::open(&db_path)
+                .unwrap()
+                .setting("k")
+                .unwrap()
+                .as_deref(),
+            Some("v")
+        );
+        assert!(backup::pending_restore(&state.data_dir()).is_some());
+        drop(state);
+
+        let state = AppState::open_for_test(data_root.clone(), None);
+        assert!(
+            state.shared.lock().unwrap().status.contains("已应用备份"),
+            "startup should report the applied backup"
+        );
+        assert_eq!(
+            Db::open(&state.db_path())
+                .unwrap()
+                .setting("k")
+                .unwrap()
+                .as_deref(),
+            Some("restored")
+        );
+        assert!(backup::pending_restore(&state.data_dir()).is_none());
+        assert_eq!(
+            Db::open(&safety)
+                .unwrap()
+                .setting("k")
+                .unwrap()
+                .as_deref(),
+            Some("v")
+        );
+        drop(state);
+        cleanup_dir(&base);
     }
 }
