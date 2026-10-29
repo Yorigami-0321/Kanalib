@@ -73,7 +73,7 @@
 | `synthetic_0004`（修复后） | 10 | 55ms | 105ms | 360ms | 369ms |
 
 - 第四轮把 UI 的单次 SQL 探测上限从 core 的 `MAX_SEARCH_PAGE=10000` 降为 `UI_SEARCH_PAGE_LIMIT=512`；超过即回退内存过滤（结果语义不变，单测 `search_page_matches_memory_filter_sort_and_paging` 继续通过）。复测中 `synthetic` 从约 1.6s 降到 0.93s、`sky` 从约 1.45s 降到 0.66s。
-- **窄 FTS 异常已定位并修复**：`search_extent` 原用普通 `JOIN`，SQLite 3.46 在仅 10 命中时选择扫 10 万 assets、逐行探 FTS；改为 `CROSS JOIN` 强制 FTS 外表后，核心 `search_page` 从约 19s 降到 3.5ms，UI `synthetic_0004` page 55ms / visible 360ms。回归测试 `fts_extent_query_plan_prefers_fts_driver` 断言 extent 计划从 FTS 驱动且不使用 `idx_assets_folder`。
+- **窄 FTS 异常已定位并修复**：`search_extent` 原用普通 `JOIN`，SQLite 3.46 在仅 10 命中时选择扫 10 万 assets、逐行探 FTS；改为 `CROSS JOIN` 强制 FTS 外表后，核心 `search_page` 从约 19s 降到 3.5ms，UI `synthetic_0004` page 55ms / visible 360ms（修复后日志 `.kanalib/r4_e1/logs/search100k-fixed.log`；修复提交 `fed7857`）。回归测试 `fts_extent_query_plan_prefers_fts_driver` 断言 extent 计划从 FTS 驱动且不使用 `idx_assets_folder`。
 - **仍未达到 150ms**：220ms 防抖已占固定成本；100k 正常缩略图库的键入延迟仍待实测。该表只作为最坏情况记录，不与 core 的同库 p50/p95 混用；`synthetic_0004` 修复后数字来自同一隔离副本与窗口内输入。
 - UI 搜索语义、FTS5、排序与筛选下推均未改；所有计时仅在 `KANALIB_SEARCH_TIMING=1` 时输出，产品默认关。
 
