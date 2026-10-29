@@ -4,6 +4,12 @@ use crate::app::{KanalibApp, push_toast};
 /// 搜索输入停止多久后才真正查询（毫秒）。
 pub(crate) const SEARCH_DEBOUNCE_MS: u64 = 220;
 
+/// 只读计时探针：`KANALIB_SEARCH_TIMING=1` 时把防抖与查询耗时写进日志，
+/// 不改变任何查询/渲染行为。
+fn search_timing_enabled() -> bool {
+    std::env::var_os("KANALIB_SEARCH_TIMING").is_some()
+}
+
 /// 查询里是否带了 `dup:true`。与 core 的解析规则保持一致：整词、带 `-` 前缀的取反写法不算。
 pub(crate) fn query_wants_duplicates(text: &str) -> bool {
     text.split_whitespace().any(|raw| {
@@ -78,10 +84,17 @@ impl KanalibApp {
     /// 替换旧任务会取消它，所以连续输入只会跑最后一次查询。
     pub(crate) fn schedule_search(&mut self, cx: &mut Context<Self>) {
         let weak = cx.entity().downgrade();
+        let queued_at = Instant::now();
         self.search_debounce_task = Some(cx.spawn(async move |_, cx| {
             cx.background_executor()
                 .timer(Duration::from_millis(SEARCH_DEBOUNCE_MS))
                 .await;
+            if search_timing_enabled() {
+                log::info!(
+                    "search timing: debounce waited {:.1}ms",
+                    queued_at.elapsed().as_secs_f64() * 1000.0
+                );
+            }
             let _ = weak.update(cx, |app, cx| {
                 app.search_refresh_queued = false;
                 app.run_search(cx);
@@ -126,12 +139,14 @@ impl KanalibApp {
             return;
         }
         self.search_running = true;
+        let started = Instant::now();
         let mut query = SearchQuery::parse(&text);
         // SQL 按标签名精确匹配，不会自己解析别名；这里先换成规范名，和内存路径保持一致。
         query.resolve_tag_aliases(&tag_aliases);
         let state = self.state.clone();
         let request_filter = filter.clone();
         let task = cx.background_executor().spawn(async move {
+            let page_started = Instant::now();
             let page = state
                 .search_page(SearchPageRequest {
                     filter: &request_filter,
@@ -144,6 +159,7 @@ impl KanalibApp {
                     include_total: false,
                 })
                 .ok();
+            let page_ms = page_started.elapsed().as_secs_f64() * 1000.0;
             // 结果超过分页上限时只能回退到内存过滤，保留 FTS 命中集合。
             let truncated = page.as_ref().is_some_and(|page| page.next.is_some());
             let fts_paths = {
@@ -154,17 +170,25 @@ impl KanalibApp {
                     state.search_paths(&free).ok().map(Arc::new)
                 }
             };
-            (page, truncated, fts_paths)
+            (page, truncated, fts_paths, page_ms)
         });
         let weak = cx.entity().downgrade();
         cx.spawn(async move |_, cx| {
-            let (page, truncated, fts_paths) = task.await;
+            let (page, truncated, fts_paths, page_ms) = task.await;
+            let task_ms = started.elapsed().as_secs_f64() * 1000.0;
             let _ = weak.update(cx, |app, cx| {
                 app.search_running = false;
                 let page_paths = match page {
                     Some(page) if !truncated => Some(Arc::new(page.paths)),
                     _ => None,
                 };
+                if search_timing_enabled() {
+                    log::info!(
+                        "search timing: text={text:?} page_ms={page_ms:.1} \
+                         run_search_ms={task_ms:.1} hits={} truncated={truncated}",
+                        page_paths.as_ref().map_or(0, |paths| paths.len()),
+                    );
+                }
                 app.search_bundle = Some(Arc::new(SearchBundle {
                     text: text.clone(),
                     revision,

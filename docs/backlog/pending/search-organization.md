@@ -6,8 +6,12 @@
 
 - **依据**：`PLAN.md` §12 与阶段 3 目标搜索 p95 < 150ms；10 万实测 p95 284ms（`synthetic` 全命中）；改造前每次文本变化都重建可见索引，`duplicate_paths` 无论是否用 `dup:true` 都构造集合，短词走 `LIKE %x%` 全表扫描。
 - **已完成（第二轮）**：DB 侧筛选/排序下推 SQL（评级/星级/收藏/来源/时间/尺寸等索引列，`ensure_search_indexes` 幂等建索引）、keyset 分页（`SearchPage`/`SearchCursor`，`MAX_SEARCH_PAGE=10000`）、`search_paths_in` 保留旧语义兼容；结果与内存过滤逐条一致由单测 `search_page_matches_memory_filter_sort_and_paging` 保证。UI 侧输入 220ms 防抖、只在 `dup:true` 时构造去重路径集、查询与筛选/排序/数据版本绑定成 `SearchBundle` 快照；分页结果超限时回退内存过滤（不截断）。
-- **剩余**：命中全库的非名称排序（modified/captured/size/resolution/star/favorite/rating）仍走临时 B 树排序，p95 276–304ms；需要覆盖索引或预排序键才能压下去。
-- **验收（剩余）**：2026-10-27 决定把 `p95 ≤ 150ms` 从硬门禁改为「先小基准、取实测上限并写回本文档」；UI 端到端键入延迟仍需要一次单独实测（当前只有核心 DB 数字）。这条线在第三轮列为顺延（见 [round-3.md](../round-3.md) 的「顺延 3」），未派发。
+- **已完成（第四轮，2026-10-30）**：
+  - 同库 100k 对照（同一份合成库，30 次）：为 Modified/Captured/Size/Rating 建覆盖索引；Star/Favorite 因低基数实测回退，Resolution 收益不足，三者不建索引并清理旧实验索引。保留索引的排序 p95 为 232–304ms，对应无索引基线 367–387ms；名称排序保持不变（约 233ms）。
+  - 索引体积：同一 100k 库从 98,541,568 字节增至 139,251,712 字节（+40.7MB，+41%）；曾尝试的 7 索引版本为 207,605,760 字节（+110.6MB），因 Star/Favorite 回退被否决。
+  - UI：`search.rs` 仅在 `KANALIB_SEARCH_TIMING=1` 时记录防抖等待、查询耗时与命中数，不改变查询/渲染行为；真正渲染阶段与键入延迟由 E1 在 UI 侧实测。
+  - 结论：`p95 ≤ 150ms` 仍未达成，按任务书改为记录同库实测上限；名称排序与旧文档 133ms 的差异来自合成库内容/负载不同，引用数字必须同时给出库标识。
+- **验收（剩余）**：UI 端到端键入延迟（防抖 + 查询 + 可见结果更新）留给 E1 实测；后续若更换合成库或 schema，需要重新跑同库对照，不能直接复用本表绝对数字。
 - **依赖/风险**：FTS5 对 2 字词仍回退 `LIKE`（`syn` 33ms、`sky` 13ms 可接受）；SQL 与内存过滤语义必须继续逐条对齐。
 
 ### 实测（release，`KANALIB_BENCH_ROWS=100000` 重新生成的 10 万合成库，30 次取 p95）
@@ -33,6 +37,25 @@
 | 旧 `legacy_search_paths`（对照） | 100,000 | 211ms | 225ms |
 
 > 数据依赖：用合并前生成的旧 bench 库复测，同一批非名称排序是 350–380ms、名称排序 140ms，差异来自合成库内容分布，因此引用数字时必须说明用的是哪份库。
+
+### 第四轮同库对照（2026-10-30，release，100k，30 次）
+
+库标识：`target/r4-c-bench/kanalib-bench-100k-r4c.db`（100k 行，folder `C:\bench`，由 `generate_bench_database` 生成；4 索引 139.3MB，复制后删掉 4 个排序索引得到 98.5MB 基线）。本表和上表不是同一份库，绝对 p95 不可跨表比较；本表的决策依据是同一份库上的 cover/baseline 成对数字。
+
+| 排序 | 索引决策 | cover p50 | cover p95 | baseline p50 | baseline p95 |
+|---|---|---:|---:|---:|---:|
+| Name | 既有 `idx_assets_name_lower`，不新增 | 207ms | 234ms | 215ms | 232ms |
+| Modified | 保留 `idx_assets_sort_modified_desc` | 213ms | 234ms | 339ms | 367ms |
+| Captured | 保留 `idx_assets_sort_captured_desc` | 214ms | 232ms | 341ms | 368ms |
+| Size | 保留 `idx_assets_sort_size_desc` | 209ms | 233ms | 331ms | 372ms |
+| Rating | 保留 `idx_assets_sort_rating_desc` | 287ms | 304ms | 352ms | 387ms |
+| Resolution | 删除索引，回基线 | 331ms | 382ms | 333ms | 357ms |
+| Star | 删除索引，回基线 | 346ms | 372ms | 341ms | 366ms |
+| Favorite | 删除索引，回基线 | 336ms | 378ms | 361ms | 377ms |
+
+- 保留的 4 个索引在 `synthetic` 全命中下把 p95 降低约 21–37%；Star/Favorite 的低基数使覆盖索引反而更慢，Resolution 约 5% 的收益不足以抵消索引体积，因此都不保留。
+- 早前同库对照（机器同时跑 UI/构建、负载较高）中，`synthetic sky` + Modified 从 1584ms 降到 984ms，说明保留的索引在选择性过滤上未出现回退；该组数字不作为最终绝对基准。
+- `KANALIB_BENCH_SECTIONS=sorts` 可只跑本表，避开名称/自由词段落；基准开关只存在于 `#[cfg(test)]`。
 
 ## F-013 智能集合可编辑
 
