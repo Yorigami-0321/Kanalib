@@ -78,6 +78,16 @@
 3. 禁止：多个代理同时改 `app.rs`；同时改两份 schema；在 F-035 未冻结 Source 接口前接 UI；把 HEIC/RAW/PSD 未实测格式写成已支持。
 4. 每项交付附：改动文件、接口、迁移/备份、测试/指标、未完成边界；UI 附截图。
 
+## 任务 0 执行结果（2026-10-30）
+
+> 范围：只做验收、证据归档与文档，不改功能代码；本轮未重跑 UI 自动化，截图/UIA/日志/内存采样均来自 2026-10-29 的同一轮实测。原始目录 `target/r4-task0-data/`（不入库），本地归档 `.kanalib/r4_task0/`（`.kanalib/` 已在 `.gitignore`，图片与日志不提交）。
+
+- **F-036 拖拽导入：未通过 E2E，待用户手动验收。** 真实 Windows 资源管理器拖放无法在窗口内自动化中可靠复现（`ExternalPaths` 由系统拖放目标注入，UIA/消息模拟不可靠），本轮未做，不写成已通过；手动验收清单（文件夹、来源内图片、来源外图片、取消、Unicode/日文/长路径、重复来源、自绘标题栏兼容）已写入 [pending/library-sources-formats.md](pending/library-sources-formats.md)，registry 保持「实现中」。
+- **F-005 分组浏览：通过（带边界）。** 100000 张合成库上，修改时间/拍摄时间/来源/评级四种分组菜单可用，组头吸顶、折叠展开、连续滚动正常；600s 滚动采样工作集约 145MB、私有约 190MB，无增长（`.kanalib/r4_task0/100k-scroll-memory.csv`，无表头 30 行，第一列 20–600s）。边界：该库来源目录 `C:\bench` 已离线（`logs/100k-group.log` 记录 `source inaccessible: C:\bench` 与 `thumb missing and could not rebuild`），网格只有占位符，因此只证明分组布局/行级虚拟化/内存，不证明 10 万真实缩略图滚动；10k 副本（缩略图缓存可用、源目录离线）分组/滚动视觉通过。
+- **F-003 图片对比：3 张去重组对比通过，多选入口未复现。** 从 10k 去重组「对比此组」进入 3 张并排对比：同步缩放 ×1.95、同步平移、差异表（差异 1 项/相同 8 项）、保留标记、Esc 返回去重组均通过。边界：Ctrl 多选 2–4 张后进入对比仍未复现——`.kanalib/r4_task0/screens/10k-multiselect-ctrl-attempt.png` 显示 Ctrl 点击多张后仅 1 张（`synthetic_00002_city_合成.jpg`）被选中；不能把去重组入口当作多选复现，多选对比入口待手动验收。
+- **证据**：`.kanalib/r4_task0/screens/`（28 张：100k 分组/折叠/连续滚动/菜单、10k 分组/滚动、4 张对比截图（并排/缩放/平移/Esc 返回）、多选未复现、命令面板）；`.kanalib/r4_task0/100k-scroll-memory.csv`；`.kanalib/r4_task0/uia-100k-grouped.txt`、`.kanalib/r4_task0/uia-100k-menu.txt`、`.kanalib/r4_task0/uia-10k-dedup.txt`、`.kanalib/r4_task0/uia-10k-palette.txt`；`.kanalib/r4_task0/logs/100k-group.log`、`.kanalib/r4_task0/logs/10k-group.log`。
+- **未完成边界**：10 万真实缩略图下的分组滚动（需可访问的 10 万缩略图库）；Ctrl 多选 2–4 张发起对比；真实资源管理器拖放。registry 状态不改（F-003/F-005 已实现、F-036 实现中）。
+
 ## 第五轮预览（不在本轮）
 
 - F-035 完整 Immich/WebDAV 与跨源去重（若研究线通过）。
