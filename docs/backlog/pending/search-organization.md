@@ -57,6 +57,24 @@
 - 早前同库对照（机器同时跑 UI/构建、负载较高）中，`synthetic sky` + Modified 从 1584ms 降到 984ms，说明保留的索引在选择性过滤上未出现回退；该组数字不作为最终绝对基准。
 - `KANALIB_BENCH_SECTIONS=sorts` 可只跑本表，避开名称/自由词段落；基准开关只存在于 `#[cfg(test)]`。
 
+### UI 端到端（第四轮 E1，`02e4960`）
+
+库：`target/r4-task0/kanalib-100k.db` 的隔离副本（100k 行，folder `C:\bench`，源目录离线、无缩略图；这是缺图最坏情况，不代表真实缩略图库）。启动 `KANALIB_SEARCH_TIMING=1`，用窗口内 WM_CHAR 输入，记录 `ui_input_to_visible_ms`/`ui_input_to_frame_ms`；防抖固定 220ms。原始日志 `.kanalib/r4_e1/logs/search100k-limit512c.log`。
+
+| 查询 | 命中 | page | run_search | visible | frame |
+|---|---:|---:|---:|---:|---:|
+| 空（启动） | 100000 | 31.7ms | 31.7ms | 328ms | 384ms |
+| `synthetic` | 100000 | 422ms | 585ms | 931ms | 937ms |
+| `sky` | 33334 | 263ms | 354ms | 657ms | 664ms |
+| `synthetic sky` | 33334 | 1546ms | 1658ms | 1943ms | 1965ms |
+| `forest` | 16667 | 1857ms | 1930ms | 2199ms | 2250ms |
+| `4`（短词） | 40951 | 103ms | 713ms | 1005ms | 1062ms |
+| `synthetic_0004` | 10 | 14007ms | 14056ms | 14312ms | 14321ms |
+
+- 第四轮把 UI 的单次 SQL 探测上限从 core 的 `MAX_SEARCH_PAGE=10000` 降为 `UI_SEARCH_PAGE_LIMIT=512`；超过即回退内存过滤（结果语义不变，单测 `search_page_matches_memory_filter_sort_and_paging` 继续通过）。复测中 `synthetic` 从约 1.6s 降到 0.93s、`sky` 从约 1.45s 降到 0.66s。
+- **仍未达到 150ms**：220ms 防抖已占固定成本；`synthetic_0004`（仅 10 命中）仍有 14s 异常，说明还有 FTS 查询计划/缩略图缓存抖动的独立问题，本轮未定位；100k 正常缩略图库的键入延迟仍待实测。该表只作为最坏情况记录，不与 core 的同库 p50/p95 混用。
+- UI 搜索语义、FTS5、排序与筛选下推均未改；所有计时仅在 `KANALIB_SEARCH_TIMING=1` 时输出，产品默认关。
+
 ## F-013 智能集合可编辑
 
 > 第三轮已实现（schema v9 + 侧栏编辑入口），见 [implemented.md](../implemented.md)。
