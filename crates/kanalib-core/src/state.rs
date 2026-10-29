@@ -4545,10 +4545,38 @@ fn ensure_thumb(
         let _ = std::fs::remove_file(&target);
     }
 
-    let mut image = image::ImageReader::open(path)?
-        .with_guessed_format()?
-        .decode()
-        .with_context(|| format!("decode {}", path.display()))?;
+    let decoded = image::ImageReader::open(path)
+        .and_then(|reader| reader.with_guessed_format())
+        .map_err(image::ImageError::IoError)
+        .and_then(|reader| reader.decode());
+    let mut image = match decoded {
+        Ok(image) => image,
+        Err(error) => {
+            // `image` 0.25 has no AVIF/PSD decoder. The scan prefetch normally
+            // fills the cache; watch events and evicted thumbnails arrive here
+            // without one, so let ffmpeg generate the 512 copy on demand.
+            if crate::model::is_ffmpeg_only(path)
+                && let Some((mut width, mut height)) = media::fallback_dimensions(path)
+            {
+                let outcome = ffmpeg::generate_thumbnails(
+                    &[ThumbJob {
+                        source: path.to_path_buf(),
+                        target: target.clone(),
+                        alpha: ffmpeg::alpha_source(path),
+                    }],
+                    &AtomicBool::new(false),
+                    &|_, _| {},
+                );
+                if outcome.generated == 1 && target.exists() {
+                    if (5..=8).contains(&orientation) {
+                        std::mem::swap(&mut width, &mut height);
+                    }
+                    return Ok((Some(target), width, height));
+                }
+            }
+            return Err(error).with_context(|| format!("decode {}", path.display()));
+        }
+    };
     if let Some(orientation) = image::metadata::Orientation::from_exif(orientation) {
         image.apply_orientation(orientation);
     }
@@ -4717,6 +4745,220 @@ mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
+    /// 最小合法 PSD：文件头 + 三个空区块 + 未压缩平面数据；`planes` 为空即截断样本。
+    fn write_test_psd(
+        path: &Path,
+        width: u32,
+        height: u32,
+        channels: u16,
+        mode: u16,
+        planes: &[Vec<u8>],
+    ) {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(b"8BPS");
+        bytes.extend_from_slice(&1u16.to_be_bytes());
+        bytes.extend_from_slice(&[0u8; 6]);
+        bytes.extend_from_slice(&channels.to_be_bytes());
+        bytes.extend_from_slice(&height.to_be_bytes());
+        bytes.extend_from_slice(&width.to_be_bytes());
+        bytes.extend_from_slice(&8u16.to_be_bytes());
+        bytes.extend_from_slice(&mode.to_be_bytes());
+        for _ in 0..3 {
+            bytes.extend_from_slice(&0u32.to_be_bytes());
+        }
+        bytes.extend_from_slice(&0u16.to_be_bytes());
+        for plane in planes {
+            bytes.extend_from_slice(plane);
+        }
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
+        std::fs::write(path, bytes).unwrap();
+    }
+
+    fn solid_plane(width: u32, height: u32, value: u8) -> Vec<u8> {
+        vec![value; (width * height) as usize]
+    }
+
+    fn psd_rgb_planes(width: u32, height: u32) -> Vec<Vec<u8>> {
+        let mut red = Vec::with_capacity((width * height) as usize);
+        let mut green = Vec::with_capacity((width * height) as usize);
+        for y in 0..height {
+            for x in 0..width {
+                red.push((x * 2 % 256) as u8);
+                green.push((y * 3 % 256) as u8);
+            }
+        }
+        vec![red, green, solid_plane(width, height, 60)]
+    }
+
+    fn no_temp_png(cache: &Path) -> bool {
+        std::fs::read_dir(cache)
+            .map(|entries| {
+                entries.filter_map(Result::ok).all(|entry| {
+                    !entry
+                        .file_name()
+                        .to_string_lossy()
+                        .ends_with(".ffmpeg.png")
+                })
+            })
+            .unwrap_or(true)
+    }
+
+    #[test]
+    fn psd_scan_generates_thumbnail_and_dimensions() {
+        if !ffmpeg::available() {
+            return;
+        }
+        let (base, lib, state) = test_state("psd-scan");
+        let source = lib.join("sample.psd");
+        write_test_psd(&source, 96, 64, 3, 3, &psd_rgb_planes(96, 64));
+
+        state.scan_blocking(true).unwrap();
+        let summary = state.scan_summary().unwrap();
+        assert_eq!(summary.files, 1);
+        assert_eq!(summary.imported, 1);
+        assert_eq!(summary.failed, 0);
+
+        let assets = state.shared.lock().unwrap().assets.clone();
+        let snapshot = assets.read().unwrap();
+        assert_eq!(snapshot.len(), 1);
+        let asset = &snapshot[0];
+        assert_eq!((asset.width, asset.height), (96, 64));
+        assert_eq!(asset.sha1.as_deref().map(str::len), Some(40));
+        assert!(asset.phash.is_none());
+        let thumb = asset.thumb.clone().expect("PSD thumbnail");
+        let (thumb_width, thumb_height) = image::ImageReader::open(&thumb)
+            .unwrap()
+            .with_guessed_format()
+            .unwrap()
+            .into_dimensions()
+            .unwrap();
+        assert_eq!((thumb_width, thumb_height), (512, 341));
+        assert!(no_temp_png(&base.join("data").join("thumbs")));
+        drop(snapshot);
+        drop(assets);
+        drop(state);
+        std::fs::remove_dir_all(&base).unwrap();
+    }
+
+    #[test]
+    fn psd_cmyk_thumbnail_is_not_black() {
+        if !ffmpeg::available() {
+            return;
+        }
+        let dir = temp_dir("psd-cmyk");
+        let cache = dir.join("thumbs");
+        let source = dir.join("magenta.psd");
+        // Photoshop 的 CMYK 平面是反相存储：0 = 100% 墨；这里得到纯品红。
+        let planes = [
+            solid_plane(32, 32, 255),
+            solid_plane(32, 32, 0),
+            solid_plane(32, 32, 255),
+            solid_plane(32, 32, 255),
+        ];
+        write_test_psd(&source, 32, 32, 4, 4, &planes);
+        let bytes = std::fs::metadata(&source).unwrap().len();
+        let (thumb, width, height) = ensure_thumb(&source, &cache, 1, bytes, 1).unwrap();
+        assert_eq!((width, height), (32, 32));
+        let image = image::ImageReader::open(thumb.unwrap())
+            .unwrap()
+            .with_guessed_format()
+            .unwrap()
+            .decode()
+            .unwrap()
+            .to_rgb8();
+        let pixel = image.get_pixel(256, 170);
+        assert!(
+            pixel[0] > 180 && pixel[1] < 100 && pixel[2] > 180,
+            "CMYK conversion should stay magenta, got {pixel:?}"
+        );
+        assert!(no_temp_png(&cache));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn psd_alpha_uses_temp_png_without_leaving_files() {
+        if !ffmpeg::available() {
+            return;
+        }
+        let dir = temp_dir("psd-alpha");
+        let cache = dir.join("thumbs");
+        let source = dir.join("alpha.psd");
+        let planes = [
+            solid_plane(32, 32, 255),
+            solid_plane(32, 32, 0),
+            solid_plane(32, 32, 0),
+            solid_plane(32, 32, 128),
+        ];
+        write_test_psd(&source, 32, 32, 4, 3, &planes);
+        let bytes = std::fs::metadata(&source).unwrap().len();
+        let (thumb, width, height) = ensure_thumb(&source, &cache, 1, bytes, 1).unwrap();
+        assert_eq!((width, height), (32, 32));
+        let image = image::ImageReader::open(thumb.unwrap())
+            .unwrap()
+            .with_guessed_format()
+            .unwrap()
+            .decode()
+            .unwrap()
+            .to_rgb8();
+        let pixel = image.get_pixel(256, 256);
+        // ffmpeg's psd decoder currently returns the opaque composite; alpha
+        // must never fail the thumbnail or leave the intermediate PNG behind.
+        assert!(pixel[0] > 180, "unexpected alpha composite: {pixel:?}");
+        assert!(no_temp_png(&cache));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn psd_thumbnail_handles_unicode_and_long_paths() {
+        if !ffmpeg::available() {
+            return;
+        }
+        let dir = temp_dir("psd-unicode");
+        let source = dir
+            .join("图库 测试")
+            .join("ニホンゴ")
+            .join("a".repeat(60))
+            .join("写真 サンプル 长路径.psd");
+        assert!(source.as_os_str().len() > 150);
+        write_test_psd(&source, 48, 32, 3, 3, &psd_rgb_planes(48, 32));
+        let bytes = std::fs::metadata(&source).unwrap().len();
+        let (thumb, width, height) = ensure_thumb(&source, &dir.join("thumbs"), 1, bytes, 1)
+            .unwrap();
+        assert_eq!((width, height), (48, 32));
+        assert!(thumb.unwrap().exists());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn corrupt_psd_is_indexed_without_blocking_scan() {
+        let (base, lib, state) = test_state("psd-corrupt");
+        let source = lib.join("broken.psd");
+        write_test_psd(&source, 64, 64, 3, 3, &[]);
+
+        state.scan_blocking(true).unwrap();
+        let summary = state.scan_summary().unwrap();
+        assert_eq!(summary.files, 1);
+        assert_eq!(summary.imported, 1);
+
+        let assets = state.shared.lock().unwrap().assets.clone();
+        let snapshot = assets.read().unwrap();
+        assert_eq!(snapshot.len(), 1);
+        assert_eq!(snapshot[0].sha1.as_deref().map(str::len), Some(40));
+        match snapshot[0].damage.as_deref() {
+            Some(message) => assert!(
+                message.contains("FFmpeg"),
+                "PSD must stay a decoder dependency, not a corruption: {message}"
+            ),
+            None => assert!(ffmpeg::available()),
+        }
+        drop(snapshot);
+        drop(assets);
+        drop(state);
+        std::fs::remove_dir_all(&base).unwrap();
+    }
+
     #[test]
     fn qoi_alpha_flattens_onto_white() {
         let dir = temp_dir("qoi-alpha");
@@ -4740,6 +4982,94 @@ mod tests {
             pixel[0] > 200 && pixel[1] > 80 && pixel[2] > 80,
             "alpha should flatten to white, got {pixel:?}"
         );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn animated_webp_first_frame_is_used_by_image_and_ffmpeg() {
+        let Some(ffmpeg) = ffmpeg::status() else {
+            return;
+        };
+        let dir = temp_dir("animated-webp");
+        let cache = dir.join("thumbs");
+        let source = dir.join("animated.webp");
+        let status = std::process::Command::new(&ffmpeg.path)
+            .args([
+                "-hide_banner",
+                "-nostdin",
+                "-v",
+                "error",
+                "-y",
+                "-f",
+                "lavfi",
+                "-i",
+                "color=red:s=32x24:d=0.2",
+                "-f",
+                "lavfi",
+                "-i",
+                "color=blue:s=32x24:d=0.2",
+                "-filter_complex",
+                "[0:v][1:v]concat=n=2:v=1:a=0[v]",
+                "-map",
+                "[v]",
+                "-loop",
+                "0",
+                "-c:v",
+                "libwebp_anim",
+            ])
+            .arg(&source)
+            .status()
+            .unwrap();
+        if !status.success() {
+            eprintln!("ffmpeg build has no libwebp_anim encoder; skipping");
+            std::fs::remove_dir_all(&dir).unwrap();
+            return;
+        }
+
+        // `image` 的 WebP 解码器（fallback）与 ffmpeg 批处理都只取首帧。
+        let bytes = std::fs::metadata(&source).unwrap().len();
+        let (thumb, width, height) = ensure_thumb(&source, &cache, 1, bytes, 1).unwrap();
+        assert_eq!((width, height), (32, 24));
+        let pixel = image::ImageReader::open(thumb.unwrap())
+            .unwrap()
+            .with_guessed_format()
+            .unwrap()
+            .decode()
+            .unwrap()
+            .to_rgb8()
+            .get_pixel(16, 12)
+            .0;
+        assert!(pixel[0] > 200 && pixel[2] < 80, "expected red: {pixel:?}");
+
+        let target = dir.join("ffmpeg.jpg");
+        let outcome = ffmpeg::generate_thumbnails(
+            &[ThumbJob {
+                source: source.clone(),
+                target: target.clone(),
+                alpha: true,
+            }],
+            &AtomicBool::new(false),
+            &|_, _| {},
+        );
+        // n8.1.3 LGPL rejects animated WebP in the `webp` decoder
+        // ("image data not found"), so the scan prefetch reports a failure and
+        // `ensure_thumb` above is the fallback that actually produces the
+        // first-frame thumbnail. A future ffmpeg that decodes it must keep
+        // returning the first frame.
+        if outcome.generated == 1 {
+            let pixel = image::ImageReader::open(&target)
+                .unwrap()
+                .with_guessed_format()
+                .unwrap()
+                .decode()
+                .unwrap()
+                .to_rgb8()
+                .get_pixel(16, 12)
+                .0;
+            assert!(pixel[0] > 200 && pixel[2] < 80, "expected red: {pixel:?}");
+        } else {
+            assert!(!target.exists());
+        }
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
