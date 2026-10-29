@@ -306,7 +306,7 @@ pub fn alpha_source(path: &Path) -> bool {
             .and_then(|value| value.to_str())
             .map(str::to_ascii_lowercase)
             .as_deref(),
-        Some("png" | "webp" | "gif" | "tif" | "tiff" | "ico" | "qoi" | "exr" | "avif")
+        Some("png" | "webp" | "gif" | "tif" | "tiff" | "ico" | "qoi" | "exr" | "avif" | "psd")
     )
 }
 
@@ -620,6 +620,7 @@ mod tests {
         assert!(alpha_source(Path::new("a.qoi")));
         assert!(alpha_source(Path::new("a.exr")));
         assert!(alpha_source(Path::new("a.avif")));
+        assert!(alpha_source(Path::new("a.PSD")));
         assert!(!alpha_source(Path::new("a.jpg")));
         assert!(!alpha_source(Path::new("a.bmp")));
     }

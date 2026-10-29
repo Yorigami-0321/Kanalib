@@ -1606,12 +1606,13 @@ impl Shared {
 }
 
 pub const IMAGE_EXTENSIONS: &[&str] = &[
-    "jpg", "jpeg", "png", "webp", "gif", "bmp", "tif", "tiff", "ico", "qoi", "exr", "avif",
+    "jpg", "jpeg", "png", "webp", "gif", "bmp", "tif", "tiff", "ico", "qoi", "exr", "avif", "psd",
 ];
 
 /// 本构建里 `image` 没有解码器、只能交给 ffmpeg 的扩展名。
 /// AVIF 的 `image` feature 只包含编码器；解码需要 `avif-native`（dav1d 原生库）。
-pub const FFMPEG_ONLY_EXTENSIONS: &[&str] = &["avif"];
+/// PSD 没有可用的纯 Rust 解码依赖，由 LGPL ffmpeg 的 psd 解码器读取合成图。
+pub const FFMPEG_ONLY_EXTENSIONS: &[&str] = &["avif", "psd"];
 
 fn extension_lower(path: &Path) -> Option<String> {
     path.extension()
@@ -2178,14 +2179,15 @@ mod tests {
     fn image_extensions_accept_new_formats_case_insensitively() {
         for name in [
             "a.jpg", "a.JPEG", "a.png", "a.webp", "a.gif", "a.bmp", "a.tif", "a.TIFF", "a.ico",
-            "a.qoi", "a.exr", "a.avif",
+            "a.qoi", "a.exr", "a.avif", "a.psd", "a.PSD",
         ] {
             assert!(is_image(Path::new(name)), "{name} should be an image");
         }
-        for name in ["a.heic", "a.dng", "a.psd", "a.txt", "noext"] {
+        for name in ["a.heic", "a.heif", "a.dng", "a.cr2", "a.txt", "noext"] {
             assert!(!is_image(Path::new(name)), "{name} should not be an image");
         }
         assert!(is_ffmpeg_only(Path::new("a.AVIF")));
+        assert!(is_ffmpeg_only(Path::new("a.PSD")));
         assert!(!is_ffmpeg_only(Path::new("a.tiff")));
     }
     #[test]

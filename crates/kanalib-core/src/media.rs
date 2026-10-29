@@ -215,7 +215,7 @@ pub fn hash_file(path: &Path) -> Result<ContentHashes> {
                     "decode {} needs ffmpeg (not available); hashes kept, phash skipped",
                     path.display()
                 );
-                (0, false, Some("需要 FFmpeg 解码 AVIF".to_string()))
+                (0, false, Some(format!("需要 FFmpeg 解码 {}", ffmpeg_only_label(path))))
             }
         }
         Err(error) => {
@@ -251,13 +251,53 @@ fn classify_decode_error(error: &image::ImageError) -> &'static str {
     }
 }
 
+fn ffmpeg_only_label(path: &Path) -> String {
+    path.extension()
+        .map(|value| value.to_string_lossy().to_uppercase())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| "该格式".to_string())
+}
+
 /// 原始尺寸回退：`image` 没有解码器、但 ffmpeg 能生成缩略图的格式。
-/// 目前只有 AVIF；从 ISO-BMFF 的 `meta/iprp/ipco/ispe` 读取主图尺寸，
+/// AVIF 从 ISO-BMFF 的 `meta/iprp/ipco/ispe` 读取主图尺寸，PSD 读 26 字节文件头，
 /// 避免把 512 缩略图的尺寸误存成原图尺寸。
 pub fn fallback_dimensions(path: &Path) -> Option<(u32, u32)> {
     if !is_ffmpeg_only(path) {
         return None;
     }
+    if path
+        .extension()
+        .and_then(|value| value.to_str())
+        .is_some_and(|value| value.eq_ignore_ascii_case("psd"))
+    {
+        return psd_dimensions(path);
+    }
+    iso_bmff_dimensions(path)
+}
+
+/// PSD 文件头：`8BPS` + 版本 1 + 通道数 + 高/宽（大端）+ 位深 + 颜色模式。
+/// 只读取固定 26 字节，不解析图层/图像数据，也不为损坏文件分配大块内存。
+fn psd_dimensions(path: &Path) -> Option<(u32, u32)> {
+    let mut file = File::open(path).ok()?;
+    let mut header = [0u8; 26];
+    file.read_exact(&mut header).ok()?;
+    if &header[0..4] != b"8BPS" || u16::from_be_bytes([header[4], header[5]]) != 1 {
+        return None;
+    }
+    let channels = u16::from_be_bytes([header[12], header[13]]);
+    let height = u32::from_be_bytes(header[14..18].try_into().ok()?);
+    let width = u32::from_be_bytes(header[18..22].try_into().ok()?);
+    let depth = u16::from_be_bytes([header[22], header[23]]);
+    let mode = u16::from_be_bytes([header[24], header[25]]);
+    let plausible = (1..=56).contains(&channels)
+        && (1..=300_000).contains(&width)
+        && (1..=300_000).contains(&height)
+        && matches!(depth, 1 | 8 | 16 | 32)
+        && mode <= 9;
+    plausible.then_some((width, height))
+}
+
+fn iso_bmff_dimensions(path: &Path) -> Option<(u32, u32)> {
     let mut file = File::open(path).ok()?;
     let len = file.metadata().ok()?.len();
     let mut offset = 0u64;
@@ -376,6 +416,8 @@ fn dct_2d(input: &[f32], size: usize) -> Vec<f32> {
 
 #[cfg(test)]
 mod tests {
+    use std::path::Path;
+
     use super::{fallback_dimensions, hash_file, perceptual_hash};
     use image::{DynamicImage, GrayImage, Luma};
 
@@ -507,6 +549,82 @@ mod tests {
         assert_eq!(hashes.sha1.len(), 40);
         assert_eq!(hashes.blake3.len(), 64);
         assert_eq!(hashes.phash, 0);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// 最小合法 PSD：26 字节文件头 + 三个空区块 + 未压缩平面数据。
+    /// 测试里不需要图层/图像资源；`planes` 为空时等价于只有文件头的截断样本。
+    fn write_psd(
+        path: &Path,
+        width: u32,
+        height: u32,
+        channels: u16,
+        mode: u16,
+        depth: u16,
+        planes: &[Vec<u8>],
+    ) {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(b"8BPS");
+        bytes.extend_from_slice(&1u16.to_be_bytes());
+        bytes.extend_from_slice(&[0u8; 6]);
+        bytes.extend_from_slice(&channels.to_be_bytes());
+        bytes.extend_from_slice(&height.to_be_bytes());
+        bytes.extend_from_slice(&width.to_be_bytes());
+        bytes.extend_from_slice(&depth.to_be_bytes());
+        bytes.extend_from_slice(&mode.to_be_bytes());
+        for _ in 0..3 {
+            bytes.extend_from_slice(&0u32.to_be_bytes());
+        }
+        bytes.extend_from_slice(&0u16.to_be_bytes());
+        for plane in planes {
+            bytes.extend_from_slice(plane);
+        }
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
+        std::fs::write(path, bytes).unwrap();
+    }
+
+    #[test]
+    fn psd_dimensions_read_header_and_reject_invalid() {
+        let dir = temp_dir("psd-header");
+        let path = dir
+            .join("图库 测试")
+            .join("a".repeat(60))
+            .join("写真 サンプル.psd");
+        write_psd(&path, 640, 480, 3, 3, 8, &[]);
+        assert_eq!(fallback_dimensions(&path), Some((640, 480)));
+
+        let truncated = dir.join("bad.psd");
+        std::fs::write(&truncated, b"8BPS\x00\x01").unwrap();
+        assert_eq!(fallback_dimensions(&truncated), None);
+
+        let oversized = dir.join("huge.psd");
+        write_psd(&oversized, 400_000, 10, 3, 3, 8, &[]);
+        assert_eq!(fallback_dimensions(&oversized), None);
+
+        assert_eq!(fallback_dimensions(&dir.join("sample.png")), None);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn psd_hash_keeps_content_hashes_without_image_decoder() {
+        let dir = temp_dir("psd-hash");
+        let path = dir.join("sample.psd");
+        write_psd(&path, 96, 64, 3, 3, 8, &[]);
+
+        let hashes = hash_file(&path).unwrap();
+        assert!(!hashes.decode_ok);
+        assert_eq!(hashes.phash, 0);
+        assert_eq!(hashes.sha1.len(), 40);
+        assert_eq!(hashes.blake3.len(), 64);
+        match hashes.decode_error {
+            Some(message) => {
+                assert!(message.contains("PSD"), "unexpected message: {message}");
+                assert!(!message.contains("不完整"), "PSD is not a damaged file: {message}");
+            }
+            None => assert!(crate::ffmpeg::available()),
+        }
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
