@@ -1,6 +1,9 @@
 //! F-030 文件监听与增量同步：按来源启动 `notify` + 防抖，事件批处理只做单文件
 //! 增量索引与安全删除；事件风暴回退到该来源的 `rescan_root`。
 //!
+//! 分类、哈希与 DB 写入都在 `notify-debouncer` 的回调线程完成，UI 线程不参与；
+//! 批次收尾只 bump 一次 revision，UI 在 revision 变化后读取快照。
+//!
 //! 安全底线：监听只更新数据库与内存图库，绝不删除磁盘文件；只有来源可访问且
 //! 路径确认缺失（`NotFound`）时才移除 DB 记录。来源离线、权限错误或存在性无法
 //! 判断时一律保留记录。
@@ -14,7 +17,7 @@ use anyhow::{Context, Result};
 use notify::{RecommendedWatcher, RecursiveMode};
 use notify_debouncer_mini::{DebounceEventResult, Debouncer, new_debouncer};
 
-use crate::model::{ScanCounts, ScanFilterConfig, is_image};
+use crate::model::{ScanCounts, ScanFilterConfig, Shared, is_image};
 use crate::scan_filter::{CompiledIgnoreRules, CompiledScanFilter, IgnoreRules};
 use crate::state::{AppState, IndexedFile};
 
@@ -216,6 +219,10 @@ pub(crate) fn handle_watch_batch(state: &Arc<AppState>, root: &Path, paths: Vec<
 }
 
 /// 执行已分类的监听批次：先处理新增/修改（含 SHA1 重命名恢复），再安全删除。
+///
+/// 去重刷新只在批次收尾执行一次：`touched`（新增/修改/重命名新旧路径）与
+/// `deleted` 交给 `DedupState::apply_exact_changes` 做增量组更新，不在每文件
+/// 循环里重建分组；删除仍继续 `prune_similar`。`revision` 只在收尾 bump 一次。
 pub(crate) fn apply_watch_batch(
     state: &Arc<AppState>,
     root: &Path,
@@ -227,6 +234,7 @@ pub(crate) fn apply_watch_batch(
     let mut updated = 0usize;
     let mut failed = 0usize;
     let mut renamed_old = HashSet::new();
+    let mut touched = HashSet::new();
 
     for path in &batch.changed {
         if state.is_scanning() {
@@ -240,8 +248,12 @@ pub(crate) fn apply_watch_batch(
                     IndexedFile::Imported | IndexedFile::Renamed => imported += 1,
                     IndexedFile::Updated => updated += 1,
                 }
+                if outcome.kind != IndexedFile::Unchanged && outcome.kind != IndexedFile::Ignored {
+                    touched.insert(path.clone());
+                }
                 if let Some(old_path) = outcome.renamed_from {
-                    renamed_old.insert(old_path);
+                    renamed_old.insert(old_path.clone());
+                    touched.insert(old_path);
                 }
                 if outcome.hash_failed || outcome.thumb_failed {
                     failed += 1;
@@ -258,12 +270,12 @@ pub(crate) fn apply_watch_batch(
     db.enqueue_tag_jobs(&folder)?;
     let queue = db.tag_job_counts(&folder)?;
 
+    // 来源可访问是删除的前提；扫描期间、离线、权限不足一律保留记录。
+    let online = root.is_dir() && std::fs::read_dir(root).is_ok();
     let mut deleted = HashSet::new();
     let mut removed = 0usize;
     if !batch.missing.is_empty() {
-        // 来源可访问是删除的前提；扫描期间一律不删。
-        let accessible = !state.is_scanning() && root.is_dir() && std::fs::read_dir(root).is_ok();
-        if !accessible {
+        if !online || state.is_scanning() {
             failed += batch.missing.len();
         } else {
             let mut confirmed = Vec::new();
@@ -286,7 +298,24 @@ pub(crate) fn apply_watch_batch(
     let mut shared = state.shared.lock().unwrap();
     if !deleted.is_empty() {
         shared.remove_assets(&deleted);
-        shared.refresh_after_removal(&deleted);
+        // 相似组不因监听新增而清空；删除时保持原有整组剪枝语义。
+        shared.dedup.prune_similar(&deleted);
+    }
+    if !touched.is_empty() || !deleted.is_empty() {
+        // 批次收尾只刷新一次：只重建受影响的 SHA1 组，不克隆/排序全库。
+        let rebuilt = {
+            let Shared { assets, dedup, .. } = &mut *shared;
+            let assets = assets.read().unwrap();
+            dedup.apply_exact_changes(&assets, &touched, &deleted)
+        };
+        if rebuilt {
+            log::debug!(
+                "watch dedup refresh {}: {} touched / {} removed",
+                root.display(),
+                touched.len(),
+                deleted.len()
+            );
+        }
     }
     shared.set_queue_counts(queue.pending, queue.running, queue.error);
     shared.status = format!(
@@ -296,8 +325,15 @@ pub(crate) fn apply_watch_batch(
         queue.pending
     );
     let status = shared.source_status_mut(root);
-    status.online = true;
-    status.error = None;
+    status.online = online;
+    if online {
+        status.error = None;
+    } else {
+        status.error = Some(format!(
+            "来源离线或不可访问，已保留现有记录：{}",
+            root.display()
+        ));
+    }
     status.counts = ScanCounts {
         discovered: batch.changed.len() + batch.missing.len(),
         imported,
@@ -306,7 +342,11 @@ pub(crate) fn apply_watch_batch(
         removed,
         failed,
     };
-    shared.error = None;
+    if online {
+        shared.error = None;
+    } else {
+        shared.error = Some(format!("来源离线或不可访问：{}", root.display()));
+    }
     shared.revision = shared.revision.wrapping_add(1);
     Ok(())
 }
@@ -333,6 +373,7 @@ pub(crate) fn mark_source_error(state: &Arc<AppState>, root: &Path, message: Str
 mod tests {
     use super::*;
     use std::collections::HashMap;
+    use std::time::Instant;
 
     fn config() -> ScanFilterConfig {
         ScanFilterConfig::default()
@@ -391,6 +432,61 @@ mod tests {
         assert!(classification.oversized);
         assert!(classification.changed.is_empty());
         assert!(classification.missing.is_empty());
+    }
+
+    #[test]
+    fn hundred_thousand_path_storm_does_not_enqueue_per_file_work() {
+        let root = PathBuf::from("C:/library");
+        let paths = (0..100_000u32)
+            .map(|index| root.join(format!("image-{index:06}.png")))
+            .collect::<Vec<_>>();
+
+        let started = Instant::now();
+        let changed =
+            classify_watch_paths(&root, &config(), paths.clone(), |_| WatchProbe::File(1))
+                .unwrap();
+        let changed_cost = started.elapsed();
+        assert!(changed.oversized);
+        assert!(changed.changed.is_empty(), "风暴批次不能逐文件哈希/缩略图");
+        assert!(changed.missing.is_empty());
+
+        // 全部缺失同样只回退重扫，不能把 10 万条记录当作删除。
+        let started = Instant::now();
+        let missing =
+            classify_watch_paths(&root, &config(), paths, |_| WatchProbe::Missing).unwrap();
+        let missing_cost = started.elapsed();
+        assert!(missing.oversized);
+        assert!(missing.changed.is_empty());
+        assert!(missing.missing.is_empty(), "风暴批次不能产生删除候选");
+        eprintln!(
+            "100k watch classification: all-changed {changed_cost:?}, all-missing {missing_cost:?}"
+        );
+        // 仅防极端退化（debug 构建）；正常远低于阈值。
+        assert!(changed_cost < std::time::Duration::from_secs(10));
+        assert!(missing_cost < std::time::Duration::from_secs(10));
+    }
+
+    #[test]
+    fn uncertain_probe_is_never_classified_as_missing() {
+        let root = PathBuf::from("C:/library");
+        let existing = root.join("existing.png");
+        let denied = root.join("denied.png");
+        let classification = classify_watch_paths(
+            &root,
+            &config(),
+            vec![existing.clone(), denied],
+            |path| {
+                if path == existing {
+                    WatchProbe::File(10)
+                } else {
+                    WatchProbe::Uncertain
+                }
+            },
+        )
+        .unwrap();
+        assert_eq!(classification.changed, vec![existing]);
+        assert!(classification.missing.is_empty(), "权限/IO 错误一律保留");
+        assert_eq!(classification.ignored, 1);
     }
 
     #[test]

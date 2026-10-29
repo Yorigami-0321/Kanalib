@@ -538,6 +538,9 @@ pub struct DedupState {
     pub similar_threshold: u8,
     pub protected_paths: Vec<PathBuf>,
     reviews: HashMap<String, DuplicateReview>,
+    /// 测试用：监听批次增量刷新的实际执行次数；每批应只增加一次。
+    #[cfg(test)]
+    pub(crate) exact_refresh_count: usize,
 }
 
 impl Default for DedupState {
@@ -550,6 +553,8 @@ impl Default for DedupState {
             similar_threshold: DEFAULT_SIMILAR_THRESHOLD,
             protected_paths: Vec::new(),
             reviews: HashMap::new(),
+            #[cfg(test)]
+            exact_refresh_count: 0,
         }
     }
 }
@@ -604,6 +609,109 @@ impl DedupState {
                 .iter()
                 .any(|asset| removed.contains(&asset.path))
         });
+    }
+
+    /// 监听批次结束的增量精确重复组刷新：只重建受影响的 SHA1 分组。
+    ///
+    /// `touched` 是本批次新增/修改后的路径与重命名/跨来源移动前的旧路径；
+    /// `removed` 是来源可访问且确认 `NotFound` 的删除路径。相比 `rebuild_exact`
+    /// 全量重建，这里只扫描一次资产切片找出受影响路径，再重建命中的组，避免
+    /// 每批复制/排序全库资产。相似组不参与重建；删除时由调用方 `prune_similar`。
+    ///
+    /// 返回是否实际重建了分组。
+    pub fn apply_exact_changes(
+        &mut self,
+        assets: &[Asset],
+        touched: &HashSet<PathBuf>,
+        removed: &HashSet<PathBuf>,
+    ) -> bool {
+        if touched.is_empty() && removed.is_empty() {
+            return false;
+        }
+        #[cfg(test)]
+        {
+            self.exact_refresh_count += 1;
+        }
+        let affected = touched
+            .iter()
+            .chain(removed.iter())
+            .map(PathBuf::as_path)
+            .collect::<HashSet<&Path>>();
+        // 旧的受影响组：成员路径在本批次里出现（修改/重命名旧路径/删除）。
+        let mut keys = HashSet::new();
+        for group in self.groups.iter() {
+            if group
+                .assets
+                .iter()
+                .any(|asset| affected.contains(asset.path.as_path()))
+            {
+                keys.insert(group.key.clone());
+            }
+        }
+        // 新增/修改后的 SHA1 也是受影响组；新副本可能让一个原本唯一的哈希成组。
+        for asset in assets {
+            if !affected.contains(asset.path.as_path()) {
+                continue;
+            }
+            if let Some(sha1) = asset.sha1.as_deref().filter(|value| !value.is_empty()) {
+                keys.insert(sha1.to_string());
+            }
+        }
+        if keys.is_empty() {
+            return false;
+        }
+
+        // 一次扫描收集受影响哈希的当前全部成员（含未受影响的同内容副本）。
+        // 重命名/删除的旧路径已不在 `assets` 里，因此不会残留。
+        let mut members_by_key: HashMap<&str, Vec<Asset>> = HashMap::new();
+        for asset in assets {
+            let Some(sha1) = asset.sha1.as_deref().filter(|value| !value.is_empty()) else {
+                continue;
+            };
+            if keys.contains(sha1) {
+                members_by_key.entry(sha1).or_default().push(asset.clone());
+            }
+        }
+
+        let old_keepers = keeper_map(&self.groups);
+        let mut rebuilt = Vec::with_capacity(keys.len());
+        for key in &keys {
+            let Some(mut members) = members_by_key.remove(key.as_str()) else {
+                continue;
+            };
+            if members.len() < 2 {
+                continue;
+            }
+            members.sort_by(|a, b| a.path.cmp(&b.path));
+            members.dedup_by(|a, b| a.path == b.path);
+            if members.len() < 2 {
+                continue;
+            }
+            let (suggested, suggested_reason) =
+                suggest_exact_keeper(&members, &self.protected_paths);
+            rebuilt.push(make_group(
+                GroupKind::Exact,
+                key.clone(),
+                members,
+                &self.reviews,
+                &old_keepers,
+                suggested,
+                suggested_reason,
+                &self.protected_paths,
+            ));
+        }
+
+        let groups = Arc::make_mut(&mut self.groups);
+        groups.retain(|group| !keys.contains(&group.key));
+        // 未受影响的组原本就有序；只把重建的小组按同一比较器插回原位，
+        // 避免每个监听批次都对全部组重新排序。
+        for group in rebuilt {
+            let index = groups
+                .binary_search_by(|probe| compare_groups(probe, &group))
+                .unwrap_or_else(|index| index);
+            groups.insert(index, group);
+        }
+        true
     }
 
     pub fn set_similar_groups(&mut self, groups: Vec<DuplicateGroup>, threshold: u8) {
@@ -860,12 +968,14 @@ fn keeper_map(groups: &[DuplicateGroup]) -> HashMap<String, PathBuf> {
         .collect()
 }
 
+fn compare_groups(a: &DuplicateGroup, b: &DuplicateGroup) -> std::cmp::Ordering {
+    b.reclaimable()
+        .cmp(&a.reclaimable())
+        .then_with(|| a.title().cmp(&b.title()))
+}
+
 fn sort_groups(groups: &mut Vec<DuplicateGroup>) {
-    groups.sort_by(|a, b| {
-        b.reclaimable()
-            .cmp(&a.reclaimable())
-            .then_with(|| a.title().cmp(&b.title()))
-    });
+    groups.sort_by(compare_groups);
 }
 
 fn member_signature(assets: &[Asset]) -> String {
@@ -1124,6 +1234,7 @@ impl UnionFind {
 mod tests {
     use super::*;
     use crate::model::TagHit;
+    use std::time::{Duration, Instant};
 
     fn asset(path: &str, tags: usize, mtime: u64) -> Asset {
         asset_with(path, "aaa", 1, 100, mtime, 100, 100, tags)
@@ -1235,6 +1346,237 @@ mod tests {
             state.groups[0].keeper.as_deref(),
             Some(Path::new("C:/lib/b.png"))
         );
+    }
+
+    #[test]
+    fn incremental_exact_refresh_adds_renames_and_drops_groups() {
+        let a = asset("C:/lib/a.png", 0, 1);
+        let b = asset("C:/lib/b.png", 0, 1);
+        let mut state = DedupState::default();
+        state.rebuild_exact(&[a.clone(), b.clone()]);
+        assert_eq!(state.groups.len(), 1);
+
+        // 新增同内容副本：组立即扩为 3。
+        let c = asset("C:/lib/c.png", 0, 1);
+        let assets = vec![a.clone(), b.clone(), c.clone()];
+        assert!(state.apply_exact_changes(
+            &assets,
+            &HashSet::from([c.path.clone()]),
+            &HashSet::new(),
+        ));
+        assert_eq!(state.groups.len(), 1);
+        assert_eq!(state.groups[0].member_count, 3);
+        assert_eq!(state.exact_refresh_count, 1);
+
+        // 重命名：新路径加入，旧路径不能残留。
+        let renamed = asset("C:/lib/renamed.png", 0, 1);
+        let assets = vec![a.clone(), c.clone(), renamed.clone()];
+        assert!(state.apply_exact_changes(
+            &assets,
+            &HashSet::from([b.path.clone(), renamed.path.clone()]),
+            &HashSet::new(),
+        ));
+        let paths = state.groups[0]
+            .assets
+            .iter()
+            .map(|asset| asset.path.clone())
+            .collect::<Vec<_>>();
+        assert!(paths.contains(&renamed.path));
+        assert!(!paths.contains(&b.path));
+        assert_eq!(paths.len(), 3);
+
+        // 删除一个成员：组立即缩为 2。
+        let assets = vec![a.clone(), renamed.clone()];
+        assert!(state.apply_exact_changes(
+            &assets,
+            &HashSet::new(),
+            &HashSet::from([c.path.clone()]),
+        ));
+        assert_eq!(state.groups.len(), 1);
+        assert_eq!(state.groups[0].member_count, 2);
+
+        // 只剩一个成员：过期组必须消失。
+        let assets = vec![a.clone()];
+        assert!(state.apply_exact_changes(
+            &assets,
+            &HashSet::new(),
+            &HashSet::from([renamed.path.clone()]),
+        ));
+        assert!(state.groups.is_empty());
+    }
+
+    #[test]
+    fn incremental_exact_refresh_moves_modified_asset_to_new_hash() {
+        let a = asset_with("C:/lib/a.png", "aaa", 1, 100, 10, 4, 4, 0);
+        let b = asset_with("C:/lib/b.png", "aaa", 1, 100, 10, 4, 4, 0);
+        let x = asset_with("C:/lib/x.png", "zzz", 2, 100, 10, 4, 4, 0);
+        let y = asset_with("C:/lib/y.png", "zzz", 2, 100, 10, 4, 4, 0);
+        let mut state = DedupState::default();
+        state.rebuild_exact(&[a.clone(), b.clone(), x.clone(), y.clone()]);
+        assert_eq!(state.groups.len(), 2);
+
+        // a 被修改为与 x/y 相同的内容：从 aaa 组移入 zzz 组。
+        let modified = asset_with("C:/lib/a.png", "zzz", 2, 100, 11, 4, 4, 0);
+        let assets = vec![modified.clone(), b.clone(), x.clone(), y.clone()];
+        assert!(state.apply_exact_changes(
+            &assets,
+            &HashSet::from([modified.path.clone()]),
+            &HashSet::new(),
+        ));
+        assert_eq!(state.groups.len(), 1);
+        assert_eq!(state.groups[0].key, "zzz");
+        assert_eq!(state.groups[0].member_count, 3);
+        assert!(
+            state.groups[0]
+                .assets
+                .iter()
+                .any(|asset| asset.path == modified.path)
+        );
+        assert!(
+            !state.groups.iter().any(|group| group.key == "aaa"),
+            "只剩一个成员的 aaa 组必须消失"
+        );
+    }
+
+    #[test]
+    fn incremental_exact_refresh_keeps_keeper_and_similar_groups() {
+        let a = asset("C:/lib/a.png", 0, 1);
+        let b = asset("C:/lib/b.png", 0, 1);
+        let mut state = DedupState::default();
+        state.rebuild_exact(&[a.clone(), b.clone()]);
+        let key = state.groups[0].key.clone();
+        state
+            .set_keeper(&key, &b.path, GroupKind::Exact)
+            .expect("keeper review");
+        let similar = compute_similar_groups(
+            &[
+                asset_with("C:/lib/s1.png", "bbb", 7, 100, 10, 4, 4, 0),
+                asset_with("C:/lib/s2.png", "ccc", 7, 100, 10, 4, 4, 0),
+            ],
+            0,
+            &HashMap::new(),
+            &[],
+            &[],
+        );
+        assert!(!similar.is_empty());
+        state.set_similar_groups(similar, 0);
+
+        let c = asset("C:/lib/c.png", 0, 1);
+        let assets = vec![a.clone(), b.clone(), c.clone()];
+        state.apply_exact_changes(
+            &assets,
+            &HashSet::from([c.path.clone()]),
+            &HashSet::new(),
+        );
+        assert_eq!(
+            state.groups[0].keeper.as_deref(),
+            Some(b.path.as_path()),
+            "新增成员不得丢弃已选 keeper"
+        );
+        assert!(
+            !state.similar_groups.is_empty(),
+            "监听新增不得清空相似组"
+        );
+        assert!(state.similar_scanned);
+        assert_eq!(state.similar_threshold, 0);
+    }
+
+    #[test]
+    fn incremental_exact_refresh_ignores_empty_batches() {
+        let a = asset("C:/lib/a.png", 0, 1);
+        let b = asset("C:/lib/b.png", 0, 1);
+        let mut state = DedupState::default();
+        state.rebuild_exact(&[a.clone(), b.clone()]);
+        assert!(!state.apply_exact_changes(&[a, b], &HashSet::new(), &HashSet::new()));
+        assert_eq!(state.exact_refresh_count, 0);
+    }
+
+    #[test]
+    fn prune_similar_drops_groups_with_removed_members() {
+        let s1 = asset_with("C:/lib/s1.png", "bbb", 7, 100, 10, 4, 4, 0);
+        let s2 = asset_with("C:/lib/s2.png", "ccc", 7, 100, 10, 4, 4, 0);
+        let groups = compute_similar_groups(&[s1.clone(), s2], 0, &HashMap::new(), &[], &[]);
+        let mut state = DedupState::default();
+        state.set_similar_groups(groups, 0);
+        assert_eq!(state.similar_groups.len(), 1);
+
+        state.prune_similar(&HashSet::from([s1.path.clone()]));
+        assert!(
+            state.similar_groups.is_empty(),
+            "删除成员后相似组必须整组剪枝"
+        );
+    }
+
+    #[test]
+    #[ignore = "perf: 100k 资产去重刷新成本；用 --ignored --nocapture 运行"]
+    fn exact_dedup_refresh_100k_cost() {
+        // 5 万组 × 2 张完全相同 = 10 万资产，覆盖“组数量最多”的最坏情况。
+        let mut assets = (0..100_000u32)
+            .map(|index| {
+                asset_with(
+                    &format!("C:/lib/{index:06}.png"),
+                    &format!("sha1-{:06}", index / 2),
+                    1,
+                    100,
+                    10,
+                    4,
+                    4,
+                    0,
+                )
+            })
+            .collect::<Vec<_>>();
+
+        let mut state = DedupState::default();
+        let mut full = Duration::MAX;
+        for _ in 0..3 {
+            let started = Instant::now();
+            state.rebuild_exact(&assets);
+            full = full.min(started.elapsed());
+        }
+        assert_eq!(state.groups.len(), 50_000);
+
+        // 小批次：5 个组各新增 1 个副本 + 5 个唯一新文件。
+        let mut touched = HashSet::new();
+        for group in 0..5u32 {
+            let path = format!("C:/lib/new-{group:02}.png");
+            assets.push(asset_with(
+                &path,
+                &format!("sha1-{:06}", group),
+                1,
+                100,
+                10,
+                4,
+                4,
+                0,
+            ));
+            touched.insert(PathBuf::from(path));
+        }
+        for index in 0..5u32 {
+            let path = format!("C:/lib/unique-{index:02}.png");
+            assets.push(asset_with(
+                &path,
+                &format!("unique-{index:02}"),
+                1,
+                100,
+                10,
+                4,
+                4,
+                0,
+            ));
+            touched.insert(PathBuf::from(path));
+        }
+        let mut incremental = Duration::MAX;
+        for _ in 0..3 {
+            let started = Instant::now();
+            state.apply_exact_changes(&assets, &touched, &HashSet::new());
+            incremental = incremental.min(started.elapsed());
+        }
+
+        eprintln!(
+            "100k assets / 50k exact groups: rebuild_exact(best of 3) = {full:?}; \
+             apply_exact_changes(10 paths, best of 3) = {incremental:?}"
+        );
+        assert_eq!(state.groups.len(), 50_000);
     }
 
     #[test]
