@@ -38,7 +38,7 @@ use kanalib_core::model::{
     default_category_thresholds, is_ffmpeg_only, normalize_tag_name,
 };
 use kanalib_core::backup;
-use kanalib_core::db::{MAX_SEARCH_PAGE, SearchPageRequest, SearchSort};
+use kanalib_core::db::{SearchPageRequest, SearchSort};
 use kanalib_core::diagnostics::{self, DiagnosticsContext};
 use kanalib_core::export;
 use kanalib_core::state::{AppState, CacheStats};

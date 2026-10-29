@@ -7,7 +7,17 @@ use crate::theme::*;
 
 pub(crate) fn friendly_media_error(message: &str) -> String {
     let text = message.to_lowercase();
-    if text.contains("avif")
+    if (text.contains("psd") || text.contains("photoshop"))
+        && (text.contains("ffmpeg")
+            || text.contains("unsupported")
+            || text.contains("unknown format")
+            || text.contains("decoder")
+            || text.contains("not supported"))
+    {
+        "PSD 需要 FFmpeg 解码；未检测到 FFmpeg 时只有哈希与尺寸，无法生成缩略图".to_string()
+    } else if text.contains("heic") || text.contains("heif") || text.contains("libheif") {
+        "HEIC/HEIF 未接入，当前版本不支持该格式".to_string()
+    } else if text.contains("avif")
         && (text.contains("unsupported")
             || text.contains("unknown format")
             || text.contains("not supported")
@@ -49,19 +59,39 @@ pub(crate) fn friendly_format_label(path: &Path) -> String {
         "qoi" => "QOI".to_string(),
         "exr" => "EXR".to_string(),
         "avif" => "AVIF".to_string(),
+        "psd" => "PSD".to_string(),
+        "heic" | "heif" => "HEIC/HEIF".to_string(),
+        "dng" | "cr2" | "cr3" | "nef" | "arw" | "raf" | "orf" | "rw2" | "pef" | "srw" | "x3f" => {
+            "RAW".to_string()
+        }
         "" => "未知格式".to_string(),
         other => other.to_uppercase(),
     }
 }
 
-/// 解码能力提示：只有 AVIF 需要 FFmpeg，其余格式走内置解码。
+/// 解码能力提示：AVIF/PSD 需要 FFmpeg；GIF/WebP 内置解码但动画只取首帧；
+/// HEIC/RAW 明确未接入，不写成“内置解码”。
 pub(crate) fn format_capability_note(path: &Path) -> String {
+    if crate::format::unsupported_format_note(path).is_some() {
+        return "未接入（当前版本不支持扫描/解码）".to_string();
+    }
+    let ext = path
+        .extension()
+        .map(|value| value.to_string_lossy().to_lowercase())
+        .unwrap_or_default();
     if is_ffmpeg_only(path) {
-        if kanalib_core::ffmpeg::available() {
+        let available = kanalib_core::ffmpeg::available();
+        let mut note = if available {
             "需要 FFmpeg 解码".to_string()
         } else {
             "需要 FFmpeg 解码 · 当前未检测到 FFmpeg".to_string()
+        };
+        if ext == "psd" {
+            note.push_str(" · 仅合成图");
         }
+        note
+    } else if crate::format::is_animation_container(path) {
+        "内置解码 · 动画仅首帧".to_string()
     } else {
         "内置解码".to_string()
     }
@@ -145,6 +175,9 @@ mod tests {
         assert_eq!(super::friendly_format_label(Path::new("a.TIFF")), "TIFF");
         assert_eq!(super::friendly_format_label(Path::new("b.avif")), "AVIF");
         assert_eq!(super::friendly_format_label(Path::new("c.qoi")), "QOI");
+        assert_eq!(super::friendly_format_label(Path::new("d.psd")), "PSD");
+        assert_eq!(super::friendly_format_label(Path::new("e.HEIC")), "HEIC/HEIF");
+        assert_eq!(super::friendly_format_label(Path::new("f.cr2")), "RAW");
         assert_eq!(super::friendly_format_label(Path::new("d.xyz")), "XYZ");
         assert_eq!(super::friendly_format_label(Path::new("noext")), "未知格式");
     }
@@ -172,6 +205,24 @@ mod tests {
         assert!(
             super::format_capability_note(Path::new("a.avif")).contains("需要 FFmpeg 解码")
         );
+        let psd = super::format_capability_note(Path::new("a.PSD"));
+        assert!(psd.contains("需要 FFmpeg 解码"), "{psd}");
+        assert!(psd.contains("仅合成图"), "{psd}");
+        let gif = super::format_capability_note(Path::new("a.gif"));
+        assert!(gif.contains("动画仅首帧"), "{gif}");
+        let heic = super::format_capability_note(Path::new("a.heic"));
+        assert!(heic.contains("未接入"), "{heic}");
+        assert!(!heic.contains("内置解码"), "{heic}");
+        let raw = super::format_capability_note(Path::new("a.nef"));
+        assert!(raw.contains("未接入"), "{raw}");
+    }
+
+    #[test]
+    fn friendly_media_error_covers_psd_and_heic() {
+        let psd = super::friendly_media_error("ffmpeg psd decoder failed: unsupported format");
+        assert!(psd.contains("PSD") && psd.contains("FFmpeg"), "{psd}");
+        let heic = super::friendly_media_error("libheif: no decoder for heic");
+        assert!(heic.contains("HEIC") && heic.contains("不支持"), "{heic}");
     }
 
 }
@@ -621,6 +672,17 @@ impl KanalibApp {
                 .on_click(move |_, _, _| {
                     open_path(&path_for_open);
                 });
+            // 动画不内置播放器：明确提供“系统应用播放”出口，不伪造逐帧能力。
+            let animation_open = crate::format::is_animation_container(&path);
+            let animation_path = path.clone();
+            let animation_button = animation_open.then(|| {
+                Button::new("inspector-open-animation", "用系统应用播放")
+                    .size(ControlSize::Sm)
+                    .icon(IconName::Play)
+                    .on_click(move |_, _, _| {
+                        open_path(&animation_path);
+                    })
+            });
             let this_quick = this.clone();
             let quick = Button::new("quick-view", "快速查看")
                 .size(ControlSize::Sm)
@@ -984,17 +1046,28 @@ impl KanalibApp {
                 .child(
                     div()
                         .text_xs()
-                        .text_color(if is_ffmpeg_only(&asset.path) {
-                            colors.warning
-                        } else {
-                            colors.subtle
-                        })
+                        .text_color(
+                            if is_ffmpeg_only(&asset.path)
+                                || crate::format::unsupported_format_note(&asset.path).is_some()
+                            {
+                                colors.warning
+                            } else {
+                                colors.subtle
+                            },
+                        )
                         .child(format!(
                             "格式 · {} · {}",
                             friendly_format_label(&asset.path),
                             format_capability_note(&asset.path)
                         )),
                 )
+                .children(crate::format::format_limits_note(&asset.path).map(|note| {
+                    div()
+                        .id("inspector-format-note")
+                        .text_xs()
+                        .text_color(colors.muted)
+                        .child(note)
+                }))
                 .child(album_section)
                 .children(exif_panel(asset, colors))
                 .child(div().text_xs().text_color(colors.subtle).child(
@@ -1005,6 +1078,18 @@ impl KanalibApp {
                             &blake3[..8.min(blake3.len())],
                             match asset.phash {
                                 Some(phash) => format!(" · pHash {phash:016x}"),
+                                None if crate::format::unsupported_format_note(&asset.path)
+                                    .is_some() =>
+                                {
+                                    " · pHash 未计算（该格式未接入）".to_string()
+                                }
+                                None if asset
+                                    .path
+                                    .extension()
+                                    .is_some_and(|ext| ext.eq_ignore_ascii_case("psd")) =>
+                                {
+                                    " · pHash 未计算（PSD 不参与相似去重）".to_string()
+                                }
                                 None => " · pHash 未计算（解码失败）".to_string(),
                             }
                         ),
@@ -1021,7 +1106,8 @@ impl KanalibApp {
                         .child(quick)
                         .child(find_similar)
                         .child(compare)
-                        .child(open),
+                        .child(open)
+                        .children(animation_button),
                 )
                 .child(
                     div()

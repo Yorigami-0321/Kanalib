@@ -1,6 +1,6 @@
 use crate::*;
 use crate::format::*;
-use crate::search::{SearchBundle, query_wants_duplicates};
+use crate::search::{SearchBundle, query_wants_duplicates, search_timing_enabled};
 use crate::settings::parse_optional_bytes;
 use crate::sidebar::{
     SIDEBAR_DEFAULT_WIDTH, SIDEBAR_MAX_WIDTH, SIDEBAR_MIN_WIDTH, SIDEBAR_SECTIONS, source_label,
@@ -67,6 +67,14 @@ pub(crate) struct ViewCache {
     pub(crate) visible_indices: Arc<Vec<usize>>,
 }
 
+/// 一次搜索的端到端计时探针；只在 `KANALIB_SEARCH_TIMING` 下创建。
+pub(crate) struct SearchFrameProbe {
+    input_at: Instant,
+    visible_ms: f64,
+    run_ms: f64,
+    hits: usize,
+}
+
 /// 合成器帧计时探针。`KANALIB_FRAME_METRICS=<秒>` 开启：导入结束后每帧请求一次动画帧，
 /// 到时把 gpui profiler 的直方图汇总成一行 JSON。
 #[cfg(feature = "frame-profiler")]
@@ -100,6 +108,10 @@ pub struct KanalibApp {
     pub(crate) search_pending: String,
     pub(crate) search_bundle: Option<Arc<SearchBundle>>,
     pub(crate) search_debounce_task: Option<Task<()>>,
+    /// 输入文本变化后第一次排入防抖的时刻；端到端计时用。
+    pub(crate) search_queued_at: Option<Instant>,
+    /// 搜索可见索引重建后的下一帧探针；只读计时，不参与渲染结果。
+    pub(crate) search_frame_probe: Option<SearchFrameProbe>,
     /// 已排入一次“数据变了要重查”的刷新；避免每次渲染都重置防抖计时。
     pub(crate) search_refresh_queued: bool,
     pub(crate) search_running: bool,
@@ -131,6 +143,8 @@ pub struct KanalibApp {
     pub(crate) source_statuses: Vec<SourceScanStatus>,
     pub(crate) last_backup: Option<String>,
     pub(crate) backup_running: bool,
+    /// 已暂存、等待重启应用的恢复请求（启动/恢复后同步一次，避免底栏每帧读库）。
+    pub(crate) pending_restore_hint: Option<String>,
     pub(crate) diagnostic_snapshot: Option<DiagnosticSnapshot>,
     pub(crate) refresh_task: Option<Task<()>>,
     pub(crate) thumb_cache: Entity<ThumbCache>,
@@ -551,6 +565,26 @@ impl Render for KanalibApp {
                     self.view.visible_indices.len(),
                     self.sort
                 );
+            }
+            // F-012 端到端：输入排入防抖 → 查询完成并应用到可见索引（本帧）。
+            // 最后一段“实际呈现”由下一帧回调记录；不参与渲染逻辑。
+            if search_timing_enabled()
+                && let Some(bundle) = bundle.as_ref()
+            {
+                let visible_ms = bundle.input_at.elapsed().as_secs_f64() * 1000.0;
+                log::info!(
+                    "search timing: ui_input_to_visible_ms={visible_ms:.1} \
+                     run_search_ms={:.1} hits={} sort={:?}",
+                    bundle.run_ms,
+                    self.view.visible_indices.len(),
+                    self.sort
+                );
+                self.search_frame_probe = Some(SearchFrameProbe {
+                    input_at: bundle.input_at,
+                    visible_ms,
+                    run_ms: bundle.run_ms,
+                    hits: self.view.visible_indices.len(),
+                });
             }
         }
         let visible_indices = self.view.visible_indices.clone();
@@ -1041,6 +1075,17 @@ impl Render for KanalibApp {
                     )
                     .icon(IconName::Ban),
                     Command::new("library:open-ignores", "查看忽略列表").icon(IconName::EyeOff),
+                ],
+            )
+            .group(
+                "备份与恢复",
+                [
+                    Command::new("backup:now", "立即备份数据库").icon(IconName::Database),
+                    Command::new("backup:restore", "恢复数据库备份…").icon(IconName::History),
+                    Command::new("backup:cancel-pending", "取消待恢复备份")
+                        .icon(IconName::RotateCcw),
+                    Command::new("backup:settings", "打开设置 · 数据库备份")
+                        .icon(IconName::SlidersHorizontal),
                 ],
             )
             .group(
@@ -1693,6 +1738,18 @@ impl Render for KanalibApp {
                 render_started.elapsed().as_secs_f64() * 1000.0
             );
         }
+        if let Some(probe) = self.search_frame_probe.take() {
+            window.on_next_frame(move |_, _| {
+                log::info!(
+                    "search timing: ui_input_to_frame_ms={:.1} visible_ms={:.1} \
+                     run_search_ms={:.1} hits={}",
+                    probe.input_at.elapsed().as_secs_f64() * 1000.0,
+                    probe.visible_ms,
+                    probe.run_ms,
+                    probe.hits
+                );
+            });
+        }
         // 整棵树共用一个有界图片缓存：子树里所有 img 都走它，不再进无上限的全局 asset cache。
         image_cache(self.thumb_cache.clone())
             .size_full()
@@ -2152,6 +2209,8 @@ impl KanalibApp {
             search_pending: String::new(),
             search_bundle: None,
             search_debounce_task: None,
+            search_queued_at: None,
+            search_frame_probe: None,
             search_refresh_queued: false,
             search_running: false,
             last_scanning: false,
@@ -2182,6 +2241,7 @@ impl KanalibApp {
             source_statuses,
             last_backup: None,
             backup_running: false,
+            pending_restore_hint: None,
             diagnostic_snapshot: None,
             refresh_task: None,
             cache_task: None,
@@ -2288,6 +2348,9 @@ impl KanalibApp {
 
     pub fn start(&mut self, cx: &mut Context<Self>) {
         self.sync_source_statuses();
+        // 启动时若有上次暂存但尚未应用的恢复请求（通常会在打开数据库前应用），
+        // 给出持久提示与设置页取消入口；正常启动这里为 None。
+        self.refresh_pending_restore_hint(cx);
         if self.screen == Screen::Settings {
             self.refresh_diagnostics();
             self.refresh_tag_settings(cx);
@@ -2633,6 +2696,31 @@ impl KanalibApp {
         self.refresh_diagnostics();
         self.refresh_tag_settings(cx);
         self.refresh_tag_reviews(cx);
+    }
+
+    /// 同步“已暂存、等待重启”的恢复请求到内存提示；只在启动/恢复/取消时调用，
+    /// 不放进每帧渲染（`backup_status` 会打开一次数据库）。
+    pub(crate) fn refresh_pending_restore_hint(&mut self, cx: &mut Context<Self>) {
+        match self.state.backup_status().pending_restore {
+            Some(pending) => {
+                let message = format!(
+                    "待恢复备份：{} · 重启 Kanalib 后生效；可在设置页「数据库备份」取消",
+                    pending.candidate.display()
+                );
+                let changed = self.pending_restore_hint.as_deref() != Some(message.as_str());
+                self.pending_restore_hint = Some(message.clone());
+                if changed {
+                    self.settings_notice = Some(message.clone());
+                    push_toast(
+                        &self.toaster,
+                        cx,
+                        "检测到待恢复备份：重启后生效，可在设置页取消",
+                        Severity::Warning,
+                    );
+                }
+            }
+            None => self.pending_restore_hint = None,
+        }
     }
 
     /// 数据目录（数据库所在目录）。
@@ -3256,6 +3344,16 @@ impl KanalibApp {
             "library:open-ignores" => {
                 self.open_settings(cx);
                 self.settings_notice = Some("忽略列表位于设置页底部「忽略列表」".to_string());
+                cx.notify();
+            }
+            // F-061：命令面板接入备份/恢复；具体实现与设置页共用同一套方法。
+            "backup:now" => self.start_backup(cx),
+            "backup:restore" => self.pick_restore_backup(cx),
+            "backup:cancel-pending" => self.cancel_pending_restore(cx),
+            "backup:settings" => {
+                self.open_settings(cx);
+                self.settings_notice =
+                    Some("数据库备份、自动备份计划与恢复入口位于「数据库备份」".to_string());
                 cx.notify();
             }
             "org:new-album" => {
