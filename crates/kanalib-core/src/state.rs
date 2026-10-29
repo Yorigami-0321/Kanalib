@@ -1059,17 +1059,36 @@ impl AppState {
         self.ensure_watch_retry_loop();
     }
 
-    /// 为尚未挂上监听的来源补建 watcher；已存在的 watcher 原样保留。
+    /// 为尚未挂上监听的来源补建 watcher；已存在且状态正常的 watcher 原样保留。
+    /// 运行中断线/监听报错的来源在目录恢复可访问后重建 watcher，避免一直持有失效句柄。
     fn ensure_watchers(&self) {
         let Some(state) = self.self_ref.lock().unwrap().clone().upgrade() else {
             return;
         };
-        let roots = self.shared.lock().unwrap().roots.clone();
+        let (roots, retry_roots) = {
+            let shared = self.shared.lock().unwrap();
+            let retry_roots = shared
+                .source_statuses
+                .iter()
+                .filter(|(_, status)| {
+                    status
+                        .error
+                        .as_deref()
+                        .is_some_and(|error| error.contains("监听") || error.contains("离线"))
+                })
+                .map(|(root, _)| root.clone())
+                .collect::<HashSet<_>>();
+            (shared.roots.clone(), retry_roots)
+        };
         let mut watchers = self.watchers.lock().unwrap();
         watchers.retain(|root, _| roots.contains(root));
         for root in roots {
             if watchers.contains_key(&root) {
-                continue;
+                if !(retry_roots.contains(&root) && root.is_dir()) {
+                    continue;
+                }
+                // 来源断线重连或监听报错：丢弃旧句柄，下面重新挂监听。
+                watchers.remove(&root);
             }
             match watch::spawn(&state, root.clone()) {
                 Ok(handle) => {
@@ -5473,6 +5492,26 @@ mod tests {
         (base, lib, state)
     }
 
+    /// 精确重复组的成员路径（按成员路径排序，便于断言无过期路径）。
+    fn exact_group_paths(state: &Arc<AppState>) -> Vec<(String, Vec<PathBuf>)> {
+        let shared = state.shared.lock().unwrap();
+        shared
+            .dedup
+            .groups
+            .iter()
+            .map(|group| {
+                (
+                    group.key.clone(),
+                    group
+                        .assets
+                        .iter()
+                        .map(|asset| asset.path.clone())
+                        .collect(),
+                )
+            })
+            .collect()
+    }
+
     #[test]
     fn saved_searches_and_collections_stay_in_sync_with_shared_state() {
         use crate::model::DuplicateNameError;
@@ -5606,9 +5645,84 @@ mod tests {
         let status = state.source_statuses().remove(0);
         assert!(status.online);
         assert!(status.error.is_none());
+
+        // 恢复的不只是状态：新事件必须真的被监听线程接收。
+        let recovered = lib.join("recovered.png");
+        write_test_image(&recovered, [7, 7, 7]);
+        let deadline = Instant::now() + Duration::from_secs(30);
+        loop {
+            if state
+                .shared
+                .lock()
+                .unwrap()
+                .assets
+                .read()
+                .unwrap()
+                .iter()
+                .any(|asset| asset.path == recovered)
+            {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "目录恢复后监听未自动恢复：{}",
+                lib.display()
+            );
+            std::thread::sleep(Duration::from_millis(80));
+        }
+
         state.stop_watching();
         drop(state);
-        std::fs::remove_dir_all(&base).unwrap();
+        cleanup_dir(&base);
+    }
+
+    #[test]
+    fn runtime_watch_error_rebuilds_watcher_when_source_is_accessible() {
+        let base = temp_dir("watch-runtime-recover");
+        let lib = base.join("lib");
+        std::fs::create_dir_all(&lib).unwrap();
+        let state = AppState::open_for_test_with_watch(base.join("data"), Some(lib.clone()));
+
+        // 运行中监听报错（网络盘断线等）：重试线程应丢弃旧句柄并重建 watcher。
+        crate::watch::mark_source_error(
+            &state,
+            &lib,
+            "文件监听错误：模拟断线；请手动重新扫描该来源".into(),
+        );
+        assert!(state.source_statuses().remove(0).error.is_some());
+        state.retry_watchers_once();
+        let status = state.source_statuses().remove(0);
+        assert!(status.online);
+        assert!(status.error.is_none(), "恢复后应清除监听错误");
+
+        // 重建后的监听仍能接收真实事件。
+        let recovered = lib.join("after-recover.png");
+        write_test_image(&recovered, [9, 8, 7]);
+        let deadline = Instant::now() + Duration::from_secs(30);
+        loop {
+            if state
+                .shared
+                .lock()
+                .unwrap()
+                .assets
+                .read()
+                .unwrap()
+                .iter()
+                .any(|asset| asset.path == recovered)
+            {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "重建后的监听未接收事件：{}",
+                lib.display()
+            );
+            std::thread::sleep(Duration::from_millis(80));
+        }
+
+        state.stop_watching();
+        drop(state);
+        cleanup_dir(&base);
     }
 
     #[test]
@@ -6190,6 +6304,223 @@ mod tests {
         );
         assert_eq!(state.source_statuses()[0].asset_count, 1);
         assert!(base.join("lib").join("b.png").exists());
+        std::fs::remove_dir_all(&base).unwrap();
+    }
+
+    #[test]
+    fn watch_batch_refreshes_exact_groups_once_per_batch() {
+        let (base, lib, state) = test_state("watch-dedup");
+        let a = lib.join("a.png");
+        write_test_image(&a, [12, 34, 56]);
+        state.rescan_root_blocking(lib.clone(), true).unwrap();
+        assert!(exact_group_paths(&state).is_empty());
+
+        // 新增一个与已有文件完全相同的内容：批次结束立即成组。
+        let b = lib.join("b.png");
+        std::fs::copy(&a, &b).unwrap();
+        let before = state.shared.lock().unwrap().dedup.exact_refresh_count;
+        crate::watch::handle_watch_batch(&state, &lib, vec![b.clone()]);
+        let groups = exact_group_paths(&state);
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].1, vec![a.clone(), b.clone()]);
+        let sha1 = groups[0].0.clone();
+        assert!(!sha1.is_empty());
+        assert_eq!(
+            state.shared.lock().unwrap().dedup.exact_refresh_count,
+            before + 1,
+            "单个新增批次只刷新一次"
+        );
+
+        // 同一批新增两张：仍然只刷新一次，不按文件重建。
+        let c = lib.join("c.png");
+        let d = lib.join("d.png");
+        std::fs::copy(&a, &c).unwrap();
+        std::fs::copy(&a, &d).unwrap();
+        let before = state.shared.lock().unwrap().dedup.exact_refresh_count;
+        crate::watch::handle_watch_batch(&state, &lib, vec![c.clone(), d.clone()]);
+        assert_eq!(
+            exact_group_paths(&state),
+            vec![(
+                sha1.clone(),
+                vec![a.clone(), b.clone(), c.clone(), d.clone()]
+            )]
+        );
+        assert_eq!(
+            state.shared.lock().unwrap().dedup.exact_refresh_count,
+            before + 1,
+            "多文件批次也只刷新一次"
+        );
+
+        // 删除一张：组立即收缩，无过期成员。
+        std::fs::remove_file(&c).unwrap();
+        let before = state.shared.lock().unwrap().dedup.exact_refresh_count;
+        crate::watch::handle_watch_batch(&state, &lib, vec![c.clone()]);
+        assert_eq!(
+            exact_group_paths(&state),
+            vec![(sha1.clone(), vec![a.clone(), b.clone(), d.clone()])]
+        );
+        assert_eq!(
+            state.shared.lock().unwrap().dedup.exact_refresh_count,
+            before + 1
+        );
+
+        // 再删两张：只剩一个成员，过期组立即消失。
+        std::fs::remove_file(&b).unwrap();
+        std::fs::remove_file(&d).unwrap();
+        crate::watch::handle_watch_batch(&state, &lib, vec![b.clone(), d.clone()]);
+        assert!(exact_group_paths(&state).is_empty(), "不能残留过期去重组");
+        assert_eq!(state.shared.lock().unwrap().counts.total(), 1);
+        std::fs::remove_dir_all(&base).unwrap();
+    }
+
+    #[test]
+    fn watch_batch_rename_updates_exact_group_paths_without_stale_member() {
+        let (base, lib, state) = test_state("watch-dedup-rename");
+        let a = lib.join("a.png");
+        let b = lib.join("b.png");
+        write_test_image(&a, [3, 4, 5]);
+        std::fs::copy(&a, &b).unwrap();
+        state.rescan_root_blocking(lib.clone(), true).unwrap();
+        let groups = exact_group_paths(&state);
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].1, vec![a.clone(), b.clone()]);
+
+        // 只把新路径交给监听批次：靠 SHA1 + 旧路径缺失恢复同一记录。
+        let renamed = lib.join("renamed.png");
+        std::fs::rename(&b, &renamed).unwrap();
+        crate::watch::handle_watch_batch(&state, &lib, vec![renamed.clone()]);
+        assert_eq!(
+            exact_group_paths(&state),
+            vec![(groups[0].0.clone(), vec![a.clone(), renamed.clone()])],
+            "重命名后旧路径不得残留在去重组"
+        );
+        assert_eq!(state.shared.lock().unwrap().counts.total(), 2);
+        std::fs::remove_dir_all(&base).unwrap();
+    }
+
+    #[test]
+    fn watch_batch_cross_source_move_updates_exact_group_paths() {
+        let (base, lib, state) = test_state("watch-dedup-cross-source");
+        let second = base.join("lib2");
+        std::fs::create_dir_all(&second).unwrap();
+        state.add_roots(vec![second.clone()]).unwrap();
+        let a = lib.join("a.png");
+        let b = lib.join("b.png");
+        write_test_image(&a, [21, 22, 23]);
+        std::fs::copy(&a, &b).unwrap();
+        state.rescan_root_blocking(lib.clone(), true).unwrap();
+        let groups = exact_group_paths(&state);
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].1, vec![a.clone(), b.clone()]);
+
+        let moved = second.join("moved.png");
+        std::fs::rename(&a, &moved).unwrap();
+        crate::watch::handle_watch_batch(&state, &second, vec![moved.clone()]);
+        assert_eq!(
+            exact_group_paths(&state),
+            vec![(groups[0].0.clone(), vec![b.clone(), moved.clone()])],
+            "跨来源移动后组内只保留新路径"
+        );
+        {
+            let shared = state.shared.lock().unwrap();
+            let assets = shared.assets.read().unwrap();
+            assert_eq!(assets.len(), 2, "跨来源移动不能复制记录");
+            assert!(assets.iter().any(|asset| asset.path == moved));
+            assert!(!assets.iter().any(|asset| asset.path == a));
+        }
+        std::fs::remove_dir_all(&base).unwrap();
+    }
+
+    #[test]
+    fn watch_batch_keeps_records_and_groups_when_source_offline() {
+        let (base, lib, state) = test_state("watch-dedup-offline");
+        let a = lib.join("a.png");
+        let b = lib.join("b.png");
+        write_test_image(&a, [31, 32, 33]);
+        std::fs::copy(&a, &b).unwrap();
+        state.rescan_root_blocking(lib.clone(), true).unwrap();
+        let groups = exact_group_paths(&state);
+        assert_eq!(groups.len(), 1);
+
+        // 模拟网络盘/OneDrive 离线：整个来源目录不可见，事件只剩“缺失”。
+        let offline = base.join("lib-offline");
+        std::fs::rename(&lib, &offline).unwrap();
+        let before = state.shared.lock().unwrap().dedup.exact_refresh_count;
+        crate::watch::handle_watch_batch(&state, &lib, vec![a.clone(), b.clone()]);
+        {
+            let shared = state.shared.lock().unwrap();
+            assert_eq!(
+                shared.dedup.exact_refresh_count, before,
+                "离线批次不得重建去重组"
+            );
+            assert_eq!(
+                shared.assets.read().unwrap().len(),
+                2,
+                "来源离线/不可访问时绝不删除记录"
+            );
+            assert!(!shared.source_statuses[&lib].online);
+            assert!(
+                shared.source_statuses[&lib]
+                    .error
+                    .as_deref()
+                    .is_some_and(|error| error.contains("离线"))
+            );
+            assert!(
+                shared
+                    .error
+                    .as_deref()
+                    .is_some_and(|error| error.contains("离线"))
+            );
+        }
+        assert_eq!(exact_group_paths(&state), groups);
+
+        // 目录恢复后下一批次把来源标回在线，记录与组保持不变。
+        std::fs::rename(&offline, &lib).unwrap();
+        crate::watch::handle_watch_batch(&state, &lib, vec![a.clone()]);
+        {
+            let shared = state.shared.lock().unwrap();
+            assert!(shared.source_statuses[&lib].online);
+            assert!(shared.source_statuses[&lib].error.is_none());
+            assert!(shared.error.is_none());
+        }
+        assert_eq!(exact_group_paths(&state), groups);
+        std::fs::remove_dir_all(&base).unwrap();
+    }
+
+    #[test]
+    fn directory_rename_updates_exact_group_paths() {
+        let (base, lib, state) = test_state("watch-dedup-dir-rename");
+        let sub = lib.join("sub");
+        std::fs::create_dir_all(&sub).unwrap();
+        let a = sub.join("a.png");
+        let b = sub.join("b.png");
+        write_test_image(&a, [41, 42, 43]);
+        std::fs::copy(&a, &b).unwrap();
+        state.rescan_root_blocking(lib.clone(), true).unwrap();
+        assert_eq!(exact_group_paths(&state).len(), 1);
+
+        // 平台补发文件级事件时，同一批次内两张新路径各自接管旧记录。
+        let sub2 = lib.join("sub2");
+        std::fs::rename(&sub, &sub2).unwrap();
+        let moved_a = sub2.join("a.png");
+        let moved_b = sub2.join("b.png");
+        crate::watch::handle_watch_batch(
+            &state,
+            &lib,
+            vec![moved_a.clone(), moved_b.clone()],
+        );
+        let groups = exact_group_paths(&state);
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].1, vec![moved_a.clone(), moved_b.clone()]);
+
+        // 平台只发目录事件时监听层忽略，下一次扫描对账恢复路径且组不留旧路径。
+        let sub3 = lib.join("sub3");
+        std::fs::rename(&sub2, &sub3).unwrap();
+        state.rescan_root_blocking(lib.clone(), true).unwrap();
+        assert_eq!(
+            exact_group_paths(&state)[0].1,
+            vec![sub3.join("a.png"), sub3.join("b.png")]
+        );
         std::fs::remove_dir_all(&base).unwrap();
     }
 
