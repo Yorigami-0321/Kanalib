@@ -91,9 +91,9 @@
 | E2 可选小项 | 未开工 | — |
 | F-035/F-064/F-065 独立可选线 | 未开工 | — |
 
-- **最终验证**：`cargo test --workspace` core **149 passed / 14 ignored**、UI **36 passed**、bin **3**；`cargo check --workspace` 无代码警告；`scripts/check_backlog_docs.sh` 无新增矛盾。
+- **最终验证**：`cargo test --workspace` core **150 passed / 15 ignored**、UI **36 passed**、bin **3**；`cargo check --workspace` 无代码警告；`scripts/check_backlog_docs.sh` 无新增矛盾。
 - **归档**：Task 0 验收证据 `.kanalib/r4_task0/`；E1 备份/格式截图与搜索日志 `.kanalib/r4_e1/`。
-- **剩余边界**：F-012 的 150ms 目标与 `synthetic_0004` 异常、F-030 真实网络盘、F-033 HEIC/RAW、F-040 视频、F-036 真实拖放、F-003 Ctrl 多选均未完成/未实测；F-039 多实例互斥仍是 F-061 恢复独占的前提。
+- **剩余边界**：F-012 的 150ms 目标（`synthetic_0004` 窄 FTS 异常已修复，核心 3.5ms、UI page 55ms/visible 360ms；真实 10 万缩略图库仍待实测）、F-030 真实网络盘、F-033 HEIC/RAW、F-040 视频、F-036 真实拖放、F-003 Ctrl 多选均未完成/未实测；F-039 多实例互斥仍是 F-061 恢复独占的前提。
 
 ## 任务 0 执行结果（2026-10-30）
 
@@ -111,10 +111,10 @@
 
 - **F-061 备份/恢复 UI**：命令面板新增「备份与恢复」（立即备份、恢复备份…、取消待恢复、打开设置·数据库备份）；启动时 `pending_restore` 通过 `pending_restore_hint` 提示“重启后生效，可在设置页取消”，不自动替换运行中的库；设置页备份计划/保留/恢复/损坏候选拒绝均已截图。恢复仍走“校验 + safety backup + 下次启动应用”，运行期不换库。
 - **F-033 格式 UI**：PSD 检查器显示「需要 FFmpeg 解码 · 仅合成图」及图层/Alpha/pHash/`.psb` 边界；GIF/WebP 显示「内置解码 · 动画仅首帧」，查看器提供「用系统应用播放」出口，未实现应用内逐帧播放；HEIC/RAW 仍不支持。
-- **F-012 搜索 UI**：单次 SQL 探测上限从 10000 降为 `UI_SEARCH_PAGE_LIMIT=512`（超过回退内存过滤，结果语义不变）；`KANALIB_SEARCH_TIMING` 记录防抖/page/run/visible/frame。100k 缺图最坏库上 `synthetic` 热查 0.93s、`sky` 0.66s（原约 1.6/1.45s），但仍未达 150ms；`synthetic_0004` 10 命中 14s 异常未定位。完整表见 [pending/search-organization.md](pending/search-organization.md)。
-- **验证**：`cargo test --workspace` core **149 passed / 14 ignored**、UI **36 passed**、bin **3**；`cargo check --workspace` 无警告（仅 vendor profile 提示）。
+- **F-012 搜索 UI**：单次 SQL 探测上限从 10000 降为 `UI_SEARCH_PAGE_LIMIT=512`（超过回退内存过滤，结果语义不变）；`KANALIB_SEARCH_TIMING` 记录防抖/page/run/visible/frame。100k 缺图最坏库上 `synthetic` 热查 0.93s、`sky` 0.66s（原约 1.6/1.45s），但仍未达 150ms。`synthetic_0004` 10 命中 14s 异常已定位：`search_extent` 普通 `JOIN` 在 SQLite 3.46 下逐行探 FTS；改 `CROSS JOIN` 后核心 `search_page` 3.5ms、UI page 55ms/visible 360ms，回归测试 `fts_extent_query_plan_prefers_fts_driver`。完整表见 [pending/search-organization.md](pending/search-organization.md)。
+- **验证**：`cargo test --workspace` core **150 passed / 15 ignored**、UI **36 passed**、bin **3**；`cargo check --workspace` 无警告（仅 vendor profile 提示）。
 - **截图**：`.kanalib/r4_e1/screens/settings-backup-section.png`、`settings-backup-plan-enabled.png`、`settings-backup-now.png`、`restore-corrupt-failure.png`、`psd-inspector.png`、`gif-inspector.png`、`gif-viewer.png`；搜索日志 `.kanalib/r4_e1/logs/search100k-limit512c.log`。
-- **未完成边界**：应用内动画逐帧播放、100k 真实缩略图库的键入延迟、`synthetic_0004` 异常定位、备份大库进度/VACUUM、真实 OneDrive/网络盘事件语义、F-036 真实拖放与 F-003 Ctrl 多选仍待手动验收。
+- **未完成边界**：应用内动画逐帧播放、100k 真实缩略图库的键入延迟、备份大库进度/VACUUM、真实 OneDrive/网络盘事件语义、F-036 真实拖放与 F-003 Ctrl 多选仍待手动验收。
 
 ## 第五轮预览（不在本轮）
 

@@ -3091,6 +3091,35 @@ impl Db {
         })
     }
 
+    /// 构造 FTS extent 探测 SQL，返回未追加 LIMIT 参数的语句与参数。
+    ///
+    /// 必须固定 FTS 为外表（CROSS JOIN）。普通 JOIN 在窄 FTS 结果（如 10
+    /// 命中）时，SQLite 3.46 可能选择扫 folder 索引并逐行探 FTS，10 万库会
+    /// 退化到十几秒；CROSS JOIN 与 `fts_has_rows` 一样强制 FTS 驱动。
+    fn fts_extent_query(
+        &self,
+        folders: &[String],
+        request: &SearchPageRequest<'_>,
+        parts: &SearchQueryParts<'_>,
+        fts_query: &str,
+    ) -> Result<(String, Vec<Value>)> {
+        let external = self.build_search_sql_with(
+            folders,
+            request,
+            parts,
+            FtsPlacement::External,
+            Some(fts_query),
+        )?;
+        let sql = format!(
+            "SELECT 1 FROM assets_fts CROSS JOIN assets ON assets.id = assets_fts.rowid
+             WHERE assets_fts MATCH ? AND {} LIMIT ?",
+            external.where_sql
+        );
+        let mut params = vec![Value::Text(fts_query.to_string())];
+        params.extend(external.where_params.iter().cloned());
+        Ok((sql, params))
+    }
+
     /// 只探测“是否为空”和“是否超过阈值”，不排序、不取全量。
     ///
     /// 有 FTS 命中条件时让 FTS 表驱动：命中很多时取满阈值就停，不必像
@@ -3106,20 +3135,8 @@ impl Db {
         hint: Option<&'static str>,
     ) -> Result<(usize, bool)> {
         if let Some(fts_query) = built.fts_query.clone() {
-            let external = self.build_search_sql_with(
-                folders,
-                request,
-                parts,
-                FtsPlacement::External,
-                Some(&fts_query),
-            )?;
-            let sql = format!(
-                "SELECT 1 FROM assets_fts JOIN assets ON assets.id = assets_fts.rowid
-                 WHERE assets_fts MATCH ? AND {} LIMIT ?",
-                external.where_sql
-            );
-            let mut params = vec![Value::Text(fts_query)];
-            params.extend(external.where_params.iter().cloned());
+            let (sql, mut params) =
+                self.fts_extent_query(folders, request, parts, &fts_query)?;
             params.push(Value::Integer(threshold as i64 + 1));
             let mut statement = self.conn.prepare(&sql)?;
             let rows = statement.query_map(rusqlite::params_from_iter(params.iter()), |row| {
@@ -6653,6 +6670,40 @@ mod tests {
         let _ = fs::remove_dir_all(&root);
     }
 
+    #[test]
+    fn fts_extent_query_plan_prefers_fts_driver() {
+        let (root, roots, db) = broad_search_fixture(320);
+        let filter = Filter::All;
+        let query = SearchQuery::parse("omega");
+        let request = SearchPageRequest {
+            filter: &filter,
+            query: &query,
+            sort: SearchSort::Name,
+            ascending: true,
+            limit: 512,
+            cursor: None,
+            duplicate_paths: None,
+            include_total: false,
+        };
+        let parts = query.parts();
+        let built = db.build_search_sql(&roots, &request, &parts).unwrap();
+        let fts = built.fts_query.clone().expect("omega should use FTS");
+        let (sql, mut params) = db
+            .fts_extent_query(&roots, &request, &parts, &fts)
+            .unwrap();
+        params.push(Value::Integer(4097));
+        let plan = explain_with(&db, &sql, &params);
+        assert!(
+            plan.iter().any(|line| line.contains("SCAN assets_fts")),
+            "extent should drive from FTS: {plan:?}"
+        );
+        assert!(
+            !plan.iter().any(|line| line.contains("idx_assets_folder")),
+            "extent must not scan folder index per asset: {plan:?}"
+        );
+        let _ = fs::remove_dir_all(&root);
+    }
+
     fn asset_index_names(db: &Db) -> HashSet<String> {
         let mut statement = db
             .conn
@@ -7054,6 +7105,87 @@ mod tests {
         );
         drop(db);
         let _ = fs::remove_dir_all(&temp);
+    }
+
+    #[test]
+    #[ignore = "single-query open/search probe; KANALIB_PROBE_DB"]
+    fn probe_open_and_search_one_query() {
+        let Some(path) = std::env::var_os("KANALIB_PROBE_DB").map(PathBuf::from) else {
+            return;
+        };
+        let text = std::env::var("KANALIB_PROBE_QUERY")
+            .unwrap_or_else(|_| "synthetic_0004".to_string());
+        let limit = std::env::var("KANALIB_PROBE_LIMIT")
+            .ok()
+            .and_then(|value| value.parse::<usize>().ok())
+            .unwrap_or(512);
+        let folder = std::env::var("KANALIB_PROBE_FOLDER")
+            .unwrap_or_else(|_| "C:\\bench".to_string());
+        let started = std::time::Instant::now();
+        let db = Db::open(&path).unwrap();
+        eprintln!("probe open={:?}", started.elapsed());
+        let folders = vec![folder];
+        let filter = Filter::All;
+        let query = SearchQuery::parse(&text);
+        let request = SearchPageRequest {
+            filter: &filter,
+            query: &query,
+            sort: SearchSort::Name,
+            ascending: true,
+            limit,
+            cursor: None,
+            duplicate_paths: None,
+            include_total: false,
+        };
+        let parts = query.parts();
+        let started = std::time::Instant::now();
+        let built = db
+            .build_search_sql(&folders, &request, &parts)
+            .unwrap();
+        eprintln!("probe build={:?}", started.elapsed());
+        let started = std::time::Instant::now();
+        let extent = db
+            .search_extent(&folders, &request, &parts, &built, limit * 8, None)
+            .unwrap();
+        eprintln!("probe extent={:?} {:?}", started.elapsed(), extent);
+        let started = std::time::Instant::now();
+        let mut statement = db.conn.prepare(&built.page_sql()).unwrap();
+        let mut params = built.where_params.clone();
+        params.extend(built.keyset_params.iter().cloned());
+        params.push(Value::Integer(limit as i64 + 1));
+        let rows = statement
+            .query_map(rusqlite::params_from_iter(params.iter()), |row| {
+                row.get::<_, String>(0)
+            })
+            .unwrap();
+        let mut count = 0;
+        for row in rows {
+            let _ = row.unwrap();
+            count += 1;
+        }
+        eprintln!("probe page_exec={:?} rows={count}", started.elapsed());
+        let started = std::time::Instant::now();
+        let page = db.search_page(&folders, request.clone()).unwrap();
+        eprintln!(
+            "probe search_page={:?} limit={limit} rows={}",
+            started.elapsed(),
+            page.paths.len()
+        );
+        eprintln!("probe sql={}", built.page_sql());
+        let mut statement = db
+            .conn
+            .prepare(&format!("EXPLAIN QUERY PLAN {}", built.page_sql()))
+            .unwrap();
+        let mut plan_params = built.where_params.clone();
+        plan_params.push(Value::Integer(limit as i64 + 1));
+        let rows = statement
+            .query_map(rusqlite::params_from_iter(plan_params.iter()), |row| {
+                row.get::<_, String>(3)
+            })
+            .unwrap();
+        for row in rows {
+            eprintln!("probe plan {:?}", row.unwrap());
+        }
     }
 
     #[test]
