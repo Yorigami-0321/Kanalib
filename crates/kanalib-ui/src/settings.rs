@@ -733,11 +733,19 @@ impl KanalibApp {
                             "备份完成：{}",
                             report.destination.display()
                         ));
+                        push_toast(
+                            &app.toaster,
+                            cx,
+                            format!("备份完成：{}", report.destination.display()),
+                            Severity::Success,
+                        );
                         app.refresh_diagnostics();
                     }
                     Err(error) => {
-                        app.last_backup = Some(format!("最近备份失败：{error:#}"));
-                        app.settings_notice = Some(format!("备份失败：{error:#}"));
+                        let message = format!("最近备份失败：{error:#}");
+                        app.last_backup = Some(message.clone());
+                        app.settings_notice = Some(message.clone());
+                        push_toast(&app.toaster, cx, message, Severity::Danger);
                     }
                 }
                 cx.notify();
@@ -902,17 +910,50 @@ impl KanalibApp {
                         app.settings_notice = Some(
                             "备份校验通过；关闭并重新启动 Kanalib 后应用恢复。".to_string(),
                         );
+                        push_toast(
+                            &app.toaster,
+                            cx,
+                            "备份校验通过：重启 Kanalib 后应用恢复",
+                            Severity::Warning,
+                        );
+                        app.refresh_pending_restore_hint(cx);
                     }
                     Err(error) => {
                         let message = format!("恢复失败：{error:#}");
                         app.last_backup = Some(message.clone());
-                        app.settings_notice = Some(message);
+                        app.settings_notice = Some(message.clone());
+                        push_toast(&app.toaster, cx, message, Severity::Danger);
                     }
                 }
                 cx.notify();
             });
         })
         .detach();
+        cx.notify();
+    }
+
+    /// 取消已暂存、等待重启的恢复请求；当前库不受影响，下次启动不再替换。
+    pub(crate) fn cancel_pending_restore(&mut self, cx: &mut Context<Self>) {
+        let data_dir = self.data_dir();
+        match backup::discard_pending_restore(&data_dir) {
+            Ok(true) => {
+                let message = "已取消待恢复备份；当前数据库保持不变，下次启动不会替换".to_string();
+                self.last_backup = Some(message.clone());
+                self.settings_notice = Some(message.clone());
+                push_toast(&self.toaster, cx, message, Severity::Success);
+            }
+            Ok(false) => {
+                let message = "没有待恢复的备份".to_string();
+                self.settings_notice = Some(message.clone());
+                push_toast(&self.toaster, cx, message, Severity::Warning);
+            }
+            Err(error) => {
+                let message = format!("取消待恢复备份失败：{error:#}");
+                self.settings_notice = Some(message.clone());
+                push_toast(&self.toaster, cx, message, Severity::Danger);
+            }
+        }
+        self.refresh_pending_restore_hint(cx);
         cx.notify();
     }
 
@@ -1081,6 +1122,7 @@ impl KanalibApp {
         let this_backup_days_toggle = this.clone();
         let this_backup_days_less = this.clone();
         let this_backup_days_more = this.clone();
+        let this_backup_cancel = this.clone();
         let this_copy_diagnostics = this.clone();
         let this_open_logs = this.clone();
         let cache_stats = self.cache_stats.clone();
@@ -1117,7 +1159,8 @@ impl KanalibApp {
         let backup_status = self.state.backup_status();
         let backup_plan = backup_status.plan.clone();
         let backup_next_text = backup_next_due_text(&backup_status);
-        let backup_has_pending = backup_status.pending_restore.is_some();
+        let backup_pending = backup_status.pending_restore.clone();
+        let backup_has_pending = backup_pending.is_some();
         let backup_skipped = backup_status
             .skipped_reason
             .as_ref()
@@ -2658,6 +2701,59 @@ impl KanalibApp {
                                 let _ = this_backup_days_more.update(cx, |app, cx| {
                                     app.adjust_backup_keep_days(7, cx);
                                 });
+                            }),
+                    ),
+            );
+        }
+        if let Some(pending) = &backup_pending {
+            let cancel = this_backup_cancel.clone();
+            let mut detail = format!("候选：{}", pending.candidate.display());
+            if let Some(safety) = &pending.safety_backup {
+                detail.push_str(&format!("\n当前库安全备份：{}", safety.display()));
+            }
+            if let Some(created) = pending.created_at {
+                detail.push_str(&format!(
+                    "\n请求时间：{}",
+                    backup::format_utc_datetime(created)
+                ));
+            }
+            detail.push_str(&format!("\n备份 schema 版本：{}", pending.user_version));
+            backup_section = backup_section.child(
+                div()
+                    .id("backup-pending")
+                    .flex()
+                    .flex_col()
+                    .gap(px(6.))
+                    .p(px(10.))
+                    .rounded(px(8.))
+                    .border_1()
+                    .border_color(colors.warning)
+                    .bg(colors.sunken)
+                    .child(
+                        div()
+                            .text_xs()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(colors.warning)
+                            .child("待恢复备份 · 重启后生效"),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(colors.fg)
+                            .child(detail),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(colors.muted)
+                            .child("取消只删除暂存请求与标记，当前数据库立即保持不变；不会删除候选文件或安全备份。"),
+                    )
+                    .child(
+                        Button::new("backup-cancel-pending", "取消待恢复")
+                            .size(ControlSize::Sm)
+                            .on_click(move |_, _, cx| {
+                                let _ = cancel
+                                    .update(cx, |app, cx| app.cancel_pending_restore(cx));
                             }),
                     ),
             );

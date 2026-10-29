@@ -4,9 +4,15 @@ use crate::app::{KanalibApp, push_toast};
 /// 搜索输入停止多久后才真正查询（毫秒）。
 pub(crate) const SEARCH_DEBOUNCE_MS: u64 = 220;
 
+/// UI 单次 SQL 探测上限。超过此数直接回退内存过滤，避免把 core 的
+/// `MAX_SEARCH_PAGE`（10000）当成探测窗口：全命中时 extent 会扫到 8 万条，
+/// 并让可见索引持有上万路径，叠加缩略图缓存抖动后 UI 端到端可达数秒。
+/// 结果仍由内存过滤补齐，语义不变。
+pub(crate) const UI_SEARCH_PAGE_LIMIT: usize = 512;
+
 /// 只读计时探针：`KANALIB_SEARCH_TIMING=1` 时把防抖与查询耗时写进日志，
 /// 不改变任何查询/渲染行为。
-fn search_timing_enabled() -> bool {
+pub(crate) fn search_timing_enabled() -> bool {
     std::env::var_os("KANALIB_SEARCH_TIMING").is_some()
 }
 
@@ -35,6 +41,10 @@ pub(crate) struct SearchBundle {
     pub(crate) fts_paths: Option<Arc<HashSet<PathBuf>>>,
     /// `search_page` 返回的有序路径。结果超过分页上限时为 None，回退到内存过滤。
     pub(crate) page_paths: Option<Arc<Vec<PathBuf>>>,
+    /// 输入触发防抖的时刻；只用于 `KANALIB_SEARCH_TIMING` 的端到端计时。
+    pub(crate) input_at: Instant,
+    /// 后台查询耗时（含 FTS 命中集合）；只用于计时日志。
+    pub(crate) run_ms: f64,
 }
 
 impl SearchBundle {
@@ -85,6 +95,8 @@ impl KanalibApp {
     pub(crate) fn schedule_search(&mut self, cx: &mut Context<Self>) {
         let weak = cx.entity().downgrade();
         let queued_at = Instant::now();
+        // 端到端计时起点：输入文本变化后第一次排入防抖的时刻。
+        self.search_queued_at = Some(queued_at);
         self.search_debounce_task = Some(cx.spawn(async move |_, cx| {
             cx.background_executor()
                 .timer(Duration::from_millis(SEARCH_DEBOUNCE_MS))
@@ -105,6 +117,7 @@ impl KanalibApp {
     /// 执行一次查询。FTS 与分页下推都放到后台线程，避免阻塞渲染。
     pub(crate) fn run_search(&mut self, cx: &mut Context<Self>) {
         let text = self.search_pending.clone();
+        let input_at = self.search_queued_at.take().unwrap_or_else(Instant::now);
         let wants_duplicates = query_wants_duplicates(&text);
         let sort = SearchSort::from_key(self.sort.key()).unwrap_or(SearchSort::Name);
         let ascending = self.sort_ascending;
@@ -153,7 +166,7 @@ impl KanalibApp {
                     query: &query,
                     sort,
                     ascending,
-                    limit: MAX_SEARCH_PAGE,
+                    limit: UI_SEARCH_PAGE_LIMIT,
                     cursor: None,
                     duplicate_paths: duplicate_paths.as_ref(),
                     include_total: false,
@@ -197,6 +210,8 @@ impl KanalibApp {
                     ascending,
                     fts_paths,
                     page_paths,
+                    input_at,
+                    run_ms: task_ms,
                 }));
                 app.last_search = text;
                 app.view.search_revision = app.view.search_revision.wrapping_add(1);

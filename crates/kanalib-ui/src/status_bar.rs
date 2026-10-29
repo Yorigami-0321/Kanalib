@@ -230,6 +230,25 @@ impl KanalibApp {
                 },
             ));
         }
+        if let Some(hint) = &self.pending_restore_hint {
+            let this_pending = this.clone();
+            let hint = hint.clone();
+            left = left.child(status_bar_item(
+                "status-pending-restore",
+                SharedString::from("待恢复备份 · 重启后生效"),
+                colors.warning,
+                colors,
+                false,
+                move |_, _, cx| {
+                    let hint = hint.clone();
+                    let _ = this_pending.update(cx, |app, cx| {
+                        app.open_settings(cx);
+                        app.settings_notice = Some(hint);
+                        cx.notify();
+                    });
+                },
+            ));
+        }
         if self.search_running {
             left = left.child(
                 div()

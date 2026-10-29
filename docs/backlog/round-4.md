@@ -88,6 +88,17 @@
 - **证据**：`.kanalib/r4_task0/screens/`（28 张：100k 分组/折叠/连续滚动/菜单、10k 分组/滚动、4 张对比截图（并排/缩放/平移/Esc 返回）、多选未复现、命令面板）；`.kanalib/r4_task0/100k-scroll-memory.csv`；`.kanalib/r4_task0/uia-100k-grouped.txt`、`.kanalib/r4_task0/uia-100k-menu.txt`、`.kanalib/r4_task0/uia-10k-dedup.txt`、`.kanalib/r4_task0/uia-10k-palette.txt`；`.kanalib/r4_task0/logs/100k-group.log`、`.kanalib/r4_task0/logs/10k-group.log`。
 - **未完成边界**：10 万真实缩略图下的分组滚动（需可访问的 10 万缩略图库）；Ctrl 多选 2–4 张发起对比；真实资源管理器拖放。registry 状态不改（F-003/F-005 已实现、F-036 实现中）。
 
+## 任务 E1 执行结果（2026-10-30）
+
+> 唯一 UI 车道；提交 `02e4960`（本地，未推送），改动 `app.rs`/`settings.rs`/`search.rs`/`viewer.rs`/`format.rs`/`inspector.rs`/`status_bar.rs` 与 `lib.rs` 的 import 收尾。截图归档 `.kanalib/r4_e1/`（`.kanalib/` 已忽略，不提交）。
+
+- **F-061 备份/恢复 UI**：命令面板新增「备份与恢复」（立即备份、恢复备份…、取消待恢复、打开设置·数据库备份）；启动时 `pending_restore` 通过 `pending_restore_hint` 提示“重启后生效，可在设置页取消”，不自动替换运行中的库；设置页备份计划/保留/恢复/损坏候选拒绝均已截图。恢复仍走“校验 + safety backup + 下次启动应用”，运行期不换库。
+- **F-033 格式 UI**：PSD 检查器显示「需要 FFmpeg 解码 · 仅合成图」及图层/Alpha/pHash/`.psb` 边界；GIF/WebP 显示「内置解码 · 动画仅首帧」，查看器提供「用系统应用播放」出口，未实现应用内逐帧播放；HEIC/RAW 仍不支持。
+- **F-012 搜索 UI**：单次 SQL 探测上限从 10000 降为 `UI_SEARCH_PAGE_LIMIT=512`（超过回退内存过滤，结果语义不变）；`KANALIB_SEARCH_TIMING` 记录防抖/page/run/visible/frame。100k 缺图最坏库上 `synthetic` 热查 0.93s、`sky` 0.66s（原约 1.6/1.45s），但仍未达 150ms；`synthetic_0004` 10 命中 14s 异常未定位。完整表见 [pending/search-organization.md](pending/search-organization.md)。
+- **验证**：`cargo test --workspace` core **149 passed / 14 ignored**、UI **36 passed**、bin **3**；`cargo check --workspace` 无警告（仅 vendor profile 提示）。
+- **截图**：`.kanalib/r4_e1/screens/settings-backup-section.png`、`settings-backup-plan-enabled.png`、`settings-backup-now.png`、`restore-corrupt-failure.png`、`psd-inspector.png`、`gif-inspector.png`、`gif-viewer.png`；搜索日志 `.kanalib/r4_e1/logs/search100k-limit512c.log`。
+- **未完成边界**：应用内动画逐帧播放、100k 真实缩略图库的键入延迟、`synthetic_0004` 异常定位、备份大库进度/VACUUM、真实 OneDrive/网络盘事件语义、F-036 真实拖放与 F-003 Ctrl 多选仍待手动验收。
+
 ## 第五轮预览（不在本轮）
 
 - F-035 完整 Immich/WebDAV 与跨源去重（若研究线通过）。

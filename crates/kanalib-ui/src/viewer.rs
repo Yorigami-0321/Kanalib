@@ -1,5 +1,7 @@
 use crate::*;
 use crate::app::{KanalibApp, push_toast};
+use crate::format::is_animation_container;
+use crate::platform::open_path;
 use crate::theme::*;
 
 pub(crate) const VIEWER_CONTEXT: &str = "KanalibViewer";
@@ -202,6 +204,14 @@ impl KanalibApp {
                 .unwrap_or_else(|| path.clone())
         };
         let count = self.viewer_slides.len();
+        // 动画容器不内置播放器：只显示首帧，并给“系统应用播放”出口，避免假播放。
+        let animated = is_animation_container(&path);
+        let external_path = path.clone();
+        let hint = if animated {
+            "← → 切图 · +/- 缩放 · Ctrl+滚轮缩放 · 拖拽平移 · R 旋转 · F 全屏 · 动画仅首帧，播放请用系统应用"
+        } else {
+            "← → 切图 · +/- 缩放 · Ctrl+滚轮缩放 · 拖拽平移 · R 旋转 · F 全屏"
+        };
         let title = path
             .file_name()
             .map(|name| name.to_string_lossy().to_string())
@@ -307,6 +317,13 @@ impl KanalibApp {
                                         .update(cx, |app, cx| app.toggle_viewer_source(cx));
                                 }),
                             )
+                            .children(animated.then(|| {
+                                Button::new("viewer-open-external", "用系统应用播放")
+                                    .size(ControlSize::Sm)
+                                    .variant(ButtonVariant::Ghost)
+                                    .icon(IconName::Play)
+                                    .on_click(move |_, _, _| open_path(&external_path))
+                            }))
                             .child(
                                 IconButton::new("viewer-fullscreen", IconName::Fullscreen)
                                     .size(ControlSize::Sm)
@@ -386,9 +403,7 @@ impl KanalibApp {
                             .flex_none()
                             .text_xs()
                             .text_color(colors.subtle)
-                            .child(
-                                "← → 切图 · +/- 缩放 · Ctrl+滚轮缩放 · 拖拽平移 · R 旋转 · F 全屏",
-                            ),
+                            .child(hint),
                     ),
             )
             .into_any_element(),
