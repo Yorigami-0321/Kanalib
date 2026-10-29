@@ -2,7 +2,7 @@
 
 > 上级索引：[../FEATURE-BACKLOG.md](../FEATURE-BACKLOG.md) · 文档地图：[README](./README.md)
 
-> 2026-10-27 状态：第一轮任务 0/A/B/C/E/D 全部完成并合入；第二轮任务 0/A/B/C/D1/D2 全部完成并合入，见 [round-2.md](round-2.md)。第三轮任务包见 [round-3.md](round-3.md)。
+> 2026-10-27 状态：第一轮任务 0/A/B/C/E/D 全部完成并合入；第二轮任务 0/A/B/C/D1/D2 全部完成并合入，见 [round-2.md](round-2.md)。第三轮 G2b2 已完成，剩余项见 [round-3.md](round-3.md)；第四轮任务包见 [round-4.md](round-4.md)。
 >
 > 冲突约束延续：`db.rs` schema 迁移、`sidecar` 协议各只有一个负责人；UI 只有一个写入车道（第三轮任务 0 的模块拆分合入后，`app.rs`/命令面板/底栏仍是单点写入）。
 
