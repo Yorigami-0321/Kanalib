@@ -548,8 +548,16 @@ pub fn stage_restore(
     }
     let staged = data_dir.join(PENDING_RESTORE_DB_NAME);
     let marker_path = data_dir.join(PENDING_RESTORE_MARKER_NAME);
-    if marker_path.exists() || staged.exists() {
+    if marker_path.exists() {
         bail!("已有待恢复的备份，重启 Kanalib 应用或先移除待恢复标记后再试");
+    }
+    if staged.exists() {
+        // 只有暂存库没有标记：上次复制中断的残留，不会在启动时应用，直接清掉。
+        log::warn!(
+            "remove incomplete restore staging {}",
+            staged.display()
+        );
+        remove_database_files(&staged);
     }
     let (inspection, mut warnings) = validate_restore_candidate(candidate)?;
 
@@ -1305,6 +1313,49 @@ mod test {
             .unwrap_err()
             .to_string();
         assert!(err.contains("当前数据库"), "{err}");
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn stage_restore_clears_interrupted_staging_without_marker() {
+        use super::{pending_restore, stage_restore};
+
+        let root = temp_root("restore-residue");
+        let data = root.join("data");
+        fs::create_dir_all(&data).unwrap();
+        let db_path = data.join("kanalib.db");
+        {
+            let db = Db::open(&db_path).unwrap();
+            db.set_setting("k", "v").unwrap();
+        }
+
+        // 上次复制中断：暂存库及边车存在但没有标记，启动时不会被应用。
+        let staged = data.join(super::PENDING_RESTORE_DB_NAME);
+        fs::write(&staged, b"incomplete").unwrap();
+        fs::write(sidecar(&staged, "-wal"), b"incomplete").unwrap();
+        // 用户备份不在暂存路径上，清理残留不能碰到它。
+        let user_backup = root.join("my-backup.db");
+        fs::write(&user_backup, b"user").unwrap();
+
+        let candidate = root.join("candidate.db");
+        {
+            let db = Db::open(&candidate).unwrap();
+            db.set_setting("k", "restored").unwrap();
+        }
+        let report = stage_restore(&data, &db_path, &candidate).unwrap();
+        assert!(report.staged.is_file());
+        assert!(!sidecar(&staged, "-wal").exists(), "stale sidecar must be removed");
+        assert!(pending_restore(&data).is_some());
+        assert_eq!(fs::read(&user_backup).unwrap(), b"user");
+        assert_eq!(
+            Db::open(&staged).unwrap().setting("k").unwrap().as_deref(),
+            Some("restored")
+        );
+        // 运行中的当前库仍未替换。
+        assert_eq!(
+            Db::open(&db_path).unwrap().setting("k").unwrap().as_deref(),
+            Some("v")
+        );
         fs::remove_dir_all(&root).unwrap();
     }
 
