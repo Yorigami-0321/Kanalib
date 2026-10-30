@@ -1,5 +1,5 @@
 use crate::*;
-use crate::app::KanalibApp;
+use crate::app::{KanalibApp, push_toast};
 use crate::format::*;
 use crate::theme::*;
 use crate::platform::*;
@@ -200,6 +200,23 @@ pub(crate) fn asset_context_menu(asset: &Asset, this: &Entity<KanalibApp>) -> Me
     let paths_path = path.clone();
     let open_file = path.clone();
     let reveal_file = path.clone();
+    let open_this = this.clone();
+    let reveal_this = this.clone();
+    let video = asset.is_video();
+    let remote = is_remote_asset(&path);
+    let open_label = if remote {
+        "打开文件（远端只读）"
+    } else if video {
+        "用系统播放器打开"
+    } else {
+        "打开文件"
+    };
+    let reveal_label = if remote {
+        "在资源管理器中显示（远端只读）"
+    } else {
+        "在资源管理器中显示"
+    };
+    let open_icon = if video { IconName::Play } else { IconName::Image };
     Menu::new()
         .item(
             MenuItem::new("快速查看")
@@ -261,14 +278,35 @@ pub(crate) fn asset_context_menu(asset: &Asset, this: &Entity<KanalibApp>) -> Me
         )
         .separator()
         .item(
-            MenuItem::new("打开文件")
-                .icon(IconName::Image)
-                .on_click(move |_, _| open_path(&open_file)),
+            MenuItem::new(open_label)
+                .icon(open_icon)
+                .disabled(remote)
+                .on_click(move |_, cx| {
+                    if let Err(error) = open_asset_with_system(&open_file) {
+                        let _ = open_this.update(cx, |app, cx| {
+                            push_toast(&app.toaster, cx, error, Severity::Danger);
+                        });
+                    }
+                }),
         )
         .item(
-            MenuItem::new("在资源管理器中显示")
+            MenuItem::new(reveal_label)
                 .icon(IconName::FolderOpen)
-                .on_click(move |_, _| reveal_path(&reveal_file)),
+                .disabled(remote)
+                .on_click(move |_, cx| {
+                    if !can_touch_local_file(&reveal_file) {
+                        let _ = reveal_this.update(cx, |app, cx| {
+                            push_toast(
+                                &app.toaster,
+                                cx,
+                                REMOTE_READONLY_NOTE,
+                                Severity::Warning,
+                            );
+                        });
+                        return;
+                    }
+                    reveal_path(&reveal_file);
+                }),
         )
 }
 

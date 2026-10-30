@@ -51,6 +51,26 @@ pub(crate) fn tile(
     let rating = asset.rating.to_uppercase();
     let favorite = asset.favorite;
     let star = asset.star;
+    let video_badge = asset.is_video().then(|| {
+        let duration = crate::format::video_meta(&asset.metadata_json)
+            .duration_secs
+            .map(crate::format::format_duration);
+        let label = match duration {
+            Some(duration) => format!("视频 · {duration}"),
+            None => "视频".to_string(),
+        };
+        div()
+            .absolute()
+            .top(px(6.))
+            .left(px(if selected { 32. } else { 6. }))
+            .px(px(6.))
+            .py(px(1.))
+            .rounded(px(4.))
+            .bg(colors.backdrop)
+            .text_xs()
+            .text_color(colors.fg)
+            .child(label)
+    });
     let menu = asset_context_menu(&asset, &this);
     let this_click = this.clone();
     let path_click = path.clone();
@@ -125,6 +145,7 @@ pub(crate) fn tile(
                                 .color(colors.danger),
                         )
                 }))
+                .children(video_badge)
                 .children(has_damage.then(|| {
                     div()
                         .absolute()

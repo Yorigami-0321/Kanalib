@@ -274,6 +274,7 @@ pub(crate) fn source_menu(root: &Path, this: Entity<KanalibApp>) -> Menu {
     let reveal_root = root.to_path_buf();
     let rescan_this = this.clone();
     let rescan_root = root.to_path_buf();
+    let remote = crate::format::is_remote_asset(root);
     Menu::new()
         .item(
             MenuItem::new("重命名…")
@@ -294,9 +295,14 @@ pub(crate) fn source_menu(root: &Path, this: Entity<KanalibApp>) -> Menu {
                 }),
         )
         .item(
-            MenuItem::new("在资源管理器中打开")
-                .icon(IconName::FolderOpen)
-                .on_click(move |_, _| reveal_path(&reveal_root)),
+            MenuItem::new(if remote {
+                "网络来源只读，无本地路径"
+            } else {
+                "在资源管理器中打开"
+            })
+            .icon(IconName::FolderOpen)
+            .disabled(remote)
+            .on_click(move |_, _| reveal_path(&reveal_root)),
         )
         .separator()
         .item(
