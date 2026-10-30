@@ -6,6 +6,7 @@ pub mod export;
 pub mod ffmpeg;
 pub mod media;
 pub mod model;
+pub mod open;
 pub mod scan_filter;
 pub mod sidecar;
 pub mod state;

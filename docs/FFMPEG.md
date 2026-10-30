@@ -216,9 +216,97 @@ GPL 构建仍禁止随包；运行时只把 ffmpeg/ffprobe 当外部进程，不
 
 历史 52.2s/152.3s 在当前机器状态/负载下，基线二进制本身也无法复现（同机基线 103.7s）；本轮相对同机基线缩略图快 24%，总耗时快 7%，没有回退。100k 未重跑；批处理 ≤32、worker、120s 超时、`max_pixels`、`v3` 缓存键与回退顺序均未改。
 
+## 第五轮（任务 C）：视频（F-040）与格式门（F-033）
+
+> 2026-10-30。视频只作为**新的 `media_kind`**接入：首帧缩略图 + 时长/分辨率 + 系统默认播放器入口。不实现内置解码器播放、不转码、不批量打标视频；图片路径（含 `image` 回退、批处理池、`v3` 缓存）不变。
+
+### 数据模型：v9 → v10
+
+- `SCHEMA_VERSION` 由 9 升到 **10**，唯一变更是 `assets.media_kind TEXT NOT NULL DEFAULT 'image'`。
+- `migrate()` 在写 `PRAGMA user_version = 10` **之前**调用 `ensure_media_kind_column`：先读 `PRAGMA table_info(assets)`，只有缺列时才 `ALTER TABLE`。列已存在时是空操作，迁移中途失败后重开可以继续；`ensure_asset_columns` 里再守卫一次，覆盖「user_version 已写、ALTER 前进程被杀」的窗口。
+- 旧行不重写：SQLite 的 `NOT NULL DEFAULT` 让既有行读作 `'image'`，图片查询、排序与去重语义与 v9 完全相同；`Db::open` 检测到 `user_version < 10` 时仍按既有逻辑先做 `kanalib.db.bak-v9-<stamp>` 备份。
+- 取值只有 `image` / `video`（`MediaKind`，未知值按 `image` 读取，手工写坏不会让资产消失）。`mime` 同步补了视频容器 MIME（`video/mp4`、`video/quicktime`、`video/x-matroska`、`video/webm`、`video/x-msvideo`、`video/mp2t` 等），仅用于展示/导出。
+- `enqueue_tag_jobs` 增加 `AND media_kind = 'image'`：视频不进入打标队列，已有图片的排队条件不变。
+
+### 视频容器白名单
+
+`VIDEO_EXTENSIONS`：mp4、m4v、mov、mkv、webm、avi、wmv、flv、mpg、mpeg、3gp、3g2、ts、m2ts、mts、ogv、vob。
+
+- 这是**容器**白名单，不承诺任意编码：H.264/HEVC/AV1/VP9 能否解码取决于 ffmpeg 构建；某个容器里的编码解不出来时，缩略图生成失败并按“需要 FFmpeg”记录，不会标成损坏图片。
+- 新容器必须先在真实样本上验证首帧与 ffprobe 元数据，再加入白名单。
+
+### 扫描、哈希与打标边界
+
+- 扫描/监听/排除规则预览统一改用 `is_media`（图片 + 视频）；`is_image` 语义未变，AVIF/PSD 的 ffmpeg-only 判断也未变。
+- SHA1/BLAKE3 照常按字节流计算；视频**不参与** pHash（`phash` 落库为 NULL，哈希复用返回 `phash=0/decode_ok=false`），也不写 `damage`：视频在 `image` 解码器里必然失败，不能据此判损坏。
+- `StoredMeta::is_unchanged` / `content_if_current` 对 `media_kind='video'` 不再要求 pHash，避免每次扫描都把全库视频当成“需要重算”。
+
+### 首帧缩略图
+
+- `ensure_thumb` 对视频走专用分支：校验已有缓存（`validate_thumbnail` 读 JPEG 尺寸）→ 否则交给**同一个** `generate_thumbnails` 批处理池（≤32 输入/批、worker 数、120s 超时、`-threads 1`、`-max_pixels`、`-protocol_whitelist file`、每输入 `-map i:v -frames:v 1`、`scale=512:512:force_original_aspect_ratio=decrease`）。
+- 视频不在 `alpha_source` 列表里，直接写 JPEG，不产生临时 PNG；失败时删除半成品并返回“无法生成视频首帧缩略图（需要 FFmpeg）”。
+- 缓存键仍是 `v3-<path>-<mtime>-<bytes>-<ext>`，未改版本号；图片缩略图不会因本功能失效重建。
+- 批量失败（没有 ffmpeg）时索引继续：入库哈希与 `media_kind`，`thumb` 为空，扫描不中断。
+
+### 元数据探测（ffprobe）
+
+| 项 | 行为 |
+|---|---|
+| 发现顺序 | `KANALIB_FFPROBE`（设为 `off` 关闭）→ 已探测到的 ffmpeg 同目录 `ffprobe[.exe]`（同一构建/同一 configuration/同一许可）→ `PATH` → `<root>/runtime/ffmpeg/bin` → 可执行文件同级 `runtime/ffmpeg/bin` → 仅 debug 的 `<root>/tools/ffmpeg/bin` |
+| 与 ffmpeg 联动 | `KANALIB_FFMPEG=off` 且未单独指定 `KANALIB_FFPROBE` 时，ffprobe 一起关闭 |
+| 调用 | `-hide_banner -v error -show_format -show_streams -of json -protocol_whitelist file`，stdin 关闭，Windows `CREATE_NO_WINDOW` |
+| 超时 | `KANALIB_FFPROBE_TIMEOUT_SECS`（5–120，默认 20s），超时 kill 并放弃本次元数据 |
+| 解析 | 取首个 `codec_type=video` 且 `disposition.attached_pic=0` 的流（跳过封面图）；宽高来自该流，时长优先流级 `duration`，缺失回退 `format.duration`；同时记录 `codec_name` |
+| 失败 | 超时、spawn 失败、非法 JSON、无视频流都返回 `None`：**不阻塞导入**，只缺时长/尺寸 |
+
+- 结果写进 `metadata_json`：`duration_secs`（秒，浮点）与 `codec`，两者都带 `serde(default + skip_serializing_if)`，图片的 JSON 形状与旧检查器完全不变。
+- 视频宽高**只**来自 ffprobe；探测不到时沿用旧记录尺寸，绝不用 512 缩略图的尺寸冒充原图尺寸。
+- 成本：约 150ms/文件（第四轮实测，含 Windows 进程启动）。只在文件需要更新时探测，图片完全不调用 ffprobe，所以 10k/100k 图片导入不受影响；视频量大的库按每文件 0.15s 估算扫描增量。
+- 容器里没有视频流（例如纯音频改名 `.mp4`）时按“探测失败”处理：仍入库、有哈希，没有尺寸/时长。
+
+### 系统默认播放器
+
+- `core::open`：`open_video(path)`（先校验是受支持的视频扩展名）→ `open_with_default_app(path)`；Windows 用 `explorer <path>`（等价于 ShellExecute 的“打开”，与 UI 既有 `open_path`/`reveal_path` 一致），其它平台 `xdg-open`。
+- 只 `spawn` 不等待（`explorer` 成功也可能返回非零），stdin/stdout/stderr 置空，Windows 加 `CREATE_NO_WINDOW`；`can_open_externally(path)` 供 UI 决定是否显示入口。
+- 不存在内置解码器、逐帧/拖动播放、转码或视频批量打标；播放能力完全由系统关联程序提供，Kanalib 不读取像素。
+
+### F-033 格式门：HEIC/HEIF、RAW 明确不支持
+
+- `UNSUPPORTED_FORMAT_EXTENSIONS`：heic、heif、dng、cr2、cr3、nef、arw、raf、rw2、orf、srw、pef、raw、3fr、x3f；`is_unsupported_format()` 供扫描/UI 识别，`UNSUPPORTED_FORMAT_NOTE` 提供统一提示语（“真实样本 + 可分发解码链 + 许可审查”）。
+- 这些扩展名**不扫描、不入库、不算哈希、不生成缩略图**：它们既不在 `IMAGE_EXTENSIONS` 也不在 `VIDEO_EXTENSIONS`，扫描器和监听器直接忽略；UI 只能提示“不支持”，不得显示为空缩略图的“损坏图片”。
+- 当前状态：**不支持 / 未验证**。本机 LGPL 构建没有 HEIC/HEIF demuxer 与相机 RAW demuxer，仓库也没有合法真实样本，因此没有样本、没有解码链、没有许可审查结论；不引入 libheif / rawloader / LibRaw。
+- 重新开启的门槛（三者缺一不可）：① 合法真实样本（含 10-bit/广色域/多图 HEIF、至少两种相机 RAW）；② 可分发解码链（明确版本、来源、体积）；③ 许可审查（解码器许可、HEVC/RAW 专利、静态链接合规）。通过后还需补端到端测试才允许加入白名单。
+- PSD 已按第四轮走 ffmpeg-only，不在格式门里，不重复处理。
+
+### 许可与 SHA256 边界
+
+- ffprobe 与 ffmpeg 同源：BtbN `win64-lgpl-shared-8.1`，`n8.1.3-24-g92611900bb-20261026`，configuration 无 `--enable-gpl`、含 `--enable-version3`，即 **LGPLv3**；archive SHA256 `96AFE9BEE66012F4CBC336A473F0B595060D73BDC5EFE4331D55101500D0A93E`（`runtime/ffmpeg/FFMPEG-SOURCE.txt`）。
+- 本机二进制实测 SHA256（2026-10-30，`runtime/ffmpeg/bin`）：
+
+| 二进制 | SHA256 |
+|---|---|
+| `ffmpeg.exe` | `ea039032d89939c4c4d033cdcb0b61b13eb1323c7d7da32f98d4577da530386d` |
+| `ffprobe.exe` | `03f436484e313b908f08dc6582455877725051ec62d95bde5f247b4acf60c880` |
+
+- 打包规则未改：`fetch_ffmpeg_lgpl.ps1` / `build_portable.ps1` 继续只接受 LGPL，`FFMPEG-BUILD.txt` 记录版本、GPL 标志、configuration 与每个二进制 SHA256；GPL 构建禁止随包分发。
+- 视频功能没有新增 crate、原生库或 DLL（耗时端全部在外部进程）：LGPL 合规面与第四轮一致，`ffprobe` 只是同一包的第二个可执行文件（约 222 KiB），可随时 `KANALIB_FFPROBE=off` 关闭。
+
+### 实测与证据（本机，2026-10-30）
+
+- 样本：`ffmpeg -f lavfi -i testsrc=size=320x240:rate=10:duration=2 -c:v mpeg4` → 2.000s / 320×240 / mpeg4 / 40,256 字节，文件名含日文与空格（`.kanalib/r5c/サンプル clip.mp4`，`.kanalib/` 已 gitignore）。
+- `ffprobe -show_format -show_streams -of json` 返回 `width=320, height=240, codec_name=mpeg4, duration=2.000000`（`duration_secs` 走流级取值）。
+- 首帧：同参数批处理输出 512×384 JPEG（`.kanalib/r5c/first-frame.jpg`），512 长边、保持 4:3，无临时 PNG 残留。
+- 端到端（`KANALIB_FFMPEG=D:/Code/Kanalib/runtime/ffmpeg/bin/ffmpeg.exe`）：
+  - `state::tests::video_scan_persists_media_kind_duration_and_first_frame`：入库 `media_kind=video`、尺寸 320×240、`phash=NULL`、`damage=NULL`、首帧 512×384、`metadata_json.codec=mpeg4`、时长 1.8–2.2s、缓存判定不要求 pHash；同库图片仍是 `image` 且有 pHash。
+  - `ffmpeg::tests::video_probe_and_first_frame_thumbnail_end_to_end`（`--ignored`）：Unicode + 长路径样本的探测、首帧、临时文件清理、损坏 mp4 返回 `None` 且不产出半成品。
+  - 损坏/伪造 mp4：哈希照算（SHA1 40 位、BLAKE3 64 位），不标 `damage`。
+- 无 ffmpeg 环境（PATH/runtime 都没有）：视频仍入库，`thumb` 为空、无时长/尺寸，扫描不中断；图片测试全绿。
+- 测试数量：`cargo test -p kanalib-core` **165 passed / 16 ignored**（无 ffmpeg 与有 ffmpeg 环境都是该数量；基线 150/15 未减少）。新增单测覆盖 `MediaKind`/扩展名、格式门、`metadata_json` 兼容、ffprobe JSON 解析（含封面图跳过）、v9→v10 迁移、视频哈希/入库/打标队列/监听事件、系统播放命令构造。
+- 10k 图片冷导入（`KANALIB_FFMPEG=runtime/ffmpeg/bin/ffmpeg.exe cargo test -p kanalib-core state::tests::ten_thousand_cold_import -- --ignored --nocapture`，本机 debug）：**213.7s**，10,000 导入、0 失败；缩略图阶段约 77.5s（0.05s→77.5s），与第四轮同机基线 284.5s / 78.5s 同量级或更快，没有回退。100k 未重跑（同上轮原因，缺可访问大库）；图片路径只多一次扩展名比较（`is_media` 先判 `is_image`，命中即返回）与 `media_kind` 列读写，批处理参数、worker、`v3` 缓存键、`image` 回退顺序均未改，`enqueue_tag_jobs` 只多一个对全 `image` 列等值谓词，仍走原有 `folder` 索引。
+
 ## 范围与后续
 
 - 阶段 1 只迁移 **512 缩略图**；SHA1/BLAKE3 仍按字节流计算，EXIF 仍用 `kamadak-exif`。
 - pHash 仍由 `image` crate 解码；损坏修复仍走 Python `repair.py`。阶段 2 评估结论见上：两项都保留。
-- HEIC/AVIF/RAW/PSD 取决于 ffmpeg 构建：AVIF、PSD 已走 ffmpeg；HEIC/RAW 未支持。
+- HEIC/AVIF/RAW/PSD 取决于 ffmpeg 构建：AVIF、PSD 已走 ffmpeg；HEIC/HEIF 与 RAW **不支持**（无样本、无解码链、无许可结论），视频已按 F-040 接入首帧/元数据/系统播放入口。
 - GPL 随包分发必须由产品/法务明确确认；默认路径是 LGPL 或外部用户自备。

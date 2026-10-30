@@ -26,6 +26,12 @@ pub struct ExifData {
     pub focal_length: String,
     #[serde(default = "default_orientation")]
     pub orientation: u8,
+    /// F-040 视频时长（秒）。图片为空；旧 metadata_json 没有该键时按 None 读取。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duration_secs: Option<f64>,
+    /// F-040 视频首条视频流编码名（如 `h264`）。图片为空。
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub codec: String,
 }
 
 fn default_orientation() -> u8 {
@@ -42,6 +48,8 @@ impl Default for ExifData {
             shutter: String::new(),
             focal_length: String::new(),
             orientation: 1,
+            duration_secs: None,
+            codec: String::new(),
         }
     }
 }
@@ -54,6 +62,8 @@ impl ExifData {
             && self.aperture.is_empty()
             && self.shutter.is_empty()
             && self.focal_length.is_empty()
+            && self.duration_secs.is_none()
+            && self.codec.is_empty()
     }
 }
 
@@ -162,6 +172,7 @@ pub fn read_exif(path: &Path) -> (ExifData, Option<u64>) {
             shutter: exif_text(&exif, Tag::ExposureTime).unwrap_or_default(),
             focal_length: exif_text(&exif, Tag::FocalLength).unwrap_or_default(),
             orientation,
+            ..ExifData::default()
         },
         captured_at,
     )
@@ -192,6 +203,19 @@ pub fn hash_file(path: &Path) -> Result<ContentHashes> {
         }
         sha1.update(&buffer[..read]);
         blake3.update(&buffer[..read]);
+    }
+    let sha1 = format!("{:x}", sha1.finalize());
+    let blake3 = blake3.finalize().to_hex().to_string();
+    // F-040：视频不进入 `image` 解码与 pHash 路径。首帧由 ffmpeg 生成，
+    // 视频在 `image` 里必然“解码失败”，不能据此标记损坏。
+    if crate::model::is_video(path) {
+        return Ok(ContentHashes {
+            sha1,
+            blake3,
+            phash: 0,
+            decode_ok: false,
+            decode_error: None,
+        });
     }
     let decoded = image::ImageReader::open(path)
         .and_then(|reader| reader.with_guessed_format())
@@ -228,8 +252,8 @@ pub fn hash_file(path: &Path) -> Result<ContentHashes> {
         }
     };
     Ok(ContentHashes {
-        sha1: format!("{:x}", sha1.finalize()),
-        blake3: blake3.finalize().to_hex().to_string(),
+        sha1,
+        blake3,
         phash,
         decode_ok,
         decode_error,
@@ -465,6 +489,49 @@ mod tests {
         let data: super::ExifData = serde_json::from_str("{}").unwrap();
         assert_eq!(data.orientation, 1);
         assert!(data.is_empty());
+        assert!(data.duration_secs.is_none());
+        assert!(data.codec.is_empty());
+    }
+
+    #[test]
+    fn video_metadata_round_trips_without_touching_image_json() {
+        let mut data = super::ExifData {
+            duration_secs: Some(12.5),
+            codec: "h264".into(),
+            ..super::ExifData::default()
+        };
+        let json = serde_json::to_string(&data).unwrap();
+        assert!(json.contains("\"duration_secs\":12.5"));
+        let parsed: super::ExifData = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.duration_secs, Some(12.5));
+        assert_eq!(parsed.codec, "h264");
+        assert!(!parsed.is_empty());
+
+        // 图片的 metadata_json 不新增键，旧检查器不受影响。
+        data.duration_secs = None;
+        data.codec.clear();
+        let json = serde_json::to_string(&data).unwrap();
+        assert!(!json.contains("duration_secs") && !json.contains("codec"));
+    }
+
+    #[test]
+    fn video_hash_keeps_hashes_and_never_reports_damage() {
+        let dir = temp_dir("video-hash");
+        let path = dir.join("clip.mp4");
+        // 内容不需要是合法视频：哈希层不解析容器，也不会做图片解码。
+        std::fs::write(&path, b"not a real mp4 payload").unwrap();
+        let hashes = hash_file(&path).unwrap();
+        assert_eq!(hashes.sha1.len(), 40);
+        assert_eq!(hashes.blake3.len(), 64);
+        assert_eq!(hashes.phash, 0);
+        assert!(!hashes.decode_ok);
+        assert!(
+            hashes.decode_error.is_none(),
+            "video must not be marked as a damaged image: {:?}",
+            hashes.decode_error
+        );
+        assert!(!crate::model::is_unsupported_format(&path));
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

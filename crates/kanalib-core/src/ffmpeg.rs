@@ -15,6 +15,7 @@ use crate::sidecar::project_root;
 const DEFAULT_BATCH: usize = 32;
 const MAX_BATCH: usize = 48;
 const DEFAULT_TIMEOUT_SECS: u64 = 120;
+const DEFAULT_PROBE_TIMEOUT_SECS: u64 = 20;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum License {
@@ -71,6 +72,14 @@ fn binary_name() -> &'static str {
     }
 }
 
+fn probe_binary_name() -> &'static str {
+    if cfg!(windows) {
+        "ffprobe.exe"
+    } else {
+        "ffprobe"
+    }
+}
+
 fn candidates() -> Vec<PathBuf> {
     // A system-wide ffmpeg wins; the program-local copy is the offline fallback.
     let mut paths = vec![PathBuf::from(binary_name())];
@@ -102,12 +111,14 @@ fn candidates() -> Vec<PathBuf> {
 }
 
 fn parse_version_output(text: &str) -> Result<Build> {
+    // ffmpeg/ffprobe 的 `-version` 首行分别是 "ffmpeg version …" / "ffprobe version …"。
     let first = text
         .lines()
-        .find(|line| line.starts_with("ffmpeg version "))
-        .context("missing ffmpeg version line")?;
+        .find(|line| line.starts_with("ffmpeg version ") || line.starts_with("ffprobe version "))
+        .context("missing ffmpeg/ffprobe version line")?;
     let version = first
         .trim_start_matches("ffmpeg version ")
+        .trim_start_matches("ffprobe version ")
         .split(" Copyright")
         .next()
         .unwrap_or_default()
@@ -162,20 +173,20 @@ fn probe(path: &Path) -> Result<Build> {
     Ok(build)
 }
 
-fn log_license(build: &Build) {
+fn log_license(tool: &str, build: &Build) {
     match build.license {
         License::Gpl => log::warn!(
-            "ffmpeg: {} is a GPL build; do not redistribute it with Kanalib unless the whole distribution complies with the GPL",
+            "{tool}: {} is a GPL build; do not redistribute it with Kanalib unless the whole distribution complies with the GPL",
             build.path.display()
         ),
         License::Lgpl => log::info!(
-            "ffmpeg: {} version={} license={}",
+            "{tool}: {} version={} license={}",
             build.path.display(),
             build.version,
             build.license.label()
         ),
         License::Unknown => log::warn!(
-            "ffmpeg: {} version={} has no configuration line; license is unknown",
+            "{tool}: {} version={} has no configuration line; license is unknown",
             build.path.display(),
             build.version
         ),
@@ -191,7 +202,7 @@ fn discover() -> Option<Build> {
         let path = PathBuf::from(value);
         return match probe(&path) {
             Ok(build) => {
-                log_license(&build);
+                log_license("ffmpeg", &build);
                 Some(build)
             }
             Err(error) => {
@@ -211,7 +222,7 @@ fn discover() -> Option<Build> {
         seen.push(candidate.clone());
         match probe(&candidate) {
             Ok(build) => {
-                log_license(&build);
+                log_license("ffmpeg", &build);
                 return Some(build);
             }
             Err(error) => {
@@ -232,6 +243,218 @@ pub fn status() -> Option<&'static Build> {
 
 pub fn available() -> bool {
     status().is_some()
+}
+
+/// F-040：视频时长/分辨率元数据探测结果。
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct MediaProbe {
+    pub width: u32,
+    pub height: u32,
+    pub duration_secs: Option<f64>,
+    pub codec: String,
+}
+
+fn probe_candidates() -> Vec<PathBuf> {
+    let mut paths = Vec::new();
+    // 与已探测到的 ffmpeg 同目录的 ffprobe：保证同一构建、同一 configuration/许可。
+    if let Some(build) = status() {
+        paths.push(build.path.with_file_name(probe_binary_name()));
+    }
+    paths.push(PathBuf::from(probe_binary_name()));
+    let root = project_root();
+    paths.push(
+        root.join("runtime")
+            .join("ffmpeg")
+            .join("bin")
+            .join(probe_binary_name()),
+    );
+    if let Ok(dir) = std::env::current_exe()
+        && let Some(dir) = dir.parent()
+    {
+        paths.push(
+            dir.join("runtime")
+                .join("ffmpeg")
+                .join("bin")
+                .join(probe_binary_name()),
+        );
+    }
+    #[cfg(debug_assertions)]
+    paths.push(
+        root.join("tools")
+            .join("ffmpeg")
+            .join("bin")
+            .join(probe_binary_name()),
+    );
+    paths
+}
+
+fn discover_probe() -> Option<Build> {
+    if let Some(value) = std::env::var_os("KANALIB_FFPROBE") {
+        if value == "off" {
+            log::info!("ffprobe: disabled by KANALIB_FFPROBE=off");
+            return None;
+        }
+        let path = PathBuf::from(value);
+        return match probe(&path) {
+            Ok(build) => {
+                log_license("ffprobe", &build);
+                Some(build)
+            }
+            Err(error) => {
+                log::error!(
+                    "ffprobe: KANALIB_FFPROBE={} is not usable: {error:#}",
+                    path.display()
+                );
+                None
+            }
+        };
+    }
+    // ffmpeg 被显式关闭时沿用同一套运行时判定：没单独指定 ffprobe 就一起关掉。
+    if std::env::var_os("KANALIB_FFMPEG").is_some_and(|value| value == "off") {
+        log::info!("ffprobe: disabled together with KANALIB_FFMPEG=off");
+        return None;
+    }
+    let mut seen = Vec::new();
+    for candidate in probe_candidates() {
+        if seen.iter().any(|path: &PathBuf| path == &candidate) {
+            continue;
+        }
+        seen.push(candidate.clone());
+        match probe(&candidate) {
+            Ok(build) => {
+                log_license("ffprobe", &build);
+                return Some(build);
+            }
+            Err(error) => {
+                if candidate.components().count() > 1 {
+                    log::debug!("ffprobe candidate {}: {error:#}", candidate.display());
+                }
+            }
+        }
+    }
+    log::info!("ffprobe: not found; video duration/resolution stay unknown");
+    None
+}
+
+/// ffprobe 只用于读元数据（不引入 GPL 工具：默认与 ffmpeg 同一 LGPL 构建）。
+pub fn probe_status() -> Option<&'static Build> {
+    static BUILD: OnceLock<Option<Build>> = OnceLock::new();
+    BUILD.get_or_init(discover_probe).as_ref()
+}
+
+pub fn probe_available() -> bool {
+    probe_status().is_some()
+}
+
+fn probe_timeout() -> Duration {
+    let secs = std::env::var("KANALIB_FFPROBE_TIMEOUT_SECS")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .map(|value| value.clamp(5, 120))
+        .unwrap_or(DEFAULT_PROBE_TIMEOUT_SECS);
+    Duration::from_secs(secs)
+}
+
+fn parse_probe_json(text: &str) -> Option<MediaProbe> {
+    let value: serde_json::Value = serde_json::from_str(text).ok()?;
+    let streams = value.get("streams")?.as_array()?;
+    let video = streams.iter().find(|stream| {
+        stream.get("codec_type").and_then(|kind| kind.as_str()) == Some("video")
+            // ffmpeg 会把封面图当作 attached_pic 视频流；它不是视频轨道。
+            && stream
+                .get("disposition")
+                .and_then(|disposition| disposition.get("attached_pic"))
+                .and_then(|flag| flag.as_i64())
+                .unwrap_or(0)
+                == 0
+    })?;
+    let width = video
+        .get("width")
+        .and_then(|value| value.as_u64())
+        .unwrap_or(0)
+        .min(u32::MAX as u64) as u32;
+    let height = video
+        .get("height")
+        .and_then(|value| value.as_u64())
+        .unwrap_or(0)
+        .min(u32::MAX as u64) as u32;
+    let duration = |source: Option<&serde_json::Value>| {
+        source
+            .and_then(|value| value.get("duration"))
+            .and_then(|value| value.as_str())
+            .and_then(|value| value.parse::<f64>().ok())
+            .filter(|value| value.is_finite() && *value >= 0.0)
+    };
+    // 单帧视频/部分容器没有流级 duration，回退 format.duration。
+    let duration_secs = duration(Some(video)).or_else(|| duration(value.get("format")));
+    Some(MediaProbe {
+        width,
+        height,
+        duration_secs,
+        codec: video
+            .get("codec_name")
+            .and_then(|value| value.as_str())
+            .unwrap_or_default()
+            .to_string(),
+    })
+}
+
+/// 用 ffprobe 读取首个视频流的宽高/编码与时长。
+///
+/// 解析失败、超时或没有 ffprobe 时返回 None：调用方必须继续导入，只是没有这些元数据。
+pub fn probe_media(path: &Path) -> Option<MediaProbe> {
+    let probe = probe_status()?;
+    let mut command = Command::new(&probe.path);
+    command
+        .args([
+            "-hide_banner",
+            "-v",
+            "error",
+            "-show_format",
+            "-show_streams",
+            "-of",
+            "json",
+            "-protocol_whitelist",
+            "file",
+        ])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .arg(path);
+    hide_console(&mut command);
+    let child = match command.spawn() {
+        Ok(child) => child,
+        Err(error) => {
+            log::warn!("ffprobe spawn {}: {error}", path.display());
+            return None;
+        }
+    };
+    let (timed_out, stdout, stderr) = match wait_with_timeout(child, probe_timeout()) {
+        Ok(value) => value,
+        Err(error) => {
+            log::warn!("ffprobe wait {}: {error:#}", path.display());
+            return None;
+        }
+    };
+    if timed_out {
+        log::warn!(
+            "ffprobe timed out after {}s for {}",
+            probe_timeout().as_secs(),
+            path.display()
+        );
+        return None;
+    }
+    let parsed = parse_probe_json(&stdout);
+    if parsed.is_none() {
+        let excerpt = stderr
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .take(2)
+            .collect::<Vec<_>>()
+            .join(" | ");
+        log::debug!("ffprobe {}: no video stream ({excerpt})", path.display());
+    }
+    parsed
 }
 
 fn env_usize(key: &str, default: usize, min: usize, max: usize) -> usize {
@@ -319,11 +542,23 @@ fn temp_png(target: &Path) -> PathBuf {
     target.with_file_name(name)
 }
 
-fn wait_with_timeout(mut child: Child, limit: Duration) -> Result<(bool, String)> {
-    let stderr = child.stderr.take();
-    let reader = stderr.map(|mut stderr| {
+/// 等待子进程结束并读取输出；超时直接 kill。
+///
+/// stdout/stderr 各由独立线程读取，避免管道写满把子进程卡死。
+fn wait_with_timeout(mut child: Child, limit: Duration) -> Result<(bool, String, String)> {
+    use std::io::Read;
+
+    let stdout = child.stdout.take();
+    let stdout_reader = stdout.map(|mut stdout| {
         std::thread::spawn(move || {
-            use std::io::Read;
+            let mut text = String::new();
+            let _ = stdout.read_to_string(&mut text);
+            text
+        })
+    });
+    let stderr = child.stderr.take();
+    let stderr_reader = stderr.map(|mut stderr| {
+        std::thread::spawn(move || {
             let mut text = String::new();
             let _ = stderr.read_to_string(&mut text);
             text
@@ -342,10 +577,13 @@ fn wait_with_timeout(mut child: Child, limit: Duration) -> Result<(bool, String)
         }
         std::thread::sleep(Duration::from_millis(20));
     };
-    let stderr = reader
+    let stdout = stdout_reader
         .and_then(|reader| reader.join().ok())
         .unwrap_or_default();
-    Ok((timed_out, stderr))
+    let stderr = stderr_reader
+        .and_then(|reader| reader.join().ok())
+        .unwrap_or_default();
+    Ok((timed_out, stdout, stderr))
 }
 
 fn flatten_to_jpeg(image: DynamicImage, target: &Path) -> Result<()> {
@@ -372,6 +610,11 @@ fn validate_jpeg(target: &Path) -> bool {
         .and_then(|reader| reader.with_guessed_format().ok())
         .and_then(|reader| reader.into_dimensions().ok())
         .is_some_and(|(width, height)| width > 0 && height > 0)
+}
+
+/// 公开的缩略图完好性校验；`ensure_thumb` 的视频分支复用它。
+pub fn validate_thumbnail(target: &Path) -> bool {
+    validate_jpeg(target)
 }
 
 struct BatchReport {
@@ -428,7 +671,7 @@ fn run_batch(ffmpeg: &Path, jobs: &[ThumbJob], limit: Duration) -> BatchReport {
             return report;
         }
     };
-    let (timed_out, stderr) = match wait_with_timeout(child, limit) {
+    let (timed_out, _stdout, stderr) = match wait_with_timeout(child, limit) {
         Ok(value) => value,
         Err(error) => {
             outcome.failed = jobs.len();
@@ -590,6 +833,180 @@ pub fn generate_thumbnails(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// F-040 测试样本统一放在 `<repo>/target/kanalib-video-tests`，不触碰真实图库。
+    fn sample_dir(tag: &str) -> PathBuf {
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("..")
+            .join("target")
+            .join("kanalib-video-tests")
+            .join(format!(
+                "{tag}-{}-{:?}",
+                std::process::id(),
+                std::thread::current().id()
+            ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// 用被测 ffmpeg 生成 2s 320×240 MPEG-4 样本。
+    fn write_video_sample(ffmpeg: &Path, path: &Path) {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
+        let status = Command::new(ffmpeg)
+            .args([
+                "-hide_banner",
+                "-nostdin",
+                "-v",
+                "error",
+                "-y",
+                "-f",
+                "lavfi",
+                "-i",
+                "testsrc=size=320x240:rate=10:duration=2",
+                "-c:v",
+                "mpeg4",
+            ])
+            .arg(path)
+            .stdin(Stdio::null())
+            .status()
+            .unwrap();
+        assert!(
+            status.success(),
+            "ffmpeg failed to create {}",
+            path.display()
+        );
+    }
+
+    #[test]
+    fn parses_probe_json_with_format_duration_fallback() {
+        let json = r#"{
+            "streams": [
+                {"codec_type": "audio", "codec_name": "aac"},
+                {"codec_type": "video", "codec_name": "h264", "width": 1920, "height": 1080}
+            ],
+            "format": {"duration": "3.500000"}
+        }"#;
+        let probe = parse_probe_json(json).unwrap();
+        assert_eq!((probe.width, probe.height), (1920, 1080));
+        assert_eq!(probe.codec, "h264");
+        assert_eq!(probe.duration_secs, Some(3.5));
+
+        let no_video = r#"{"streams": [{"codec_type": "audio"}], "format": {}}"#;
+        assert!(parse_probe_json(no_video).is_none());
+        assert!(parse_probe_json("not json").is_none());
+    }
+
+    #[test]
+    fn probe_skips_cover_art_and_reads_stream_duration() {
+        let json = r#"{
+            "streams": [
+                {"codec_type": "video", "codec_name": "mjpeg", "width": 600, "height": 600,
+                 "disposition": {"attached_pic": 1}},
+                {"codec_type": "video", "codec_name": "vp9", "width": 640, "height": 360,
+                 "duration": "1.250000", "disposition": {"attached_pic": 0}}
+            ],
+            "format": {"duration": "9.000000"}
+        }"#;
+        let probe = parse_probe_json(json).unwrap();
+        assert_eq!((probe.width, probe.height), (640, 360));
+        assert_eq!(probe.codec, "vp9");
+        assert_eq!(probe.duration_secs, Some(1.25));
+
+        let attached_only = r#"{"streams": [
+            {"codec_type": "video", "codec_name": "mjpeg", "width": 600, "height": 600,
+             "disposition": {"attached_pic": 1}}
+        ], "format": {"duration": "2.0"}}"#;
+        assert!(parse_probe_json(attached_only).is_none());
+    }
+
+    #[test]
+    fn parses_ffprobe_version_line() {
+        let text = "ffprobe version n8.1.3 Copyright (c) 2007-2026 the FFmpeg developers\nconfiguration: --enable-version3 --disable-libx264";
+        let build = parse_version_output(text).unwrap();
+        assert_eq!(build.version, "n8.1.3");
+        assert_eq!(build.license, License::Lgpl);
+    }
+
+    #[test]
+    #[ignore = "requires ffmpeg + ffprobe (for example KANALIB_FFMPEG=/runtime/ffmpeg/bin/ffmpeg.exe)"]
+    fn video_probe_and_first_frame_thumbnail_end_to_end() {
+        let Some(ffmpeg) = status() else {
+            return;
+        };
+        assert!(
+            probe_available(),
+            "ffprobe should sit next to the configured ffmpeg"
+        );
+        let dir = sample_dir("video-e2e");
+        let unicode = dir
+            .join("图库 视频")
+            .join("a".repeat(60))
+            .join("サンプル 動画.mp4");
+        write_video_sample(&ffmpeg.path, &unicode);
+
+        let probe = probe_media(&unicode).expect("ffprobe should read the sample");
+        assert_eq!((probe.width, probe.height), (320, 240));
+        assert_eq!(probe.codec, "mpeg4");
+        let duration = probe.duration_secs.expect("duration");
+        assert!(
+            (1.8..=2.2).contains(&duration),
+            "unexpected duration {duration}"
+        );
+
+        let target = dir.join("thumb.jpg");
+        let outcome = generate_thumbnails(
+            &[ThumbJob {
+                source: unicode.clone(),
+                target: target.clone(),
+                alpha: false,
+            }],
+            &AtomicBool::new(false),
+            &|_, _| {},
+        );
+        assert_eq!(outcome.generated, 1, "first frame should be generated");
+        assert!(validate_thumbnail(&target));
+        let (width, height) = ImageReader::open(&target)
+            .unwrap()
+            .with_guessed_format()
+            .unwrap()
+            .into_dimensions()
+            .unwrap();
+        assert_eq!((width, height), (512, 384));
+        assert_eq!(
+            std::fs::read_dir(&dir)
+                .unwrap()
+                .filter_map(|entry| entry.ok())
+                .filter(|entry| { entry.file_name().to_string_lossy().ends_with(".ffmpeg.png") })
+                .count(),
+            0,
+            "temporary files must be cleaned up"
+        );
+
+        let broken = dir.join("broken.mp4");
+        std::fs::write(&broken, b"definitely not a video").unwrap();
+        assert!(
+            probe_media(&broken).is_none(),
+            "corrupt video has no metadata"
+        );
+        let failed_target = dir.join("broken.jpg");
+        let failed = generate_thumbnails(
+            &[ThumbJob {
+                source: broken,
+                target: failed_target.clone(),
+                alpha: false,
+            }],
+            &AtomicBool::new(false),
+            &|_, _| {},
+        );
+        assert_eq!(failed.generated, 0);
+        assert_eq!(failed.failed, 1);
+        assert!(!failed_target.exists(), "partial output must be removed");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn parses_gpl_and_lgpl_configuration() {
