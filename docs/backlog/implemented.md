@@ -17,7 +17,6 @@
 | F-020 | 标签重命名/合并；`tags.alias_of`（schema v6）保留旧名别名并扁平化别名链；FTS `tags_text` 并入别名 | 单测 `renaming_and_merging_tags_keep_aliases_and_fts` |
 | F-022 | 启动灌入 30,877 词表；补全为全词表前缀/子串 + 使用次数排序，最多 50 条 | `.kanalib/f022_suggest2.png` |
 | F-034 | `kamadak-exif` 解析方向/拍摄时间/相机/镜头/ISO/光圈/快门/焦距；缩略图按方向旋转并交换尺寸；`captured_at` 入库；`sort:captured` 与 `date:` 过滤；GPS 未展示 | 单测 `exif_orientation...`、`exif_datetime...` |
-| F-040 | 阶段 1：512 缩略图走 ffmpeg 多输入批处理池（≤32/批、120s 超时、`-protocol_whitelist file`、`max_pixels`、无窗口）；路径 env → PATH → `runtime/ffmpeg` → exe 同级（debug 另含 `tools/ffmpeg`）；`--enable-gpl` 探测；失败二分重试、`image` 回退；缓存键 `v3`；`runtime/ffmpeg` 为 LGPL shared，GPL 仅本地开发；pHash/修复仍走 `image`/Python | `docs/FFMPEG.md`；ffmpeg 4 测试；10k/100k 基准见下 |
 | F-041 | 主题按钮在导出与窗口控制之间，`ControlSize::Md` + Ghost，非图库页仍在窗口控制左侧 | `cargo check` 通过 |
 | F-042 | 26px 底栏：左侧状态/总数/已打标/未打标/失败/损坏可点跳筛选；右侧队列/设备/命令面板；标题栏命令面板与侧栏重复状态卡移除 | `.kanalib/ui_shell_statusbar.png` |
 | F-060 | 10GB 默认磁盘预算（可调）；`thumb_access.json` 记录访问；512+t256 组 LRU 并保护当前解码/最近访问；设置页显示用量/命中率/清理；缺失缩略图按 `thumb_sources` 重建 | 单测 `evicted_thumbs_rebuild...`，`.kanalib/f060_settings2.png` |
@@ -35,6 +34,10 @@
 | F-045 | 相似阈值预览：阈值统一 0–32（6/10/14 快捷档），`preview_similar_threshold` 返回预估组数/成员数/链式风险；≤4096 张精确，更大库抽 4096 种子（10 万 4.1%），检测链式合并时回退精确全扫；改阈值不清空评审状态 | core 单测（预览与全扫一致/边界/风险标记）；UI 滑杆 + 临时值/默认值 + 预估与风险实测 `.kanalib/r3_g2_preview2_top.png` |
 | F-005 | 分组浏览：按修改时间/拍摄时间/来源/评级分组，组头显示名称与数量、滚动吸顶、可折叠；`ui.group_by` 持久化；保持行级虚拟化与 6 种视图固定格尺寸；「查看 → 分组」菜单 + 命令面板 | 单测（分组布局/折叠/映射 6 项）；UI 实测分组、计数、折叠与吸顶 `.kanalib/r3_g2_grouped.png`、`r3_g2_collapsed.png`；第四轮 10 万库实测分组（修改时间/拍摄时间/来源/评级）、组头吸顶、折叠与连续滚动可用，600s 滚动采样工作集约 145MB、私有约 190MB 无增长（`.kanalib/r4_task0/100k-scroll-memory.csv`、`.kanalib/r4_task0/screens/100k-*.png`、`.kanalib/r4_task0/uia-100k-grouped.txt`）；10k 有缩略图的分组/滚动视觉通过（`.kanalib/r4_task0/screens/10k-group-*.png`）。边界：100k 合成库源目录 `C:\bench` 离线、无缩略图，只证明分组布局/虚拟化/内存，不证明 10 万真实缩略图滚动 |
 | F-003 | 图片对比：`Screen::Compare` + `compare.rs`，并排 2–4 栏、同步缩放/平移、适应/原图、元数据差异表（差异/相同分组）、保留项标记（只标记不删移）；Esc 返回原视图与滚动位置；只加载当前对比图 | UI 单测 4 项（布局/差异）；实测两栏对比、差异表与保留标记 `.kanalib/r3_g2c_compare.png`；第四轮从去重组「对比此组」验证 3 张对比：并排 3 栏、同步缩放（×1.95）/平移、差异表（差异 1 项/相同 8 项）、保留标记、Esc 返回去重组（`.kanalib/r4_task0/screens/10k-compare-*.png`）；Ctrl 多选 2–4 张进入对比仍未复现（`10k-multiselect-ctrl-attempt.png` 显示 Ctrl 点击后仅 1 张选中），多选入口待手动验收 |
+| F-038 | 窗口位置/大小/最大化/上次屏幕恢复：`.kanalib/window_state.json`，500ms 节流 + 关闭/退出补写；启动按 display_id→窗口中心→主屏回退并夹取可见工作区；仅单主窗口，不做多窗口/面板布局/托盘 | 平台单测 10 项（离屏/125% DPI/显示器回退）；实机重启恢复像素差 0、最大化 `IsZoomed=true`（`.kanalib/r5a/`）；多显示器与真实 125% 目视未验证 |
+| F-039 | 单实例：数据根规范化哈希 → Windows 命名 mutex/激活事件；第二实例 `AllowSetForegroundWindow`+`SetEvent` 后退出，首实例轮询置前；headless 不参与；不同数据根可共存；托盘/开机启动不做 | 双开实测第二实例 0.11s 退出且无窗口、前台 HWND 与首实例一致；bin 单测 3 项；证据 `.kanalib/r5a/summary.txt` |
+| F-035 | Immich/WebDAV 只读来源与跨源 SHA1 精确去重：`Source` 抽象、Immich 版本/分页/`updatedAfter`/缩略图、WebDAV PROPFIND/ETag/Last-Modified/4 并发限流/目录缓存、keyring 凭据、`immich://`/`webdav://` 虚拟路径只读拦截、设置页添加/测试/同步/凭据/移除；不写回/不删远端/不上传/不下载 original/不做跨源相似 | core 单测 12 项（本地不回归、分页增量、断线、凭据不落库、PROPFIND/限流、跨源归组）+ UI 单测 3 项 + 设置页截图 `.kanalib/r5d/settings3.png`、`.kanalib/r5d/dialog.png`；全部回环 mock，**未联真实服务器**；WebDAV 无 SHA1 不参与归组、远端删除暂不清理旧资产行 |
+| F-040 | 视频作为新 `media_kind`：首帧走既有批处理池、ffprobe 时长/宽高/编码、系统默认播放器入口、视频不进 pHash/打标队列/不标损坏；schema v9→v10 幂等补列并先备份；不做内置播放器/转码/批量视频打标；HEIC/RAW 明确不支持（F-033 仍 pending） | core 165/16（合并后 177/16）；10k 冷导入 213.7s / 0 失败；视频样本 2.0s/320×240、首帧 512×384；UI 视频瓦片 `视频 · 00:02` 截图 `.kanalib/r5d/grid2.png`；100k 未重跑、系统播放未实点打开 |
 
 验证汇总：`cargo test --workspace` core 32 + UI 5 通过（4 项按需忽略）；ffmpeg 4 项、视图收敛 6 项通过。10k 冷导入缩略图 ffmpeg 52.2s vs image 124.3s，总 152.3s vs 230.9s；100k 缩略图 738.7s（历史 1130s），总 42.3min（历史 49.3min）。历史 100k 滚动 151.5fps、present p99 15.84ms、峰值 329MB；搜索 p95 284ms（目标 <150ms）。所有 UI 冒烟使用隔离数据根，未触碰真实图库。
 

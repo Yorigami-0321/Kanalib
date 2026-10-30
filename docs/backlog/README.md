@@ -44,13 +44,14 @@
 | [pending/tags.md](pending/tags.md) | 标签与打标：F-021/023/024（已归档，本域暂无未完成项） |
 | [pending/library-sources-formats.md](pending/library-sources-formats.md) | 图库/来源/格式：F-030–F-033、F-035–F-037、F-040 |
 | [pending/dedup.md](pending/dedup.md) | 去重：F-045 |
-| [pending/ops.md](pending/ops.md) | 性能/可靠性与交付：F-061–F-063 |
+| [pending/ops.md](pending/ops.md) | 性能/可靠性与交付：F-038/F-039、F-061–F-063 |
 | [candidate-pool.md](candidate-pool.md) | 低优先级/远期候选 |
 | [constraints.md](constraints.md) | 安全/性能/缓存/许可/本机脚本等全局约束 |
 | [parallel-plan.md](parallel-plan.md) | 并行开发矩阵 + 第一轮可直接派发的任务包 |
 | [round-2.md](round-2.md) | 第二轮任务包：打标质量/队列、搜索性能、媒体格式与阶段 2 |
 | [round-3.md](round-3.md) | 第三轮任务包：组织、相似/浏览、扫描运维与 UI 拆分 |
 | [round-4.md](round-4.md) | 第四轮任务包：备份恢复、媒体评估、搜索上限与监听收尾 |
+| [round-5.md](round-5.md) | 第五轮任务包：桌面基础、Immich/WebDAV 网络源、视频与格式门 |
 | [component-research.md](component-research.md) | 非 UI 现成组件调研（可直接采用/评估/自研） |
 | [references.md](references.md) | 外部参考与本地依据 |
 
@@ -62,8 +63,8 @@
 |---|---|---|
 | 第 1 批 | 图库可信度与规模 | F-012（剩余：非名称排序 p95）、F-030、F-032、F-061、F-063、F-040（阶段 2 剩余） |
 | 第 2 批 | 整理工作流 | F-003、F-004、F-005、F-013、F-014、F-033（剩余：HEIC/RAW/PSD）、F-036、F-037、F-045 |
-| 第 3 批 | 原计划阶段 2 | F-035 |
-| 候选池 | 低优先级/远期 | F-015、F-016、F-025、F-026、F-038、F-039、F-046、F-047、F-048、F-049、F-064、F-065、F-066、F-067、F-068 |
+| 第 3 批 | 原计划阶段 2 / 桌面基础 | F-035（第五轮 B）、F-038/F-039（第五轮 A） |
+| 候选池 | 低优先级/远期 | F-015、F-016、F-025、F-026、F-046、F-047、F-048、F-049、F-064、F-065、F-066、F-067、F-068 |
 
 ## 使用约定
 

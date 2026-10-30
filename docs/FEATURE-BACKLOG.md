@@ -16,6 +16,7 @@
 | [backlog/round-2.md](backlog/round-2.md) | 第二轮任务包（打标/搜索/媒体） |
 | [backlog/round-3.md](backlog/round-3.md) | 第三轮任务包与执行结果 |
 | [backlog/round-4.md](backlog/round-4.md) | 第四轮任务包（备份/媒体/搜索/监听） |
+| [backlog/round-5.md](backlog/round-5.md) | 第五轮任务包（桌面基础/网络源/视频） |
 | [backlog/component-research.md](backlog/component-research.md) | 非 UI 现成组件调研 |
 | [backlog/candidate-pool.md](backlog/candidate-pool.md) | 候选池 |
 | [backlog/references.md](backlog/references.md) | 参考与本地依据 |

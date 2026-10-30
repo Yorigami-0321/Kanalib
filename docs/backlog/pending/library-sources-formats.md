@@ -31,16 +31,25 @@
 - **已完成（第二轮）**：`image` 0.25 打开 `tiff`/`ico`/`qoi`/`exr` 特性，扩展名白名单扩到 tif/tiff/ico/qoi/exr/avif；新格式可算内容哈希、读尺寸，损坏文件仍保留哈希并标记损坏（`new_image_formats_decode_for_hashes`、`truncated_new_format_keeps_content_hashes`）；AVIF 留在 ffmpeg 路径（`FFMPEG_ONLY_EXTENSIONS`），尺寸从 ispe box 读取，ffmpeg 缺失时回退并保留哈希不误判损坏（`avif_dimensions_read_ispe_box`、`avif_ffmpeg_fallback_keeps_hashes_without_damage`）；检查器展示格式友好名与解码能力提示（内置解码 / 需要 FFmpeg）。
 - **已完成（第四轮，2026-10-29）**：PSD 接入（ffmpeg-only）——`.psd` 进入扫描白名单，SHA1/BLAKE3 照常；尺寸读 26 字节文件头（`media::fallback_dimensions`）；512 缩略图交给 LGPL ffmpeg 的 psd 解码器，alpha 仍走临时 PNG + 白底；监听新增/缓存淘汰时 `ensure_thumb` 可按单文件回退 ffmpeg。实测合成样本覆盖 RGB、CMYK（反相存储转品红 ≈254,0,254）、灰度、RGBA（ffmpeg 输出 `gbrp`，alpha 不保留）、仅文件头截断、Unicode/长路径；扫描/尺寸/哈希/缩略图测试见 `media.rs`/`state.rs`。PSD 未新增 crate/原生库，运行时/依赖包体积增量 0（应用代码仅少量分支）。动画两帧 WebP 的 `image` 回退确认取首帧；本机 ffmpeg n8.1.3 拒绝动画 WebP，预取失败后由 `image` 回退补首帧。
   - **UI 收口（第四轮 E1，`02e4960`）**：检查器把 PSD 显示为「格式 PSD · 需要 FFmpeg 解码 · 仅合成图」，并写明图层/智能对象不展开、Alpha 不保留、无 pHash、不支持 `.psb`；无 ffmpeg 时提示只有哈希/尺寸、无缩略图。GIF/WebP 显示「内置解码 · 动画仅首帧」，查看器提供「用系统应用播放」出口并在底部提示“动画仅首帧，播放请用系统应用”；本轮不实现应用内逐帧播放。HEIC/RAW 仍不进入支持列表。截图：`.kanalib/r4_e1/screens/psd-inspector.png`、`gif-inspector.png`、`gif-viewer.png`。
-- **剩余**：HEIC/HEIF（`libheif-rs` + HEVC）与 RAW（`rawloader`/LibRaw）仍不接入：本机 LGPL ffmpeg 无 HEIC/HEIF 与相机 RAW demuxer，仓库/机器无合法真实样本，rawloader/LibRaw 为 LGPL 且静态链接分发需额外合规。PSD 的图层/智能对象只显示合成图、alpha 不保留、无 pHash（相似去重不含 PSD）、不支持 `.psb`；动画 GIF/WebP 的查看器播放/逐帧入口留待 E1，Core 继续只取首帧。
+- **第五轮（2026-10-30，任务 C）**：格式门统一为 `is_unsupported_format` + `UNSUPPORTED_FORMAT_NOTE`；HEIC/HEIF、相机 RAW 不扫描/不入库/不解码，UI 只提示「不支持」，不伪装支持；无真实样本、可分发解码链与许可结论，状态仍为未完成。
+- **剩余**：HEIC/HEIF（`libheif-rs` + HEVC）与 RAW（`rawloader`/LibRaw）仍不接入：本机 LGPL ffmpeg 无 HEIC/HEIF 与相机 RAW demuxer，仓库/机器无合法真实样本，rawloader/LibRaw 为 LGPL 且静态链接分发需额外合规。PSD 的图层/智能对象只显示合成图、alpha 不保留、无 pHash（相似去重不含 PSD）、不支持 `.psb`；动画 GIF/WebP 未做应用内逐帧播放，E1 只提供“用系统应用播放”出口，Core 继续只取首帧。
 - **验收（剩余）**：HEIC/RAW 需真实样本 + 可分发解码链 + 体积/安全/许可审查后才写入支持列表；动画入口需查看器内实测；PSD 只在有真实分层/CMYK 样本时再扩大承诺。
 - **依赖/风险**：二进制体积、解码器许可证、解码安全（解压炸弹，PSD 已受 `max_pixels`/120s 超时约束）；不同格式的 EXIF/方向与 F-034 共享处理；无 ffmpeg 时 PSD 只有哈希、没有缩略图/尺寸/phash，UI 提示需要 FFmpeg。
 
 ## F-035 Immich/WebDAV 只读来源
 
 - **依据**：`PLAN.md` §9 与阶段 2；`sources` 表已有 `kind/config_json/read_only/last_sync_at/sync_cursor`；当前只有本地根。
-- **现状**：没有 HTTP 客户端依赖；无法连接 Immich 或 WebDAV；跨源统一视图与跨源去重也未实现。
+- **第四轮现状（2026-10-28 前）**：没有 HTTP 客户端依赖；无法连接 Immich 或 WebDAV；跨源统一视图与跨源去重也未实现。
 - **建议**：定义统一 `Source` trait；Immich 只读（版本探测、分页搜索、`updatedAfter` 增量、缩略图下载、只读约束）；WebDAV（PROPFIND、ETag/Last-Modified、并发限流）；凭据进 Windows Credential Manager；远程缩略图落本地缓存；离线不阻塞本地库；SHA1 跨源精确去重；来源设置页支持测试连接/同步。
-- **验收**：按 PLAN 阶段 2 验收：同一张图在本地与 Immich 能归入同一精确重复组；网盘断线不影响本地库；远端不写回。
+- **第五轮已完成（2026-10-30，任务 B + D；`8340f71`/`3d9bb40`，合并 `18a0155`/`3025605`）**：
+  1. **Source 抽象**：本地 roots 包成 `Source` trait，行为与数据不变；`Shared.sources` 统一列表，本地扫描/监听/清理仍只用 roots。
+  2. **Immich 只读 MVP**：版本探测、分页搜索、`updatedAfter` 增量、缩略图缓存、只读约束；凭据进 `keyring`；断线不阻塞本地库。
+  3. **WebDAV 只读**：PROPFIND Depth 0/1、ETag/Last-Modified、4 并发限流 + 退避、目录缓存；凭据同上。
+  4. **跨源精确去重**：按 SHA1 归组，复用现有去重评审状态；远端资产用 `immich://`/`webdav://` 虚拟路径，回收站/移动/删除三重拦截。
+- **交付验证（2026-10-30）**：core 12 项 mock 单测（本地不回归、版本/分页/`updatedAfter`、断线、凭据不落库、PROPFIND/限流、跨源归组）+ UI 测试 3 项 + 设置页截图 `.kanalib/r5d/settings3.png`、`.kanalib/r5d/dialog.png`；合并后 core 177/16、UI 52、bin 6。
+- **未验证边界**：未联真实 Immich/WebDAV（全部回环 mock）；WebDAV 无 SHA1 不参与精确归组且不下载 original；远端删除暂不清理旧资产行；添加/测试/同步的完整 UI 提交链路未用真实键入跑通（GPUI TextInput 不接受 UIA `ValuePattern`）。
+- **第五轮边界（不做）**：写回、删除/移动远端、上传、下载 original、跨源相似去重（后续轮次）；不改本地 Source 的既有行为；网络源测试只用隔离数据根/测试容器，不碰真实图库；`sources` 表迁移前必须先备份。
+- **验收（第五轮）**：同一张图在本地与 Immich 归入同一 SHA1 组；断线/凭据失效不阻塞本地库；远端零写入；本地 Source 行为不回归；`sources` 表迁移前备份存在；来源测试连接/同步/空结果有隔离根截图或 UIA。
 - **依赖/风险**：范围大；凭据与网络安全；API 版本差异；远程缩略图缓存与 F-060 预算共享。
 
 ## F-036 拖拽导入文件夹/图片
@@ -62,12 +71,13 @@
 
 > 第三轮已实现（核心移除 + 路径/SHA1/glob 忽略列表 + 设置页忽略列表 UI），见 [implemented.md](../implemented.md)。
 
-## F-040 缩略图/文件处理改用 ffmpeg（阶段 2）
+## F-040 缩略图/文件处理改用 ffmpeg（阶段 2，第五轮 C+D 已收口）
 
 > 阶段 1 已实现：512 缩略图走 ffmpeg 多输入批处理池；默认 LGPL，GPL 不随包；缓存键 `v3`；扫描前预生成、失败二分重试、`image` 回退。详细许可/进程模型/基准见 [`docs/FFMPEG.md`](../../FFMPEG.md)。本节只保留剩余阶段与不可回退约束。
 
 - **已完成**：路径解析 env → PATH → `runtime/ffmpeg` → exe 同级（debug 另含 `tools/ffmpeg`）；`--enable-gpl` 探测；每批 ≤32、120s 超时、`-protocol_whitelist file`、`max_pixels`、无窗口；alpha 合成白底 JPEG；t256 从 512 派生；缓存键 `v3`；10k 缩略图 52.2s、100k 738.7s、总 42.3min；`runtime/ffmpeg` 为 LGPL shared，`tools/ffmpeg` GPL 仅本地开发。第二轮阶段 2：AVIF 走 ffmpeg-only 路径（`image` 0.25 无 AVIF 解码器，哈希照算、尺寸从 ispe box 读、缺 ffmpeg 时给“需要 FFmpeg 解码”提示而不误判损坏）；动画 GIF/WebP 取首帧；含 alpha 的新格式先写临时 PNG 再白底合成；批次内损坏输入被隔离。pHash 仍走自研 DCT（不换 `image_hasher`），损坏修复仍走 Python。第四轮（2026-10-29）：PSD 以 ffmpeg-only 接入（详见 F-033）；复核 pHash/修复结论不变；核对 ffprobe 与 LGPLv3 构建参数，ffprobe 默认随包；视频首帧/时长仅评估，未接视频功能。
-- **剩余阶段**：视频（第一帧/时长扫描与查看）完整功能；HEIC/RAW 仅在真实样本与许可审查后承诺；PSD 的图层/Alpha/pHash/PSB 边界；动画 GIF/WebP 的查看器播放入口（E1）。
+- **第五轮已完成（2026-10-30，任务 C + D；`40baa4f`/`582d9e2`，合并 `d1df29a`/`3025605`）**：视频作为新 `media_kind`；首帧走既有批处理池（512、120s、`-frames:v 1`）；ffprobe 取时长/宽高/编码（20s 超时、可关）；系统默认播放器入口只 `spawn`；视频不进 pHash/打标队列/不标损坏；schema v9→v10 幂等补列并先备份；网格视频瓦片首帧+时长角标，查看器固定首帧并提供系统播放；远端虚拟路径在 UI 全面只读拦截。core 合并后 177/16、UI 52；10k 冷导入 213.7s / 0 失败；视频样本 2.0s/320×240、首帧 512×384（`.kanalib/r5c/`、`.kanalib/r5d/grid2.png`）。
+- **剩余阶段**：HEIC/RAW 仅在真实样本与许可审查后承诺（F-033 继续 pending）；PSD 的图层/Alpha/pHash/PSB 边界；动画 GIF/WebP 不做应用内逐帧播放（仅系统应用出口）；不做内置视频播放器/转码/批量视频打标；100k 未重跑、系统播放入口未实点打开。
 - **约束**：批处理参数不得经过 shell；Unicode/长路径用 `Command` 参数；临时文件必须清理；GPL 构建不得随包；ffmpeg 缺失/损坏时回退 `image` 并记日志；100k 指标不得劣于 738.7s/42.3min；ffprobe 与 ffmpeg 同 configuration、同 LGPL 许可，不单独引入 GPL 工具。
 - **验收**：阶段 2 的真实/合成样本（竖图、横图、alpha、CMYK、动画首帧、Unicode、超大图）通过；无进程/临时文件泄漏；许可与打包清单明确；pHash/修复迁移不改变现有去重评审语义；ffprobe 随包体积与许可落盘。
 - **未决问题（第四轮已决）**：pHash 不换（会改变全部哈希/评审状态，且无等价算法）；修复保留 Python（ffmpeg 缺少 JSON/`--max-size`/EXIF/alpha 契约）；`ffprobe` 随包（同一 LGPL 构建，`bin` 除 `ffplay` 外全部复制）；LGPL 打包范围保持 `runtime/ffmpeg` 全 `bin`；alpha 继续白底 JPEG；失败回退保持预取二分 + `image`。
