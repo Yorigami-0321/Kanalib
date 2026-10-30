@@ -14,14 +14,18 @@ use serde::{Deserialize, Serialize};
 use crate::dedup::{DuplicateReview, ReviewState};
 use crate::media::ContentHashes;
 use crate::model::{
-    Asset, BackupReport, Collection, DateFilter, DuplicateNameError, Filter, NumField, NumOp,
-    NumericFilter, OrganizationKind, RetagSummary, SavedSearch, SavedSearchView, SearchQuery,
-    SearchQueryParts, TAG_CANDIDATE_MIN_SCORE, TAG_CATEGORIES, TableCount, TagCandidateReview,
-    TagHit, TagJobError, TagQueueTotals, TagRecomputeSummary, TagReviewState, TagSummary,
-    TagThresholds, candidate_limit, day_number, default_category_thresholds, normalize_tag_name,
+    Asset, BackupReport, Collection, DateFilter, DuplicateNameError, Filter, MediaKind, NumField,
+    NumOp, NumericFilter, OrganizationKind, RetagSummary, SavedSearch, SavedSearchView,
+    SearchQuery, SearchQueryParts, TAG_CANDIDATE_MIN_SCORE, TAG_CATEGORIES, TableCount,
+    TagCandidateReview, TagHit, TagJobError, TagQueueTotals, TagRecomputeSummary, TagReviewState,
+    TagSummary, TagThresholds, candidate_limit, day_number, default_category_thresholds,
+    media_kind, normalize_tag_name,
 };
 
-const SCHEMA_VERSION: i64 = 9;
+/// v10：`assets.media_kind`（F-040 视频）。v9 及更早的库没有该列，必须在
+/// `migrate` 里用 `ALTER TABLE ... DEFAULT 'image'` 补齐，否则任何读取
+/// `media_kind` 的查询都会在旧库上报 "no such column"。
+const SCHEMA_VERSION: i64 = 10;
 const TAG_THRESHOLDS_KEY: &str = "tags.category_thresholds";
 /// 库内是否存在内置 lower() 与 Rust Unicode 小写不同的名称；避免每次打开全表探测。
 const NAME_FOLD_KEY: &str = "search.name_fold_unicode";
@@ -399,6 +403,7 @@ CREATE TABLE IF NOT EXISTS assets (
     path TEXT NOT NULL,
     folder TEXT NOT NULL,
     name TEXT NOT NULL,
+    -- v10（F-040）：新库直接建列；v9 及更早的库由 `ensure_media_kind_column` 补列。
     media_kind TEXT NOT NULL DEFAULT 'image',
     mime TEXT NOT NULL DEFAULT '',
     width INTEGER NOT NULL DEFAULT 0,
@@ -605,6 +610,8 @@ pub struct StoredMeta {
     pub captured_at: Option<u64>,
     pub metadata_json: String,
     pub exif_state: String,
+    /// F-040：落库的媒体类型；视频没有 pHash，缓存判定要区分。
+    pub media_kind: MediaKind,
 }
 
 impl StoredMeta {
@@ -618,12 +625,13 @@ impl StoredMeta {
         if !Path::new(&self.thumb).exists() {
             return false;
         }
+        let phash_ok = self.media_kind == MediaKind::Video || self.phash.is_some();
         self.sha1.as_deref().is_some_and(|value| !value.is_empty())
             && self
                 .blake3
                 .as_deref()
                 .is_some_and(|value| !value.is_empty())
-            && self.phash.is_some()
+            && phash_ok
     }
 
     pub fn content_if_current(&self, mtime: u64, bytes: u64) -> Option<ContentHashes> {
@@ -632,6 +640,16 @@ impl StoredMeta {
         }
         let sha1 = self.sha1.clone().filter(|value| !value.is_empty())?;
         let blake3 = self.blake3.clone().filter(|value| !value.is_empty())?;
+        // 视频不参与 pHash：复用哈希时返回 0/未解码，绝不因 phash 缺失而重算全库视频。
+        if self.media_kind == MediaKind::Video {
+            return Some(ContentHashes {
+                sha1,
+                blake3,
+                phash: 0,
+                decode_ok: false,
+                decode_error: None,
+            });
+        }
         Some(ContentHashes {
             sha1,
             blake3,
@@ -1001,7 +1019,7 @@ impl Db {
         self.conn
             .query_row(
                 "SELECT mtime, bytes, sha1, blake3, phash, width, height, thumb,
-                        captured_at, metadata_json, exif_state
+                        captured_at, metadata_json, exif_state, media_kind
                  FROM assets WHERE path = ?1",
                 [&path],
                 |row| {
@@ -1020,6 +1038,7 @@ impl Db {
                             .map(|value| value.max(0) as u64),
                         metadata_json: row.get(9)?,
                         exif_state: row.get(10)?,
+                        media_kind: MediaKind::from_stored(&row.get::<_, String>(11)?),
                     })
                 },
             )
@@ -1051,11 +1070,12 @@ impl Db {
             .unwrap_or_default();
         let source_id = self.source_id(folder)?;
         let valid_hashes = !hashes.sha1.is_empty() && !hashes.blake3.is_empty();
+        // F-040：media_kind/mime 由扩展名决定，图片路径的落库值与旧库一致（默认 'image'）。
         self.conn.execute(
             "INSERT INTO assets(
                 source_id, path, folder, name, media_kind, mime, width, height, bytes, mtime,
                 thumb, sha1, blake3, phash, damage
-             ) VALUES(?1, ?2, ?3, ?4, 'image', ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
+             ) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)
              ON CONFLICT(source_id, path) DO UPDATE SET
                 folder = excluded.folder,
                 name = excluded.name,
@@ -1070,12 +1090,13 @@ impl Db {
                 blake3 = excluded.blake3,
                 phash = excluded.phash,
                 damage = excluded.damage,
-                tag_attempts = CASE WHEN ?15 THEN 0 ELSE tag_attempts END",
+                tag_attempts = CASE WHEN ?16 THEN 0 ELSE tag_attempts END",
             params![
                 source_id,
                 path_string,
                 folder,
                 name,
+                media_kind(path).as_str(),
                 mime_for(path),
                 width,
                 height,
@@ -2457,7 +2478,8 @@ impl Db {
             "INSERT OR IGNORE INTO jobs(kind, asset_id, priority, state, attempts, last_error, run_after)
              SELECT 'tag', id, 0, 'pending', 0, NULL, 0
              FROM assets
-             WHERE folder = ?1 AND tagged = 0 AND tag_attempts < 3 AND deleted_at IS NULL",
+             WHERE folder = ?1 AND tagged = 0 AND tag_attempts < 3 AND deleted_at IS NULL
+               AND media_kind = 'image'",
             [folder],
         )?;
         tx.execute(
@@ -2466,6 +2488,7 @@ impl Db {
              WHERE kind = 'tag' AND asset_id IN (
                 SELECT id FROM assets
                 WHERE folder = ?1 AND tagged = 0 AND tag_attempts < 3 AND deleted_at IS NULL
+                  AND media_kind = 'image'
              )",
             [folder],
         )?;
@@ -2812,16 +2835,17 @@ impl Db {
         };
         tx.execute(
             "UPDATE assets SET
-                source_id = ?1, path = ?2, folder = ?3, name = ?4, mime = ?5,
-                width = ?6, height = ?7, bytes = ?8, mtime = ?9, thumb = ?10,
-                sha1 = ?11, blake3 = ?12, phash = ?13, damage = ?14,
+                source_id = ?1, path = ?2, folder = ?3, name = ?4, media_kind = ?5,
+                mime = ?6, width = ?7, height = ?8, bytes = ?9, mtime = ?10, thumb = ?11,
+                sha1 = ?12, blake3 = ?13, phash = ?14, damage = ?15,
                 thumb_state = 'done'
-             WHERE id = ?15",
+             WHERE id = ?16",
             params![
                 source_id,
                 new_string,
                 folder,
                 name,
+                media_kind(new_path).as_str(),
                 mime_for(new_path),
                 width,
                 height,
@@ -4592,6 +4616,19 @@ pub(crate) fn mime_for(path: &Path) -> &'static str {
         Some("webp") => "image/webp",
         Some("gif") => "image/gif",
         Some("bmp") => "image/bmp",
+        // F-040：视频容器 MIME；只做展示/导出用，不影响解码路径。
+        Some("mp4") | Some("m4v") => "video/mp4",
+        Some("mov") => "video/quicktime",
+        Some("mkv") => "video/x-matroska",
+        Some("webm") => "video/webm",
+        Some("avi") => "video/x-msvideo",
+        Some("wmv") => "video/x-ms-wmv",
+        Some("flv") => "video/x-flv",
+        Some("mpg") | Some("mpeg") | Some("vob") => "video/mpeg",
+        Some("3gp") => "video/3gpp",
+        Some("3g2") => "video/3gpp2",
+        Some("ts") | Some("m2ts") | Some("mts") => "video/mp2t",
+        Some("ogv") => "video/ogg",
         _ => "application/octet-stream",
     }
 }
@@ -4700,9 +4737,30 @@ fn ensure_asset_columns(conn: &Connection) -> Result<()> {
             "ALTER TABLE assets ADD COLUMN metadata_json TEXT NOT NULL DEFAULT '{}';",
         )?;
     }
+    // v10：`migrate` 已加列，这里再按列名守卫一次，覆盖「user_version 已写、
+    // ALTER 前进程被杀」的窗口，以及跳过 migrate 的只读/手工打开。
+    ensure_media_kind_column(conn)?;
     conn.execute_batch(
         "CREATE INDEX IF NOT EXISTS idx_assets_captured_at ON assets(captured_at);",
     )?;
+    Ok(())
+}
+
+/// v9 → v10：补 `assets.media_kind`。
+///
+/// 老库（v9 及更早）没有这一列，旧行一律按 `'image'` 解释：`ALTER TABLE ... NOT NULL
+/// DEFAULT 'image'` 让既有行读出该默认值，不需要回填或重写全表。列已存在时不做任何事，
+/// 因此迁移中途失败后重开可以继续。
+fn ensure_media_kind_column(conn: &Connection) -> Result<()> {
+    let mut statement = conn.prepare("PRAGMA table_info(assets)")?;
+    let columns = statement
+        .query_map([], |row| row.get::<_, String>(1))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    if columns.iter().any(|column| column == "media_kind") {
+        return Ok(());
+    }
+    conn.execute_batch("ALTER TABLE assets ADD COLUMN media_kind TEXT NOT NULL DEFAULT 'image';")?;
+    log::info!("v10: added assets.media_kind (existing rows are images)");
     Ok(())
 }
 
@@ -4875,6 +4933,9 @@ fn migrate(conn: &Connection) -> Result<()> {
     conn.execute_batch(SCHEMA_V8)?;
     ensure_saved_search_columns(conn)?;
     conn.execute_batch(SCHEMA_V9)?;
+    // v10（F-040）：视频作为新的 media_kind 需要 assets.media_kind；v9 库在此补列，
+    // 既有行保持 'image'（读取语义不变），新库的表在 SCHEMA_V2 里已带该列。
+    ensure_media_kind_column(conn)?;
     conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
     Ok(())
 }
@@ -4992,7 +5053,7 @@ mod tests {
     };
     use crate::dedup::{DuplicateReview, ReviewState};
     use crate::media::ContentHashes;
-    use crate::model::{Asset, Filter, SearchQuery, TagHit, TagReviewState};
+    use crate::model::{Asset, Filter, MediaKind, SearchQuery, TagHit, TagReviewState};
     use rusqlite::Connection;
     use rusqlite::types::Value;
     use std::collections::HashSet;
@@ -5433,6 +5494,171 @@ mod tests {
             let counts = db.tag_job_counts("C:\\lib").unwrap();
             assert_eq!((counts.pending, counts.running, counts.error), (0, 0, 1));
         }
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn media_kind_and_mime_are_persisted_and_videos_skip_tag_queue() {
+        let root = temp_root("media-kind");
+        let db_path = root.join("kanalib.db");
+        {
+            let db = Db::open(&db_path).unwrap();
+            let video = PathBuf::from("C:\\lib\\clip.MP4");
+            let image = PathBuf::from("C:\\lib\\photo.png");
+            let video_hashes = ContentHashes {
+                sha1: "a".repeat(40),
+                blake3: "b".repeat(64),
+                phash: 0,
+                decode_ok: false,
+                decode_error: None,
+            };
+            db.upsert_meta(
+                "C:\\lib",
+                &video,
+                None,
+                320,
+                240,
+                100,
+                10,
+                &video_hashes,
+                false,
+            )
+            .unwrap();
+            db.upsert_meta("C:\\lib", &image, None, 10, 20, 100, 10, &hash('c'), false)
+                .unwrap();
+
+            let stored = db.stored_meta(&video).unwrap().unwrap();
+            assert_eq!(stored.media_kind, MediaKind::Video);
+            assert!(stored.phash.is_none(), "videos never store a pHash");
+            let reused = stored.content_if_current(10, 100).unwrap();
+            assert_eq!(reused.phash, 0);
+            assert!(!reused.decode_ok);
+
+            let image_stored = db.stored_meta(&image).unwrap().unwrap();
+            assert_eq!(image_stored.media_kind, MediaKind::Image);
+            assert!(db.load_asset(&video).unwrap().is_video());
+            assert!(!db.load_asset(&image).unwrap().is_video());
+
+            let (kind, mime): (String, String) = db
+                .conn
+                .query_row(
+                    "SELECT media_kind, mime FROM assets WHERE path = ?1",
+                    [video.to_string_lossy().to_string()],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .unwrap();
+            assert_eq!((kind.as_str(), mime.as_str()), ("video", "video/mp4"));
+
+            // 视频不进入批量打标队列；图片仍按原逻辑排队。
+            db.enqueue_tag_jobs("C:\\lib").unwrap();
+            let jobs = db.claim_tag_jobs("C:\\lib", 10).unwrap();
+            assert!(jobs.iter().all(|job| job.path != video));
+            assert!(jobs.iter().any(|job| job.path == image));
+        }
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// v9 库没有 `assets.media_kind`：升级后旧图必须默认 image，视频可写可读，
+    /// 且 `stored_meta`（读取 media_kind 的查询）不能报 no such column。
+    #[test]
+    fn migrates_v9_to_v10_and_keeps_existing_rows_as_images() {
+        let root = temp_root("v9-v10");
+        let db_path = root.join("kanalib.db");
+        let image = PathBuf::from("C:\\lib\\old.png");
+        let video = PathBuf::from("C:\\lib\\clip.mp4");
+        let image_text = image.to_string_lossy().to_string();
+        {
+            let conn = Connection::open(&db_path).unwrap();
+            conn.execute_batch(super::SCHEMA_V2).unwrap();
+            conn.execute_batch(super::SCHEMA_V4).unwrap();
+            conn.execute_batch(super::SCHEMA_V5).unwrap();
+            conn.execute_batch(super::SCHEMA_V8).unwrap();
+            super::ensure_saved_search_columns(&conn).unwrap();
+            conn.execute_batch(super::SCHEMA_V9).unwrap();
+            conn.execute(
+                "INSERT INTO sources(kind, name, locator) VALUES('local', '图库', 'C:\\lib')",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO assets(
+                    source_id, path, folder, name, media_kind, mime, width, height, bytes,
+                    mtime, thumb, sha1, blake3, phash
+                 ) VALUES(1, ?1, 'C:\\lib', 'old.png', 'image', 'image/png', 10, 20, 100, 10,
+                    '', ?2, ?3, 7)",
+                rusqlite::params![image_text, "a".repeat(40), "b".repeat(64)],
+            )
+            .unwrap();
+            // 还原成 v9 的真实形态：assets 表没有 media_kind 列。
+            conn.execute_batch("ALTER TABLE assets DROP COLUMN media_kind;")
+                .unwrap();
+            conn.pragma_update(None, "user_version", 9).unwrap();
+        }
+
+        let db = Db::open(&db_path).unwrap();
+        {
+            let conn = Connection::open(&db_path).unwrap();
+            let version: i64 = conn
+                .query_row("PRAGMA user_version", [], |row| row.get(0))
+                .unwrap();
+            assert_eq!(version, 10, "v9 must upgrade to v10");
+            assert_eq!(version, super::SCHEMA_VERSION);
+            let kind: String = conn
+                .query_row(
+                    "SELECT media_kind FROM assets WHERE path = ?1",
+                    [&image_text],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(kind, "image", "existing rows default to image");
+        }
+
+        // 读路径：旧图仍是 image，phash 与哈希不变。
+        let stored = db.stored_meta(&image).unwrap().unwrap();
+        assert_eq!(stored.media_kind, MediaKind::Image);
+        assert_eq!(stored.phash, Some(7));
+        assert_eq!(
+            db.load_asset(&image).unwrap().media_kind(),
+            MediaKind::Image
+        );
+
+        // 写路径：同一库里的视频写 video，图片写回 image。
+        let video_hashes = ContentHashes {
+            sha1: "c".repeat(40),
+            blake3: "d".repeat(64),
+            phash: 0,
+            decode_ok: false,
+            decode_error: None,
+        };
+        db.upsert_meta(
+            "C:\\lib",
+            &video,
+            None,
+            320,
+            240,
+            100,
+            10,
+            &video_hashes,
+            false,
+        )
+        .unwrap();
+        assert_eq!(
+            db.stored_meta(&video).unwrap().map(|meta| meta.media_kind),
+            Some(MediaKind::Video)
+        );
+        assert!(db.load_asset(&video).unwrap().is_video());
+
+        db.upsert_meta("C:\\lib", &image, None, 10, 20, 100, 10, &hash('e'), false)
+            .unwrap();
+        assert_eq!(
+            db.stored_meta(&image).unwrap().map(|meta| meta.media_kind),
+            Some(MediaKind::Image)
+        );
+        // 视频不进入打标队列；升级后的旧图仍排队。
+        db.enqueue_tag_jobs("C:\\lib").unwrap();
+        let jobs = db.claim_tag_jobs("C:\\lib", 10).unwrap();
+        assert!(jobs.iter().all(|job| job.path != video));
+        assert!(jobs.iter().any(|job| job.path == image));
         let _ = fs::remove_dir_all(&root);
     }
 

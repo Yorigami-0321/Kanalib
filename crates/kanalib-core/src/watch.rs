@@ -17,7 +17,7 @@ use anyhow::{Context, Result};
 use notify::{RecommendedWatcher, RecursiveMode};
 use notify_debouncer_mini::{DebounceEventResult, Debouncer, new_debouncer};
 
-use crate::model::{ScanCounts, ScanFilterConfig, Shared, is_image};
+use crate::model::{ScanCounts, ScanFilterConfig, Shared, is_media};
 use crate::scan_filter::{CompiledIgnoreRules, CompiledScanFilter, IgnoreRules};
 use crate::state::{AppState, IndexedFile};
 
@@ -44,11 +44,11 @@ pub enum WatchProbe {
 /// 一批监听事件的分类结果。
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct WatchClassification {
-    /// 存在且需要新增/更新的图片路径。
+    /// 存在且需要新增/更新的媒体路径（图片/视频）。
     pub changed: Vec<PathBuf>,
-    /// 不存在且可能已删除的图片路径。
+    /// 不存在且可能已删除的媒体路径（图片/视频）。
     pub missing: Vec<PathBuf>,
-    /// 被排除、非图片、目录或无法判断而忽略的数量。
+    /// 被排除、非媒体、目录或无法判断而忽略的数量。
     pub ignored: usize,
     /// 单批事件超过阈值，需要回退整来源重扫。
     pub oversized: bool,
@@ -143,14 +143,14 @@ pub fn classify_watch_paths_with_ignores(
         }
         match probe(&path) {
             WatchProbe::File(bytes) => {
-                if is_image(&path) && !ignores.ignores(&compiled, &path, false, Some(bytes)) {
+                if is_media(&path) && !ignores.ignores(&compiled, &path, false, Some(bytes)) {
                     classification.changed.push(path);
                 } else {
                     classification.ignored += 1;
                 }
             }
             WatchProbe::Missing => {
-                if is_image(&path) && !ignores.ignores(&compiled, &path, false, None) {
+                if is_media(&path) && !ignores.ignores(&compiled, &path, false, None) {
                     classification.missing.push(path);
                 } else {
                     classification.ignored += 1;
@@ -159,7 +159,7 @@ pub fn classify_watch_paths_with_ignores(
             WatchProbe::Directory | WatchProbe::Uncertain => classification.ignored += 1,
         }
     }
-    // 只统计真正需要处理的图片事件；超过阈值时交给整来源重扫，避免逐文件哈希/缩略图。
+    // 只统计真正需要处理的媒体事件；超过阈值时交给整来源重扫，避免逐文件哈希/缩略图。
     if classification.changed.len() + classification.missing.len() > WATCH_EVENT_LIMIT {
         classification.oversized = true;
         classification.changed.clear();
@@ -464,6 +464,20 @@ mod tests {
         // 仅防极端退化（debug 构建）；正常远低于阈值。
         assert!(changed_cost < std::time::Duration::from_secs(10));
         assert!(missing_cost < std::time::Duration::from_secs(10));
+    }
+
+    #[test]
+    fn video_events_are_media_but_gated_formats_are_ignored() {
+        let root = PathBuf::from("C:/library");
+        let video = root.join("clip.MP4");
+        let heic = root.join("photo.heic");
+        let classification =
+            classify_watch_paths(&root, &config(), vec![video.clone(), heic], |_| {
+                WatchProbe::File(10)
+            })
+            .unwrap();
+        assert_eq!(classification.changed, vec![video]);
+        assert_eq!(classification.ignored, 1, "HEIC 仍被格式门拒绝");
     }
 
     #[test]

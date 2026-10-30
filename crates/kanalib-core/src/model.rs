@@ -232,6 +232,16 @@ impl Asset {
         self.captured_at.unwrap_or(self.mtime)
     }
 
+    /// F-040：媒体类型。与写入 `assets.media_kind` 的判定同源（按扩展名），
+    /// 因此不需要给 `Asset` 增加字段，读取 DB 的旧资产也得到同一结果。
+    pub fn media_kind(&self) -> MediaKind {
+        media_kind(&self.path)
+    }
+
+    pub fn is_video(&self) -> bool {
+        is_video(&self.path)
+    }
+
     pub fn summary(&self) -> String {
         let tags = self
             .top_tags(2)
@@ -1642,10 +1652,70 @@ pub const IMAGE_EXTENSIONS: &[&str] = &[
     "jpg", "jpeg", "png", "webp", "gif", "bmp", "tif", "tiff", "ico", "qoi", "exr", "avif", "psd",
 ];
 
+/// 视频扩展名（F-040）。只列出本机 LGPL ffmpeg n8.1.3 实测能解复用并生成首帧的容器：
+/// mp4/m4v/mov/mkv/webm/avi/wmv/flv/mpg/mpeg/3gp/3g2/ts/m2ts/mts/ogv/vob。
+///
+/// 这是**容器**白名单，不承诺任意编码：HEVC、AV1 等解码器是否存在取决于 ffmpeg 构建；
+/// 没有 ffmpeg/ffprobe 时视频仍可入库（有哈希与 media_kind），但没有缩略图、时长与尺寸。
+/// 新增容器必须在真实样本上验证首帧与 ffprobe 元数据后再加入。
+pub const VIDEO_EXTENSIONS: &[&str] = &[
+    "mp4", "m4v", "mov", "mkv", "webm", "avi", "wmv", "flv", "mpg", "mpeg", "3gp", "3g2", "ts",
+    "m2ts", "mts", "ogv", "vob",
+];
+
 /// 本构建里 `image` 没有解码器、只能交给 ffmpeg 的扩展名。
 /// AVIF 的 `image` feature 只包含编码器；解码需要 `avif-native`（dav1d 原生库）。
 /// PSD 没有可用的纯 Rust 解码依赖，由 LGPL ffmpeg 的 psd 解码器读取合成图。
 pub const FFMPEG_ONLY_EXTENSIONS: &[&str] = &["avif", "psd"];
+
+/// F-033 格式门：明确**不**扫描、不解码、不生成缩略图的扩展名。
+///
+/// HEIC/HEIF 需要 HEIF 解复用器 + HEVC 解码；相机 RAW 需要各自的 demuxer/解码器。
+/// 本机 LGPL ffmpeg 没有这些 demuxer，仓库也没有合法真实样本，因此不写入白名单。
+/// 重新开启的门槛（三者缺一不可）：真实样本 + 可分发解码链 + 许可审查
+/// （含解码器许可、专利与打包体积），并补端到端测试后才允许加入。
+pub const UNSUPPORTED_FORMAT_EXTENSIONS: &[&str] = &[
+    "heic", "heif", "dng", "cr2", "cr3", "nef", "arw", "raf", "rw2", "orf", "srw", "pef", "raw",
+    "3fr", "x3f",
+];
+
+/// 能力提示数据：UI/检查器/文档共用同一句门槛说明，避免各处口径漂移。
+pub const UNSUPPORTED_FORMAT_NOTE: &str = "HEIC/HEIF 与相机 RAW 需要真实样本 + 可分发解码链 + 许可审查后才能加入；当前不扫描、不解码、不生成缩略图。";
+
+/// 媒体类型：图片与视频共享资产表，但走不同的解码/缩略图/元数据路径。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum MediaKind {
+    #[default]
+    Image,
+    Video,
+}
+
+impl MediaKind {
+    /// 落库值，与 `assets.media_kind` 一致。
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Image => "image",
+            Self::Video => "video",
+        }
+    }
+
+    /// 读取落库值；未知值按图片处理（老库/手工写入不会让资产消失）。
+    pub fn from_stored(value: &str) -> Self {
+        if value.eq_ignore_ascii_case("video") {
+            Self::Video
+        } else {
+            Self::Image
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Image => "图片",
+            Self::Video => "视频",
+        }
+    }
+}
 
 fn extension_lower(path: &Path) -> Option<String> {
     path.extension()
@@ -1655,6 +1725,37 @@ fn extension_lower(path: &Path) -> Option<String> {
 pub fn is_image(path: &Path) -> bool {
     extension_lower(path)
         .map(|ext| IMAGE_EXTENSIONS.iter().any(|known| *known == ext))
+        .unwrap_or(false)
+}
+
+/// F-040：按扩展名判断视频。
+pub fn is_video(path: &Path) -> bool {
+    extension_lower(path)
+        .map(|ext| VIDEO_EXTENSIONS.iter().any(|known| *known == ext))
+        .unwrap_or(false)
+}
+
+/// 图库收编的媒体：图片或视频。扫描、监听与排除规则预览统一用它。
+pub fn is_media(path: &Path) -> bool {
+    is_image(path) || is_video(path)
+}
+
+pub fn media_kind(path: &Path) -> MediaKind {
+    if is_video(path) {
+        MediaKind::Video
+    } else {
+        MediaKind::Image
+    }
+}
+
+/// F-033：明确不支持的格式（HEIC/HEIF、相机 RAW）。
+pub fn is_unsupported_format(path: &Path) -> bool {
+    extension_lower(path)
+        .map(|ext| {
+            UNSUPPORTED_FORMAT_EXTENSIONS
+                .iter()
+                .any(|known| *known == ext)
+        })
         .unwrap_or(false)
 }
 
@@ -2222,6 +2323,47 @@ mod tests {
         assert!(is_ffmpeg_only(Path::new("a.AVIF")));
         assert!(is_ffmpeg_only(Path::new("a.PSD")));
         assert!(!is_ffmpeg_only(Path::new("a.tiff")));
+    }
+
+    #[test]
+    fn video_extensions_are_media_but_not_images() {
+        for name in [
+            "a.mp4", "a.MP4", "a.m4v", "a.mov", "a.mkv", "a.webm", "a.avi", "a.wmv", "a.flv",
+            "a.mpg", "a.mpeg", "a.3gp", "a.3g2", "a.ts", "a.m2ts", "a.mts", "a.ogv", "a.vob",
+        ] {
+            let path = std::path::Path::new(name);
+            assert!(is_video(path), "{name} should be a video");
+            assert!(is_media(path), "{name} should be media");
+            assert!(!is_image(path), "{name} must not enter the image path");
+            assert_eq!(media_kind(path), MediaKind::Video);
+        }
+        for name in ["a.jpg", "a.psd", "a.avif"] {
+            let path = std::path::Path::new(name);
+            assert!(!is_video(path), "{name} is not a video");
+            assert!(is_media(path), "{name} should be media");
+            assert_eq!(media_kind(path), MediaKind::Image);
+        }
+        for name in ["a.txt", "noext", "a.heic", "a.dng"] {
+            assert!(!is_media(std::path::Path::new(name)), "{name} is not media");
+        }
+    }
+
+    #[test]
+    fn format_gate_rejects_heic_and_raw_with_explicit_note() {
+        for name in [
+            "a.heic", "a.HEIF", "a.dng", "a.cr2", "a.cr3", "a.nef", "a.arw", "a.raf",
+        ] {
+            let path = std::path::Path::new(name);
+            assert!(is_unsupported_format(path), "{name} is gated");
+            assert!(!is_image(path) && !is_video(path) && !is_media(path));
+        }
+        assert!(!is_unsupported_format(std::path::Path::new("a.psd")));
+        assert!(!is_unsupported_format(std::path::Path::new("a.avif")));
+        assert!(UNSUPPORTED_FORMAT_NOTE.contains("真实样本"));
+        assert!(UNSUPPORTED_FORMAT_NOTE.contains("许可审查"));
+        assert_eq!(MediaKind::from_stored("video"), MediaKind::Video);
+        assert_eq!(MediaKind::from_stored("image"), MediaKind::Image);
+        assert_eq!(MediaKind::from_stored(""), MediaKind::Image);
     }
     #[test]
     fn day_number_round_trips_date_parts() {

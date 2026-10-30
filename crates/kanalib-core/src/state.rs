@@ -3915,7 +3915,12 @@ fn prefetch_thumbnails(
         }) {
             continue;
         }
-        let (exif, captured_at) = media::read_exif(path);
+        // F-040：视频没有 EXIF；首帧仍走同一 ffmpeg 批处理池（`-map i:v -frames:v 1`）。
+        let (exif, captured_at) = if crate::model::is_video(path) {
+            (media::ExifData::default(), None)
+        } else {
+            media::read_exif(path)
+        };
         let target = thumb_target(path, &state.cache_dir, mtime, bytes, exif.orientation);
         if !target.exists() {
             jobs.push(ThumbJob {
@@ -4412,15 +4417,44 @@ fn index_file(
         outcome.kind = IndexedFile::Ignored;
         return Ok(outcome);
     }
-    let (exif, captured_at) = prefetched_exif.unwrap_or_else(|| media::read_exif(path));
+    // F-040：视频先探测时长/分辨率（失败不阻塞导入），再走 ffmpeg 首帧。
+    let video_kind = crate::model::is_video(path);
+    // 文件未变化且已落库过时长/编码时直接复用，避免每次扫描都为同一批视频启动 ffprobe。
+    let cached_video = stored
+        .as_ref()
+        .filter(|meta| video_kind && meta.mtime == mtime && meta.bytes == bytes)
+        .and_then(|meta| serde_json::from_str::<media::ExifData>(&meta.metadata_json).ok())
+        .filter(|exif| exif.duration_secs.is_some() || !exif.codec.is_empty());
+    let probe = if video_kind && cached_video.is_none() {
+        ffmpeg::probe_media(path)
+    } else {
+        None
+    };
+    let (mut exif, captured_at) = prefetched_exif.unwrap_or_else(|| {
+        if video_kind {
+            (media::ExifData::default(), None)
+        } else {
+            media::read_exif(path)
+        }
+    });
+    if let Some(cached) = cached_video {
+        exif = cached;
+    } else if let Some(probe) = &probe {
+        exif.duration_secs = probe.duration_secs;
+        exif.codec = probe.codec.clone();
+    }
     let metadata_json = serde_json::to_string(&exif).unwrap_or_else(|_| "{}".to_string());
     let thumb_started = Instant::now();
     let thumbnail = ensure_thumb(path, &state.cache_dir, mtime, bytes, exif.orientation);
     outcome.thumb_secs = thumb_started.elapsed().as_secs_f64();
-    let (thumb, width, height) = match thumbnail {
+    let stored_dimensions = stored_media
+        .as_ref()
+        .map(|(stored_width, stored_height, _)| (*stored_width, *stored_height));
+    let (thumb, mut width, mut height) = match thumbnail {
         Ok(value) => value,
         Err(error) => {
             outcome.thumb_failed = true;
+            // 缩略图失败仍保留哈希与 media_kind；已有尺寸时继续沿用，避免把记录清零。
             log::warn!("thumbnail {}: {error:#}", path.display());
             match stored_media {
                 // 容错修复过的缩略图对 Rust 解码器仍不可读，同文件沿用已有缓存与尺寸。
@@ -4429,6 +4463,23 @@ fn index_file(
             }
         }
     };
+    if video_kind {
+        // 视频尺寸只来自 ffprobe；没有 ffprobe 时沿用旧记录，绝不用 512 缩略图尺寸冒充原图。
+        match &probe {
+            Some(probe) if probe.width > 0 && probe.height > 0 => {
+                width = probe.width;
+                height = probe.height;
+            }
+            _ => {
+                if width == 0 || height == 0 {
+                    if let Some((stored_width, stored_height)) = stored_dimensions {
+                        width = stored_width;
+                        height = stored_height;
+                    }
+                }
+            }
+        }
+    }
     if !existed_before && !hashes.sha1.is_empty() {
         let candidate = match rename {
             RenamePolicy::Disabled => None,
@@ -5148,6 +5199,31 @@ fn ensure_thumb(
     std::fs::create_dir_all(cache_dir)?;
     let target = thumb_target(path, cache_dir, mtime, bytes, orientation);
 
+    // F-040：视频首帧走 ffmpeg（`-map 0:v -frames:v 1`），不进入 image 解码/pHash。
+    // 尺寸由调用方用 ffprobe 覆盖，这里对视频返回 (0, 0)。
+    if crate::model::is_video(path) {
+        if target.exists() && ffmpeg::validate_thumbnail(&target) {
+            return Ok((Some(target), 0, 0));
+        }
+        let _ = std::fs::remove_file(&target);
+        let outcome = ffmpeg::generate_thumbnails(
+            &[ThumbJob {
+                source: path.to_path_buf(),
+                target: target.clone(),
+                alpha: false,
+            }],
+            &AtomicBool::new(false),
+            &|_, _| {},
+        );
+        if outcome.generated == 1 && target.exists() {
+            return Ok((Some(target), 0, 0));
+        }
+        return Err(anyhow::anyhow!(
+            "无法生成视频首帧缩略图（需要 FFmpeg）：{}",
+            path.display()
+        ));
+    }
+
     if target.exists() {
         let cached = image::ImageReader::open(&target)
             .ok()
@@ -5796,6 +5872,184 @@ mod tests {
         image::RgbImage::from_pixel(4, 4, image::Rgb(color))
             .save(path)
             .unwrap();
+    }
+
+    /// F-040 测试样本落在 `<repo>/target/kanalib-video-tests`，不触碰真实图库。
+    fn video_test_state(tag: &str) -> (PathBuf, PathBuf, Arc<AppState>) {
+        // 扫描会用 `absolute()` 归一化根目录（去掉 `..`），测试断言必须用同一形态的路径，
+        // 否则入库路径与断言路径字符串不同。
+        let base = std::path::absolute(
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("..")
+                .join("..")
+                .join("target")
+                .join("kanalib-video-tests")
+                .join(format!(
+                    "{tag}-{}-{:?}",
+                    std::process::id(),
+                    std::thread::current().id()
+                )),
+        )
+        .unwrap();
+        let _ = std::fs::remove_dir_all(&base);
+        let lib = base.join("lib");
+        std::fs::create_dir_all(&lib).unwrap();
+        let state = AppState::open_for_test(base.join("data"), Some(lib.clone()));
+        (base, lib, state)
+    }
+
+    /// 用被测 ffmpeg 生成 2s 320×240 MPEG-4 样本；没有 ffmpeg 时返回 false。
+    fn write_video_sample(path: &Path) -> bool {
+        let Some(ffmpeg) = ffmpeg::status() else {
+            return false;
+        };
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
+        let status = std::process::Command::new(&ffmpeg.path)
+            .args([
+                "-hide_banner",
+                "-nostdin",
+                "-v",
+                "error",
+                "-y",
+                "-f",
+                "lavfi",
+                "-i",
+                "testsrc=size=320x240:rate=10:duration=2",
+                "-c:v",
+                "mpeg4",
+            ])
+            .arg(path)
+            .status()
+            .unwrap();
+        assert!(
+            status.success(),
+            "ffmpeg failed to create the video sample {}",
+            path.display()
+        );
+        true
+    }
+
+    #[test]
+    fn video_scan_persists_media_kind_duration_and_first_frame() {
+        if !ffmpeg::available() || !ffmpeg::probe_available() {
+            return;
+        }
+        let (base, lib, state) = video_test_state("video-scan");
+        let clip = lib
+            .join("图库 视频")
+            .join("a".repeat(50))
+            .join("サンプル clip.mp4");
+        assert!(write_video_sample(&clip));
+        let image = lib.join("photo.png");
+        write_test_image(&image, [11, 22, 33]);
+        state.rescan_root_blocking(lib.clone(), true).unwrap();
+
+        let db = Db::open(&state.db_path()).unwrap();
+        let video = db.load_asset(&clip).unwrap();
+        assert_eq!(video.media_kind(), crate::model::MediaKind::Video);
+        assert!(video.is_video());
+        assert_eq!((video.width, video.height), (320, 240));
+        assert!(video.phash.is_none(), "videos stay out of the pHash path");
+        assert!(video.damage.is_none(), "a video is not a damaged image");
+
+        let thumb = video.thumb.as_ref().expect("video first frame");
+        assert!(thumb.exists());
+        let (thumb_width, thumb_height) = image::ImageReader::open(thumb)
+            .unwrap()
+            .with_guessed_format()
+            .unwrap()
+            .into_dimensions()
+            .unwrap();
+        assert_eq!((thumb_width, thumb_height), (512, 384));
+
+        let exif: media::ExifData = serde_json::from_str(&video.metadata_json).unwrap();
+        assert_eq!(exif.codec, "mpeg4");
+        let duration = exif
+            .duration_secs
+            .expect("duration written to metadata_json");
+        assert!(
+            (1.8..=2.2).contains(&duration),
+            "unexpected duration {duration}"
+        );
+
+        let stored = db.stored_meta(&clip).unwrap().unwrap();
+        assert_eq!(stored.media_kind, crate::model::MediaKind::Video);
+        assert!(
+            stored.is_unchanged(stored.mtime, stored.bytes),
+            "video cache must not require a pHash"
+        );
+        assert_eq!(
+            stored
+                .content_if_current(stored.mtime, stored.bytes)
+                .map(|hashes| hashes.phash),
+            Some(0)
+        );
+
+        // 二次扫描：时长/编码从已落库的 metadata_json 复用，首帧缓存不重建。
+        state.rescan_root_blocking(lib.clone(), true).unwrap();
+        let db = Db::open(&state.db_path()).unwrap();
+        let rescanned = db.load_asset(&clip).unwrap();
+        let exif: media::ExifData = serde_json::from_str(&rescanned.metadata_json).unwrap();
+        assert_eq!(exif.codec, "mpeg4");
+        assert!(exif.duration_secs.is_some_and(|value| (1.8..=2.2).contains(&value)));
+        assert_eq!(rescanned.thumb.as_deref(), Some(thumb.as_path()));
+
+        // 图片路径回归：仍然有 pHash、media_kind 为 image。
+        let image_asset = db.load_asset(&image).unwrap();
+        assert_eq!(image_asset.media_kind(), crate::model::MediaKind::Image);
+        assert!(image_asset.phash.is_some());
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn corrupt_video_keeps_hashes_and_media_kind_without_damage() {
+        let (base, lib, state) = test_state("video-corrupt");
+        let path = lib.join("broken.mp4");
+        std::fs::write(&path, b"definitely not a video").unwrap();
+        state.rescan_root_blocking(lib.clone(), true).unwrap();
+
+        let db = Db::open(&state.db_path()).unwrap();
+        let asset = db.load_asset(&path).unwrap();
+        assert_eq!(asset.media_kind(), crate::model::MediaKind::Video);
+        assert_eq!(asset.sha1.as_deref().map(str::len), Some(40));
+        assert_eq!(asset.blake3.as_deref().map(str::len), Some(64));
+        assert!(
+            asset.damage.is_none(),
+            "video must not be marked as a damaged image: {:?}",
+            asset.damage
+        );
+        assert!(asset.thumb.is_none() || asset.thumb.as_ref().is_some_and(|thumb| thumb.exists()));
+        assert_eq!(
+            db.stored_meta(&path).unwrap().map(|meta| meta.media_kind),
+            Some(crate::model::MediaKind::Video)
+        );
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn watch_batch_indexes_a_new_video() {
+        let (base, lib, state) = test_state("video-watch");
+        state.rescan_root_blocking(lib.clone(), true).unwrap();
+        let clip = lib.join("added.mp4");
+        std::fs::write(&clip, b"video bytes for the watcher").unwrap();
+        crate::watch::handle_watch_batch(&state, &lib, vec![clip.clone()]);
+
+        let db = Db::open(&state.db_path()).unwrap();
+        let asset = db.load_asset(&clip).unwrap();
+        assert_eq!(asset.media_kind(), crate::model::MediaKind::Video);
+        let shared = state.shared.lock().unwrap();
+        let assets = shared.assets.read().unwrap();
+        assert!(
+            assets
+                .iter()
+                .any(|item| item.path == clip && item.is_video()),
+            "watch event should add the video to the in-memory library"
+        );
+        drop(assets);
+        drop(shared);
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     fn test_state(tag: &str) -> (PathBuf, PathBuf, Arc<AppState>) {

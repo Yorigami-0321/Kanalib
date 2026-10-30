@@ -16,7 +16,7 @@ use serde::{Deserialize, Serialize};
 use walkdir::WalkDir;
 
 use crate::db::Db;
-use crate::model::{ScanFilterConfig, is_image};
+use crate::model::{ScanFilterConfig, is_media};
 
 /// settings 表中的配置键；值为 `{ root: ScanFilterConfig }` 的 JSON 对象。
 pub const SCAN_FILTERS_SETTING_KEY: &str = "scan.filters";
@@ -126,7 +126,7 @@ fn is_hidden(root: &Path, path: &Path) -> bool {
         .unwrap_or(false)
 }
 
-/// 收集来源下应入库的图片。
+/// 收集来源下应入库的媒体（图片与视频，F-040）。
 ///
 /// 未启用任何规则时保持原有 `walkdir` 行为（包含隐藏文件、不读 ignore 文件）；
 /// 启用规则时使用 `ignore`，但显式关闭所有 gitignore 类规则。
@@ -158,7 +158,7 @@ pub fn collect_images(root: &Path, config: &ScanFilterConfig) -> Result<ScanWalk
                 continue;
             }
         };
-        if !entry.file_type().is_some_and(|kind| kind.is_file()) || !is_image(entry.path()) {
+        if !entry.file_type().is_some_and(|kind| kind.is_file()) || !is_media(entry.path()) {
             continue;
         }
         let bytes = entry.metadata().ok().map(|metadata| metadata.len());
@@ -191,7 +191,8 @@ pub fn collect_images_with_ignores(
 }
 
 /// 无规则快路径：与改造前的遍历逻辑保持一致。
-fn collect_images_fast(root: &Path) -> ScanWalk {    let mut files = Vec::new();
+fn collect_images_fast(root: &Path) -> ScanWalk {
+    let mut files = Vec::new();
     let mut walk_complete = true;
     for entry in WalkDir::new(root).follow_links(false) {
         let entry = match entry {
@@ -202,7 +203,7 @@ fn collect_images_fast(root: &Path) -> ScanWalk {    let mut files = Vec::new();
                 continue;
             }
         };
-        if entry.file_type().is_file() && is_image(entry.path()) {
+        if entry.file_type().is_file() && is_media(entry.path()) {
             files.push(entry.path().to_path_buf());
         }
     }
@@ -213,7 +214,7 @@ fn collect_images_fast(root: &Path) -> ScanWalk {    let mut files = Vec::new();
     }
 }
 
-/// 预览规则效果：遍历来源并逐个判断图片是否会被排除。
+/// 预览规则效果：遍历来源并逐个判断媒体（图片/视频）是否会被排除。
 pub fn preview_scan_filter(root: &Path, config: &ScanFilterConfig) -> Result<ScanFilterPreview> {
     if !root.is_dir() {
         bail!("来源不可访问：{}", root.display());
@@ -224,7 +225,7 @@ pub fn preview_scan_filter(root: &Path, config: &ScanFilterConfig) -> Result<Sca
         let Ok(entry) = entry else {
             continue;
         };
-        if !entry.file_type().is_file() || !is_image(entry.path()) {
+        if !entry.file_type().is_file() || !is_media(entry.path()) {
             continue;
         }
         let bytes = entry.metadata().ok().map(|metadata| metadata.len());
