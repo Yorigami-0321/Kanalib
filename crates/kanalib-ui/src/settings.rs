@@ -7,6 +7,7 @@ use crate::sidebar::source_label;
 use crate::status_bar::{format_scan_summary, scan_phase_label, scan_progress_counts};
 use crate::tags::group_reviews_by_asset;
 use crate::theme::*;
+use kanalib_core::sources::{SourceInfo, SourceKind};
 
 pub(crate) const SETTINGS_MAX_WIDTH: f32 = 1080.;
 pub(crate) const TAG_ROW_HEIGHT: f32 = 54.;
@@ -26,6 +27,136 @@ pub(crate) const TAG_RETAG_CONFIRM_THRESHOLD: usize = 500;
 
 /// 队列区块最多展示的失败任务数。
 pub(crate) const TAG_JOB_ERROR_LIMIT: usize = 5;
+
+/// F-035：网络来源添加弹窗的类型入口。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum RemoteAddKind {
+    Immich,
+    WebDav,
+}
+
+impl RemoteAddKind {
+    pub(crate) fn kind(self) -> SourceKind {
+        match self {
+            Self::Immich => SourceKind::Immich,
+            Self::WebDav => SourceKind::WebDav,
+        }
+    }
+
+    pub(crate) fn label(self) -> &'static str {
+        remote_kind_label(self.kind())
+    }
+
+    pub(crate) fn title(self) -> &'static str {
+        match self {
+            Self::Immich => "添加 Immich 来源",
+            Self::WebDav => "添加 WebDAV 来源",
+        }
+    }
+
+    pub(crate) fn url_placeholder(self) -> &'static str {
+        match self {
+            Self::Immich => "https://immich.example.com",
+            Self::WebDav => "https://dav.example.com/remote.php/dav/files/user",
+        }
+    }
+
+    pub(crate) fn credential_label(self) -> &'static str {
+        match self {
+            Self::Immich => "Immich API key",
+            Self::WebDav => "WebDAV 凭据（用户名:密码）",
+        }
+    }
+
+    pub(crate) fn credential_placeholder(self) -> &'static str {
+        match self {
+            Self::Immich => "粘贴 API key；已保存值不会回显",
+            Self::WebDav => "用户名:密码；已保存值不会回显",
+        }
+    }
+
+    pub(crate) fn from_kind(kind: SourceKind) -> Option<Self> {
+        match kind {
+            SourceKind::Immich => Some(Self::Immich),
+            SourceKind::WebDav => Some(Self::WebDav),
+            SourceKind::Local => None,
+        }
+    }
+}
+
+/// 网络来源行的一条结果反馈；消息不含密钥。
+#[derive(Clone, Debug)]
+pub(crate) struct RemoteSourceFeedback {
+    pub(crate) message: String,
+    pub(crate) severity: Severity,
+}
+
+/// F-035 网络来源设置页的全部 UI 状态；凭据只留在系统凭据库与输入框。
+#[derive(Default)]
+pub(crate) struct RemoteSourcesState {
+    pub(crate) loaded: bool,
+    pub(crate) infos: Vec<SourceInfo>,
+    /// `Ok(true)` 已保存，`Ok(false)` 未保存，`Err` 表示读取凭据库失败。
+    pub(crate) credentials: HashMap<i64, Result<bool, String>>,
+    pub(crate) busy: HashMap<i64, String>,
+    pub(crate) feedback: HashMap<i64, RemoteSourceFeedback>,
+    pub(crate) add_kind: Option<RemoteAddKind>,
+    pub(crate) add_epoch: u64,
+    pub(crate) add_error: Option<String>,
+    pub(crate) api_key_target: Option<i64>,
+    pub(crate) api_key_epoch: u64,
+    pub(crate) remove_confirm: Option<i64>,
+}
+
+/// 远端来源只读徽标文案；本地来源不该走到这里。
+pub(crate) fn remote_kind_label(kind: SourceKind) -> &'static str {
+    match kind {
+        SourceKind::Immich => "Immich",
+        SourceKind::WebDav => "WebDAV",
+        SourceKind::Local => "本地",
+    }
+}
+
+/// 添加来源前的前置校验：非空、http(s)、有主机名且不含空白。
+pub(crate) fn validate_remote_url(text: &str) -> Result<String, String> {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return Err("请输入 base URL".to_string());
+    }
+    if trimmed.chars().any(char::is_whitespace) {
+        return Err("URL 不能包含空白字符".to_string());
+    }
+    let lower = trimmed.to_ascii_lowercase();
+    let rest = if let Some(rest) = lower.strip_prefix("https://") {
+        rest
+    } else if let Some(rest) = lower.strip_prefix("http://") {
+        rest
+    } else {
+        return Err("URL 必须以 http:// 或 https:// 开头".to_string());
+    };
+    let host = rest.split('/').next().unwrap_or_default();
+    if host.is_empty() || host.starts_with(':') {
+        return Err("URL 缺少主机名".to_string());
+    }
+    Ok(trimmed.to_string())
+}
+
+/// 远端“上次同步”展示文案；0 与 None 都读作从未。
+pub(crate) fn remote_last_sync_text(last_sync_at: Option<u64>) -> String {
+    match last_sync_at {
+        Some(seconds) if seconds > 0 => relative_time(seconds),
+        _ => "从未".to_string(),
+    }
+}
+
+fn remote_severity_color(severity: Severity, colors: UiColors) -> Hsla {
+    match severity {
+        Severity::Info => colors.accent,
+        Severity::Success => colors.success,
+        Severity::Warning => colors.warning,
+        Severity::Danger => colors.danger,
+    }
+}
 
 pub(crate) fn tag_category_label(category: &str) -> &'static str {
     TAG_CATEGORY_LABELS
@@ -213,6 +344,57 @@ mod tests {
         assert!(summary.contains("排除隐藏"));
         assert!(summary.contains("1.0 KB"));
         assert!(summary.contains("2.0 MB"));
+    }
+
+    #[test]
+    fn remote_url_validation_requires_http_and_host() {
+        assert_eq!(
+            super::validate_remote_url(" https://photos.example.com/dav ").unwrap(),
+            "https://photos.example.com/dav"
+        );
+        assert_eq!(
+            super::validate_remote_url("HTTP://127.0.0.1:2283").unwrap(),
+            "HTTP://127.0.0.1:2283"
+        );
+        for bad in [
+            "",
+            "   ",
+            "ftp://example.com",
+            "https://",
+            "https:///dav",
+            "http:// example.com",
+        ] {
+            assert!(
+                super::validate_remote_url(bad).is_err(),
+                "expected error for {bad:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn remote_add_kind_labels_and_source_kind_match() {
+        use kanalib_core::sources::SourceKind;
+        assert_eq!(super::RemoteAddKind::Immich.kind(), SourceKind::Immich);
+        assert_eq!(super::RemoteAddKind::WebDav.kind(), SourceKind::WebDav);
+        assert_eq!(super::RemoteAddKind::Immich.label(), "Immich");
+        assert_eq!(super::RemoteAddKind::WebDav.label(), "WebDAV");
+        assert_eq!(super::RemoteAddKind::from_kind(SourceKind::Local), None);
+        assert_eq!(
+            super::RemoteAddKind::from_kind(SourceKind::WebDav),
+            Some(super::RemoteAddKind::WebDav)
+        );
+    }
+
+    #[test]
+    fn remote_last_sync_text_treats_zero_as_never() {
+        use std::time::{SystemTime, UNIX_EPOCH};
+        assert_eq!(super::remote_last_sync_text(None), "从未");
+        assert_eq!(super::remote_last_sync_text(Some(0)), "从未");
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        assert_eq!(super::remote_last_sync_text(Some(now)), "刚刚");
     }
 
     #[test]
@@ -1623,6 +1805,9 @@ impl KanalibApp {
                     .text_color(colors.muted)
                     .child("移除来源只影响图库视图，不会删除磁盘文件。"),
             );
+
+        // F-035：网络来源设置区块；本地来源之后，操作全部后台执行。
+        let remote_section = self.render_remote_sources_section(this, colors);
 
         let thresholds = self.tag_thresholds.clone().unwrap_or_default();
         let thresholds_loaded = self.tag_thresholds.is_some();
@@ -3951,6 +4136,7 @@ impl KanalibApp {
                             .child(tag_section)
                             .child(review_section)
                             .child(sources_section)
+                            .child(remote_section)
                             .child(protected_section)
                             .child(similar_section)
                             .child(data_section)
@@ -3967,4 +4153,657 @@ impl KanalibApp {
             .into_any_element()
     }
 
+    /// F-035：网络来源区块；列出远端来源并提供添加/测试/同步/凭据/移除入口。
+    fn render_remote_sources_section(&self, this: &Entity<Self>, colors: UiColors) -> AnyElement {
+        let this_refresh = this.clone();
+        let this_immich = this.clone();
+        let this_webdav = this.clone();
+        let mut rows = div().flex().flex_col().gap(px(6.));
+        if self.remote_sources.infos.is_empty() {
+            rows = rows.child(
+                div()
+                    .text_xs()
+                    .text_color(colors.subtle)
+                    .child("尚未添加网络来源。Immich 与 WebDAV 均为只读；断线不会阻塞本地图库。"),
+            );
+        } else {
+            for info in &self.remote_sources.infos {
+                let Some(id) = info.id else {
+                    continue;
+                };
+                let kind = info.kind;
+                let name = info.name.clone();
+                let locator = info.locator.clone();
+                let last_sync = remote_last_sync_text(info.last_sync_at);
+                let read_only = info.read_only || kind.is_read_only();
+                let (credentials_text, credentials_color) =
+                    match self.remote_sources.credentials.get(&id) {
+                        Some(Ok(true)) => ("凭据已保存".to_string(), colors.success),
+                        Some(Ok(false)) => ("凭据未保存".to_string(), colors.warning),
+                        Some(Err(error)) => (format!("凭据状态未知：{error}"), colors.danger),
+                        None => ("凭据状态未知".to_string(), colors.subtle),
+                    };
+                let has_key = matches!(self.remote_sources.credentials.get(&id), Some(Ok(true)));
+                let busy = self.remote_sources.busy.get(&id).cloned();
+                let busy_now = busy.is_some();
+                let (status_text, status_color) = if let Some(label) = busy {
+                    (label, colors.accent)
+                } else if let Some(feedback) = self.remote_sources.feedback.get(&id) {
+                    (
+                        feedback.message.clone(),
+                        remote_severity_color(feedback.severity, colors),
+                    )
+                } else {
+                    ("空闲".to_string(), colors.subtle)
+                };
+                let this_test = this.clone();
+                let this_sync = this.clone();
+                let this_key = this.clone();
+                let this_clear_key = this.clone();
+                let this_remove = this.clone();
+                rows = rows.child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap(px(3.))
+                        .px(px(10.))
+                        .py(px(7.))
+                        .rounded(px(6.))
+                        .bg(colors.sunken)
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap(px(5.))
+                                .child(
+                                    div()
+                                        .flex_none()
+                                        .px(px(5.))
+                                        .py(px(1.))
+                                        .rounded(px(4.))
+                                        .bg(colors.selection)
+                                        .text_xs()
+                                        .text_color(colors.accent)
+                                        .child(remote_kind_label(kind)),
+                                )
+                                .child(
+                                    div()
+                                        .flex_1()
+                                        .min_w(px(0.))
+                                        .truncate()
+                                        .text_xs()
+                                        .text_color(colors.fg)
+                                        .child(name),
+                                )
+                                .children(read_only.then(|| {
+                                    div()
+                                        .flex_none()
+                                        .px(px(5.))
+                                        .py(px(1.))
+                                        .rounded(px(4.))
+                                        .bg(colors.surface)
+                                        .text_xs()
+                                        .text_color(colors.subtle)
+                                        .child("只读")
+                                })),
+                        )
+                        .child(
+                            div()
+                                .truncate()
+                                .text_xs()
+                                .text_color(colors.subtle)
+                                .child(locator),
+                        )
+                        .child(
+                            div()
+                                .flex()
+                                .flex_wrap()
+                                .items_center()
+                                .gap(px(6.))
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(colors.subtle)
+                                        .child(format!("上次同步 {last_sync}")),
+                                )
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(credentials_color)
+                                        .child(credentials_text),
+                                ),
+                        )
+                        .child(
+                            div()
+                                .truncate()
+                                .text_xs()
+                                .text_color(status_color)
+                                .child(status_text),
+                        )
+                        .child(
+                            div()
+                                .flex()
+                                .flex_wrap()
+                                .items_center()
+                                .gap(px(4.))
+                                .child(
+                                    Button::new(
+                                        SharedString::from(format!("remote-test-{id}")),
+                                        "测试连接",
+                                    )
+                                    .size(ControlSize::Sm)
+                                    .disabled(busy_now)
+                                    .on_click(
+                                        move |_, _, cx| {
+                                            let _ = this_test.update(cx, |app, cx| {
+                                                app.test_remote_source(id, cx)
+                                            });
+                                        },
+                                    ),
+                                )
+                                .child(
+                                    Button::new(
+                                        SharedString::from(format!("remote-sync-{id}")),
+                                        "立即同步",
+                                    )
+                                    .size(ControlSize::Sm)
+                                    .disabled(busy_now)
+                                    .on_click(
+                                        move |_, _, cx| {
+                                            let _ = this_sync.update(cx, |app, cx| {
+                                                app.sync_remote_source(id, cx)
+                                            });
+                                        },
+                                    ),
+                                )
+                                .child(
+                                    Button::new(
+                                        SharedString::from(format!("remote-key-{id}")),
+                                        "设置凭据",
+                                    )
+                                    .size(ControlSize::Sm)
+                                    .disabled(busy_now)
+                                    .on_click(
+                                        move |_, _, cx| {
+                                            let _ = this_key.update(cx, |app, cx| {
+                                                app.open_remote_api_key(id, cx)
+                                            });
+                                        },
+                                    ),
+                                )
+                                .children(has_key.then(|| {
+                                    let this_clear_key = this_clear_key.clone();
+                                    Button::new(
+                                        SharedString::from(format!("remote-clear-key-{id}")),
+                                        "清除凭据",
+                                    )
+                                    .size(ControlSize::Sm)
+                                    .disabled(busy_now)
+                                    .on_click(
+                                        move |_, _, cx| {
+                                            let _ = this_clear_key.update(cx, |app, cx| {
+                                                app.clear_remote_api_key(id, cx)
+                                            });
+                                        },
+                                    )
+                                }))
+                                .child(
+                                    Button::new(
+                                        SharedString::from(format!("remote-remove-{id}")),
+                                        "移除",
+                                    )
+                                    .size(ControlSize::Sm)
+                                    .disabled(busy_now)
+                                    .on_click(
+                                        move |_, _, cx| {
+                                            let _ = this_remove.update(cx, |app, cx| {
+                                                app.open_remote_remove_confirm(id, cx)
+                                            });
+                                        },
+                                    ),
+                                ),
+                        ),
+                );
+            }
+        }
+        div()
+            .p(px(16.))
+            .rounded(px(10.))
+            .border_1()
+            .border_color(colors.border)
+            .bg(colors.surface)
+            .flex()
+            .flex_col()
+            .gap(px(10.))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .gap(px(8.))
+                    .child(
+                        div()
+                            .text_sm()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .child("网络来源"),
+                    )
+                    .child(
+                        Button::new("refresh-remote-sources", "刷新")
+                            .size(ControlSize::Sm)
+                            .on_click(move |_, _, cx| {
+                                let _ = this_refresh.update(cx, |app, cx| {
+                                    app.refresh_remote_sources();
+                                    cx.notify();
+                                });
+                            }),
+                    ),
+            )
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(colors.muted)
+                    .child("网络来源只读；凭据保存在系统凭据库，不写入设置或日志。测试与同步在后台执行，断线不会阻塞本地图库。"),
+            )
+            .child(rows)
+            .child(
+                div()
+                    .flex()
+                    .flex_wrap()
+                    .gap(px(6.))
+                    .child(
+                        Button::new("add-immich-source", "添加 Immich")
+                            .primary()
+                            .on_click(move |_, _, cx| {
+                                let _ = this_immich.update(cx, |app, cx| {
+                                    app.open_remote_add(RemoteAddKind::Immich, cx)
+                                });
+                            }),
+                    )
+                    .child(
+                        Button::new("add-webdav-source", "添加 WebDAV")
+                            .on_click(move |_, _, cx| {
+                                let _ = this_webdav.update(cx, |app, cx| {
+                                    app.open_remote_add(RemoteAddKind::WebDav, cx)
+                                });
+                            }),
+                    ),
+            )
+            .into_any_element()
+    }
+
+    /// 读取来源列表并刷新每个远端来源的凭据保存状态（系统凭据库）。
+    pub(crate) fn refresh_remote_sources(&mut self) {
+        self.reload_remote_source_infos();
+        let ids = self
+            .remote_sources
+            .infos
+            .iter()
+            .filter_map(|info| info.id)
+            .collect::<Vec<_>>();
+        let mut credentials = HashMap::new();
+        let mut errors = Vec::new();
+        for id in ids {
+            match self.state.has_source_api_key(id) {
+                Ok(has) => {
+                    credentials.insert(id, Ok(has));
+                }
+                Err(error) => {
+                    let message = format!("读取凭据状态失败：{error:#}");
+                    credentials.insert(id, Err(message.clone()));
+                    errors.push((id, message));
+                }
+            }
+        }
+        self.remote_sources.credentials = credentials;
+        for (id, message) in errors {
+            self.remote_sources.feedback.insert(
+                id,
+                RemoteSourceFeedback {
+                    message,
+                    severity: Severity::Warning,
+                },
+            );
+        }
+        self.remote_sources.loaded = true;
+    }
+
+    /// 只重读来源快照，不访问凭据库；测试/同步完成后调用。
+    fn reload_remote_source_infos(&mut self) {
+        let infos = self
+            .state
+            .source_infos()
+            .into_iter()
+            .filter(|info| info.is_remote() && info.id.is_some())
+            .collect::<Vec<_>>();
+        let ids = infos
+            .iter()
+            .filter_map(|info| info.id)
+            .collect::<HashSet<_>>();
+        self.remote_sources.infos = infos;
+        self.remote_sources.busy.retain(|id, _| ids.contains(id));
+        self.remote_sources
+            .feedback
+            .retain(|id, _| ids.contains(id));
+        self.remote_sources
+            .credentials
+            .retain(|id, _| ids.contains(id));
+    }
+
+    fn remote_info(&self, id: i64) -> Option<SourceInfo> {
+        self.remote_sources
+            .infos
+            .iter()
+            .find(|info| info.id == Some(id))
+            .cloned()
+    }
+
+    pub(crate) fn open_remote_add(&mut self, kind: RemoteAddKind, cx: &mut Context<Self>) {
+        self.remote_sources.add_kind = Some(kind);
+        self.remote_sources.add_epoch = self.remote_sources.add_epoch.wrapping_add(1);
+        self.remote_sources.add_error = None;
+        cx.notify();
+    }
+
+    /// 添加弹窗提交；返回 true 时调用方关闭弹窗。参数与错误文本都不含凭据。
+    pub(crate) fn submit_remote_add(
+        &mut self,
+        kind: RemoteAddKind,
+        name: &str,
+        base_url: &str,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let url = match validate_remote_url(base_url) {
+            Ok(url) => url,
+            Err(message) => {
+                self.remote_sources.add_error = Some(message);
+                cx.notify();
+                return false;
+            }
+        };
+        let result = match kind {
+            RemoteAddKind::Immich => self.state.add_immich_source(name, &url),
+            RemoteAddKind::WebDav => self.state.add_webdav_source(name, &url),
+        };
+        match result {
+            Ok(info) => {
+                self.remote_sources.add_kind = None;
+                self.remote_sources.add_error = None;
+                let message = format!("已添加 {} 来源「{}」", kind.label(), info.name);
+                self.settings_notice =
+                    Some(format!("{message}；远端来源只读，建议先测试连接再同步"));
+                push_toast(&self.toaster, cx, message, Severity::Success);
+                self.refresh_remote_sources();
+                cx.notify();
+                true
+            }
+            Err(error) => {
+                self.remote_sources.add_error = Some(format!("添加来源失败：{error:#}"));
+                cx.notify();
+                false
+            }
+        }
+    }
+
+    pub(crate) fn open_remote_api_key(&mut self, id: i64, cx: &mut Context<Self>) {
+        if self.remote_info(id).is_none() {
+            return;
+        }
+        self.remote_sources.api_key_target = Some(id);
+        self.remote_sources.api_key_epoch = self.remote_sources.api_key_epoch.wrapping_add(1);
+        cx.notify();
+    }
+
+    /// 保存新的 API key / WebDAV 凭据；空串表示不修改，密钥不进入状态或日志。
+    pub(crate) fn save_remote_api_key(&mut self, id: i64, api_key: &str, cx: &mut Context<Self>) {
+        let key = api_key.trim();
+        if key.is_empty() {
+            self.settings_notice = Some("未输入新凭据，已保留原值".to_string());
+            cx.notify();
+            return;
+        }
+        let name = self
+            .remote_info(id)
+            .map(|info| info.name)
+            .unwrap_or_else(|| format!("来源 #{id}"));
+        match self.state.set_source_api_key(id, key) {
+            Ok(()) => {
+                let message = format!("已保存 {name} 的凭据（系统凭据库）");
+                self.settings_notice = Some(message.clone());
+                push_toast(&self.toaster, cx, message, Severity::Success);
+            }
+            Err(error) => {
+                let message = format!("保存凭据失败：{error:#}");
+                self.settings_notice = Some(message.clone());
+                self.remote_sources.feedback.insert(
+                    id,
+                    RemoteSourceFeedback {
+                        message,
+                        severity: Severity::Danger,
+                    },
+                );
+                push_toast(&self.toaster, cx, "保存凭据失败", Severity::Danger);
+            }
+        }
+        self.refresh_remote_sources();
+        cx.notify();
+    }
+
+    pub(crate) fn clear_remote_api_key(&mut self, id: i64, cx: &mut Context<Self>) {
+        match self.state.clear_source_api_key(id) {
+            Ok(()) => {
+                let message = "已清除该来源的凭据".to_string();
+                self.settings_notice = Some(message.clone());
+                push_toast(&self.toaster, cx, message, Severity::Success);
+            }
+            Err(error) => {
+                let message = format!("清除凭据失败：{error:#}");
+                self.settings_notice = Some(message.clone());
+                push_toast(&self.toaster, cx, message, Severity::Danger);
+            }
+        }
+        self.refresh_remote_sources();
+        cx.notify();
+    }
+
+    pub(crate) fn open_remote_remove_confirm(&mut self, id: i64, cx: &mut Context<Self>) {
+        if self.remote_sources.busy.contains_key(&id) {
+            self.settings_notice = Some("该来源正在测试或同步，完成后才能移除".to_string());
+            cx.notify();
+            return;
+        }
+        self.remote_sources.remove_confirm = Some(id);
+        cx.notify();
+    }
+
+    pub(crate) fn remove_remote_source(&mut self, id: i64, cx: &mut Context<Self>) {
+        self.remote_sources.remove_confirm = None;
+        if self.remote_sources.busy.contains_key(&id) {
+            self.settings_notice = Some("该来源正在测试或同步，完成后才能移除".to_string());
+            cx.notify();
+            return;
+        }
+        let name = self
+            .remote_info(id)
+            .map(|info| info.name)
+            .unwrap_or_else(|| format!("来源 #{id}"));
+        match self.state.remove_remote_source(id) {
+            Ok(()) => {
+                self.remote_sources.busy.remove(&id);
+                self.remote_sources.feedback.remove(&id);
+                self.remote_sources.credentials.remove(&id);
+                self.settings_notice =
+                    Some(format!("已移除来源「{name}」；远端服务器文件未受影响"));
+                push_toast(
+                    &self.toaster,
+                    cx,
+                    format!("已移除网络来源「{name}」"),
+                    Severity::Success,
+                );
+                self.refresh_remote_sources();
+                self.clear_multi_selection();
+                self.auto_select_pending = true;
+            }
+            Err(error) => {
+                let message = format!("移除来源失败：{error:#}");
+                self.settings_notice = Some(message.clone());
+                self.remote_sources.feedback.insert(
+                    id,
+                    RemoteSourceFeedback {
+                        message: message.clone(),
+                        severity: Severity::Danger,
+                    },
+                );
+                push_toast(&self.toaster, cx, message, Severity::Danger);
+            }
+        }
+        cx.notify();
+    }
+
+    /// 测试连接：阻塞 API 放在 background_executor，完成后回填状态。
+    pub(crate) fn test_remote_source(&mut self, id: i64, cx: &mut Context<Self>) {
+        if self.remote_sources.busy.contains_key(&id) {
+            return;
+        }
+        let Some(info) = self.remote_info(id) else {
+            return;
+        };
+        let has_key = matches!(self.remote_sources.credentials.get(&id), Some(Ok(true)));
+        if has_key {
+            self.remote_sources.feedback.remove(&id);
+        } else {
+            self.remote_sources.feedback.insert(
+                id,
+                RemoteSourceFeedback {
+                    message: "尚未保存凭据；若服务器要求认证，测试会失败".to_string(),
+                    severity: Severity::Warning,
+                },
+            );
+        }
+        self.remote_sources
+            .busy
+            .insert(id, "正在测试连接…".to_string());
+        self.settings_notice = Some(format!("正在测试 {} 连接…", info.name));
+        cx.notify();
+        let state = self.state.clone();
+        let task = cx
+            .background_executor()
+            .spawn(async move { state.test_source_connection(id) });
+        let weak = cx.entity().downgrade();
+        let name = info.name.clone();
+        let kind_label = remote_kind_label(info.kind);
+        cx.spawn(async move |_, cx| {
+            let result = task.await;
+            let _ = weak.update(cx, |app, cx| {
+                app.remote_sources.busy.remove(&id);
+                match result {
+                    Ok(status) => {
+                        let message =
+                            format!("连接成功 · {kind_label} · {} 个资产", status.asset_count);
+                        app.remote_sources.feedback.insert(
+                            id,
+                            RemoteSourceFeedback {
+                                message: message.clone(),
+                                severity: Severity::Success,
+                            },
+                        );
+                        app.settings_notice = Some(format!("{name}：{message}"));
+                    }
+                    Err(error) => {
+                        let message = format!("连接失败：{error}");
+                        app.remote_sources.feedback.insert(
+                            id,
+                            RemoteSourceFeedback {
+                                message: message.clone(),
+                                severity: Severity::Danger,
+                            },
+                        );
+                        app.settings_notice = Some(format!("{name}：{message}"));
+                        push_toast(
+                            &app.toaster,
+                            cx,
+                            format!("{name} 连接失败"),
+                            Severity::Danger,
+                        );
+                    }
+                }
+                app.reload_remote_source_infos();
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// 立即同步：sync_source_blocking 只在后台线程执行，完成后刷新列表。
+    pub(crate) fn sync_remote_source(&mut self, id: i64, cx: &mut Context<Self>) {
+        if self.remote_sources.busy.contains_key(&id) {
+            return;
+        }
+        let Some(info) = self.remote_info(id) else {
+            return;
+        };
+        let has_key = matches!(self.remote_sources.credentials.get(&id), Some(Ok(true)));
+        if !has_key {
+            self.remote_sources.feedback.insert(
+                id,
+                RemoteSourceFeedback {
+                    message: "尚未保存凭据；若服务器要求认证，同步会失败".to_string(),
+                    severity: Severity::Warning,
+                },
+            );
+        }
+        self.remote_sources.busy.insert(id, "正在同步…".to_string());
+        self.settings_notice = Some(format!("正在同步 {}…", info.name));
+        cx.notify();
+        let state = self.state.clone();
+        let task = cx
+            .background_executor()
+            .spawn(async move { state.sync_source_blocking(id) });
+        let weak = cx.entity().downgrade();
+        let name = info.name.clone();
+        cx.spawn(async move |_, cx| {
+            let result = task.await;
+            let _ = weak.update(cx, |app, cx| {
+                app.remote_sources.busy.remove(&id);
+                match result {
+                    Ok(report) => {
+                        let message = format!(
+                            "同步完成 · 新增 {} · 更新 {} · 跳过 {} · 缩略图 {}",
+                            report.imported,
+                            report.updated,
+                            report.skipped,
+                            report.thumbnails_downloaded
+                        );
+                        app.remote_sources.feedback.insert(
+                            id,
+                            RemoteSourceFeedback {
+                                message: message.clone(),
+                                severity: Severity::Success,
+                            },
+                        );
+                        app.settings_notice = Some(format!("{name}：{message}"));
+                    }
+                    Err(error) => {
+                        let message = format!("同步失败：{error}");
+                        app.remote_sources.feedback.insert(
+                            id,
+                            RemoteSourceFeedback {
+                                message: message.clone(),
+                                severity: Severity::Danger,
+                            },
+                        );
+                        app.settings_notice = Some(format!("{name}：{message}"));
+                        push_toast(
+                            &app.toaster,
+                            cx,
+                            format!("{name} 同步失败"),
+                            Severity::Danger,
+                        );
+                    }
+                }
+                app.reload_remote_source_infos();
+                cx.notify();
+            });
+        })
+        .detach();
+    }
 }

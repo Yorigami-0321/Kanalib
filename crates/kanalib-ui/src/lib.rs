@@ -10,7 +10,7 @@ use ely_gpui_component::{
     media::ImageViewer,
     menus::{ContextMenu, DropdownMenu, Menu, MenuItem, OverflowMenu},
     navigation::{Command, CommandPalette},
-    overlays::{ConfirmDialog, PromptDialog},
+    overlays::{ConfirmDialog, Dialog, PromptDialog},
     primitives::{Icon, IconName, Severity},
     theme::{ActiveTheme, ControlSize, IconSize, Mode, Theme},
 };

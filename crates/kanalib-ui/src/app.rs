@@ -1,7 +1,9 @@
 use crate::*;
 use crate::format::*;
 use crate::search::{SearchBundle, query_wants_duplicates, search_timing_enabled};
-use crate::settings::parse_optional_bytes;
+use crate::settings::{
+    RemoteAddKind, RemoteSourcesState, parse_optional_bytes, validate_remote_url,
+};
 use crate::sidebar::{
     SIDEBAR_DEFAULT_WIDTH, SIDEBAR_MAX_WIDTH, SIDEBAR_MIN_WIDTH, SIDEBAR_SECTIONS, source_label,
     source_menu,
@@ -261,6 +263,8 @@ pub struct KanalibApp {
     pub(crate) compare_focus_pending: bool,
     /// 自动化截图用：启动后预选可见列表前 N 张（PostMessage 无法合成 Ctrl+点击）。
     pub(crate) demo_select_first: Option<usize>,
+    // ---- F-035（第五轮 D1）：网络来源设置 UI；凭据永不进入这里。 ----
+    pub(crate) remote_sources: RemoteSourcesState,
 }
 
 impl Render for KanalibApp {
@@ -836,6 +840,9 @@ impl Render for KanalibApp {
             )
             .into_any_element()
         } else if self.screen == Screen::Settings {
+            if !self.remote_sources.loaded {
+                self.refresh_remote_sources();
+            }
             let settings_width = (window_width - sidebar_width).max(px(640.));
             self.render_settings(
                 &this,
@@ -1353,6 +1360,199 @@ impl Render for KanalibApp {
             })
             .into_any_element()
         });
+        // F-035：添加网络来源（名称可空 + base URL）；字段随 epoch 重建，关闭时清空。
+        let remote_add_dialog = self.remote_sources.add_kind.map(|kind| {
+            let epoch = self.remote_sources.add_epoch;
+            let name_field = window.use_keyed_state(
+                SharedString::from(format!("remote-add-name-{epoch}")),
+                cx,
+                |window, cx| TextInput::new(window, cx).placeholder("名称（可留空，默认使用 URL）"),
+            );
+            let url_field = window.use_keyed_state(
+                SharedString::from(format!("remote-add-url-{epoch}")),
+                cx,
+                |window, cx| TextInput::new(window, cx).placeholder(kind.url_placeholder()),
+            );
+            let primed = window.use_keyed_state(
+                SharedString::from(format!("remote-add-primed-{epoch}")),
+                cx,
+                |_, _| false,
+            );
+            if !*primed.read(cx) {
+                primed.update(cx, |primed, _| *primed = true);
+                let focus = url_field.read(cx).focus_handle(cx);
+                window.defer(cx, move |window, cx| window.focus(&focus, cx));
+            }
+            let url_text = url_field.read(cx).text().to_string();
+            let live_error = match validate_remote_url(&url_text) {
+                Ok(_) => None,
+                Err(_) if url_text.trim().is_empty() => None,
+                Err(message) => Some(message),
+            };
+            let error = self.remote_sources.add_error.clone().or(live_error);
+            let ready = validate_remote_url(&url_text).is_ok();
+            let close_app = this.clone();
+            let close_name = name_field.clone();
+            let close_url = url_field.clone();
+            let submit_app = this.clone();
+            let submit_name = name_field.clone();
+            let submit_url = url_field.clone();
+            let dialog = Dialog::new(
+                SharedString::from(format!("remote-add-dialog-{epoch}")),
+                kind.title(),
+                move |_, cx| {
+                    close_name.update(cx, |input, cx| input.set_text(String::new(), cx));
+                    close_url.update(cx, |input, cx| input.set_text(String::new(), cx));
+                    let _ = close_app.update(cx, |app, cx| {
+                        app.remote_sources.add_kind = None;
+                        app.remote_sources.add_error = None;
+                        cx.notify();
+                    });
+                },
+            )
+            .detail("远端来源只读；添加后可先测试连接。")
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(4.))
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(colors.muted)
+                            .child("名称（可留空）"),
+                    )
+                    .child(Input::new(&name_field)),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(4.))
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(colors.muted)
+                            .child("Base URL（http/https）"),
+                    )
+                    .child(Input::new(&url_field)),
+            );
+            let dialog = match error {
+                Some(message) => {
+                    dialog.child(div().text_xs().text_color(colors.danger).child(message))
+                }
+                None => dialog,
+            };
+            dialog
+                .action(move |close| {
+                    Button::new(
+                        SharedString::from(format!("remote-add-cancel-{epoch}")),
+                        "取消",
+                    )
+                    .variant(ButtonVariant::Ghost)
+                    .on_click(move |_, window, cx| close(window, cx))
+                })
+                .action(move |close| {
+                    let submit_app = submit_app.clone();
+                    let submit_name = submit_name.clone();
+                    let submit_url = submit_url.clone();
+                    Button::new(
+                        SharedString::from(format!("remote-add-submit-{epoch}")),
+                        "添加",
+                    )
+                    .primary()
+                    .disabled(!ready)
+                    .on_click(move |_, window, cx| {
+                        let name_text = submit_name.read(cx).text().to_string();
+                        let url_text = submit_url.read(cx).text().to_string();
+                        let ok = submit_app.update(cx, |app, cx| {
+                            app.submit_remote_add(kind, &name_text, &url_text, cx)
+                        });
+                        if ok {
+                            close(window, cx);
+                        }
+                    })
+                })
+                .into_any_element()
+        });
+        // F-035：设置/清除远端凭据；输入框不回显已保存值，关闭即清空。
+        let remote_api_key_dialog = self.remote_sources.api_key_target.and_then(|id| {
+            let info = self
+                .remote_sources
+                .infos
+                .iter()
+                .find(|info| info.id == Some(id))?
+                .clone();
+            let epoch = self.remote_sources.api_key_epoch;
+            let hint = RemoteAddKind::from_kind(info.kind);
+            let placeholder = hint
+                .map(|kind| kind.credential_placeholder())
+                .unwrap_or("凭据；已保存值不会回显");
+            let field = window.use_keyed_state(
+                SharedString::from(format!("remote-api-key-{epoch}")),
+                cx,
+                move |window, cx| TextInput::new(window, cx).placeholder(placeholder),
+            );
+            let close = this.clone();
+            let close_field = field.clone();
+            let submit = this.clone();
+            let submit_id = id;
+            Some(
+                PromptDialog::new(
+                    SharedString::from(format!("remote-api-key-dialog-{epoch}")),
+                    "设置网络来源凭据",
+                    &field,
+                    move |_, cx| {
+                        close_field.update(cx, |input, cx| input.set_text(String::new(), cx));
+                        let _ = close.update(cx, |app, cx| {
+                            app.remote_sources.api_key_target = None;
+                            cx.notify();
+                        });
+                    },
+                )
+                .label(format!(
+                    "{}「{}」；留空保存表示不修改，已保存值不会回显；凭据存入系统凭据库。",
+                    hint.map(|kind| kind.credential_label()).unwrap_or("凭据"),
+                    info.name
+                ))
+                .submit("保存凭据")
+                .on_submit(move |text, _, cx| {
+                    let _ =
+                        submit.update(cx, |app, cx| app.save_remote_api_key(submit_id, text, cx));
+                })
+                .into_any_element(),
+            )
+        });
+        let remote_remove_dialog = self.remote_sources.remove_confirm.map(|id| {
+            let name = self
+                .remote_sources
+                .infos
+                .iter()
+                .find(|info| info.id == Some(id))
+                .map(|info| info.name.clone())
+                .unwrap_or_else(|| format!("来源 #{id}"));
+            let close = this.clone();
+            let confirm = this.clone();
+            ConfirmDialog::new(
+                "remove-remote-source-dialog",
+                "移除网络来源？",
+                format!(
+                    "将从图库移除「{name}」及其远端资产记录。\n远端服务器上的文件不会删除，本地图库不受影响。"
+                ),
+                move |_, cx| {
+                    let _ = close.update(cx, |app, cx| {
+                        app.remote_sources.remove_confirm = None;
+                        cx.notify();
+                    });
+                },
+            )
+            .confirm("移除来源")
+            .destructive()
+            .on_confirm(move |_, cx| {
+                let _ = confirm.update(cx, |app, cx| app.remove_remote_source(id, cx));
+            })
+            .into_any_element()
+        });
         let rescan_dialog = self.rescan_confirm.map(|origin| {
             let close = this.clone();
             let confirm = this.clone();
@@ -1619,6 +1819,9 @@ impl Render for KanalibApp {
             .children(rescan_dialog)
             .children(tag_retag_dialog)
             .children(source_rename_dialog)
+            .children(remote_add_dialog)
+            .children(remote_api_key_dialog)
+            .children(remote_remove_dialog)
             .children(source_context_menu)
             .children(cleanup_dialog)
             .children(remove_assets_dialog)
@@ -1734,6 +1937,9 @@ impl Render for KanalibApp {
             && self.source_rename.is_none()
             && self.rescan_confirm.is_none()
             && self.tag_retag_confirm.is_none()
+            && self.remote_sources.add_kind.is_none()
+            && self.remote_sources.api_key_target.is_none()
+            && self.remote_sources.remove_confirm.is_none()
         {
             window.focus(&self.grid_focus, cx);
             self.focus_grid_pending = false;
@@ -2349,6 +2555,7 @@ impl KanalibApp {
                 .ok()
                 .and_then(|value| value.parse::<usize>().ok())
                 .filter(|count| *count > 0),
+            remote_sources: RemoteSourcesState::default(),
             window_state_root: kanalib_core::sidecar::project_root(),
             window_state_pending: None,
             window_state_task: None,
@@ -2765,6 +2972,7 @@ impl KanalibApp {
         self.refresh_diagnostics();
         self.refresh_tag_settings(cx);
         self.refresh_tag_reviews(cx);
+        self.refresh_remote_sources();
     }
 
     /// 同步“已暂存、等待重启”的恢复请求到内存提示；只在启动/恢复/取消时调用，
