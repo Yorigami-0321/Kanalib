@@ -12,9 +12,11 @@ frame-profiler = []
 
 [dependencies]
 anyhow = "1"
+base64 = "=0.22.1"
 blake3 = "1"
 dirs = "6"
 ignore = "0.4"
+keyring = { version = "=3.6.3", default-features = false, features = ["windows-native"] }
 # AVIF decode in image 0.25 needs `avif-native` (dav1d, a native library), so
 # AVIF stays on the ffmpeg path; the plain `avif` feature only adds an encoder.
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp", "gif", "bmp", "tiff", "ico", "qoi", "exr"] }
@@ -22,6 +24,8 @@ kamadak-exif = "0.6"
 log = "0.4"
 notify = "8"
 notify-debouncer-mini = "0.7"
+quick-xml = "0.41"
+reqwest = { version = "=0.12.28", default-features = false, features = ["blocking", "rustls-tls-webpki-roots", "json"] }
 rfd = "0.17"
 rusqlite = { version = "0.32", features = ["bundled", "backup", "functions"] }
 serde = { version = "1", features = ["derive"] }

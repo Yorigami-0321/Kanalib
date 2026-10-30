@@ -579,6 +579,19 @@ pub struct ThumbSource {
     pub orientation: u8,
 }
 
+/// `sources` 表的一行；`kind` 保持数据库原文，由 sources 模块解释。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SourceRecord {
+    pub id: i64,
+    pub kind: String,
+    pub name: String,
+    pub locator: String,
+    pub config_json: String,
+    pub read_only: bool,
+    pub last_sync_at: Option<u64>,
+    pub sync_cursor: Option<String>,
+}
+
 #[derive(Clone, Debug)]
 pub struct StoredMeta {
     pub mtime: u64,
@@ -3597,6 +3610,178 @@ impl Db {
             )
             .map_err(Into::into)
     }
+
+    /// 新建或更新一个来源；`UNIQUE(kind, locator)` 冲突时更新显示名/配置/只读位。
+    pub fn upsert_source(
+        &self,
+        kind: &str,
+        name: &str,
+        locator: &str,
+        config_json: &str,
+        read_only: bool,
+    ) -> Result<i64> {
+        let name = if name.trim().is_empty() {
+            locator
+        } else {
+            name.trim()
+        };
+        self.conn.execute(
+            "INSERT INTO sources(kind, name, locator, config_json, read_only)
+             VALUES(?1, ?2, ?3, ?4, ?5)
+             ON CONFLICT(kind, locator) DO UPDATE SET
+                name = excluded.name,
+                config_json = excluded.config_json,
+                read_only = excluded.read_only",
+            params![kind, name, locator, config_json, read_only as i64],
+        )?;
+        self.conn
+            .query_row(
+                "SELECT id FROM sources WHERE kind = ?1 AND locator = ?2",
+                params![kind, locator],
+                |row| row.get(0),
+            )
+            .map_err(Into::into)
+    }
+
+    pub fn list_sources(&self) -> Result<Vec<SourceRecord>> {
+        let mut statement = self.conn.prepare(
+            "SELECT id, kind, name, locator, config_json, read_only, last_sync_at, sync_cursor
+             FROM sources ORDER BY id",
+        )?;
+        let rows = statement.query_map([], |row| {
+            Ok(SourceRecord {
+                id: row.get(0)?,
+                kind: row.get(1)?,
+                name: row.get(2)?,
+                locator: row.get(3)?,
+                config_json: row.get(4)?,
+                read_only: row.get::<_, i64>(5)? != 0,
+                last_sync_at: row
+                    .get::<_, Option<i64>>(6)?
+                    .map(|value| value.max(0) as u64),
+                sync_cursor: row.get(7)?,
+            })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    pub fn source_record(&self, id: i64) -> Result<Option<SourceRecord>> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT id, kind, name, locator, config_json, read_only, last_sync_at, sync_cursor
+                 FROM sources WHERE id = ?1",
+                [id],
+                |row| {
+                    Ok(SourceRecord {
+                        id: row.get(0)?,
+                        kind: row.get(1)?,
+                        name: row.get(2)?,
+                        locator: row.get(3)?,
+                        config_json: row.get(4)?,
+                        read_only: row.get::<_, i64>(5)? != 0,
+                        last_sync_at: row
+                            .get::<_, Option<i64>>(6)?
+                            .map(|value| value.max(0) as u64),
+                        sync_cursor: row.get(7)?,
+                    })
+                },
+            )
+            .optional()?)
+    }
+
+    /// 只在一个来源成功完成同步后调用；`cursor` 为 NULL 时清空增量游标。
+    pub fn update_source_sync(
+        &self,
+        id: i64,
+        cursor: Option<&str>,
+        last_sync_at: u64,
+    ) -> Result<()> {
+        let updated = self.conn.execute(
+            "UPDATE sources SET sync_cursor = ?2, last_sync_at = ?3 WHERE id = ?1",
+            params![id, cursor, last_sync_at as i64],
+        )?;
+        if updated == 0 {
+            bail!("来源不存在: {id}");
+        }
+        Ok(())
+    }
+
+    /// 删除来源行；`assets.source_id` 外键级联删除该来源的资产记录。
+    pub fn delete_source(&self, id: i64) -> Result<usize> {
+        Ok(self.conn.execute("DELETE FROM sources WHERE id = ?1", [id])?)
+    }
+
+    pub fn source_asset_count(&self, id: i64) -> Result<usize> {
+        let count: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM assets WHERE source_id = ?1",
+            [id],
+            |row| row.get(0),
+        )?;
+        Ok(count.max(0) as usize)
+    }
+
+    /// 远端只读资产入库：保留既有标签/评分/收藏，只更新来源元数据。
+    #[allow(clippy::too_many_arguments)]
+    pub fn upsert_remote_asset(
+        &self,
+        source_id: i64,
+        path: &str,
+        folder: &str,
+        name: &str,
+        mime: &str,
+        width: u32,
+        height: u32,
+        bytes: u64,
+        mtime: u64,
+        captured_at: Option<u64>,
+        sha1: Option<&str>,
+        thumb: Option<&Path>,
+    ) -> Result<()> {
+        self.invalidate_name_fold();
+        self.remember_name_fold(name);
+        let thumb = thumb
+            .map(|value| value.to_string_lossy().to_string())
+            .unwrap_or_default();
+        let mime = if mime.is_empty() {
+            mime_for(Path::new(name))
+        } else {
+            mime
+        };
+        self.conn.execute(
+            "INSERT INTO assets(
+                source_id, path, folder, name, media_kind, mime, width, height, bytes, mtime,
+                captured_at, sha1, thumb
+             ) VALUES(?1, ?2, ?3, ?4, 'image', ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
+             ON CONFLICT(source_id, path) DO UPDATE SET
+                folder = excluded.folder,
+                name = excluded.name,
+                media_kind = 'image',
+                mime = CASE WHEN excluded.mime <> '' THEN excluded.mime ELSE assets.mime END,
+                width = excluded.width,
+                height = excluded.height,
+                bytes = excluded.bytes,
+                mtime = excluded.mtime,
+                captured_at = COALESCE(excluded.captured_at, assets.captured_at),
+                sha1 = COALESCE(excluded.sha1, assets.sha1),
+                thumb = CASE WHEN excluded.thumb <> '' THEN excluded.thumb ELSE assets.thumb END",
+            params![
+                source_id,
+                path,
+                folder,
+                name,
+                mime,
+                width,
+                height,
+                bytes as i64,
+                mtime as i64,
+                captured_at.map(|value| value as i64),
+                sha1,
+                thumb
+            ],
+        )?;
+        Ok(())
+    }
 }
 
 fn empty_search_page(include_total: bool) -> SearchPage {
@@ -4396,7 +4581,7 @@ fn upsert_tag(conn: &Connection, tag: &TagHit) -> Result<i64> {
     .map_err(Into::into)
 }
 
-fn mime_for(path: &Path) -> &'static str {
+pub(crate) fn mime_for(path: &Path) -> &'static str {
     match path
         .extension()
         .map(|value| value.to_string_lossy().to_lowercase())
