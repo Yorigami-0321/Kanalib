@@ -44,6 +44,10 @@ use kanalib_core::export;
 use kanalib_core::state::{AppState, CacheStats};
 
 pub use app::KanalibApp;
+pub use platform::{
+    MIN_WINDOW_HEIGHT, MIN_WINDOW_WIDTH, ResolvedWindowState, WINDOW_STATE_DIR, WINDOW_STATE_FILE,
+    WindowState, WorkArea, window_state_path,
+};
 pub use thumb_cache::{CacheCleanup, ThumbCache};
 
 mod app;
