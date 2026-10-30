@@ -1,7 +1,6 @@
 use crate::*;
-use crate::app::KanalibApp;
+use crate::app::{KanalibApp, push_toast};
 use crate::format::*;
-use crate::platform::*;
 use crate::theme::*;
 use crate::views::GRID_CONTEXT;
 use kanalib_core::model::{SimilarHit, SimilarThresholdPreview};
@@ -162,6 +161,7 @@ pub(crate) fn dedup_group_row(
         .assets
         .iter()
         .any(|asset| is_protected(&asset.path, protected_paths));
+    let has_remote = any_remote_asset(group.assets.iter().map(|asset| asset.path.as_path()));
     let (kind_label, kind_fg, kind_bg) = match group.kind {
         GroupKind::Exact => (
             "完全相同".to_string(),
@@ -246,6 +246,9 @@ pub(crate) fn dedup_group_row(
                                 .children(has_protected.then(|| {
                                     small_badge("保护".into(), colors.accent, colors.selection)
                                 }))
+                                .children(has_remote.then(|| {
+                                    small_badge("远端只读".into(), colors.accent, colors.selection)
+                                }))
                                 .child(small_badge(
                                     group_state_label(group.state).into(),
                                     state_fg,
@@ -283,6 +286,7 @@ pub(crate) fn dedup_asset_card(
     let path = asset.path.clone();
     let pending = group.state == ReviewState::Pending;
     let is_protected_path = is_protected(&asset.path, protected_paths);
+    let is_remote = is_remote_asset(&asset.path);
     let similarity = group
         .distance_to_keeper(asset)
         .map(similarity_pct_from_distance);
@@ -349,6 +353,9 @@ pub(crate) fn dedup_asset_card(
     }
     if is_protected_path {
         badge = badge.child(small_badge("保护".into(), colors.accent, colors.selection));
+    }
+    if is_remote {
+        badge = badge.child(small_badge("远端只读".into(), colors.accent, colors.selection));
     }
 
     let mut card = div()
@@ -847,6 +854,10 @@ impl KanalibApp {
             exact_summary.clone()
         };
         let busy = library_scanning || (similar_mode && similar_scanning);
+        let has_remote_pending = groups.iter().any(|group| {
+            group.state == ReviewState::Pending
+                && any_remote_asset(group.assets.iter().map(|asset| asset.path.as_path()))
+        });
 
         let visible_indices = groups
             .iter()
@@ -1018,7 +1029,7 @@ impl KanalibApp {
                     )
                     .children((!similar_mode).then(|| {
                         Button::new("dedup-batch", "批量移入回收站")
-                            .disabled(busy || summary.pending == 0)
+                            .disabled(busy || summary.pending == 0 || has_remote_pending)
                             .on_click(move |_, _, cx| {
                                 let _ = this_batch.update(cx, |app, cx| {
                                     app.dedup_confirm = Some(DedupConfirm::Batch);
@@ -1230,9 +1241,17 @@ impl KanalibApp {
         };
 
         let notice = self.dedup_notice.clone();
+        let remote_note = has_remote_pending.then(|| {
+            (
+                "含远端只读资产的组不能移入回收站；批量回收站已禁用，请逐组处理本地组。"
+                    .to_string(),
+                colors.warning,
+            )
+        });
         let banner: Option<AnyElement> = error
             .map(|message| (message.to_string(), colors.danger))
             .or_else(|| notice.map(|message| (message, colors.muted)))
+            .or(remote_note)
             .map(|(message, color)| {
                 div()
                     .px(px(16.))
@@ -1312,10 +1331,26 @@ impl KanalibApp {
             .assets
             .iter()
             .any(|asset| is_protected(&asset.path, protected_paths));
+        let group_remote = any_remote_asset(group.assets.iter().map(|asset| asset.path.as_path()));
 
         let open = keeper.map(|asset| {
             let path = asset.path.clone();
-            Button::new("dedup-open", "打开保留项").on_click(move |_, _, _| open_path(&path))
+            let remote = is_remote_asset(&path);
+            let label = if remote {
+                "打开保留项（远端只读）"
+            } else if asset.is_video() {
+                "用系统播放器打开"
+            } else {
+                "打开保留项"
+            };
+            let open_toaster = self.toaster.clone();
+            Button::new("dedup-open", label)
+                .disabled(remote)
+                .on_click(move |_, _, cx| {
+                    if let Err(error) = open_asset_with_system(&path) {
+                        push_toast(&open_toaster, cx, error, Severity::Danger);
+                    }
+                })
         });
         let this_compare = this.clone();
         let group_for_compare = group.clone();
@@ -1618,7 +1653,9 @@ impl KanalibApp {
                 .child(
                     Button::new("dedup-trash", format!("移入回收站 ({duplicate_count})"))
                         .variant(ButtonVariant::Danger)
-                        .disabled(scanning || keeper.is_none() || protected_duplicate)
+                        .disabled(
+                            scanning || keeper.is_none() || protected_duplicate || group_remote,
+                        )
                         .on_click(move |_, _, cx| {
                             let _ = this_trash.update(cx, |app, cx| {
                                 app.dedup_confirm = Some(DedupConfirm::Group(key.clone()));
@@ -1696,6 +1733,8 @@ impl KanalibApp {
                             .text_color(colors.subtle)
                             .child(if scanning {
                                 "扫描中，完成后可操作"
+                            } else if group_remote {
+                                "包含远端只读资产，移入回收站已禁用；可标记忽略或全部保留"
                             } else if protected_duplicate {
                                 "包含受保护路径，移入回收站已禁用；请把受保护文件设为保留项或调整保护路径"
                             } else {
@@ -1735,7 +1774,7 @@ impl KanalibApp {
         summary: DedupSummary,
         colors: UiColors,
     ) -> Option<AnyElement> {
-        let (title, detail, rows, key) = match confirm {
+        let (title, detail, rows, key, remote) = match confirm {
             DedupConfirm::Group(key) => {
                 let group = groups.iter().find(|group| &group.key == key)?;
                 let keeper = group.keeper_asset()?;
@@ -1747,6 +1786,8 @@ impl KanalibApp {
                 if duplicates.is_empty() {
                     return None;
                 }
+                let remote =
+                    any_remote_asset(group.assets.iter().map(|asset| asset.path.as_path()));
                 let rows = duplicates
                     .iter()
                     .take(6)
@@ -1771,6 +1812,7 @@ impl KanalibApp {
                     ),
                     rows,
                     Some(key.clone()),
+                    remote,
                 )
             }
             DedupConfirm::Batch => {
@@ -1785,6 +1827,9 @@ impl KanalibApp {
                     .iter()
                     .map(|group| group.assets.len().saturating_sub(1))
                     .sum::<usize>();
+                let remote = pending.iter().any(|group| {
+                    any_remote_asset(group.assets.iter().map(|asset| asset.path.as_path()))
+                });
                 let rows = pending
                     .iter()
                     .take(6)
@@ -1805,8 +1850,14 @@ impl KanalibApp {
                     ),
                     rows,
                     None,
+                    remote,
                 )
             }
+        };
+        let detail = if remote {
+            format!("{detail} 其中含远端只读资产，不能移入回收站。")
+        } else {
+            detail
         };
 
         let this_cancel = this.clone();
@@ -1885,6 +1936,7 @@ impl KanalibApp {
                             .child(
                                 Button::new("dedup-confirm", "确认移入回收站")
                                     .variant(ButtonVariant::Danger)
+                                    .disabled(remote)
                                     .on_click(move |_, _, cx| {
                                         let _ = this_confirm.update(cx, |app, cx| {
                                             let result = match &key {

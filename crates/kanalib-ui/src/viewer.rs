@@ -1,7 +1,8 @@
 use crate::*;
 use crate::app::{KanalibApp, push_toast};
-use crate::format::is_animation_container;
-use crate::platform::open_path;
+use crate::format::{
+    is_animation_container, is_remote_asset, open_asset_with_system, video_fact_rows, video_meta,
+};
 use crate::theme::*;
 
 pub(crate) const VIEWER_CONTEXT: &str = "KanalibViewer";
@@ -11,7 +12,19 @@ pub(crate) fn viewer_caption(asset: &Asset) -> SharedString {
         .all_tags()
         .filter(|tag| matches!(tag.category.as_str(), "general" | "manual"))
         .count();
-    let mut parts = vec![asset.title(), format!("{} × {}", asset.width, asset.height)];
+    let mut parts = vec![asset.title()];
+    if asset.is_video() {
+        let meta = video_meta(&asset.metadata_json);
+        parts.push("视频".into());
+        for (_, value) in video_fact_rows(&meta, asset.width, asset.height) {
+            parts.push(value);
+        }
+    } else {
+        parts.push(format!("{} × {}", asset.width, asset.height));
+    }
+    if is_remote_asset(&asset.path) {
+        parts.push("远端只读".into());
+    }
     if asset.favorite {
         parts.push("收藏".into());
     }
@@ -142,14 +155,19 @@ impl KanalibApp {
     }
 
     pub(crate) fn toggle_viewer_source(&mut self, cx: &mut Context<Self>) {
-        self.viewer_original = !self.viewer_original;
-        if let Some(path) = self
+        let Some(path) = self
             .viewer_at
             .and_then(|at| self.viewer_slides.get(at))
             .map(|(path, _)| path.clone())
-        {
-            self.remove_viewer_asset(&path, cx);
+        else {
+            return;
+        };
+        // 视频只显示首帧；远端虚拟路径没有本地原图。两者都不允许切到“原图”。
+        if kanalib_core::model::is_video(&path) || is_remote_asset(&path) {
+            return;
         }
+        self.viewer_original = !self.viewer_original;
+        self.remove_viewer_asset(&path, cx);
         cx.notify();
     }
 
@@ -192,25 +210,73 @@ impl KanalibApp {
         colors: UiColors,
     ) -> Option<AnyElement> {
         let (path, caption) = self.viewer_slides.get(at)?.clone();
-        let source = if self.viewer_original {
-            path.clone()
-        } else {
+        let (is_video, remote, thumb) = {
             let shared = self.state.shared.lock().unwrap();
             let assets = shared.assets.read().unwrap();
-            assets
-                .iter()
-                .find(|asset| asset.path == path)
-                .and_then(|asset| asset.thumb.clone().or_else(|| asset.tile_thumb.clone()))
-                .unwrap_or_else(|| path.clone())
+            match assets.iter().find(|asset| asset.path == path) {
+                Some(asset) => (
+                    asset.is_video(),
+                    is_remote_asset(&asset.path),
+                    asset.thumb.clone().or_else(|| asset.tile_thumb.clone()),
+                ),
+                None => (
+                    kanalib_core::model::is_video(&path),
+                    is_remote_asset(&path),
+                    None,
+                ),
+            }
+        };
+        // 视频固定首帧；远端虚拟路径没有本地原图，同样不能切“原图”。
+        let show_original = !is_video && !remote;
+        let source = if show_original && self.viewer_original {
+            Some(path.clone())
+        } else {
+            thumb.or_else(|| show_original.then(|| path.clone()))
         };
         let count = self.viewer_slides.len();
-        // 动画容器不内置播放器：只显示首帧，并给“系统应用播放”出口，避免假播放。
         let animated = is_animation_container(&path);
         let external_path = path.clone();
-        let hint = if animated {
-            "← → 切图 · +/- 缩放 · Ctrl+滚轮缩放 · 拖拽平移 · R 旋转 · F 全屏 · 动画仅首帧，播放请用系统应用"
+        let external_toaster = self.toaster.clone();
+        let can_external = (is_video || animated)
+            && !remote
+            && kanalib_core::open::can_open_externally(&path);
+        let external_label = if is_video {
+            "用系统播放器打开"
         } else {
-            "← → 切图 · +/- 缩放 · Ctrl+滚轮缩放 · 拖拽平移 · R 旋转 · F 全屏"
+            "用系统应用播放"
+        };
+        let mut hint_parts = vec![
+            "← → 切图",
+            "+/- 缩放",
+            "Ctrl+滚轮缩放",
+            "拖拽平移",
+            "R 旋转",
+            "F 全屏",
+        ];
+        if is_video {
+            hint_parts.push("视频仅显示首帧，播放请用系统播放器");
+        } else if animated {
+            hint_parts.push("动画仅首帧，播放请用系统应用");
+        }
+        if remote {
+            hint_parts.push("远端只读 · 未下载原图");
+        }
+        let hint = hint_parts.join(" · ");
+        let preview: AnyElement = match source {
+            Some(source) => ImageViewer::new("kanalib-viewer", source).into_any_element(),
+            None => div()
+                .size_full()
+                .flex()
+                .items_center()
+                .justify_center()
+                .text_sm()
+                .text_color(colors.subtle)
+                .child(if is_video {
+                    "暂无视频首帧（生成首帧需要 FFmpeg）"
+                } else {
+                    "远端资产未下载原图，暂无预览"
+                })
+                .into_any_element(),
         };
         let title = path
             .file_name()
@@ -305,7 +371,7 @@ impl KanalibApp {
                                     .text_color(colors.subtle)
                                     .child(format!("{} / {count}", at + 1)),
                             )
-                            .child(
+                            .children(show_original.then(|| {
                                 Button::new(
                                     "viewer-source",
                                     if self.viewer_original { "预览" } else { "原图" },
@@ -315,14 +381,25 @@ impl KanalibApp {
                                 .on_click(move |_, _, cx| {
                                     let _ = source_button
                                         .update(cx, |app, cx| app.toggle_viewer_source(cx));
-                                }),
-                            )
-                            .children(animated.then(|| {
-                                Button::new("viewer-open-external", "用系统应用播放")
+                                })
+                            }))
+                            .children(can_external.then(|| {
+                                Button::new("viewer-open-external", external_label)
                                     .size(ControlSize::Sm)
                                     .variant(ButtonVariant::Ghost)
                                     .icon(IconName::Play)
-                                    .on_click(move |_, _, _| open_path(&external_path))
+                                    .on_click(move |_, _, cx| {
+                                        if let Err(error) =
+                                            open_asset_with_system(&external_path)
+                                        {
+                                            push_toast(
+                                                &external_toaster,
+                                                cx,
+                                                error,
+                                                Severity::Danger,
+                                            );
+                                        }
+                                    })
                             }))
                             .child(
                                 IconButton::new("viewer-fullscreen", IconName::Fullscreen)
@@ -349,7 +426,7 @@ impl KanalibApp {
                     .min_h(px(0.))
                     .w_full()
                     .p(px(12.))
-                    .child(ImageViewer::new("kanalib-viewer", source)),
+                    .child(preview),
             )
             .child(
                 div()

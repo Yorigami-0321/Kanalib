@@ -1,7 +1,6 @@
 use crate::*;
 use crate::app::{KanalibApp, prompt_for, push_toast};
 use crate::format::*;
-use crate::platform::*;
 use crate::sidebar::source_label;
 use crate::theme::*;
 
@@ -60,6 +59,21 @@ pub(crate) fn friendly_format_label(path: &Path) -> String {
         "exr" => "EXR".to_string(),
         "avif" => "AVIF".to_string(),
         "psd" => "PSD".to_string(),
+        "mp4" | "m4v" => "MP4".to_string(),
+        "mov" => "MOV".to_string(),
+        "mkv" => "MKV".to_string(),
+        "webm" => "WebM".to_string(),
+        "avi" => "AVI".to_string(),
+        "wmv" => "WMV".to_string(),
+        "flv" => "FLV".to_string(),
+        "mpg" | "mpeg" => "MPEG".to_string(),
+        "3gp" => "3GP".to_string(),
+        "3g2" => "3G2".to_string(),
+        "ts" => "TS".to_string(),
+        "m2ts" => "M2TS".to_string(),
+        "mts" => "MTS".to_string(),
+        "ogv" => "OGV".to_string(),
+        "vob" => "VOB".to_string(),
         "heic" | "heif" => "HEIC/HEIF".to_string(),
         "dng" | "cr2" | "cr3" | "nef" | "arw" | "raf" | "orf" | "rw2" | "pef" | "srw" | "x3f" => {
             "RAW".to_string()
@@ -74,6 +88,9 @@ pub(crate) fn friendly_format_label(path: &Path) -> String {
 pub(crate) fn format_capability_note(path: &Path) -> String {
     if crate::format::unsupported_format_note(path).is_some() {
         return "未接入（当前版本不支持扫描/解码）".to_string();
+    }
+    if kanalib_core::model::is_video(path) {
+        return "首帧缩略图 · 系统播放器".to_string();
     }
     let ext = path
         .extension()
@@ -98,14 +115,22 @@ pub(crate) fn format_capability_note(path: &Path) -> String {
 }
 
 pub(crate) fn exif_panel(asset: &Asset, colors: UiColors) -> Option<AnyElement> {
-    let meta = serde_json::from_str::<kanalib_core::media::ExifData>(&asset.metadata_json).ok()?;
-    if meta.is_empty() && asset.captured_at.is_none() {
+    let meta =
+        serde_json::from_str::<kanalib_core::media::ExifData>(&asset.metadata_json)
+            .unwrap_or_default();
+    let video = asset.is_video();
+    // 视频即使 ffprobe 缺失也要显示分辨率行，因此不能按 ExifData 为空直接隐藏。
+    if !video && meta.is_empty() && asset.captured_at.is_none() {
         return None;
     }
+    let video_facts = video.then(|| {
+        video_fact_rows(&video_meta(&asset.metadata_json), asset.width, asset.height)
+    });
     let mut rows: Vec<(&'static str, String)> = Vec::new();
     if let Some(captured) = asset.captured_at {
         rows.push(("拍摄时间", format_date(captured)));
     }
+    rows.extend(video_facts.unwrap_or_default());
     if !meta.camera.is_empty() {
         rows.push(("相机", meta.camera));
     }
@@ -138,7 +163,7 @@ pub(crate) fn exif_panel(asset: &Asset, colors: UiColors) -> Option<AnyElement> 
                     .text_xs()
                     .font_weight(FontWeight::SEMIBOLD)
                     .text_color(colors.subtle)
-                    .child("拍摄信息"),
+                    .child(if video { "视频信息" } else { "拍摄信息" }),
             )
             .children(rows.into_iter().map(|(label, value)| {
                 div()
@@ -178,6 +203,11 @@ mod tests {
         assert_eq!(super::friendly_format_label(Path::new("d.psd")), "PSD");
         assert_eq!(super::friendly_format_label(Path::new("e.HEIC")), "HEIC/HEIF");
         assert_eq!(super::friendly_format_label(Path::new("f.cr2")), "RAW");
+        assert_eq!(super::friendly_format_label(Path::new("clip.MP4")), "MP4");
+        assert_eq!(super::friendly_format_label(Path::new("clip.mov")), "MOV");
+        assert_eq!(super::friendly_format_label(Path::new("clip.mkv")), "MKV");
+        assert_eq!(super::friendly_format_label(Path::new("clip.webm")), "WebM");
+        assert_eq!(super::friendly_format_label(Path::new("clip.avi")), "AVI");
         assert_eq!(super::friendly_format_label(Path::new("d.xyz")), "XYZ");
         assert_eq!(super::friendly_format_label(Path::new("noext")), "未知格式");
     }
@@ -215,6 +245,9 @@ mod tests {
         assert!(!heic.contains("内置解码"), "{heic}");
         let raw = super::format_capability_note(Path::new("a.nef"));
         assert!(raw.contains("未接入"), "{raw}");
+        let video = super::format_capability_note(Path::new("clip.MP4"));
+        assert!(video.contains("首帧"), "{video}");
+        assert!(video.contains("系统播放器"), "{video}");
     }
 
     #[test]
@@ -256,6 +289,15 @@ impl KanalibApp {
             };
             let this_quick = this.clone();
             let path_for_open = asset.path.clone();
+            let open_toaster = self.toaster.clone();
+            let open_remote = is_remote_asset(&asset.path);
+            let open_label = if open_remote {
+                "远端只读"
+            } else if asset.is_video() {
+                "用系统播放器打开"
+            } else {
+                "打开文件"
+            };
             let similar_this = this.clone();
             let similar_path = asset.path.clone();
             let compare_this = this.clone();
@@ -289,6 +331,12 @@ impl KanalibApp {
                             source_label(&asset.library_root, source_aliases)
                         )),
                 )
+                .children(open_remote.then(|| {
+                    div()
+                        .text_xs()
+                        .text_color(colors.warning)
+                        .child(REMOTE_READONLY_NOTE)
+                }))
                 .child(
                     div()
                         .flex()
@@ -334,9 +382,14 @@ impl KanalibApp {
                                 }),
                         )
                         .child(
-                            Button::new("preview-open-file", "打开文件")
+                            Button::new("preview-open-file", open_label)
                                 .size(ControlSize::Sm)
-                                .on_click(move |_, _, _| open_path(&path_for_open)),
+                                .disabled(open_remote)
+                                .on_click(move |_, _, cx| {
+                                    if let Err(error) = open_asset_with_system(&path_for_open) {
+                                        push_toast(&open_toaster, cx, error, Severity::Danger);
+                                    }
+                                }),
                         )
                         .child(
                             Button::new("preview-find-similar", "查找相似")
@@ -667,20 +720,35 @@ impl KanalibApp {
             }
 
             let path_for_open = path.clone();
-            let open = Button::new("open-file", "打开文件")
+            let open_toaster = self.toaster.clone();
+            let open_remote = is_remote_asset(&path);
+            let open_label = if open_remote {
+                "远端只读"
+            } else if asset.is_video() {
+                "用系统播放器打开"
+            } else {
+                "打开文件"
+            };
+            let open = Button::new("open-file", open_label)
                 .size(ControlSize::Sm)
-                .on_click(move |_, _, _| {
-                    open_path(&path_for_open);
+                .disabled(open_remote)
+                .on_click(move |_, _, cx| {
+                    if let Err(error) = open_asset_with_system(&path_for_open) {
+                        push_toast(&open_toaster, cx, error, Severity::Danger);
+                    }
                 });
             // 动画不内置播放器：明确提供“系统应用播放”出口，不伪造逐帧能力。
-            let animation_open = crate::format::is_animation_container(&path);
+            let animation_open = !open_remote && crate::format::is_animation_container(&path);
             let animation_path = path.clone();
+            let animation_toaster = self.toaster.clone();
             let animation_button = animation_open.then(|| {
                 Button::new("inspector-open-animation", "用系统应用播放")
                     .size(ControlSize::Sm)
                     .icon(IconName::Play)
-                    .on_click(move |_, _, _| {
-                        open_path(&animation_path);
+                    .on_click(move |_, _, cx| {
+                        if let Err(error) = open_asset_with_system(&animation_path) {
+                            push_toast(&animation_toaster, cx, error, Severity::Danger);
+                        }
                     })
             });
             let this_quick = this.clone();
@@ -1043,6 +1111,12 @@ impl KanalibApp {
                             source_label(&asset.library_root, source_aliases)
                         )),
                 )
+                .children(open_remote.then(|| {
+                    div()
+                        .text_xs()
+                        .text_color(colors.warning)
+                        .child(REMOTE_READONLY_NOTE)
+                }))
                 .child(
                     div()
                         .text_xs()
