@@ -8,6 +8,7 @@ pub mod media;
 pub mod model;
 pub mod scan_filter;
 pub mod sidecar;
+pub mod sources;
 pub mod state;
 pub mod trash;
 pub mod watch;

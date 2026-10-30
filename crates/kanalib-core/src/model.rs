@@ -5,6 +5,7 @@ use std::sync::{Arc, RwLock};
 use serde::{Deserialize, Serialize};
 
 use crate::dedup::{DedupState, DuplicateReview};
+use crate::sources::SourceInfo;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct TagHit {
@@ -1294,6 +1295,8 @@ pub struct PendingCleanup {
 #[derive(Debug)]
 pub struct Shared {
     pub roots: Vec<PathBuf>,
+    /// 本地 roots + 远端来源（只读）的统一列表；`roots` 仍是本地扫描/监听/清理的唯一依据。
+    pub sources: Vec<SourceInfo>,
     pub assets: Arc<RwLock<Vec<Asset>>>,
     pub counts: CountAccumulator,
     pub revision: u64,
@@ -1367,6 +1370,7 @@ impl Shared {
         dedup.rebuild(&assets);
         Self {
             roots,
+            sources: Vec::new(),
             assets: Arc::new(RwLock::new(assets)),
             counts,
             revision: 1,
@@ -1397,6 +1401,35 @@ impl Shared {
     /// 单个来源的运行时状态；未初始化时返回 None。
     pub fn source_status(&self, root: &Path) -> Option<&SourceScanStatus> {
         self.source_statuses.get(root)
+    }
+
+    /// 本地 roots 的字符串形式；扫描/监听/清理与本地打标队列只使用这些。
+    pub fn local_folders(&self) -> Vec<String> {
+        self.roots
+            .iter()
+            .map(|root| root.to_string_lossy().to_string())
+            .collect()
+    }
+
+    /// 加载/搜索/标签统计使用的统一 folder 列表：本地 roots 在前，远端 locator 在后。
+    pub fn all_folders(&self) -> Vec<String> {
+        let mut folders = self.local_folders();
+        for source in self.sources.iter().filter(|source| source.is_remote()) {
+            if !source.locator.is_empty() && !folders.contains(&source.locator) {
+                folders.push(source.locator.clone());
+            }
+        }
+        folders
+    }
+
+    pub fn remote_sources(&self) -> impl Iterator<Item = &SourceInfo> {
+        self.sources.iter().filter(|source| source.is_remote())
+    }
+
+    pub fn source_info(&self, id: i64) -> Option<&SourceInfo> {
+        self.sources
+            .iter()
+            .find(|source| source.id == Some(id))
     }
 
     /// 取或创建来源状态；调用方应先确保 root 在 `roots` 中。

@@ -26,6 +26,11 @@ use crate::model::{
 };
 use crate::scan_filter::{self, CompiledIgnoreRules, IgnoreRules, ScanFilterPreview};
 use crate::sidecar::{Sidecar, project_root, repair_file};
+use crate::sources::{
+    Credentials, ImmichConfig, ImmichSource, Source, SourceError, SourceInfo, SourceKind,
+    SourceStatus, SourceSyncContext, SourceSyncReport, WebDavConfig, WebDavSource, is_remote_path,
+    remote_kind_for_path, source_infos,
+};
 use crate::watch;
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -64,6 +69,8 @@ pub struct AppState {
     backup_scheduler: Mutex<Option<Arc<AtomicBool>>>,
     /// 备份运行时快照；UI 通过 [`AppState::backup_status`] 只读。
     backup_runtime: Mutex<BackupStatus>,
+    /// 来源凭据（API key 只在 Windows Credential Manager / 注入后端）。
+    credentials: Credentials,
     db_path: PathBuf,
     cache_dir: PathBuf,
 }
@@ -93,6 +100,15 @@ impl AppState {
 
     /// 打开指定数据根目录；测试与 headless 复用同一套初始化逻辑。
     fn open(data_root: PathBuf, folder: Option<PathBuf>, watch_allowed: bool) -> Arc<Self> {
+        Self::open_with_credentials(data_root, folder, watch_allowed, Credentials::system())
+    }
+
+    fn open_with_credentials(
+        data_root: PathBuf,
+        folder: Option<PathBuf>,
+        watch_allowed: bool,
+        credentials: Credentials,
+    ) -> Arc<Self> {
         let data_dir = data_root.join(".kanalib");
         let db_path = data_dir.join("kanalib.db");
         let cache_dir = data_dir.join("thumbs");
@@ -125,6 +141,7 @@ impl AppState {
         let initial_folder = folder.map(absolute);
         let (
             roots,
+            sources,
             assets,
             reviews,
             similar_threshold,
@@ -167,7 +184,13 @@ impl AppState {
                     .iter()
                     .map(|root| root.to_string_lossy().to_string())
                     .collect::<Vec<_>>();
-                let assets = load_tile_thumbs(match db.load_library(&root_strings) {
+                let source_records = db.list_sources().unwrap_or_else(|error| {
+                    log::warn!("load sources: {error:#}");
+                    Vec::new()
+                });
+                let sources = source_infos(&roots, &source_records);
+                let folders = folders_with_remote(&root_strings, &sources);
+                let assets = load_tile_thumbs(match db.load_library(&folders) {
                     Ok(assets) => assets,
                     Err(error) => {
                         log::error!("load assets: {error:#}");
@@ -223,6 +246,7 @@ impl AppState {
                     .unwrap_or_default();
                 (
                     roots,
+                    sources,
                     assets,
                     reviews,
                     threshold,
@@ -234,8 +258,11 @@ impl AppState {
             }
             Err(error) => {
                 log::error!("open database: {error:#}");
+                let roots = initial_folder.into_iter().collect::<Vec<_>>();
+                let sources = source_infos(&roots, &[]);
                 (
-                    initial_folder.into_iter().collect(),
+                    roots,
+                    sources,
                     Vec::new(),
                     Default::default(),
                     DEFAULT_SIMILAR_THRESHOLD,
@@ -247,6 +274,7 @@ impl AppState {
             }
         };
         let mut shared = Shared::new(roots, assets, reviews, similar_threshold, protected_paths);
+        shared.sources = sources;
         if let Some(notice) = &restored_notice {
             shared.status = notice.clone();
         }
@@ -292,6 +320,7 @@ impl AppState {
                 last_error: restore_error,
                 ..BackupStatus::default()
             }),
+            credentials,
             db_path,
             cache_dir,
         });
@@ -306,6 +335,16 @@ impl AppState {
     #[cfg(test)]
     pub(crate) fn open_for_test(data_root: PathBuf, folder: Option<PathBuf>) -> Arc<Self> {
         Self::open(data_root, folder, false)
+    }
+
+    /// 测试用：隔离数据根 + 注入内存凭据后端，不触碰系统 Credential Manager。
+    #[cfg(test)]
+    pub(crate) fn open_for_test_with_credentials(
+        data_root: PathBuf,
+        folder: Option<PathBuf>,
+        credentials: Credentials,
+    ) -> Arc<Self> {
+        Self::open_with_credentials(data_root, folder, false, credentials)
     }
 
     /// 测试用：隔离数据根目录，但启用真实 `notify` 监听（headless 可跑）。
@@ -1417,27 +1456,13 @@ impl AppState {
     }
 
     pub fn list_tags(&self) -> Result<Vec<TagSummary>> {
-        let roots = self
-            .shared
-            .lock()
-            .unwrap()
-            .roots
-            .iter()
-            .map(|root| root.to_string_lossy().to_string())
-            .collect::<Vec<_>>();
+        let roots = self.all_folder_strings();
         Db::open(&self.db_path)?.list_tags_in(&roots)
     }
 
     /// 全词表 + 当前图库用量；未使用的标签保留 0 次，供补全使用。
     pub fn tag_vocabulary(&self) -> Result<Vec<TagSummary>> {
-        let roots = self
-            .shared
-            .lock()
-            .unwrap()
-            .roots
-            .iter()
-            .map(|root| root.to_string_lossy().to_string())
-            .collect::<Vec<_>>();
+        let roots = self.all_folder_strings();
         let db = Db::open(&self.db_path)?;
         let used = db.list_tags_in(&roots)?;
         let names = db.list_tag_names()?;
@@ -1526,14 +1551,7 @@ impl AppState {
     }
 
     fn reload_after_tag_change(&self, status: String) -> Result<()> {
-        let roots = self
-            .shared
-            .lock()
-            .unwrap()
-            .roots
-            .iter()
-            .map(|root| root.to_string_lossy().to_string())
-            .collect::<Vec<_>>();
+        let roots = self.all_folder_strings();
         let db = Db::open(&self.db_path)?;
         let assets = load_tile_thumbs(db.load_library(&roots)?);
         let aliases = db.load_tag_aliases()?;
@@ -1740,14 +1758,7 @@ impl AppState {
     }
 
     pub fn retry_failed(&self) -> Result<usize> {
-        let roots = self
-            .shared
-            .lock()
-            .unwrap()
-            .roots
-            .iter()
-            .map(|root| root.to_string_lossy().to_string())
-            .collect::<Vec<_>>();
+        let roots = self.all_folder_strings();
         let db = Db::open(&self.db_path)?;
         let mut total = 0;
         for root in &roots {
@@ -1757,13 +1768,12 @@ impl AppState {
     }
 
     fn root_strings(&self) -> Vec<String> {
-        self.shared
-            .lock()
-            .unwrap()
-            .roots
-            .iter()
-            .map(|root| root.to_string_lossy().to_string())
-            .collect()
+        self.shared.lock().unwrap().local_folders()
+    }
+
+    /// 加载/搜索/标签统计使用：本地 roots + 远端只读来源 locator。
+    fn all_folder_strings(&self) -> Vec<String> {
+        self.shared.lock().unwrap().all_folders()
     }
 
     /// 重算/审核后把受影响的资产从 DB 读回共享列表，计数与筛选同步更新。
@@ -1829,7 +1839,7 @@ impl AppState {
     }
 
     pub fn pending_tag_reviews(&self, limit: usize) -> Result<Vec<TagCandidateReview>> {
-        let folders = self.root_strings();
+        let folders = self.all_folder_strings();
         Db::open(&self.db_path)?.pending_tag_candidates(&folders, limit)
     }
 
@@ -1899,7 +1909,7 @@ impl AppState {
     }
 
     pub fn tag_job_errors(&self, limit: usize) -> Result<Vec<TagJobError>> {
-        Db::open(&self.db_path)?.tag_job_errors(&self.root_strings(), limit)
+        Db::open(&self.db_path)?.tag_job_errors(&self.all_folder_strings(), limit)
     }
 
     pub fn pause_tag_queue(&self) {
@@ -1975,7 +1985,7 @@ impl AppState {
     pub fn tag_queue_status(&self) -> TagQueueStatus {
         let mut status = self.shared.lock().unwrap().tag_status.clone();
         if let Ok(db) = Db::open(&self.db_path) {
-            let folders = self.root_strings();
+            let folders = self.all_folder_strings();
             if let Ok(totals) = db.tag_queue_totals(&folders) {
                 status.pending = totals.pending;
                 status.running = totals.running;
@@ -2838,6 +2848,7 @@ impl AppState {
         if paths.is_empty() {
             bail!("这一组没有待移入回收站的副本");
         }
+        reject_remote_assets(&paths, "移入回收站/移动")?;
         if let Some(blocked) = paths.iter().find(|path| is_protected(path, &protected)) {
             bail!("受保护路径不能移入回收站: {}", blocked.display());
         }
@@ -2913,6 +2924,7 @@ impl AppState {
                 protected_skipped += 1;
                 continue;
             }
+            reject_remote_assets(&copies, "移入回收站/移动")?;
             validate_under_roots(&roots, &copies)?;
             paths.extend(copies);
         }
@@ -2968,14 +2980,7 @@ impl AppState {
     }
 
     pub fn search_paths(&self, text: &str) -> Result<HashSet<PathBuf>> {
-        let roots = self
-            .shared
-            .lock()
-            .unwrap()
-            .roots
-            .iter()
-            .map(|root| root.to_string_lossy().to_string())
-            .collect::<Vec<_>>();
+        let roots = self.all_folder_strings();
         let tokens = text
             .split_whitespace()
             .map(str::to_string)
@@ -2983,16 +2988,9 @@ impl AppState {
         Db::open(&self.db_path)?.search_paths_in(&roots, &tokens)
     }
 
-    /// 分页搜索入口；作用范围与 `search_paths` 相同（当前所有本地根目录）。
+    /// 分页搜索入口；作用范围与 `search_paths` 相同（本地 roots + 只读远端来源）。
     pub fn search_page(&self, request: SearchPageRequest<'_>) -> Result<SearchPage> {
-        let roots = self
-            .shared
-            .lock()
-            .unwrap()
-            .roots
-            .iter()
-            .map(|root| root.to_string_lossy().to_string())
-            .collect::<Vec<_>>();
+        let roots = self.all_folder_strings();
         if roots.is_empty() {
             return Ok(SearchPage {
                 paths: Vec::new(),
@@ -3001,6 +2999,292 @@ impl AppState {
             });
         }
         Db::open(&self.db_path)?.search_page(&roots, request)
+    }
+
+    /// 当前来源列表快照（本地 roots + 远端只读来源）。
+    pub fn source_infos(&self) -> Vec<SourceInfo> {
+        self.shared.lock().unwrap().sources.clone()
+    }
+
+    /// 新增/更新一个 Immich 来源；只写 locator 与不含密钥的 config_json。
+    pub fn add_immich_source(&self, name: &str, base_url: &str) -> Result<SourceInfo> {
+        let info = SourceInfo {
+            id: None,
+            kind: SourceKind::Immich,
+            name: name.trim().to_string(),
+            locator: base_url.trim().trim_end_matches('/').to_string(),
+            read_only: true,
+            last_sync_at: None,
+            sync_cursor: None,
+        };
+        let source = ImmichSource::new(info, ImmichConfig::default()).map_err(anyhow::Error::new)?;
+        let locator = source.base_url().to_string();
+        let name = if name.trim().is_empty() {
+            locator.clone()
+        } else {
+            name.trim().to_string()
+        };
+        let db = Db::open(&self.db_path)?;
+        let id = db.upsert_source(
+            SourceKind::Immich.as_str(),
+            &name,
+            &locator,
+            &source.config().to_json(),
+            true,
+        )?;
+        let record = db
+            .source_record(id)?
+            .context("Immich 来源写入后无法读取")?;
+        let info = SourceInfo::from_record(&record).context("未知来源类型")?;
+        self.refresh_remote_assets()?;
+        Ok(info)
+    }
+
+    /// 新增/更新一个 WebDAV 来源；只写 locator 与不含密钥的 config_json。
+    pub fn add_webdav_source(&self, name: &str, base_url: &str) -> Result<SourceInfo> {
+        let info = SourceInfo {
+            id: None,
+            kind: SourceKind::WebDav,
+            name: name.trim().to_string(),
+            locator: base_url.trim().trim_end_matches('/').to_string(),
+            read_only: true,
+            last_sync_at: None,
+            sync_cursor: None,
+        };
+        let source = WebDavSource::new(info, WebDavConfig::default()).map_err(anyhow::Error::new)?;
+        let locator = source.base_url().to_string();
+        let name = if name.trim().is_empty() {
+            locator.clone()
+        } else {
+            name.trim().to_string()
+        };
+        let db = Db::open(&self.db_path)?;
+        let id = db.upsert_source(
+            SourceKind::WebDav.as_str(),
+            &name,
+            &locator,
+            &source.config().to_json(),
+            true,
+        )?;
+        let record = db
+            .source_record(id)?
+            .context("WebDAV 来源写入后无法读取")?;
+        let info = SourceInfo::from_record(&record).context("未知来源类型")?;
+        self.refresh_remote_assets()?;
+        Ok(info)
+    }
+
+    /// 删除远端来源行；外键级联删除其资产，本地 roots 与文件不受影响。
+    pub fn remove_remote_source(&self, id: i64) -> Result<()> {
+        let db = Db::open(&self.db_path)?;
+        let record = db.source_record(id)?.context("来源不存在")?;
+        if record.kind == SourceKind::Local.as_str() {
+            bail!("本地来源请通过来源列表移除文件夹，不能按 id 删除");
+        }
+        db.delete_source(id)?;
+        self.refresh_remote_assets()?;
+        let mut shared = self.shared.lock().unwrap();
+        shared.status = format!("已移除来源「{}」", record.name);
+        shared.revision = shared.revision.wrapping_add(1);
+        Ok(())
+    }
+
+    pub fn set_source_api_key(&self, id: i64, api_key: &str) -> Result<()> {
+        let info = self.source_info_by_id(id)?;
+        if !info.kind.is_remote() {
+            bail!("本地来源不需要凭据");
+        }
+        self.credentials
+            .set_secret(&info.credential_account(), api_key)?;
+        let mut shared = self.shared.lock().unwrap();
+        shared.status = format!("已保存 {} 凭据（系统凭据库）", info.name);
+        shared.error = None;
+        shared.revision = shared.revision.wrapping_add(1);
+        Ok(())
+    }
+
+    pub fn clear_source_api_key(&self, id: i64) -> Result<()> {
+        let info = self.source_info_by_id(id)?;
+        self.credentials
+            .clear_secret(&info.credential_account())?;
+        let mut shared = self.shared.lock().unwrap();
+        shared.status = format!("已清除 {} 凭据", info.name);
+        shared.revision = shared.revision.wrapping_add(1);
+        Ok(())
+    }
+
+    pub fn has_source_api_key(&self, id: i64) -> Result<bool> {
+        let info = self.source_info_by_id(id)?;
+        self.credentials.has_secret(&info.credential_account())
+    }
+
+    /// 测试连接（阻塞）；调用方应在后台线程执行。
+    pub fn test_source_connection(&self, id: i64) -> Result<SourceStatus, SourceError> {
+        let source = self.source_by_id(id)?;
+        source.test_connection(&self.credentials)
+    }
+
+    /// 同步入口（阻塞）；不得在 GPUI 线程直接调用。失败不删除本地记录、
+    /// 不推进 cursor/last_sync_at，也不触碰本地 roots。
+    pub fn sync_source_blocking(&self, id: i64) -> Result<SourceSyncReport, SourceError> {
+        let info = self.source_info_by_id(id).map_err(SourceError::from_anyhow)?;
+        let source = self.source_by_id(id)?;
+        let db = Db::open(&self.db_path).map_err(SourceError::from_anyhow)?;
+        let context = SourceSyncContext {
+            db: &db,
+            cache_dir: &self.cache_dir,
+            cancel: None,
+        };
+        let result = source.sync(&context, &self.credentials);
+        drop(db);
+        let refresh = self.refresh_remote_assets();
+        if let Err(error) = &refresh {
+            log::warn!("refresh remote assets: {error:#}");
+        }
+        match result {
+            Ok(report) => {
+                if let Err(error) = refresh {
+                    return Err(SourceError::from_anyhow(error));
+                }
+                let mut shared = self.shared.lock().unwrap();
+                shared.status = format!(
+                    "{} 同步完成 · 新增 {} · 更新 {} · 跳过 {} · 缩略图 {}",
+                    info.name,
+                    report.imported,
+                    report.updated,
+                    report.skipped,
+                    report.thumbnails_downloaded
+                );
+                shared.error = None;
+                shared.revision = shared.revision.wrapping_add(1);
+                Ok(report)
+            }
+            Err(error) => {
+                let mut shared = self.shared.lock().unwrap();
+                shared.error = Some(error.to_string());
+                shared.status = format!("{} 同步失败：{}", info.name, error.message);
+                shared.revision = shared.revision.wrapping_add(1);
+                Err(error)
+            }
+        }
+    }
+
+    /// 后台同步入口：只启动线程，立即返回；不与本地扫描互斥。
+    pub fn start_source_sync(self: &Arc<Self>, id: i64) -> Result<()> {
+        let info = self.source_info_by_id(id)?;
+        {
+            let mut shared = self.shared.lock().unwrap();
+            shared.status = format!("正在同步 {}...", info.name);
+            shared.error = None;
+            shared.revision = shared.revision.wrapping_add(1);
+        }
+        let state = self.clone();
+        let spawned = std::thread::Builder::new()
+            .name("kanalib-source-sync".into())
+            .spawn(move || {
+                if let Err(error) = state.sync_source_blocking(id) {
+                    log::warn!("source sync {id}: {error}");
+                }
+            });
+        if spawned.is_err() {
+            let mut shared = self.shared.lock().unwrap();
+            shared.error = Some("无法创建同步线程".into());
+            shared.status = "远端来源同步失败".into();
+            bail!("无法创建同步线程");
+        }
+        Ok(())
+    }
+
+    fn source_info_by_id(&self, id: i64) -> Result<SourceInfo> {
+        let shared = self.shared.lock().unwrap();
+        if let Some(info) = shared.source_info(id) {
+            return Ok(info.clone());
+        }
+        drop(shared);
+        let record = Db::open(&self.db_path)?
+            .source_record(id)?
+            .context("来源不存在")?;
+        SourceInfo::from_record(&record).context("未知来源类型")
+    }
+
+    fn source_by_id(&self, id: i64) -> Result<Box<dyn Source>, SourceError> {
+        let record = Db::open(&self.db_path)
+            .map_err(SourceError::from_anyhow)?
+            .source_record(id)
+            .map_err(SourceError::from_anyhow)?
+            .ok_or_else(|| {
+                SourceError::new(
+                    crate::sources::SourceErrorKind::Local,
+                    format!("来源不存在：{id}"),
+                )
+            })?;
+        let info = SourceInfo::from_record(&record).ok_or_else(|| {
+            SourceError::new(
+                crate::sources::SourceErrorKind::Unsupported,
+                format!("不支持的来源类型：{}", record.kind),
+            )
+        })?;
+        match info.kind {
+            SourceKind::Immich => {
+                let config = ImmichConfig::from_json(&record.config_json);
+                Ok(Box::new(ImmichSource::new(info, config)?))
+            }
+            SourceKind::WebDav => {
+                let config = WebDavConfig::from_json(&record.config_json);
+                Ok(Box::new(WebDavSource::new(info, config)?))
+            }
+            SourceKind::Local => Err(SourceError::unsupported("本地来源不走远端同步")),
+        }
+    }
+
+    /// 只合并远端资产并刷新来源列表；不重载、不删除本地资产，扫描中也可安全调用。
+    fn refresh_remote_assets(&self) -> Result<()> {
+        let db = Db::open(&self.db_path)?;
+        let records = db.list_sources()?;
+        let (roots, remote_locators) = {
+            let shared = self.shared.lock().unwrap();
+            let sources = source_infos(&shared.roots, &records);
+            let remote = sources
+                .iter()
+                .filter(|source| source.is_remote())
+                .map(|source| source.locator.clone())
+                .collect::<Vec<_>>();
+            (shared.roots.clone(), (sources, remote))
+        };
+        let (sources, remote) = remote_locators;
+        let remote_assets = load_tile_thumbs(db.load_library(&remote)?);
+        let keep = remote_assets
+            .iter()
+            .map(|asset| asset.path.clone())
+            .collect::<HashSet<_>>();
+        let mut shared = self.shared.lock().unwrap();
+        let stale = {
+            let assets = shared.assets.read().unwrap();
+            assets
+                .iter()
+                .filter(|asset| is_remote_path(&asset.path) && !keep.contains(&asset.path))
+                .map(|asset| asset.path.clone())
+                .collect::<HashSet<_>>()
+        };
+        if !stale.is_empty() {
+            shared.remove_assets(&stale);
+        }
+        for asset in remote_assets {
+            shared.upsert(asset);
+        }
+        shared.sources = sources;
+        let target = shared.assets.clone();
+        {
+            let assets = target.read().unwrap();
+            shared.dedup.rebuild(&assets);
+        }
+        shared.revision = shared.revision.wrapping_add(1);
+        log::debug!(
+            "remote sources refreshed: roots={} remote={}",
+            roots.len(),
+            remote.len()
+        );
+        Ok(())
     }
 
     pub fn stop(&self) {
@@ -4659,6 +4943,30 @@ fn validate_under_roots(roots: &[PathBuf], paths: &[PathBuf]) -> Result<()> {
     Ok(())
 }
 
+/// 远端只读资产不能删除/移动/回收；UI 侧还会在按钮上加 guard。
+fn reject_remote_assets(paths: &[PathBuf], action: &str) -> Result<()> {
+    for path in paths {
+        if let Some(kind) = remote_kind_for_path(path) {
+            bail!(
+                "{kind} 只读来源的资产不能{action}: {}",
+                path.display()
+            );
+        }
+    }
+    Ok(())
+}
+
+/// 本地 roots 在前，远端来源 locator 在后；供初始化时一次加载全库。
+fn folders_with_remote(roots: &[String], sources: &[SourceInfo]) -> Vec<String> {
+    let mut folders = roots.to_vec();
+    for source in sources.iter().filter(|source| source.is_remote()) {
+        if !source.locator.is_empty() && !folders.contains(&source.locator) {
+            folders.push(source.locator.clone());
+        }
+    }
+    folders
+}
+
 /// 启动时把已存在的小档直接挂到资产上，省掉一次生成与等待。
 fn load_tile_thumbs(mut assets: Vec<Asset>) -> Vec<Asset> {
     for asset in &mut assets {
@@ -4806,7 +5114,13 @@ fn backfill_tile_thumbs(state: &Arc<AppState>, cancel: &AtomicBool) {
     );
 }
 
-fn thumb_target(path: &Path, cache_dir: &Path, mtime: u64, bytes: u64, orientation: u8) -> PathBuf {
+pub(crate) fn thumb_target(
+    path: &Path,
+    cache_dir: &Path,
+    mtime: u64,
+    bytes: u64,
+    orientation: u8,
+) -> PathBuf {
     let mut key = format!(
         "v3-{}-{}-{}-{}",
         path.to_string_lossy(),
