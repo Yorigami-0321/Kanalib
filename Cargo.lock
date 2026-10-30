@@ -3368,6 +3368,7 @@ dependencies = [
  "kanalib-core",
  "kanalib-ui",
  "log",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

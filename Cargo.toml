@@ -31,6 +31,15 @@ kanalib-core = { path = "crates/kanalib-core" }
 kanalib-ui = { path = "crates/kanalib-ui" }
 log = "0.4"
 
+# F-039：单实例命名 mutex/事件只在 Windows GUI 进程使用；headless 不加载。
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_System_Threading",
+    "Win32_UI_WindowsAndMessaging",
+] }
+
 [profile.dev]
 opt-level = 1
 

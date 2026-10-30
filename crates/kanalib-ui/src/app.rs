@@ -146,6 +146,12 @@ pub struct KanalibApp {
     /// 已暂存、等待重启应用的恢复请求（启动/恢复后同步一次，避免底栏每帧读库）。
     pub(crate) pending_restore_hint: Option<String>,
     pub(crate) diagnostic_snapshot: Option<DiagnosticSnapshot>,
+    /// F-038：窗口状态（位置/大小/最大化/屏幕）的落盘根目录与节流保存状态。
+    pub(crate) window_state_root: PathBuf,
+    pub(crate) window_state_pending: Option<crate::platform::WindowState>,
+    pub(crate) window_state_task: Option<Task<()>>,
+    pub(crate) window_state_subscription: Option<gpui::Subscription>,
+    pub(crate) window_state_quit: Option<gpui::Subscription>,
     pub(crate) refresh_task: Option<Task<()>>,
     pub(crate) thumb_cache: Entity<ThumbCache>,
     pub(crate) cache_task: Option<Task<()>>,
@@ -2343,10 +2349,73 @@ impl KanalibApp {
                 .ok()
                 .and_then(|value| value.parse::<usize>().ok())
                 .filter(|count| *count > 0),
+            window_state_root: kanalib_core::sidecar::project_root(),
+            window_state_pending: None,
+            window_state_task: None,
+            window_state_subscription: None,
+            window_state_quit: None,
         }
     }
 
-    pub fn start(&mut self, cx: &mut Context<Self>) {
+    /// F-038：监听窗口移动/缩放/最大化并节流保存；关闭与退出时各补写一次。
+    fn init_window_state(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let root = self.window_state_root.clone();
+        window.on_window_should_close(cx, move |window, cx| {
+            let state = crate::platform::WindowState::capture(window, cx);
+            if let Err(error) = state.save(&root) {
+                log::warn!("save window state on close: {error}");
+            }
+            true
+        });
+        self.window_state_subscription = Some(cx.observe_window_bounds(window, |app, window, cx| {
+            app.queue_window_state_save(window, cx);
+        }));
+        self.window_state_quit = Some(cx.on_app_quit(|app, _cx| {
+            if let Some(state) = app.window_state_pending.take() {
+                if let Err(error) = state.save(&app.window_state_root) {
+                    log::warn!("save window state on quit: {error}");
+                }
+            }
+            async {}
+        }));
+        self.queue_window_state_save(window, cx);
+    }
+
+    /// 500ms 静默窗口后写盘；拖动过程中只更新 pending，不逐帧碰磁盘。
+    fn queue_window_state_save(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let state = crate::platform::WindowState::capture(window, cx);
+        if self.window_state_pending == Some(state) {
+            return;
+        }
+        self.window_state_pending = Some(state);
+        let running = self
+            .window_state_task
+            .as_ref()
+            .is_some_and(|task| !task.is_ready());
+        if running {
+            return;
+        }
+        let root = self.window_state_root.clone();
+        self.window_state_task = Some(cx.spawn(async move |app, cx| {
+            loop {
+                cx.background_executor()
+                    .timer(Duration::from_millis(500))
+                    .await;
+                match app.update(cx, |app, _| app.window_state_pending.take()) {
+                    Ok(Some(state)) => {
+                        if let Err(error) = state.save(&root) {
+                            log::warn!("save window state: {error}");
+                        }
+                    }
+                    Ok(None) => break,
+                    Err(_) => break,
+                }
+            }
+        }));
+    }
+
+    pub fn start(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.init_window_state(window, cx);
         self.sync_source_statuses();
         // 启动时若有上次暂存但尚未应用的恢复请求（通常会在打开数据库前应用），
         // 给出持久提示与设置页取消入口；正常启动这里为 None。
