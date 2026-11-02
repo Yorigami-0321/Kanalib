@@ -3,6 +3,24 @@ use crate::*;
 pub(crate) const TITLEBAR_HEIGHT: f32 = 48.;
 pub(crate) const STATUS_BAR_HEIGHT: f32 = 26.;
 pub(crate) const ACTIVITY_BAR_WIDTH: f32 = 48.;
+pub(crate) const ACTIVITY_ITEM_HEIGHT: f32 = 40.;
+
+// F-073：Kanalib 壳层 token。Ely 的 Theme 已覆盖颜色、控件/图标/文本尺寸；
+// 这里只补间距、行高与圆角，组件不再各写一套字面量。
+pub(crate) const SPACE_HALF: f32 = 2.;
+pub(crate) const SPACE_1: f32 = 4.;
+pub(crate) const SPACE_1_5: f32 = 6.;
+pub(crate) const SPACE_2: f32 = 8.;
+pub(crate) const SPACE_3: f32 = 12.;
+pub(crate) const SPACE_4: f32 = 16.;
+pub(crate) const SPACE_6: f32 = 24.;
+
+pub(crate) const RADIUS_SM: f32 = 4.;
+pub(crate) const RADIUS_MD: f32 = 6.;
+pub(crate) const RADIUS_LG: f32 = 8.;
+
+pub(crate) const ROW_SM: f32 = 28.;
+pub(crate) const ROW_MD: f32 = 36.;
 
 #[derive(Clone, Copy)]
 pub(crate) struct UiColors {

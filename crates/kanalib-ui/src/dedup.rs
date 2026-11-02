@@ -1,4 +1,5 @@
 use crate::app::{KanalibApp, push_toast};
+use crate::components::*;
 use crate::format::*;
 use crate::theme::*;
 use crate::views::GRID_CONTEXT;
@@ -1085,6 +1086,7 @@ pub(crate) fn dedup_diff(
 impl KanalibApp {
     pub(crate) fn open_dedup_mode(&mut self, mode: GroupKind, cx: &mut Context<Self>) {
         self.screen = Screen::Duplicates;
+        self.tag_return_pending = false;
         self.dedup_mode = mode;
         self.dedup_filter = DedupFilter::Pending;
         self.dedup_selected = None;
@@ -1641,28 +1643,39 @@ impl KanalibApp {
                 colors,
             )
         } else {
-            let message = if similar_mode && !similar_scanned && !similar_scanning {
-                "尚未扫描相似图片。选一个阈值开始扫描。"
-            } else if similar_scanning {
-                "正在计算相似图片..."
-            } else if library_scanning {
-                "正在扫描图库..."
-            } else if similar_mode {
-                "没有符合筛选的相似组"
-            } else {
-                "没有符合筛选的重复组"
-            };
-            div()
-                .flex_1()
-                .min_w(px(0.))
-                .h_full()
-                .flex()
-                .items_center()
-                .justify_center()
-                .text_sm()
-                .text_color(colors.muted)
-                .child(message)
-                .into_any_element()
+            let (icon, title, description) =
+                if similar_mode && !similar_scanned && !similar_scanning {
+                    (
+                        IconName::Search,
+                        "尚未扫描相似图片",
+                        "在阈值栏选择一个相似度后开始扫描。",
+                    )
+                } else if similar_scanning {
+                    (
+                        IconName::RefreshCw,
+                        "正在计算相似图片",
+                        "扫描完成后相似组会出现在这里。",
+                    )
+                } else if library_scanning {
+                    (
+                        IconName::RefreshCw,
+                        "正在扫描图库",
+                        "扫描完成后重复组会自动刷新。",
+                    )
+                } else if similar_mode {
+                    (
+                        IconName::SearchX,
+                        "没有符合筛选的相似组",
+                        "调整筛选或排序后再试。",
+                    )
+                } else {
+                    (
+                        IconName::SearchX,
+                        "没有符合筛选的重复组",
+                        "调整筛选或排序后再试。",
+                    )
+                };
+            empty_state(icon, title, description, None, colors)
         };
 
         let notice = self.dedup_notice.clone();

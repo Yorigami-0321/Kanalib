@@ -1,4 +1,5 @@
 use crate::app::{KanalibApp, push_toast};
+use crate::components::*;
 use crate::format::*;
 use crate::platform::*;
 use crate::theme::*;
@@ -397,25 +398,38 @@ impl KanalibApp {
         let sort_mode = self.sort;
         let sort_ascending = self.sort_ascending;
         let grid: AnyElement = if rows_for_list.is_empty() {
-            div()
-                .flex_1()
-                .p(px(24.))
-                .child(
-                    div()
-                        .p(px(24.))
-                        .rounded(px(8.))
-                        .bg(colors.sunken)
-                        .text_sm()
-                        .text_color(colors.muted)
-                        .child(if roots_empty {
-                            "还没有图库文件夹。点击侧栏“添加文件夹”开始。"
-                        } else if scanning {
-                            "正在扫描图片..."
-                        } else {
-                            "没有符合筛选的图片。"
-                        }),
+            let this_empty = this.clone();
+            let action = (!roots_empty && !scanning).then(|| {
+                Button::new("library-empty-reset", "清除筛选")
+                    .size(ControlSize::Sm)
+                    .on_click(move |_, _, cx| {
+                        let _ = this_empty.update(cx, |app, cx| {
+                            app.apply_search_text(String::new(), cx);
+                            app.set_filter(Filter::All, cx);
+                        });
+                    })
+                    .into_any_element()
+            });
+            let (icon, title, description) = if roots_empty {
+                (
+                    IconName::FolderOpen,
+                    "还没有图库文件夹",
+                    "点击侧栏「添加文件夹」或拖入文件夹开始。",
                 )
-                .into_any_element()
+            } else if scanning {
+                (
+                    IconName::RefreshCw,
+                    "正在扫描图片",
+                    "扫描完成后缩略图会出现在这里。",
+                )
+            } else {
+                (
+                    IconName::SearchX,
+                    "没有符合筛选的图片",
+                    "清除筛选或调整搜索条件后再试。",
+                )
+            };
+            empty_state(icon, title, description, action, colors)
         } else if let Some(layout) = group_layout.clone() {
             self.render_grouped_list(
                 this,

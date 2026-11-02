@@ -14,7 +14,7 @@ use crate::thumb_cache::watch_enabled;
 use crate::viewer::VIEWER_CONTEXT;
 use crate::views::{GRID_CONTEXT, grid_columns};
 use crate::*;
-use ely_gpui_component::forms::InputEvent;
+use ely_gpui_component::forms::{InputEvent, SelectAll};
 use gpui::ExternalPaths;
 use kanalib_core::model::{ExcludedAssetAction, SavedSearchView, ScanFilterImpact, is_image};
 
@@ -275,6 +275,8 @@ pub struct KanalibApp {
     // ---- F-025（第六轮 A2）：标签管理筛选/排序；只影响展示。 ----
     pub(crate) tag_manager_filter: crate::tags::TagManagerFilter,
     pub(crate) tag_manager_sort: crate::tags::TagManagerSort,
+    // ---- F-070：标签页「查看图片」后保留返回路径；只存会话状态。 ----
+    pub(crate) tag_return_pending: bool,
     // ---- F-046/F-047（第六轮 A3/A4）：去重组筛选排序、键盘导航与回收站审计。 ----
     pub(crate) dedup_query: String,
     pub(crate) dedup_query_input: Option<Entity<TextInput>>,
@@ -823,7 +825,7 @@ impl Render for KanalibApp {
             };
         let dedup_similar_count = dedup_similar_groups.len();
         let tag_search = window.use_keyed_state("kanalib-sidebar-tag-search", cx, |window, cx| {
-            TextInput::new(window, cx).placeholder("搜索标签")
+            TextInput::new(window, cx).placeholder("筛选标签（有使用）")
         });
         let tag_query = tag_search.read(cx).text().to_string();
         let sidebar: AnyElement = if self.show_sidebar {
@@ -1815,6 +1817,7 @@ impl Render for KanalibApp {
             window_width,
             colors,
         );
+        let search_blur = search.clone();
         let shell =
             div()
                 .flex()
@@ -1825,6 +1828,12 @@ impl Render for KanalibApp {
                 .bg(colors.bg)
                 .text_color(colors.fg)
                 .font_family(cx.theme().font_family.clone())
+                .on_mouse_down(MouseButton::Left, move |_, window, cx| {
+                    let handle = search_blur.read(cx).focus_handle(cx);
+                    if window.focused(cx) == Some(handle) {
+                        window.blur(cx);
+                    }
+                })
                 .child(titlebar)
                 .children(search_chips)
                 .child(
@@ -1886,8 +1895,14 @@ impl Render for KanalibApp {
                 }))
                 .on_action(cx.listener(|this, _: &ClearSelection, _, cx| this.clear_selection(cx)))
                 // F-004：结果视图里 Esc 先关快速查看，再回到图库；图库里仍是清除选择。
+                // F-070：从标签页「查看图片」进入的图库视图，Esc 先返回标签管理。
                 .on_action(cx.listener(|this, _: &CloseSimilar, _, cx| {
-                    if this.screen == Screen::Similar && this.viewer_at.is_none() {
+                    if this.tag_return_pending
+                        && this.screen == Screen::Library
+                        && this.viewer_at.is_none()
+                    {
+                        this.return_to_tag_manager(cx);
+                    } else if this.screen == Screen::Similar && this.viewer_at.is_none() {
                         this.close_similar(cx);
                     } else {
                         this.clear_selection(cx);
@@ -2044,6 +2059,7 @@ impl KanalibApp {
         self.show_extensions = saved.view.show_extensions;
         self.persist_setting("ui.show_extensions", self.show_extensions.to_string(), cx);
         self.screen = Screen::Library;
+        self.tag_return_pending = false;
         self.dedup_confirm = None;
         self.clear_multi_selection();
         self.focus_grid_pending = true;
@@ -2586,6 +2602,7 @@ impl KanalibApp {
             search_history_subscription: None,
             tag_manager_filter: crate::tags::TagManagerFilter::default(),
             tag_manager_sort: crate::tags::TagManagerSort::default(),
+            tag_return_pending: false,
             dedup_query: String::new(),
             dedup_query_input: None,
             dedup_sort: crate::dedup::DedupSort::default(),
@@ -2918,6 +2935,7 @@ impl KanalibApp {
                 app.state.start_scan();
                 app.reset_search();
                 app.screen = Screen::Library;
+                app.tag_return_pending = false;
                 app.dedup_selected = None;
                 app.dedup_confirm = None;
                 app.source_remove_confirm = None;
@@ -2999,6 +3017,7 @@ impl KanalibApp {
 
     pub(crate) fn open_settings(&mut self, cx: &mut Context<Self>) {
         self.screen = Screen::Settings;
+        self.tag_return_pending = false;
         self.dedup_confirm = None;
         self.tag_retag_confirm = None;
         self.tag_settings_notice = None;
@@ -3575,6 +3594,7 @@ impl KanalibApp {
         if let Some(search) = &self.search_input {
             let handle = search.read(cx).focus_handle(cx);
             window.focus(&handle, cx);
+            window.dispatch_action(Box::new(SelectAll), cx);
         }
     }
 
@@ -3967,8 +3987,6 @@ impl KanalibApp {
         } else {
             px(220.)
         };
-        let this_theme = this.clone();
-
         let sort = library.then(|| {
             DropdownMenu::new("library-sort", "排序", self.sort_menu(this))
                 .icon(IconName::ArrowDownUp)
@@ -3978,24 +3996,6 @@ impl KanalibApp {
             DropdownMenu::new("library-view", "查看", self.view_menu(this))
                 .icon(IconName::LayoutGrid)
                 .variant(ButtonVariant::Ghost)
-        });
-        let theme = IconButton::new(
-            "theme-toggle",
-            if self.theme_dark {
-                IconName::Sun
-            } else {
-                IconName::Moon
-            },
-        )
-        .size(ControlSize::Md)
-        .variant(ButtonVariant::Ghost)
-        .tooltip(if self.theme_dark {
-            "切换到浅色主题"
-        } else {
-            "切换到深色主题"
-        })
-        .on_click(move |_, _, cx| {
-            let _ = this_theme.update(cx, |app, cx| app.toggle_theme(cx));
         });
         let export = library.then(|| {
             DropdownMenu::new("library-export", "导出", self.export_menu(this))
@@ -4050,12 +4050,36 @@ impl KanalibApp {
             .icon(IconName::CircleHelp)
             .tooltip("搜索语法帮助");
         let search_field = library.then(|| {
+            let this_escape = this.clone();
+            let search_escape = search.clone();
             div()
                 .w(search_width)
                 .flex()
                 .items_center()
-                .gap(px(2.))
-                .on_mouse_down(MouseButton::Left, |_, window, _| window.prevent_default())
+                .gap(px(SPACE_HALF))
+                .on_mouse_down(MouseButton::Left, |_, window, cx| {
+                    cx.stop_propagation();
+                    window.prevent_default();
+                })
+                .on_key_down(move |event, window, cx| {
+                    if event.keystroke.key != "escape"
+                        || event.keystroke.modifiers.control
+                        || event.keystroke.modifiers.alt
+                        || event.keystroke.modifiers.platform
+                    {
+                        return;
+                    }
+                    cx.stop_propagation();
+                    if search_escape.read(cx).text().is_empty() {
+                        let grid = this_escape.read(cx).grid_focus.clone();
+                        window.focus(&grid, cx);
+                    } else {
+                        let _ = this_escape.update(cx, |app, cx| {
+                            app.apply_search_text(String::new(), cx);
+                            cx.notify();
+                        });
+                    }
+                })
                 .child(
                     div().flex_1().min_w(px(0.)).child(
                         Input::new(search)
@@ -4087,12 +4111,25 @@ impl KanalibApp {
             }
         }
         if library {
+            let this_tag_return = this.clone();
+            let tag_return = self.tag_return_pending.then(|| {
+                Button::new("tag-return", "标签管理")
+                    .icon(IconName::ArrowLeft)
+                    .size(ControlSize::Sm)
+                    .variant(ButtonVariant::Ghost)
+                    .on_click(move |_, _, cx| {
+                        let _ = this_tag_return.update(cx, |app, cx| {
+                            app.return_to_tag_manager(cx);
+                        });
+                    })
+            });
             left = left.child(
                 div()
                     .flex()
                     .items_center()
-                    .gap(px(10.))
+                    .gap(px(SPACE_2))
                     .min_w(px(0.))
+                    .children(tag_return)
                     .child(
                         div()
                             .max_w(px(if compact { 140. } else { 260. }))
@@ -4128,15 +4165,9 @@ impl KanalibApp {
             );
         }
 
-        let mut controls = div().flex_none().flex().items_center().gap(px(4.));
+        let mut controls = div().flex_none().flex().items_center().gap(px(SPACE_1));
         if library {
-            controls = controls
-                .children(sort)
-                .children(view)
-                .children(export)
-                .child(theme);
-        } else {
-            controls = controls.child(theme);
+            controls = controls.children(sort).children(view).children(export);
         }
         let right = div()
             .flex_none()
@@ -4159,11 +4190,11 @@ impl KanalibApp {
             .w_full()
             .flex_none()
             .h(px(TITLEBAR_HEIGHT))
-            .pl(px(12.))
+            .pl(px(SPACE_3))
             .flex()
             .items_center()
             .justify_between()
-            .gap(px(4.))
+            .gap(px(SPACE_1))
             .bg(colors.bg)
             .border_b_1()
             .border_color(colors.border)
@@ -4309,6 +4340,7 @@ impl KanalibApp {
                 self.state.start_scan();
                 self.reset_search();
                 self.screen = Screen::Library;
+                self.tag_return_pending = false;
                 self.dedup_selected = None;
                 self.dedup_confirm = None;
                 self.source_remove_confirm = None;
@@ -4336,6 +4368,7 @@ impl KanalibApp {
             return;
         }
         self.screen = Screen::Library;
+        self.tag_return_pending = false;
         if let Some(search) = &self.search_input {
             search.update(cx, |input, cx| input.set_text("", cx));
         }

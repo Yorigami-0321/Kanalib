@@ -20,6 +20,7 @@
 | [backlog/round-6.md](backlog/round-6.md) | 第六轮任务包（UI 小项/保护路径/ICC） |
 | [backlog/round-7.md](backlog/round-7.md) | 第七轮任务包（F-067 撤销/历史） |
 | [backlog/component-research.md](backlog/component-research.md) | 非 UI 现成组件调研 |
+| [backlog/ui-refactor.md](backlog/ui-refactor.md) | UI 重构调研、参考层级（图片管理器为主，VS Code 仅局部参考）、设计 token、组件状态与验收基线 |
 | [backlog/candidate-pool.md](backlog/candidate-pool.md) | 候选池 |
 | [backlog/references.md](backlog/references.md) | 参考与本地依据 |
 

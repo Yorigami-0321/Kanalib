@@ -1,4 +1,5 @@
 use crate::app::{KanalibApp, push_toast};
+use crate::components::*;
 use crate::settings::TAG_ROW_HEIGHT;
 use crate::theme::*;
 use crate::*;
@@ -286,8 +287,29 @@ impl KanalibApp {
         self.screen = Screen::Tags;
         self.dedup_confirm = None;
         self.palette_open = false;
+        self.tag_return_pending = false;
         self.tag_scroll.scroll_to_item(0, ScrollStrategy::Top);
         cx.notify();
+    }
+
+    /// F-070：从标签页跳到图库，保留标签页的筛选/搜索/排序与滚动状态。
+    pub(crate) fn open_tag_assets(&mut self, name: String, cx: &mut Context<Self>) {
+        self.set_filter(Filter::Tag(name), cx);
+        self.tag_return_pending = true;
+        cx.notify();
+    }
+
+    /// 返回标签页时不重置滚动与筛选；只刷新计数。
+    pub(crate) fn return_to_tag_manager(&mut self, cx: &mut Context<Self>) {
+        if self.viewer_at.is_some() {
+            self.close_viewer(cx);
+        }
+        self.focus_grid_pending = false;
+        self.tag_return_pending = false;
+        self.screen = Screen::Tags;
+        self.dedup_confirm = None;
+        self.palette_open = false;
+        self.refresh_tag_manager(cx);
     }
 
     pub(crate) fn refresh_tag_manager(&mut self, cx: &mut Context<Self>) {
@@ -487,7 +509,7 @@ impl KanalibApp {
         colors: UiColors,
     ) -> impl IntoElement + use<> {
         let search = window.use_keyed_state("tag-manager-search", cx, |window, cx| {
-            TextInput::new(window, cx).placeholder("筛选标签名 / 类别")
+            TextInput::new(window, cx).placeholder("搜索全部标签（含 0 使用/已屏蔽）")
         });
         let query = search.read(cx).text().trim().to_lowercase();
         let tags = filter_tag_summaries(&self.tag_list, &query, self.tag_manager_filter);
@@ -578,23 +600,34 @@ impl KanalibApp {
                 )
         };
         let body: AnyElement = if filtered.is_empty() {
-            div()
-                .flex_1()
-                .p(px(24.))
-                .child(
-                    div()
-                        .p(px(24.))
-                        .rounded(px(8.))
-                        .bg(colors.sunken)
-                        .text_sm()
-                        .text_color(colors.muted)
-                        .child(if total == 0 {
-                            "还没有标签，先导入图片并完成自动打标。"
-                        } else {
-                            "没有匹配的标签。"
-                        }),
+            let this_reset = this.clone();
+            let search_reset = search.clone();
+            let action = (total > 0).then(|| {
+                Button::new("tag-empty-reset", "重置筛选")
+                    .size(ControlSize::Sm)
+                    .on_click(move |_, _, cx| {
+                        let _ = this_reset.update(cx, |app, cx| {
+                            app.tag_manager_filter = TagManagerFilter::All;
+                            search_reset.update(cx, |input, cx| input.set_text("", cx));
+                            cx.notify();
+                        });
+                    })
+                    .into_any_element()
+            });
+            let (icon, title, description) = if total == 0 {
+                (
+                    IconName::Tag,
+                    "还没有标签",
+                    "导入图片并完成自动打标后，标签会出现在这里。",
                 )
-                .into_any_element()
+            } else {
+                (
+                    IconName::SearchX,
+                    "没有匹配的标签",
+                    "调整搜索或筛选条件后再试。",
+                )
+            };
+            empty_state(icon, title, description, action, colors)
         } else {
             let this_list = this.clone();
             let blocked = blocked_tags.clone();
@@ -608,9 +641,12 @@ impl KanalibApp {
                         let block_name = tag.name.clone();
                         let rename_name = tag.name.clone();
                         let merge_name = tag.name.clone();
+                        let view_name = tag.name.clone();
                         let this_block = this_list.clone();
                         let this_rename = this_list.clone();
                         let this_merge = this_list.clone();
+                        let this_view = this_list.clone();
+                        let has_assets = tag.count > 0;
                         div()
                             .w_full()
                             .h(px(TAG_ROW_HEIGHT))
@@ -656,6 +692,21 @@ impl KanalibApp {
                                     .flex()
                                     .items_center()
                                     .gap(px(4.))
+                                    .child(
+                                        Button::new(
+                                            SharedString::from(format!("view-tag-{view_name}")),
+                                            "查看图片",
+                                        )
+                                        .size(ControlSize::Sm)
+                                        .disabled(!has_assets)
+                                        .on_click(
+                                            move |_, _, cx| {
+                                                let _ = this_view.update(cx, |app, cx| {
+                                                    app.open_tag_assets(view_name.clone(), cx)
+                                                });
+                                            },
+                                        ),
+                                    )
                                     .child(
                                         IconButton::new(
                                             SharedString::from(format!("rename-tag-{rename_name}")),
@@ -763,7 +814,11 @@ impl KanalibApp {
                             .child(
                                 div()
                                     .w(px(260.))
-                                    .child(Input::new(&search).clearable().least("筛选标签")),
+                                    .child(
+                                        Input::new(&search)
+                                            .clearable()
+                                            .least("搜索全部标签"),
+                                    ),
                             )
                             .child(
                                 Button::new("tags-refresh", "刷新")
@@ -781,6 +836,7 @@ impl KanalibApp {
                                     .on_click(move |_, _, cx| {
                                         let _ = this_back.update(cx, |app, cx| {
                                             app.screen = Screen::Library;
+                                            app.tag_return_pending = false;
                                             app.focus_grid_pending = true;
                                             cx.notify();
                                         });

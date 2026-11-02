@@ -269,6 +269,7 @@ impl KanalibApp {
 
     pub(crate) fn set_filter(&mut self, filter: Filter, cx: &mut Context<Self>) {
         self.screen = Screen::Library;
+        self.tag_return_pending = false;
         self.state.set_filter(filter);
         self.clear_multi_selection();
         self.focus_grid_pending = true;
@@ -368,11 +369,11 @@ impl KanalibApp {
             .id("search-chips")
             .flex_none()
             .w_full()
-            .px(px(16.))
-            .py(px(4.))
+            .px(px(SPACE_4))
+            .py(px(SPACE_1))
             .flex()
             .items_center()
-            .gap(px(4.))
+            .gap(px(SPACE_1))
             .border_b_1()
             .border_color(colors.border)
             .bg(colors.surface)

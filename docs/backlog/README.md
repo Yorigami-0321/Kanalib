@@ -39,7 +39,8 @@
 | [registry.md](registry.md) | 全量 F-xxx 登记表（状态/优先级/依据） |
 | [implemented.md](implemented.md) | 已实现归档：关键约束 + 验证汇总 |
 | [pending/overview.md](pending/overview.md) | 未完成项速览（缺口/优先级/依赖） |
-| [pending/browse.md](pending/browse.md) | 浏览与查看：F-003/004/005 |
+| [pending/browse.md](pending/browse.md) | 浏览与查看：F-003/004/005、F-069、F-070–F-074 |
+| [ui-refactor.md](ui-refactor.md) | 全局 UI 重构调研、参考层级（图片管理器为主，VS Code 仅局部参考）、设计 token、组件状态与验收基线（F-070–F-073） |
 | [pending/search-organization.md](pending/search-organization.md) | 搜索与组织：F-012/013/014 |
 | [pending/tags.md](pending/tags.md) | 标签与打标：F-021/023/024（已归档，本域暂无未完成项） |
 | [pending/library-sources-formats.md](pending/library-sources-formats.md) | 图库/来源/格式：F-030–F-033、F-035–F-037、F-040 |
@@ -63,8 +64,9 @@
 
 | 批次 | 目标 | 条目 |
 |---|---|---|
+| 当前优先 | 全局 UI 组件与视觉体系 | F-073（总纲）、F-071、F-072、F-070、F-074 |
 | 第 1 批 | 图库可信度与规模 | F-012（剩余：非名称排序 p95）、F-030、F-032、F-061、F-063、F-040（阶段 2 剩余） |
-| 第 2 批 | 整理工作流 | F-003、F-004、F-005、F-013、F-014、F-033（剩余：HEIC/RAW/PSD）、F-036、F-037、F-045 |
+| 第 2 批 | 浏览、整理与信息架构 | F-003、F-004、F-005、F-013、F-014、F-033（剩余：HEIC/RAW/PSD）、F-036、F-037、F-045、F-069、F-070 |
 | 第 3 批 | 原计划阶段 2 / 桌面基础 | F-035（第五轮 B）、F-038/F-039（第五轮 A） |
 | 候选池 | 低优先级/远期 | F-016、F-026、F-048、F-065、F-066 |
 

@@ -51,6 +51,7 @@ pub use thumb_cache::{CacheCleanup, ThumbCache};
 
 mod app;
 mod compare;
+mod components;
 mod dedup;
 mod format;
 mod inspector;
@@ -395,7 +396,6 @@ enum Screen {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ActivityTarget {
     Library,
-    Search,
     Duplicates,
     Tags,
     Settings,

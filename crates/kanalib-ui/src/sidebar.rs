@@ -13,12 +13,12 @@ pub(crate) const SIDEBAR_DEFAULT_WIDTH: f32 = 260.;
 pub(crate) const SIDEBAR_SECTIONS: [&str; 8] = [
     "sources",
     "filters",
-    "collections",
-    "albums",
-    "organize",
     "ratings",
     "groups",
     "tags",
+    "collections",
+    "albums",
+    "organize",
 ];
 
 /// 组织对象的新建/重命名/删除弹窗；命名冲突由核心 `DuplicateNameError` 判定。
@@ -93,27 +93,18 @@ pub(crate) fn activity_item(
         .aria_label(label)
         .relative()
         .w_full()
-        .h(px(40.))
+        .h(px(ACTIVITY_ITEM_HEIGHT))
         .flex()
         .items_center()
         .justify_center()
         .cursor_pointer()
         .text_color(if active { colors.fg } else { colors.muted })
         .hover(move |style| style.bg(colors.hover))
-        .on_click(move |_, window, cx| {
-            let search = if target == ActivityTarget::Search {
-                this_click.read(cx).search_input.clone()
-            } else {
-                None
-            };
+        .on_click(move |_, _, cx| {
             let _ = this_click.update(cx, |app, cx| match target {
                 ActivityTarget::Library => {
                     app.screen = Screen::Library;
-                    app.dedup_confirm = None;
-                    cx.notify();
-                }
-                ActivityTarget::Search => {
-                    app.screen = Screen::Library;
+                    app.tag_return_pending = false;
                     app.dedup_confirm = None;
                     cx.notify();
                 }
@@ -124,10 +115,6 @@ pub(crate) fn activity_item(
                 ActivityTarget::Settings => app.open_settings(cx),
                 ActivityTarget::Theme => app.toggle_theme(cx),
             });
-            if let Some(search) = search {
-                let handle = search.read(cx).focus_handle(cx);
-                window.focus(&handle, cx);
-            }
         })
         .child(Icon::new(icon).size(IconSize::Lg).color(if active {
             colors.accent
@@ -138,9 +125,9 @@ pub(crate) fn activity_item(
             div()
                 .absolute()
                 .left_0()
-                .top(px(8.))
-                .bottom(px(8.))
-                .w(px(2.))
+                .top(px(SPACE_2))
+                .bottom(px(SPACE_2))
+                .w(px(SPACE_HALF))
                 .rounded_full()
                 .bg(colors.accent)
         }))
@@ -204,7 +191,7 @@ pub(crate) fn source_row(
         .justify_between()
         .px(px(8.))
         .py(px(5.))
-        .rounded(px(5.))
+        .rounded(px(RADIUS_SM))
         .cursor_pointer()
         .hover(move |style| style.bg(colors.hover));
     if active {
@@ -333,7 +320,7 @@ pub(crate) fn filter_row(
         .justify_between()
         .px(px(8.))
         .py(px(5.))
-        .rounded(px(5.))
+        .rounded(px(RADIUS_SM))
         .cursor_pointer()
         .hover(move |style| style.bg(colors.hover));
     if active {
@@ -381,7 +368,7 @@ pub(crate) fn dedup_row(
         .justify_between()
         .px(px(8.))
         .py(px(5.))
-        .rounded(px(5.))
+        .rounded(px(RADIUS_SM))
         .cursor_pointer()
         .hover(move |style| style.bg(colors.hover));
     if active {
@@ -400,40 +387,6 @@ pub(crate) fn dedup_row(
             .text_xs()
             .text_color(if active { colors.accent } else { colors.subtle })
             .child(count),
-    )
-}
-
-pub(crate) fn tag_manager_row(
-    id: SharedString,
-    label: &'static str,
-    active: bool,
-    this: Entity<KanalibApp>,
-    colors: UiColors,
-) -> impl IntoElement {
-    let mut row = div()
-        .id(id)
-        .role(Role::Button)
-        .aria_label(label)
-        .flex()
-        .items_center()
-        .justify_between()
-        .px(px(8.))
-        .py(px(5.))
-        .rounded(px(5.))
-        .cursor_pointer()
-        .hover(move |style| style.bg(colors.hover));
-    if active {
-        row = row.bg(colors.selection);
-    }
-    row.on_click(move |_, _, cx| {
-        let _ = this.update(cx, |app, cx| app.open_tag_manager(cx));
-    })
-    .child(div().text_xs().text_color(colors.fg).child(label))
-    .child(
-        div()
-            .text_xs()
-            .text_color(if active { colors.accent } else { colors.subtle })
-            .child("›"),
     )
 }
 
@@ -576,12 +529,12 @@ impl KanalibApp {
             .aria_label(title)
             .flex_1()
             .min_w(px(0.))
-            .h(px(28.))
-            .px(px(6.))
+            .h(px(ROW_SM))
+            .px(px(SPACE_1_5))
             .flex()
             .items_center()
-            .gap(px(4.))
-            .rounded(px(4.))
+            .gap(px(SPACE_1))
+            .rounded(px(RADIUS_SM))
             .cursor_pointer()
             .hover(move |style| style.bg(colors.hover))
             .on_click(move |_, _, cx| {
@@ -643,11 +596,11 @@ impl KanalibApp {
             .flex_1()
             .min_h(px(0.))
             .overflow_y_scroll()
-            .px(px(8.))
-            .pb(px(12.))
+            .px(px(SPACE_2))
+            .pb(px(SPACE_3))
             .flex()
             .flex_col()
-            .gap(px(2.));
+            .gap(px(SPACE_HALF));
 
         body = body.child(self.sidebar_section_header(
             "sources",
@@ -757,6 +710,284 @@ impl KanalibApp {
             }
         }
 
+        if !counts.ratings.is_empty() {
+            body = body.child(self.sidebar_section_header(
+                "ratings",
+                "评级",
+                Some(counts.ratings.len()),
+                this,
+                colors,
+            ));
+            if self.sidebar_section_open("ratings") {
+                for (rating, count) in counts.ratings.iter() {
+                    body = body.child(filter_row(
+                        SharedString::from(format!("filter-rating-{rating}")),
+                        format!("评级 {rating}"),
+                        *count,
+                        library && filter == &Filter::Rating(rating.clone()),
+                        Filter::Rating(rating.clone()),
+                        state.clone(),
+                        this.clone(),
+                        colors,
+                    ));
+                }
+            }
+        }
+
+        if !counts.groups.is_empty() {
+            body = body.child(self.sidebar_section_header(
+                "groups",
+                "自动归类",
+                Some(counts.groups.len()),
+                this,
+                colors,
+            ));
+            if self.sidebar_section_open("groups") {
+                for (group, count) in counts.groups.iter() {
+                    body = body.child(filter_row(
+                        SharedString::from(format!("filter-group-{group}")),
+                        group.clone(),
+                        *count,
+                        library && filter == &Filter::Group(group.clone()),
+                        Filter::Group(group.clone()),
+                        state.clone(),
+                        this.clone(),
+                        colors,
+                    ));
+                }
+            }
+        }
+
+        // F-070：标签页打开时侧栏不再渲染第二套标签搜索/分类；标签管理入口统一由活动栏提供。
+        if screen != Screen::Tags {
+            let used_tag_count = tag_vocab
+                .iter()
+                .filter(|tag| tag.count > 0 && !blocked_tags.contains(&tag.name))
+                .count();
+            let blocked_tag_count = tag_vocab
+                .iter()
+                .filter(|tag| blocked_tags.contains(&tag.name))
+                .count();
+            let this_tag_sort = this.clone();
+            let this_tag_manage = this.clone();
+            body = body.child(
+                div()
+                    .flex()
+                    .items_center()
+                    .child(self.sidebar_section_header(
+                        "tags",
+                        "标签",
+                        Some(used_tag_count),
+                        this,
+                        colors,
+                    ))
+                    .child(
+                        IconButton::new("tag-pane-sort", IconName::ArrowDownUp)
+                            .size(ControlSize::Sm)
+                            .tooltip(if self.tag_pane_sort_name {
+                                "按使用次数排序"
+                            } else {
+                                "按名称排序"
+                            })
+                            .on_click(move |_, _, cx| {
+                                let _ = this_tag_sort.update(cx, |app, cx| {
+                                    app.tag_pane_sort_name = !app.tag_pane_sort_name;
+                                    cx.notify();
+                                });
+                            }),
+                    )
+                    .child(
+                        IconButton::new("tag-pane-manage", IconName::SlidersHorizontal)
+                            .size(ControlSize::Sm)
+                            .tooltip("标签管理")
+                            .on_click(move |_, _, cx| {
+                                let _ = this_tag_manage.update(cx, |app, cx| {
+                                    app.open_tag_manager(cx);
+                                });
+                            }),
+                    ),
+            );
+            body = body.child(
+                div()
+                    .px(px(SPACE_2))
+                    .pb(px(SPACE_1))
+                    .text_xs()
+                    .text_color(colors.subtle)
+                    .child(format!(
+                        "有使用 {used_tag_count} / 共 {} / 已屏蔽 {blocked_tag_count}",
+                        tag_vocab.len()
+                    )),
+            );
+            if self.sidebar_section_open("tags") {
+                body = body.child(
+                    div().px(px(8.)).pb(px(4.)).child(
+                        Input::new(tag_search)
+                            .clearable()
+                            .least("筛选标签（有使用）"),
+                    ),
+                );
+                let mut category_chips = div().flex().flex_wrap().gap(px(3.)).px(px(8.)).pb(px(4.));
+                for (key, label) in [
+                    ("general", "通用"),
+                    ("character", "角色"),
+                    ("copyright", "作品"),
+                    ("style", "风格"),
+                    ("meta", "元数据"),
+                    ("manual", "手工"),
+                ] {
+                    let this = this.clone();
+                    let active = self.tag_pane_category == key;
+                    category_chips = category_chips.child(
+                        div()
+                            .id(SharedString::from(format!("tag-category-{key}")))
+                            .px(px(6.))
+                            .py(px(2.))
+                            .rounded(px(RADIUS_SM))
+                            .text_xs()
+                            .cursor_pointer()
+                            .text_color(if active { colors.fg } else { colors.muted })
+                            .when(active, |chip| chip.bg(colors.selection))
+                            .hover(move |chip| chip.bg(colors.hover))
+                            .on_click(move |_, _, cx| {
+                                let _ = this.update(cx, |app, cx| {
+                                    app.tag_pane_category = key.to_string();
+                                    app.tag_pane_expanded = false;
+                                    cx.notify();
+                                });
+                            })
+                            .child(label),
+                    );
+                }
+                body = body.child(category_chips);
+
+                let needle = tag_query.trim().to_lowercase();
+                let mut pane_tags = tag_vocab
+                    .iter()
+                    .filter(|tag| {
+                        tag.count > 0
+                            && tag.category == self.tag_pane_category
+                            && !blocked_tags.contains(&tag.name)
+                            && (needle.is_empty() || tag.name.to_lowercase().contains(&needle))
+                    })
+                    .collect::<Vec<_>>();
+                if self.tag_pane_sort_name {
+                    pane_tags.sort_by(|a, b| a.name.cmp(&b.name));
+                } else {
+                    pane_tags
+                        .sort_by(|a, b| b.count.cmp(&a.count).then_with(|| a.name.cmp(&b.name)));
+                }
+                let total = pane_tags.len();
+                let limit = if self.tag_pane_expanded { 200 } else { 10 };
+                pane_tags.truncate(limit);
+                if pane_tags.is_empty() {
+                    body = body.child(
+                        div()
+                            .px(px(8.))
+                            .pb(px(4.))
+                            .text_xs()
+                            .text_color(colors.subtle)
+                            .child(if needle.is_empty() {
+                                "这个类别还没有标签"
+                            } else {
+                                "没有匹配的标签"
+                            }),
+                    );
+                }
+                for tag in pane_tags {
+                    let name = tag.name.clone();
+                    let display_name = name.clone();
+                    let count = tag.count;
+                    let active = library && filter == &Filter::Tag(name.clone());
+                    let this_click = this.clone();
+                    let search_click = search.clone();
+                    let mut row = div()
+                        .id(SharedString::from(format!("filter-tag-{name}")))
+                        .role(Role::Button)
+                        .aria_label(SharedString::from(format!("#{name}")))
+                        .flex()
+                        .items_center()
+                        .justify_between()
+                        .px(px(8.))
+                        .py(px(5.))
+                        .rounded(px(RADIUS_SM))
+                        .cursor_pointer()
+                        .hover(move |row| row.bg(colors.hover));
+                    if active {
+                        row = row.bg(colors.selection);
+                    }
+                    body = body.child(
+                        row.on_click(move |event, _, cx| {
+                            let modifiers = match event {
+                                ClickEvent::Mouse(event) => event.down.modifiers,
+                                ClickEvent::Keyboard(_) | ClickEvent::Touch(_) => {
+                                    Modifiers::default()
+                                }
+                            };
+                            if modifiers.secondary() || modifiers.shift {
+                                let current = search_click.read(cx).text().to_string();
+                                let next = if current.trim().is_empty() {
+                                    format!("tag:{name}")
+                                } else {
+                                    format!("{current} tag:{name}")
+                                };
+                                search_click.update(cx, |input, cx| input.set_text(next, cx));
+                                let _ = this_click.update(cx, |app, cx| {
+                                    app.screen = Screen::Library;
+                                    app.tag_return_pending = false;
+                                    app.dedup_confirm = None;
+                                    cx.notify();
+                                });
+                            } else {
+                                let tag = name.clone();
+                                let _ = this_click.update(cx, |app, cx| {
+                                    app.set_filter(Filter::Tag(tag), cx);
+                                    app.dedup_confirm = None;
+                                });
+                            }
+                        })
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w(px(0.))
+                                .truncate()
+                                .text_xs()
+                                .text_color(colors.fg)
+                                .child(format!("#{display_name}")),
+                        )
+                        .child(
+                            div()
+                                .flex_none()
+                                .text_xs()
+                                .text_color(colors.subtle)
+                                .child(count.to_string()),
+                        ),
+                    );
+                }
+                if total > limit {
+                    let this_more = this.clone();
+                    body = body.child(
+                        div().px(px(8.)).pb(px(4.)).child(
+                            Button::new(
+                                "tag-pane-more",
+                                if self.tag_pane_expanded {
+                                    "收起".to_string()
+                                } else {
+                                    format!("查看更多（{total}）")
+                                },
+                            )
+                            .size(ControlSize::Sm)
+                            .on_click(move |_, _, cx| {
+                                let _ = this_more.update(cx, |app, cx| {
+                                    app.tag_pane_expanded = !app.tag_pane_expanded;
+                                    cx.notify();
+                                });
+                            }),
+                        ),
+                    );
+                }
+            }
+        }
+
         let this_save_search = this.clone();
         body = body.child(
             div()
@@ -859,254 +1090,6 @@ impl KanalibApp {
                 this_dedup,
                 colors,
             ));
-            let this_tags = this.clone();
-            body = body.child(tag_manager_row(
-                SharedString::from("tag-manager-entry"),
-                "标签管理",
-                screen == Screen::Tags,
-                this_tags,
-                colors,
-            ));
-        }
-
-        if !counts.ratings.is_empty() {
-            body = body.child(self.sidebar_section_header(
-                "ratings",
-                "评级",
-                Some(counts.ratings.len()),
-                this,
-                colors,
-            ));
-            if self.sidebar_section_open("ratings") {
-                for (rating, count) in counts.ratings.iter() {
-                    body = body.child(filter_row(
-                        SharedString::from(format!("filter-rating-{rating}")),
-                        format!("评级 {rating}"),
-                        *count,
-                        library && filter == &Filter::Rating(rating.clone()),
-                        Filter::Rating(rating.clone()),
-                        state.clone(),
-                        this.clone(),
-                        colors,
-                    ));
-                }
-            }
-        }
-
-        if !counts.groups.is_empty() {
-            body = body.child(self.sidebar_section_header(
-                "groups",
-                "自动归类",
-                Some(counts.groups.len()),
-                this,
-                colors,
-            ));
-            if self.sidebar_section_open("groups") {
-                for (group, count) in counts.groups.iter() {
-                    body = body.child(filter_row(
-                        SharedString::from(format!("filter-group-{group}")),
-                        group.clone(),
-                        *count,
-                        library && filter == &Filter::Group(group.clone()),
-                        Filter::Group(group.clone()),
-                        state.clone(),
-                        this.clone(),
-                        colors,
-                    ));
-                }
-            }
-        }
-
-        let this_tag_sort = this.clone();
-        body = body.child(
-            div()
-                .flex()
-                .items_center()
-                .child(self.sidebar_section_header(
-                    "tags",
-                    "标签",
-                    Some(tag_vocab.len()),
-                    this,
-                    colors,
-                ))
-                .child(
-                    IconButton::new("tag-pane-sort", IconName::ArrowDownUp)
-                        .size(ControlSize::Sm)
-                        .tooltip(if self.tag_pane_sort_name {
-                            "按使用次数排序"
-                        } else {
-                            "按名称排序"
-                        })
-                        .on_click(move |_, _, cx| {
-                            let _ = this_tag_sort.update(cx, |app, cx| {
-                                app.tag_pane_sort_name = !app.tag_pane_sort_name;
-                                cx.notify();
-                            });
-                        }),
-                ),
-        );
-        if self.sidebar_section_open("tags") {
-            body = body.child(
-                div()
-                    .px(px(8.))
-                    .pb(px(4.))
-                    .child(Input::new(tag_search).clearable().least("搜索标签")),
-            );
-            let mut category_chips = div().flex().flex_wrap().gap(px(3.)).px(px(8.)).pb(px(4.));
-            for (key, label) in [
-                ("general", "通用"),
-                ("character", "角色"),
-                ("copyright", "作品"),
-                ("style", "风格"),
-                ("meta", "元数据"),
-                ("manual", "手工"),
-            ] {
-                let this = this.clone();
-                let active = self.tag_pane_category == key;
-                category_chips = category_chips.child(
-                    div()
-                        .id(SharedString::from(format!("tag-category-{key}")))
-                        .px(px(6.))
-                        .py(px(2.))
-                        .rounded(px(4.))
-                        .text_xs()
-                        .cursor_pointer()
-                        .text_color(if active { colors.fg } else { colors.muted })
-                        .when(active, |chip| chip.bg(colors.selection))
-                        .hover(move |chip| chip.bg(colors.hover))
-                        .on_click(move |_, _, cx| {
-                            let _ = this.update(cx, |app, cx| {
-                                app.tag_pane_category = key.to_string();
-                                app.tag_pane_expanded = false;
-                                cx.notify();
-                            });
-                        })
-                        .child(label),
-                );
-            }
-            body = body.child(category_chips);
-
-            let needle = tag_query.trim().to_lowercase();
-            let mut pane_tags = tag_vocab
-                .iter()
-                .filter(|tag| {
-                    tag.count > 0
-                        && tag.category == self.tag_pane_category
-                        && !blocked_tags.contains(&tag.name)
-                        && (needle.is_empty() || tag.name.to_lowercase().contains(&needle))
-                })
-                .collect::<Vec<_>>();
-            if self.tag_pane_sort_name {
-                pane_tags.sort_by(|a, b| a.name.cmp(&b.name));
-            } else {
-                pane_tags.sort_by(|a, b| b.count.cmp(&a.count).then_with(|| a.name.cmp(&b.name)));
-            }
-            let total = pane_tags.len();
-            let limit = if self.tag_pane_expanded { 200 } else { 10 };
-            pane_tags.truncate(limit);
-            if pane_tags.is_empty() {
-                body = body.child(
-                    div()
-                        .px(px(8.))
-                        .pb(px(4.))
-                        .text_xs()
-                        .text_color(colors.subtle)
-                        .child(if needle.is_empty() {
-                            "这个类别还没有标签"
-                        } else {
-                            "没有匹配的标签"
-                        }),
-                );
-            }
-            for tag in pane_tags {
-                let name = tag.name.clone();
-                let display_name = name.clone();
-                let count = tag.count;
-                let active = library && filter == &Filter::Tag(name.clone());
-                let this_click = this.clone();
-                let search_click = search.clone();
-                let mut row = div()
-                    .id(SharedString::from(format!("filter-tag-{name}")))
-                    .role(Role::Button)
-                    .aria_label(SharedString::from(format!("#{name}")))
-                    .flex()
-                    .items_center()
-                    .justify_between()
-                    .px(px(8.))
-                    .py(px(5.))
-                    .rounded(px(5.))
-                    .cursor_pointer()
-                    .hover(move |row| row.bg(colors.hover));
-                if active {
-                    row = row.bg(colors.selection);
-                }
-                body = body.child(
-                    row.on_click(move |event, _, cx| {
-                        let modifiers = match event {
-                            ClickEvent::Mouse(event) => event.down.modifiers,
-                            ClickEvent::Keyboard(_) | ClickEvent::Touch(_) => Modifiers::default(),
-                        };
-                        if modifiers.secondary() || modifiers.shift {
-                            let current = search_click.read(cx).text().to_string();
-                            let next = if current.trim().is_empty() {
-                                format!("tag:{name}")
-                            } else {
-                                format!("{current} tag:{name}")
-                            };
-                            search_click.update(cx, |input, cx| input.set_text(next, cx));
-                            let _ = this_click.update(cx, |app, cx| {
-                                app.screen = Screen::Library;
-                                app.dedup_confirm = None;
-                                cx.notify();
-                            });
-                        } else {
-                            let tag = name.clone();
-                            let _ = this_click.update(cx, |app, cx| {
-                                app.set_filter(Filter::Tag(tag), cx);
-                                app.dedup_confirm = None;
-                            });
-                        }
-                    })
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w(px(0.))
-                            .truncate()
-                            .text_xs()
-                            .text_color(colors.fg)
-                            .child(format!("#{display_name}")),
-                    )
-                    .child(
-                        div()
-                            .flex_none()
-                            .text_xs()
-                            .text_color(colors.subtle)
-                            .child(count.to_string()),
-                    ),
-                );
-            }
-            if total > limit {
-                let this_more = this.clone();
-                body = body.child(
-                    div().px(px(8.)).pb(px(4.)).child(
-                        Button::new(
-                            "tag-pane-more",
-                            if self.tag_pane_expanded {
-                                "收起".to_string()
-                            } else {
-                                format!("查看更多（{total}）")
-                            },
-                        )
-                        .size(ControlSize::Sm)
-                        .on_click(move |_, _, cx| {
-                            let _ = this_more.update(cx, |app, cx| {
-                                app.tag_pane_expanded = !app.tag_pane_expanded;
-                                cx.notify();
-                            });
-                        }),
-                    ),
-                );
-            }
         }
 
         let screen_title = match screen {
@@ -1114,7 +1097,7 @@ impl KanalibApp {
             Screen::Similar => "查找相似",
             Screen::Compare => "图片对比",
             Screen::Duplicates => "重复项",
-            Screen::Tags => "标签管理",
+            Screen::Tags => "资源管理器",
             Screen::Settings => "设置",
         };
 
@@ -1177,7 +1160,7 @@ impl KanalibApp {
             .border_color(colors.border)
             .child(
                 div()
-                    .h(px(36.))
+                    .h(px(ROW_MD))
                     .px(px(10.))
                     .flex()
                     .items_center()
@@ -1264,7 +1247,6 @@ impl KanalibApp {
             );
 
         let this_library = this.clone();
-        let this_search = this.clone();
         let this_duplicates = this.clone();
         let this_tags = this.clone();
         let this_settings = this.clone();
@@ -1281,7 +1263,7 @@ impl KanalibApp {
             .flex_col()
             .items_center()
             .justify_between()
-            .py(px(6.))
+            .py(px(SPACE_1_5))
             .bg(colors.sunken)
             .border_r_1()
             .border_color(colors.border)
@@ -1291,7 +1273,7 @@ impl KanalibApp {
                     .flex()
                     .flex_col()
                     .items_center()
-                    .gap(px(2.))
+                    .gap(px(SPACE_HALF))
                     .child(activity_item(
                         ActivityTarget::Library,
                         IconName::Library,
@@ -1299,15 +1281,6 @@ impl KanalibApp {
                         screen == Screen::Library,
                         library_badge,
                         this_library,
-                        colors,
-                    ))
-                    .child(activity_item(
-                        ActivityTarget::Search,
-                        IconName::Search,
-                        "搜索",
-                        false,
-                        0,
-                        this_search,
                         colors,
                     ))
                     .child(activity_item(
@@ -1327,6 +1300,27 @@ impl KanalibApp {
                         0,
                         this_tags,
                         colors,
+                    )),
+            )
+            .child(
+                div()
+                    .w_full()
+                    .flex()
+                    .flex_col()
+                    .items_center()
+                    .gap(px(SPACE_HALF))
+                    .child(activity_item(
+                        ActivityTarget::Theme,
+                        if self.theme_dark {
+                            IconName::Sun
+                        } else {
+                            IconName::Moon
+                        },
+                        "主题",
+                        false,
+                        0,
+                        this_theme,
+                        colors,
                     ))
                     .child(activity_item(
                         ActivityTarget::Settings,
@@ -1337,20 +1331,7 @@ impl KanalibApp {
                         this_settings,
                         colors,
                     )),
-            )
-            .child(activity_item(
-                ActivityTarget::Theme,
-                if self.theme_dark {
-                    IconName::Sun
-                } else {
-                    IconName::Moon
-                },
-                "主题",
-                false,
-                0,
-                this_theme,
-                colors,
-            ));
+            );
 
         div()
             .flex_none()
@@ -1507,7 +1488,7 @@ impl KanalibApp {
             .gap(px(2.))
             .px(px(4.))
             .py(px(2.))
-            .rounded(px(6.))
+            .rounded(px(RADIUS_MD))
             .hover(move |style| style.bg(colors.hover))
             .child(
                 div()
@@ -1521,7 +1502,7 @@ impl KanalibApp {
                     .gap(px(4.))
                     .px(px(4.))
                     .py(px(2.))
-                    .rounded(px(4.))
+                    .rounded(px(RADIUS_SM))
                     .cursor_pointer()
                     .on_click(move |_, _, cx| {
                         let _ = this_apply.update(cx, |app, cx| {
@@ -1626,7 +1607,7 @@ impl KanalibApp {
             .gap(px(2.))
             .px(px(4.))
             .py(px(2.))
-            .rounded(px(6.))
+            .rounded(px(RADIUS_MD))
             .hover(move |style| style.bg(colors.hover))
             .child(
                 div()
