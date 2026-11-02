@@ -52,6 +52,7 @@
 | [round-3.md](round-3.md) | 第三轮任务包：组织、相似/浏览、扫描运维与 UI 拆分 |
 | [round-4.md](round-4.md) | 第四轮任务包：备份恢复、媒体评估、搜索上限与监听收尾 |
 | [round-5.md](round-5.md) | 第五轮任务包：桌面基础、Immich/WebDAV 网络源、视频与格式门 |
+| [round-6.md](round-6.md) | 第六轮任务包：UI 小项、保护路径 glob、ICC 颜色管理 |
 | [component-research.md](component-research.md) | 非 UI 现成组件调研（可直接采用/评估/自研） |
 | [references.md](references.md) | 外部参考与本地依据 |
 
