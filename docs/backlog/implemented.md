@@ -45,6 +45,7 @@
 | F-049 | `ProtectedMatcher` 唯一保护入口：目录前缀 + `globset` glob（Windows 大小写/分隔符，目录命中保护子树）+ 只读来源（Immich/WebDAV/DB 显式只读本地 locator）；保护项优先 keeper、单组拒绝、批量跳过；设置页添加/删除/预览，沿用 `dedup.protected_paths` JSON，无 schema；扫描器本地 FK 记录（`read_only=1` + `{"path": locator}`）仍视为可写，显式只读本地配置按 locator 前缀拦截 | core 单测（glob/大小写/保护优先/批量跳过/只读来源/普通路径）+ 设置页编译；合并后 core 194 通过；设置页 GUI 未人工验收 |
 | F-064 | ICC/EXIF 色彩管理：`lcms2` 6.2 static（MIT，自编 Little CMS）把非 sRGB ICC/EXIF Adobe RGB 转 sRGB；ffmpeg 缩略图后处理与 image 解码路径共用同一转换；查看器原图后台生成 `thumbs/previews` sRGB 预览（不计缩略图预算，切图/关闭清理）；无 ICC/sRGB 直通，非法 ICC 降级；缩略图缓存 `v3`→`v4`，旧文件不命中并由 10GB 预算淘汰 | core 187/17 ignored（color 7 + state 3）；1k 冷缩略图 untagged 11.30s、sRGB-ICC 11.39s、P3 16.35s；profile probe 0.07ms/张；ffmpeg 后处理并行 3.02ms/张（200 样本）；真实广色域原图与 GUI 查看器未验收 |
 | F-068 | 检查器/右键菜单「复制图片」：PNG + CF_DIB（40 字节头、自下而上 BGRA）写 Windows 剪贴板，剪贴板占用重试；失败回退复制路径并 warning；远端只读走回退 | 平台单测（DIB 头/BGRA/回退文案/远端 guard）；实际粘贴到 Word/浏览器未人工验收 |
+| F-067 | 会话内撤销收藏/星级/手工标签（批量一条）：`undo.rs` 有界栈 50、成功才出栈；自动标签移除保存 category/score/vocab_index/origin 并精确恢复；不撤销删除/回收站/来源移除/去重评审；不跨重启、不改 schema。UI：`Ctrl+Z`（排除 `ElyInput` 文本输入）、命令面板「撤销上一步」、底栏「可撤销 N」可点击；成功/空栈/失败分别提示 | core 204/17 ignored + UI 67 + bin 6；单测覆盖收藏/星级/手工标签/批量/栈上限/空栈/失败保留；未做 GUI/UIA 手动验收，真实文本输入中的 Ctrl+Z 行为只由上下文单测与机制保证 |
 
 验证汇总：`cargo test --workspace` core 32 + UI 5 通过（4 项按需忽略）；ffmpeg 4 项、视图收敛 6 项通过。10k 冷导入缩略图 ffmpeg 52.2s vs image 124.3s，总 152.3s vs 230.9s；100k 缩略图 738.7s（历史 1130s），总 42.3min（历史 49.3min）。历史 100k 滚动 151.5fps、present p99 15.84ms、峰值 329MB；搜索 p95 284ms（目标 <150ms）。所有 UI 冒烟使用隔离数据根，未触碰真实图库。
 

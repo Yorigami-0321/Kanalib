@@ -18,6 +18,7 @@
 - **保护路径/只读来源（F-049）**：唯一判定入口 `ProtectedMatcher`；`dedup.protected_paths` 仍是 settings JSON，无 schema；普通路径按目录前缀、含 `* ? [ ] { }` 的条目按 glob（Windows 大小写/分隔符等价，目录命中保护子树）。保护项优先作为 keeper 且永远不可移入回收站；单组拒绝、批量跳过并计 `protected_skipped`。Immich/WebDAV 与 DB 中显式只读的本地 locator 前缀一律拒绝；扫描器自动创建的本地 FK 记录（`read_only=1` + `{"path": locator}`）仍视为可写，避免旧库整体变只读。
 - **ICC/色彩管理（F-064）**：`lcms2` 6.2 `static`（MIT，自编 Little CMS，无系统 DLL）把非 sRGB ICC/EXIF Adobe RGB 统一到 sRGB；ffmpeg 缩略图后处理与 image 解码路径共用同一转换，查看器原图后台生成 `thumbs/previews` sRGB 预览（切图/关闭清理，不计预算）。无 ICC/sRGB 直通，非法 ICC 只降级不失败。性能口径：1k 冷缩略图 untagged 11.30s、sRGB-ICC 11.39s、P3 16.35s，profile probe 0.07ms/张，ffmpeg 后处理并行 3.02ms/张（200 样本）；真实广色域样本与 GUI 查看器未验收，不得写成通过。
 - **第六轮 UI 持久化（F-015/F-047/F-068）**：`search.history` 与 `dedup.last_trash` 存 settings JSON，无 schema；复制图片写 PNG + CF_DIB（失败回退路径），远端只读走回退；回收站入口只打开系统回收站，不做应用内撤销。
+- **会话内撤销（F-067）**：`undo.rs` 有界栈默认 50 条，仅内存、不跨重启、不加 schema；覆盖收藏/星级/手工标签，批量操作算一条；自动标签移除保存 category/score/vocab_index/origin 并精确恢复；删除/回收站、去重评审、来源移除、文件系统操作不可撤销。UI 入口 `Ctrl+Z`（排除 `ElyInput` 文本输入）、命令面板「撤销上一步」、底栏「可撤销 N」；撤销失败保留栈顶，不得伪装成功。
 - **UI 结构（第三轮拆分）**：`crates/kanalib-ui` 已拆成 `app.rs`、`views/`、`sidebar.rs`、`inspector.rs`、`settings.rs` 等模块；`KanalibApp` 字段、命令面板注册与底栏接线只在 `app.rs` 写，`lib.rs` 只保留 actions、共享枚举与模块声明。多个 UI 任务并行时按模块分工，禁止同时改 `app.rs`。
 - **便携打包（F-065 部分）**：`scripts/build_portable.ps1` 强制 pre-flight、LGPL 探测与 `PACKAGE-MANIFEST.txt`（SHA256/版本/ffmpeg 状态），拒绝 GPL；`.kanalib` 数据目录不得进入包；MSI/签名/自动更新仍未实现。
 - **本机脚本**：PowerShell 7.6.7（`pwsh`）已安装，所有 `.ps1` 优先用 `pwsh -NoLogo -NoProfile` 执行；只有无 `pwsh` 时才回退 5.1，并注意 LF/here-string 坑。
