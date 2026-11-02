@@ -305,6 +305,66 @@ pub fn source_infos(roots: &[PathBuf], records: &[SourceRecord]) -> Vec<SourceIn
     list
 }
 
+/// 只读本地来源的 locator 列表（用于回收站/移动拦截）。
+///
+/// `sources` 表里的本地记录首先是资产的 FK 宿主，历史插入把它们写成
+/// `read_only=1` 且 `config_json={"path": locator}`；这些与当前 `roots` 等价的
+/// 扫描器记录是可写来源，不能据此把整个本地图库变成只读。其余 `read_only=1`
+/// 的本地记录（显式配置的只读根或归档子目录）按 locator 前缀拦截。
+/// Immich/WebDAV 不在这里，路径前缀由 [`remote_kind_for_path`] 统一识别。
+pub fn read_only_local_roots(writable: &[PathBuf], records: &[SourceRecord]) -> Vec<PathBuf> {
+    let mut roots: Vec<PathBuf> = Vec::new();
+    for record in records {
+        if record.kind != SourceKind::Local.as_str() || !record.read_only {
+            continue;
+        }
+        let locator = record.locator.trim();
+        if locator.is_empty() {
+            continue;
+        }
+        let path = PathBuf::from(locator);
+        let scanner_writable = writable.iter().any(|root| same_local_path(root, &path))
+            && is_scanner_local_config(&record.config_json, locator);
+        if scanner_writable {
+            continue;
+        }
+        if !roots
+            .iter()
+            .any(|existing| same_local_path(existing, &path))
+        {
+            roots.push(path);
+        }
+    }
+    roots
+}
+
+/// 扫描器内部创建的本地来源配置；只有这一种默认配置会被当作可写根的 FK 宿主。
+fn is_scanner_local_config(config_json: &str, locator: &str) -> bool {
+    let Ok(serde_json::Value::Object(config)) =
+        serde_json::from_str::<serde_json::Value>(config_json)
+    else {
+        return false;
+    };
+    config.len() == 1 && config.get("path").and_then(|value| value.as_str()) == Some(locator)
+}
+
+fn same_local_path(a: &Path, b: &Path) -> bool {
+    #[cfg(windows)]
+    {
+        let key = |path: &Path| {
+            path.to_string_lossy()
+                .replace('\\', "/")
+                .trim_end_matches('/')
+                .to_lowercase()
+        };
+        key(a) == key(b)
+    }
+    #[cfg(not(windows))]
+    {
+        a == b
+    }
+}
+
 /// 是否为远端虚拟路径；本地扫描/监听/清理必须先排除这类路径。
 pub fn is_remote_path(path: &Path) -> bool {
     remote_kind_for_path(path).is_some()

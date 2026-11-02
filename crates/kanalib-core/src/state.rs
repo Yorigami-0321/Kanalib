@@ -12,8 +12,9 @@ use serde::Deserialize;
 use crate::backup::{self, BackupPlan, BackupStatus};
 use crate::db::{Db, JobCounts, SearchPage, SearchPageRequest, StoredMeta};
 use crate::dedup::{
-    DEFAULT_SIMILAR_THRESHOLD, DuplicateReview, GroupKind, ReviewState, clamp_similar_threshold,
-    is_protected,
+    DEFAULT_SIMILAR_THRESHOLD, DuplicateReview, GroupKind, ProtectedMatcher, ProtectedPreview,
+    ReviewState, clamp_similar_threshold, is_glob_pattern, protected_entries_equal,
+    validate_protected_entry,
 };
 use crate::ffmpeg::{self, ThumbJob};
 use crate::media;
@@ -29,7 +30,7 @@ use crate::sidecar::{Sidecar, project_root, repair_file};
 use crate::sources::{
     Credentials, ImmichConfig, ImmichSource, Source, SourceError, SourceInfo, SourceKind,
     SourceStatus, SourceSyncContext, SourceSyncReport, WebDavConfig, WebDavSource, is_remote_path,
-    remote_kind_for_path, source_infos,
+    read_only_local_roots, source_infos,
 };
 use crate::watch;
 
@@ -146,6 +147,7 @@ impl AppState {
             reviews,
             similar_threshold,
             protected_paths,
+            read_only_roots,
             queue_counts,
             saved_searches,
             blocked_tags,
@@ -189,6 +191,7 @@ impl AppState {
                     Vec::new()
                 });
                 let sources = source_infos(&roots, &source_records);
+                let read_only_roots = read_only_local_roots(&roots, &source_records);
                 let folders = folders_with_remote(&root_strings, &sources);
                 let assets = load_tile_thumbs(match db.load_library(&folders) {
                     Ok(assets) => assets,
@@ -251,6 +254,7 @@ impl AppState {
                     reviews,
                     threshold,
                     protected_paths,
+                    read_only_roots,
                     queue_counts,
                     saved_searches,
                     blocked_tags,
@@ -267,13 +271,21 @@ impl AppState {
                     Default::default(),
                     DEFAULT_SIMILAR_THRESHOLD,
                     Vec::new(),
+                    Vec::new(),
                     JobCounts::default(),
                     Vec::new(),
                     Vec::new(),
                 )
             }
         };
-        let mut shared = Shared::new(roots, assets, reviews, similar_threshold, protected_paths);
+        let mut shared = Shared::new(
+            roots,
+            assets,
+            reviews,
+            similar_threshold,
+            protected_paths,
+            read_only_roots,
+        );
         shared.sources = sources;
         if let Some(notice) = &restored_notice {
             shared.status = notice.clone();
@@ -2381,7 +2393,7 @@ impl AppState {
                 .dedup
                 .protected_paths
                 .iter()
-                .any(|item| item == &path)
+                .any(|item| protected_entries_equal(item, &path))
             {
                 return Ok(());
             }
@@ -2398,13 +2410,66 @@ impl AppState {
         Ok(())
     }
 
+    /// 添加保护项：已存在的文件夹按目录前缀；含通配符的文本按 glob，可相对。
+    ///
+    /// 返回当前图库的命中预览（添加前计算），设置页据此提示命中资产数。
+    pub fn add_protected_entry(&self, entry: &str) -> Result<ProtectedPreview> {
+        let path = normalize_protected_entry(entry)?;
+        let preview = self.preview_protected_path(&path)?;
+        let paths = {
+            let shared = self.shared.lock().unwrap();
+            if shared
+                .dedup
+                .protected_paths
+                .iter()
+                .any(|item| protected_entries_equal(item, &path))
+            {
+                return Ok(preview);
+            }
+            let mut paths = shared.dedup.protected_paths.clone();
+            paths.push(path.clone());
+            paths
+        };
+        self.save_protected_paths(&paths)?;
+        let mut shared = self.shared.lock().unwrap();
+        shared.dedup.set_protected_paths(paths);
+        shared.refresh_dedup();
+        shared.error = None;
+        shared.status = format!("已添加保护项：{}", path.display());
+        Ok(preview)
+    }
+
+    /// 预览用户输入的保护项（文件夹或 glob）会命中当前图库多少资产。
+    pub fn preview_protected_entry(&self, entry: &str) -> Result<ProtectedPreview> {
+        let path = normalize_protected_entry(entry)?;
+        self.preview_protected_path(&path)
+    }
+
+    /// 预览已保存保护条目的命中数；不要求普通目录仍然存在。
+    pub fn preview_protected_path(&self, entry: &Path) -> Result<ProtectedPreview> {
+        let matcher = ProtectedMatcher::from_entry(entry)?;
+        let assets = self.shared.lock().unwrap().assets.clone();
+        let assets = assets.read().unwrap();
+        Ok(ProtectedPreview {
+            matched: assets
+                .iter()
+                .filter(|asset| matcher.matches_entry(&asset.path))
+                .count(),
+            total: assets.len(),
+        })
+    }
+
     pub fn remove_protected_path(&self, path: &Path) -> Result<()> {
-        let path = absolute(path.to_path_buf());
+        let absolute_path = absolute(path.to_path_buf());
         let paths = {
             let shared = self.shared.lock().unwrap();
             let mut paths = shared.dedup.protected_paths.clone();
             let before = paths.len();
-            paths.retain(|item| item != &path);
+            paths.retain(|item| !protected_entries_equal(item, path));
+            if paths.len() == before {
+                // 旧调用方可能传入规范化前的路径；再按绝对路径比较一次。
+                paths.retain(|item| item != &absolute_path);
+            }
             if paths.len() == before {
                 return Ok(());
             }
@@ -2767,7 +2832,7 @@ impl AppState {
             let threshold = shared.dedup.similar_threshold;
             let reviews = shared.dedup.review_snapshot();
             let old_groups = shared.dedup.similar_groups.clone();
-            let protected = shared.dedup.protected_paths.clone();
+            let protected = shared.dedup.protected_matcher().clone();
             shared.dedup.similar_scanning = true;
             shared.dedup.similar_scanned = false;
             shared.dedup.similar_groups = Arc::new(Vec::new());
@@ -2788,7 +2853,7 @@ impl AppState {
         let spawned = std::thread::Builder::new()
             .name("kanalib-similar".into())
             .spawn(move || {
-                let groups = crate::dedup::compute_similar_groups(
+                let groups = crate::dedup::compute_similar_groups_matched(
                     &assets,
                     threshold,
                     &reviews,
@@ -2834,7 +2899,7 @@ impl AppState {
             (
                 shared.roots.clone(),
                 group,
-                shared.dedup.protected_paths.clone(),
+                shared.dedup.protected_matcher().clone(),
             )
         };
         let keeper = group
@@ -2848,8 +2913,11 @@ impl AppState {
         if paths.is_empty() {
             bail!("这一组没有待移入回收站的副本");
         }
-        reject_remote_assets(&paths, "移入回收站/移动")?;
-        if let Some(blocked) = paths.iter().find(|path| is_protected(path, &protected)) {
+        reject_read_only_assets(&paths, &protected, "移入回收站/移动")?;
+        if let Some(blocked) = paths
+            .iter()
+            .find(|path| protected.matches_entry(path))
+        {
             bail!("受保护路径不能移入回收站: {}", blocked.display());
         }
         validate_under_roots(&roots, &paths)?;
@@ -2902,7 +2970,7 @@ impl AppState {
             (
                 shared.roots.clone(),
                 groups,
-                shared.dedup.protected_paths.clone(),
+                shared.dedup.protected_matcher().clone(),
             )
         };
         if groups.is_empty() {
@@ -2920,16 +2988,25 @@ impl AppState {
                 bail!("保留项不在当前图库内: {}", keeper.display());
             }
             let copies = group.duplicate_paths();
-            if copies.iter().any(|path| is_protected(path, &protected)) {
+            // 保护项（用户目录/glob 或只读来源）永远不进入回收站：整组跳过。
+            if copies.iter().any(|path| protected.is_protected(path)) {
                 protected_skipped += 1;
                 continue;
             }
-            reject_remote_assets(&copies, "移入回收站/移动")?;
+            reject_read_only_assets(&copies, &protected, "移入回收站/移动")?;
             validate_under_roots(&roots, &copies)?;
             paths.extend(copies);
         }
         if paths.is_empty() {
-            bail!("待处理的组都包含受保护路径，未移入回收站");
+            let mut shared = self.shared.lock().unwrap();
+            shared.status = format!("跳过 {protected_skipped} 个受保护组，没有可移入回收站的副本");
+            shared.error = None;
+            return Ok(TrashSummary {
+                groups: 0,
+                assets: 0,
+                failed: 0,
+                protected_skipped,
+            });
         }
 
         let report = crate::trash::move_to_recycle_bin(&paths)?;
@@ -3241,7 +3318,7 @@ impl AppState {
     fn refresh_remote_assets(&self) -> Result<()> {
         let db = Db::open(&self.db_path)?;
         let records = db.list_sources()?;
-        let (roots, remote_locators) = {
+        let (roots, sources, remote) = {
             let shared = self.shared.lock().unwrap();
             let sources = source_infos(&shared.roots, &records);
             let remote = sources
@@ -3249,9 +3326,9 @@ impl AppState {
                 .filter(|source| source.is_remote())
                 .map(|source| source.locator.clone())
                 .collect::<Vec<_>>();
-            (shared.roots.clone(), (sources, remote))
+            (shared.roots.clone(), sources, remote)
         };
-        let (sources, remote) = remote_locators;
+        let read_only_roots = read_only_local_roots(&roots, &records);
         let remote_assets = load_tile_thumbs(db.load_library(&remote)?);
         let keep = remote_assets
             .iter()
@@ -3273,6 +3350,7 @@ impl AppState {
             shared.upsert(asset);
         }
         shared.sources = sources;
+        shared.dedup.set_read_only_roots(read_only_roots);
         let target = shared.assets.clone();
         {
             let assets = target.read().unwrap();
@@ -4982,6 +5060,26 @@ fn absolute(path: PathBuf) -> PathBuf {
     std::path::absolute(&path).unwrap_or(path)
 }
 
+/// 保护项输入归一化：glob 保留原样（相对 glob 由匹配器补 `**/`），
+/// 普通路径必须是已存在的文件夹并转成绝对路径。
+fn normalize_protected_entry(entry: &str) -> Result<PathBuf> {
+    let entry = entry.trim();
+    if entry.is_empty() {
+        bail!("保护项不能为空");
+    }
+    let path = PathBuf::from(entry);
+    validate_protected_entry(&path)?;
+    if is_glob_pattern(entry) {
+        Ok(path)
+    } else {
+        let path = absolute(path);
+        if !path.is_dir() {
+            bail!("保护路径必须是文件夹，或使用 * ? [ ] {{ }} 通配符: {entry}");
+        }
+        Ok(path)
+    }
+}
+
 fn validate_under_roots(roots: &[PathBuf], paths: &[PathBuf]) -> Result<()> {
     for path in paths {
         if !path.is_absolute() {
@@ -4994,14 +5092,17 @@ fn validate_under_roots(roots: &[PathBuf], paths: &[PathBuf]) -> Result<()> {
     Ok(())
 }
 
-/// 远端只读资产不能删除/移动/回收；UI 侧还会在按钮上加 guard。
-fn reject_remote_assets(paths: &[PathBuf], action: &str) -> Result<()> {
+/// 只读来源（Immich/WebDAV/本地只读）不能删除/移动/回收；与保护路径共用匹配器。
+fn reject_read_only_assets(
+    paths: &[PathBuf],
+    protected: &ProtectedMatcher,
+    action: &str,
+) -> Result<()> {
     for path in paths {
-        if let Some(kind) = remote_kind_for_path(path) {
-            bail!(
-                "{kind} 只读来源的资产不能{action}: {}",
-                path.display()
-            );
+        match protected.read_only_kind(path) {
+            Some(SourceKind::Local) => bail!("本地只读来源的资产不能{action}: {}", path.display()),
+            Some(kind) => bail!("{kind} 只读来源的资产不能{action}: {}", path.display()),
+            None => {}
         }
     }
     Ok(())
@@ -7302,6 +7403,117 @@ mod tests {
                 .as_deref(),
             Some("v")
         );
+        drop(state);
+        cleanup_dir(&base);
+    }
+
+    #[test]
+    fn protected_glob_skips_batch_and_blocks_single_group() {
+        let (base, lib, state) = test_state("protected-glob");
+        let a = lib.join("a.png");
+        let b = lib.join("b.png");
+        write_test_image(&a, [1, 2, 3]);
+        write_test_image(&b, [1, 2, 3]);
+        state.rescan_root_blocking(lib.clone(), true).unwrap();
+
+        let (key, keeper, duplicate) = {
+            let shared = state.shared.lock().unwrap();
+            let group = shared
+                .dedup
+                .groups
+                .iter()
+                .find(|group| group.member_count == 2)
+                .expect("exact duplicate group");
+            let keeper = group.keeper.clone().unwrap();
+            let duplicate = group
+                .duplicate_paths()
+                .into_iter()
+                .next()
+                .expect("duplicate path");
+            (group.key.clone(), keeper, duplicate)
+        };
+
+        let preview = state.add_protected_entry("**/*.png").unwrap();
+        assert_eq!((preview.matched, preview.total), (2, 2));
+        let summary = state.trash_preselected().unwrap();
+        assert_eq!(
+            (summary.groups, summary.assets, summary.protected_skipped),
+            (0, 0, 1)
+        );
+        assert!(
+            state
+                .shared
+                .lock()
+                .unwrap()
+                .status
+                .contains("跳过 1 个受保护组")
+        );
+        let error = state.trash_dedup_group(&key).unwrap_err();
+        assert!(
+            format!("{error:#}").contains("受保护路径"),
+            "unexpected error: {error:#}"
+        );
+        assert!(keeper.is_file() && duplicate.is_file());
+
+        // 移除 glob 后普通路径恢复原判定；不触发实际回收站写入。
+        state
+            .remove_protected_path(Path::new("**/*.png"))
+            .unwrap();
+        let matcher = state.shared.lock().unwrap().dedup.protected_matcher().clone();
+        assert!(!matcher.is_protected(&keeper));
+        assert_eq!(state.preview_protected_entry("**/*.jpg").unwrap().matched, 0);
+        assert!(keeper.is_file() && duplicate.is_file());
+        drop(state);
+        cleanup_dir(&base);
+    }
+
+    #[test]
+    fn read_only_local_source_is_protected_and_rejects_trash() {
+        let base = temp_dir("read-only-local");
+        let lib = base.join("lib");
+        let archive = lib.join("archive");
+        std::fs::create_dir_all(&archive).unwrap();
+        let writable = lib.join("a.png");
+        let read_only = archive.join("b.png");
+        write_test_image(&writable, [4, 5, 6]);
+        write_test_image(&read_only, [4, 5, 6]);
+
+        let data = base.join("data");
+        {
+            let db = Db::open(&data.join(".kanalib").join("kanalib.db")).unwrap();
+            db.upsert_source(
+                "local",
+                "Archive",
+                &archive.to_string_lossy(),
+                "{}",
+                true,
+            )
+            .unwrap();
+        }
+        let state = AppState::open_for_test(data, Some(lib.clone()));
+        state.rescan_root_blocking(lib.clone(), true).unwrap();
+
+        let (key, keeper) = {
+            let shared = state.shared.lock().unwrap();
+            assert!(shared.dedup.is_protected(&read_only));
+            assert!(!shared.dedup.is_protected(&writable));
+            let group = shared
+                .dedup
+                .groups
+                .iter()
+                .find(|group| group.member_count == 2)
+                .expect("cross-subdir duplicate group");
+            (group.key.clone(), group.keeper.clone().unwrap())
+        };
+        assert_eq!(keeper, read_only, "只读来源应优先保留");
+
+        assert!(state.set_dedup_keeper(&key, writable.clone(), GroupKind::Exact));
+        let error = state.trash_dedup_group(&key).unwrap_err();
+        assert!(
+            format!("{error:#}").contains("本地只读来源"),
+            "unexpected error: {error:#}"
+        );
+        assert!(writable.is_file() && read_only.is_file());
         drop(state);
         cleanup_dir(&base);
     }

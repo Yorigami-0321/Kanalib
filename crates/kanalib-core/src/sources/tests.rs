@@ -20,8 +20,8 @@ use crate::sources::webdav::{format_http_date, parse_http_date};
 use crate::sources::{
     Credentials, ImmichConfig, ImmichSource, LocalSource, Source, SourceErrorKind, SourceInfo,
     SourceKind, SourceSyncContext, WebDavConfig, WebDavSource, immich_virtual_path, is_remote_path,
-    parse_checksum, parse_propfind, parse_timestamp, probe_version, source_infos,
-    webdav_asset_path, webdav_relative_path, webdav_source_id,
+    parse_checksum, parse_propfind, parse_timestamp, probe_version, read_only_local_roots,
+    source_infos, webdav_asset_path, webdav_relative_path, webdav_source_id,
 };
 
 // ---------------------------------------------------------------------------
@@ -356,6 +356,48 @@ fn remote_sources_are_listed_next_to_local_roots_and_paths_are_distinct() {
         Some("旅行/写真.jpg")
     );
     cleanup(&dir);
+}
+
+#[test]
+fn read_only_local_sources_exclude_writable_scanner_roots() {
+    let record = |kind: &str, locator: &str, config: &str, read_only: bool| {
+        crate::db::SourceRecord {
+            id: 1,
+            kind: kind.to_string(),
+            name: locator.to_string(),
+            locator: locator.to_string(),
+            config_json: config.to_string(),
+            read_only,
+            last_sync_at: None,
+            sync_cursor: None,
+        }
+    };
+    let root = PathBuf::from("C:/lib");
+
+    // 扫描器为本地根创建的 FK 记录（read_only=1 + {"path": locator}）仍可写。
+    let scanner_root = record("local", "C:/lib", r#"{"path":"C:/lib"}"#, true);
+    assert!(read_only_local_roots(std::slice::from_ref(&root), &[scanner_root]).is_empty());
+
+    // 显式只读的本地根（非默认扫描器配置）按 locator 前缀拦截。
+    let explicit_root = record("local", "C:/lib", "{}", true);
+    assert_eq!(
+        read_only_local_roots(std::slice::from_ref(&root), &[explicit_root]),
+        vec![root.clone()]
+    );
+
+    // 只读子目录计入；可写本地记录与远端记录不计入。
+    let archive = record(
+        "local",
+        "C:/lib/archive",
+        r#"{"path":"C:/lib/archive"}"#,
+        true,
+    );
+    let writable = record("local", "C:/lib/other", r#"{"path":"C:/lib/other"}"#, false);
+    let remote = record("immich", "http://immich.local", "{}", true);
+    assert_eq!(
+        read_only_local_roots(std::slice::from_ref(&root), &[archive, writable, remote]),
+        vec![PathBuf::from("C:/lib/archive")]
+    );
 }
 
 // ---------------------------------------------------------------------------

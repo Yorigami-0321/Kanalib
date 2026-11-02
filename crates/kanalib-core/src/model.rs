@@ -1350,6 +1350,7 @@ impl Shared {
         reviews: std::collections::HashMap<String, DuplicateReview>,
         similar_threshold: u8,
         protected_paths: Vec<PathBuf>,
+        read_only_roots: Vec<PathBuf>,
     ) -> Self {
         let status = if assets.is_empty() {
             if roots.is_empty() {
@@ -1376,6 +1377,7 @@ impl Shared {
             })
             .collect();
         let mut dedup = DedupState::with_reviews_and_threshold(reviews, similar_threshold);
+        dedup.set_read_only_roots(read_only_roots);
         dedup.set_protected_paths(protected_paths);
         dedup.rebuild(&assets);
         Self {
@@ -2255,6 +2257,7 @@ mod tests {
             Default::default(),
             crate::dedup::DEFAULT_SIMILAR_THRESHOLD,
             Vec::new(),
+            Vec::new(),
         );
         shared.set_queue_counts(10, 0, 2);
         assert_eq!(
@@ -2294,6 +2297,7 @@ mod tests {
             vec![old.clone()],
             Default::default(),
             crate::dedup::DEFAULT_SIMILAR_THRESHOLD,
+            Vec::new(),
             Vec::new(),
         );
         assert_eq!(shared.revision, 1);
