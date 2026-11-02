@@ -3149,7 +3149,7 @@ impl KanalibApp {
                 self.selection = Arc::new(HashSet::from([path.clone()]));
             }
             self.state.select(Some(path.clone()));
-        } else if modifiers.secondary() {
+        } else if modifiers.secondary(cx) {
             let mut selection = (*self.selection).clone();
             if selection.remove(&path) {
                 if primary.as_ref() == Some(&path) {

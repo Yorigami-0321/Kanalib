@@ -1,4 +1,4 @@
-use gpui::Keystroke;
+use gpui::{Keystroke, OperatingSystem};
 
 use crate::theme::Platform;
 
@@ -13,7 +13,12 @@ pub fn keystroke(source: &str, platform: Platform) -> Keystroke {
         .split('-')
         .map(|part| if part == "secondary" { secondary } else { part })
         .collect();
-    Keystroke::parse(&spelled.join("-"))
+    let os = match platform {
+        Platform::Mac => OperatingSystem::Mac,
+        Platform::Windows => OperatingSystem::Windows,
+        Platform::Linux => OperatingSystem::Linux,
+    };
+    Keystroke::parse_with_os(&spelled.join("-"), os)
         .unwrap_or_else(|error| panic!("bad keystroke {source:?}: {error}"))
 }
 

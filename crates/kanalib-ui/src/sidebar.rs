@@ -923,7 +923,7 @@ impl KanalibApp {
                                     Modifiers::default()
                                 }
                             };
-                            if modifiers.secondary() || modifiers.shift {
+                            if modifiers.secondary(cx) || modifiers.shift {
                                 let current = search_click.read(cx).text().to_string();
                                 let next = if current.trim().is_empty() {
                                     format!("tag:{name}")

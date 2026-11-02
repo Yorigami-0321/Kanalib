@@ -1,8 +1,8 @@
 use std::rc::Rc;
 
 use gpui::{
-    AnyElement, App, ElementId, Entity, InteractiveElement, IntoElement, KeyBinding, ParentElement,
-    RenderOnce, SharedString, Styled, Window, actions, div, prelude::*,
+    AnyElement, App, ElementId, Entity, InteractiveElement, IntoElement, ParentElement, RenderOnce,
+    SharedString, Styled, Window, actions, div, prelude::*,
 };
 
 use super::{
@@ -25,9 +25,9 @@ const CONTEXT: &str = "ElyRichText";
 /// Binds the rich text keys. `init` calls it.
 pub(crate) fn bind_keys(cx: &mut App) {
     cx.bind_keys([
-        KeyBinding::new("secondary-b", ToggleBold, Some(CONTEXT)),
-        KeyBinding::new("secondary-i", ToggleItalic, Some(CONTEXT)),
-        KeyBinding::new("secondary-k", EditLink, Some(CONTEXT)),
+        crate::key_binding("secondary-b", ToggleBold, Some(CONTEXT)),
+        crate::key_binding("secondary-i", ToggleItalic, Some(CONTEXT)),
+        crate::key_binding("secondary-k", EditLink, Some(CONTEXT)),
     ]);
 }
 

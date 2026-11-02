@@ -7,9 +7,9 @@ use alacritty_terminal::{
     term::TermMode,
 };
 use gpui::{
-    App, Bounds, ClipboardItem, Context, EntityInputHandler, InteractiveElement, KeyBinding,
-    KeyDownEvent, ModifiersChangedEvent, MouseButton, MouseDownEvent, MouseMoveEvent, Pixels,
-    Point, ScrollWheelEvent, UTF16Selection, Window, actions,
+    App, Bounds, ClipboardItem, Context, EntityInputHandler, InteractiveElement, KeyDownEvent,
+    ModifiersChangedEvent, MouseButton, MouseDownEvent, MouseMoveEvent, Pixels, Point, ScrollEvent,
+    UTF16Selection, Window, actions,
 };
 
 use super::{
@@ -48,14 +48,14 @@ pub(crate) fn bind_keys(cx: &mut App) {
         )
     };
     cx.bind_keys([
-        KeyBinding::new("tab", SendTab, context),
-        KeyBinding::new("shift-tab", SendBackTab, context),
-        KeyBinding::new(copy, Copy, context),
-        KeyBinding::new(paste, Paste, context),
-        KeyBinding::new(clear, Clear, context),
-        KeyBinding::new("shift-pageup", PageUp, context),
-        KeyBinding::new("shift-pagedown", PageDown, context),
-        KeyBinding::new(find, Find, context),
+        crate::key_binding("tab", SendTab, context),
+        crate::key_binding("shift-tab", SendBackTab, context),
+        crate::key_binding(copy, Copy, context),
+        crate::key_binding(paste, Paste, context),
+        crate::key_binding(clear, Clear, context),
+        crate::key_binding("shift-pageup", PageUp, context),
+        crate::key_binding("shift-pagedown", PageDown, context),
+        crate::key_binding(find, Find, context),
     ]);
 }
 
@@ -79,7 +79,7 @@ pub(crate) fn listen<E: InteractiveElement>(root: E, cx: &mut Context<Terminal>)
             MouseButton::Left,
             cx.listener(|terminal, _, _, _| terminal.selecting = false),
         )
-        .on_scroll_wheel(cx.listener(Terminal::wheel))
+        .on_scroll(cx.listener(Terminal::wheel))
         .on_modifiers_changed(
             cx.listener(|terminal, event: &ModifiersChangedEvent, _, cx| {
                 if !event.modifiers.platform && terminal.hovered.take().is_some() {
@@ -212,7 +212,7 @@ impl Terminal {
         }
     }
 
-    fn wheel(&mut self, event: &ScrollWheelEvent, _: &mut Window, cx: &mut Context<Self>) {
+    fn wheel(&mut self, event: &ScrollEvent, _: &mut Window, cx: &mut Context<Self>) {
         cx.stop_propagation();
         self.rest += event.delta.pixel_delta(self.cell.height).y;
         let lines = (self.rest / self.cell.height).trunc() as i32;

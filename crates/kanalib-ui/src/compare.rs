@@ -770,7 +770,7 @@ impl KanalibApp {
             .overflow_hidden()
             .bg(colors.sunken)
             .cursor_grab()
-            .on_scroll_wheel(move |event, window, cx| {
+            .on_scroll(move |event, window, cx| {
                 let delta = event.delta.pixel_delta(window.line_height());
                 let zooming = event.modifiers.platform || event.modifiers.control;
                 let bounds = stage_wheel.read(cx).bounds;

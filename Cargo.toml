@@ -25,8 +25,8 @@ frame-profiler = [
 [dependencies]
 ely-gpui-component = { path = "vendor/ely-gpui-components" }
 flexi_logger = "0.31"
-gpui = { package = "gpui-pre", version = "=0.3.9", default-features = false, features = ["stacker"] }
-gpui_platform = { package = "gpui-pre-platform", version = "=0.3.9", features = ["font-kit"] }
+gpui = { package = "gpui-pre", version = "=0.3.10", default-features = false, features = ["stacker"] }
+gpui_platform = { package = "gpui-pre-platform", version = "=0.3.10", features = ["font-kit"] }
 kanalib-core = { path = "crates/kanalib-core" }
 kanalib-ui = { path = "crates/kanalib-ui" }
 log = "0.4"

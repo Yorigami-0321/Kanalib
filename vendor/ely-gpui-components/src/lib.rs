@@ -52,6 +52,24 @@ use gpui::{App, KeyBinding};
 
 use crate::primitives::{FOCUS_CONTEXT, FocusNext, FocusPrev};
 
+/// gpui 0.3.10 的 `KeyBinding::new` 只接受静态键位并在 `secondary-` 上 panic；
+/// 这里按宿主平台展开 `secondary`，让 vendored 组件继续用同一套键位表。
+pub(crate) fn key_binding<A: gpui::Action>(
+    source: &str,
+    action: A,
+    context: Option<&'static str>,
+) -> KeyBinding {
+    let source = source.replace(
+        "secondary",
+        if cfg!(target_os = "macos") {
+            "cmd"
+        } else {
+            "ctrl"
+        },
+    );
+    KeyBinding::new(Box::leak(source.into_boxed_str()), action, context)
+}
+
 /// Loads fonts and the theme, binds Tab and text keys. Call once, first.
 pub fn init(cx: &mut App) -> anyhow::Result<()> {
     let missing = assets::missing(cx.asset_source().as_ref());
@@ -77,11 +95,11 @@ pub fn init_for_tests(cx: &mut App) {
 fn setup(cx: &mut App) {
     theme::Theme::init(cx);
     cx.bind_keys([
-        KeyBinding::new("tab", FocusNext, Some(FOCUS_CONTEXT)),
-        KeyBinding::new("shift-tab", FocusPrev, Some(FOCUS_CONTEXT)),
+        crate::key_binding("tab", FocusNext, Some(FOCUS_CONTEXT)),
+        crate::key_binding("shift-tab", FocusPrev, Some(FOCUS_CONTEXT)),
         // Out of a field that keeps Tab, such as a document.
-        KeyBinding::new("f6", FocusNext, Some(FOCUS_CONTEXT)),
-        KeyBinding::new("shift-f6", FocusPrev, Some(FOCUS_CONTEXT)),
+        crate::key_binding("f6", FocusNext, Some(FOCUS_CONTEXT)),
+        crate::key_binding("shift-f6", FocusPrev, Some(FOCUS_CONTEXT)),
     ]);
     forms::bind_keys(cx);
     editor::bind_keys(cx);

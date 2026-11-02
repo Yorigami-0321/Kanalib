@@ -3,8 +3,8 @@ use std::rc::Rc;
 use gpui::{
     App, AvailableSpace, Bounds, ContentMask, DispatchPhase, Element, ElementId,
     ElementInputHandler, Entity, FontStyle, GlobalElementId, Hsla, InspectorElementId, IntoElement,
-    LayoutId, MouseMoveEvent, Pixels, Point, ScrollWheelEvent, SharedString, StrikethroughStyle,
-    Style, TextAlign, TextRun, UnderlineStyle, Window, WrappedLine, fill, point, relative, size,
+    LayoutId, MouseMoveEvent, Pixels, Point, ScrollEvent, SharedString, StrikethroughStyle, Style,
+    TextAlign, TextRun, UnderlineStyle, Window, WrappedLine, fill, point, relative, size,
 };
 
 use super::{Highlight, Layout, TextInput};
@@ -353,7 +353,7 @@ impl Element for TextElement {
             });
         }
         let wheel_input = self.input.clone();
-        window.on_mouse_event(move |event: &ScrollWheelEvent, phase, window, cx| {
+        window.on_mouse_event(move |event: &ScrollEvent, phase, window, cx| {
             if phase != DispatchPhase::Bubble || !bounds.contains(&event.position) {
                 return;
             }

@@ -12,7 +12,7 @@ frame-profiler = ["dep:hdrhistogram", "gpui/profiler", "kanalib-core/frame-profi
 
 [dependencies]
 ely-gpui-component = { path = "../../vendor/ely-gpui-components" }
-gpui = { package = "gpui-pre", version = "=0.3.9", default-features = false, features = ["stacker"] }
+gpui = { package = "gpui-pre", version = "=0.3.10", default-features = false, features = ["stacker"] }
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp", "gif", "bmp"] }
 kanalib-core = { path = "../kanalib-core" }
 log = "0.4"
