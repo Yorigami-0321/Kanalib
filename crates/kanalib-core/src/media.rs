@@ -137,14 +137,24 @@ pub fn parse_exif_datetime(text: &str, offset: Option<&str>) -> Option<u64> {
 
 /// 尽力读取 EXIF；不支持的格式或损坏文件返回默认值，不影响入库。
 pub fn read_exif(path: &Path) -> (ExifData, Option<u64>) {
+    let (exif, captured_at, _) = read_exif_with_color(path);
+    (exif, captured_at)
+}
+
+/// 与 [`read_exif`] 相同，但一并返回 F-064 的颜色空间提示，供缩略图预取
+/// 判断「无 ICC、仅 EXIF 声明 Adobe RGB」的图片，避免再解析一次 EXIF。
+pub fn read_exif_with_color(
+    path: &Path,
+) -> (ExifData, Option<u64>, crate::color::ExifColorSpace) {
     let file = match File::open(path) {
         Ok(file) => file,
-        Err(_) => return (ExifData::default(), None),
+        Err(_) => return (ExifData::default(), None, Default::default()),
     };
     let exif = match exif::Reader::new().read_from_container(&mut BufReader::new(file)) {
         Ok(exif) => exif,
-        Err(_) => return (ExifData::default(), None),
+        Err(_) => return (ExifData::default(), None, Default::default()),
     };
+    let color_space = crate::color::exif_color_space(&exif);
     let orientation = exif_field(&exif, Tag::Orientation)
         .and_then(|field| field.value.get_uint(0))
         .map(|value| value.clamp(1, 8) as u8)
@@ -175,6 +185,7 @@ pub fn read_exif(path: &Path) -> (ExifData, Option<u64>) {
             ..ExifData::default()
         },
         captured_at,
+        color_space,
     )
 }
 

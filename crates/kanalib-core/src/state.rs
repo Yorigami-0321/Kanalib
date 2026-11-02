@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -10,6 +10,7 @@ use image::{ImageFormat, Rgb, RgbImage};
 use serde::Deserialize;
 
 use crate::backup::{self, BackupPlan, BackupStatus};
+use crate::color;
 use crate::db::{Db, JobCounts, SearchPage, SearchPageRequest, StoredMeta};
 use crate::dedup::{
     DEFAULT_SIMILAR_THRESHOLD, DuplicateReview, GroupKind, ProtectedMatcher, ProtectedPreview,
@@ -2127,6 +2128,16 @@ impl AppState {
         let target = thumb_target(path, &self.cache_dir, mtime, bytes, 1);
         let outcome = repair_file(path, &target, Some(512))
             .with_context(|| format!("容错解码 {}", path.display()))?;
+        // F-064：修复副本同样要落到 sRGB，避免与正常缩略图颜色不一致。
+        let profile = color::source_profile(path);
+        if profile.needs_conversion()
+            && let Err(error) = color::convert_file_to_srgb(&target, &profile)
+        {
+            log::warn!(
+                "color-manage repaired thumbnail {}: {error:#}; keeping untagged cache",
+                target.display()
+            );
+        }
         let tile = ensure_tile_thumb(&target);
         let mut asset = db.update_media(
             path,
@@ -3399,6 +3410,9 @@ struct ScanStats {
     thumb_prefetch_generated: usize,
     thumb_prefetch_failed: usize,
     thumb_prefetch_secs: f64,
+    thumb_color_converted: usize,
+    thumb_color_failed: usize,
+    thumb_color_secs: f64,
     thumb_secs: f64,
     tag_load_secs: f64,
     tag_secs: f64,
@@ -3450,6 +3464,9 @@ fn log_scan_metrics(stats: &ScanStats) {
         "thumb_prefetch_generated": stats.thumb_prefetch_generated,
         "thumb_prefetch_failed": stats.thumb_prefetch_failed,
         "thumb_prefetch_secs": stats.thumb_prefetch_secs,
+        "thumb_color_converted": stats.thumb_color_converted,
+        "thumb_color_failed": stats.thumb_color_failed,
+        "thumb_color_secs": stats.thumb_color_secs,
         "thumb_secs": stats.thumb_secs,
         "tag_load_secs": stats.tag_load_secs,
         "tag_secs": stats.tag_secs,
@@ -3942,13 +3959,87 @@ fn thumb_cache_current(
     stored == expected && stored.exists()
 }
 
+/// F-064：ffmpeg 只缩放、不解释 ICC。生成 512 后再按源文件的 ICC/EXIF 做一次
+/// sRGB 转换；无 ICC / sRGB 的文件完全跳过。转换彼此独立，按小线程池并行，
+/// 避免 10k 全广色域图库把单线程后处理变成瓶颈。
+fn color_manage_prefetched(
+    jobs: &[ThumbJob],
+    cached_exif: &HashMap<PathBuf, (media::ExifData, Option<u64>, color::ExifColorSpace)>,
+    cancel: &AtomicBool,
+) -> (usize, usize) {
+    let pending = jobs
+        .iter()
+        .filter(|job| job.target.exists() && !crate::model::is_video(&job.source))
+        .collect::<Vec<_>>();
+    if pending.is_empty() {
+        return (0, 0);
+    }
+    let workers = std::thread::available_parallelism()
+        .map(|value| value.get())
+        .unwrap_or(2)
+        .clamp(1, 4)
+        .min(pending.len());
+    let next = AtomicUsize::new(0);
+    let converted = AtomicUsize::new(0);
+    let failed = AtomicUsize::new(0);
+    std::thread::scope(|scope| {
+        for _ in 0..workers {
+            let next = &next;
+            let converted = &converted;
+            let failed = &failed;
+            let pending = &pending;
+            let cached_exif = cached_exif;
+            let cancel = cancel;
+            scope.spawn(move || {
+                loop {
+                    if cancel.load(Ordering::SeqCst) {
+                        break;
+                    }
+                    let index = next.fetch_add(1, Ordering::SeqCst);
+                    let Some(job) = pending.get(index) else {
+                        break;
+                    };
+                    let hint = cached_exif
+                        .get(&job.source)
+                        .map(|(_, _, hint)| *hint)
+                        .unwrap_or_default();
+                    let profile = color::source_profile_with_hint(&job.source, hint);
+                    if !profile.needs_conversion() {
+                        continue;
+                    }
+                    match color::convert_file_to_srgb(&job.target, &profile) {
+                        Ok(true) => {
+                            converted.fetch_add(1, Ordering::SeqCst);
+                        }
+                        Ok(false) => {}
+                        Err(error) => {
+                            failed.fetch_add(1, Ordering::SeqCst);
+                            log::warn!(
+                                "color-manage thumbnail {}: {error:#}; keeping untagged cache",
+                                job.target.display()
+                            );
+                        }
+                    }
+                }
+            });
+        }
+    });
+    log::info!(
+        "thumb color: candidates={} converted={} failed={} workers={workers}",
+        pending.len(),
+        converted.load(Ordering::SeqCst),
+        failed.load(Ordering::SeqCst)
+    );
+    (converted.into_inner(), failed.into_inner())
+}
+
 fn prefetch_thumbnails(
     state: &Arc<AppState>,
     db: &Db,
     files: &[PathBuf],
     cancel: &AtomicBool,
     stats: &mut ScanStats,
-) -> HashMap<PathBuf, (media::ExifData, Option<u64>)> {
+) -> HashMap<PathBuf, (media::ExifData, Option<u64>, color::ExifColorSpace)> {
     let mut cached_exif = HashMap::new();
     if !ffmpeg::available() {
         return cached_exif;
@@ -3994,10 +4085,14 @@ fn prefetch_thumbnails(
             continue;
         }
         // F-040：视频没有 EXIF；首帧仍走同一 ffmpeg 批处理池（`-map i:v -frames:v 1`）。
-        let (exif, captured_at) = if crate::model::is_video(path) {
-            (media::ExifData::default(), None)
+        let (exif, captured_at, color_hint) = if crate::model::is_video(path) {
+            (
+                media::ExifData::default(),
+                None,
+                color::ExifColorSpace::Unspecified,
+            )
         } else {
-            media::read_exif(path)
+            media::read_exif_with_color(path)
         };
         let target = thumb_target(path, &state.cache_dir, mtime, bytes, exif.orientation);
         if !target.exists() {
@@ -4007,7 +4102,7 @@ fn prefetch_thumbnails(
                 alpha: ffmpeg::alpha_source(path),
             });
         }
-        cached_exif.insert(path.clone(), (exif, captured_at));
+        cached_exif.insert(path.clone(), (exif, captured_at, color_hint));
     }
     stats.thumb_prefetch_jobs = jobs.len();
     if jobs.is_empty() {
@@ -4035,13 +4130,24 @@ fn prefetch_thumbnails(
     stats.thumb_prefetch_generated = outcome.generated;
     stats.thumb_prefetch_failed = outcome.failed;
     stats.thumb_prefetch_secs = started.elapsed().as_secs_f64();
+    // F-064：ffmpeg 只缩放、不解释 ICC。生成 512 后再按源文件的 ICC/EXIF
+    // 做一次 sRGB 转换；无 ICC / sRGB 的文件完全跳过，保持原有字节路径。
+    let color_started = Instant::now();
+    let (color_converted, color_failed) =
+        color_manage_prefetched(&jobs, &cached_exif, cancel);
+    stats.thumb_color_converted = color_converted;
+    stats.thumb_color_failed = color_failed;
+    stats.thumb_color_secs = color_started.elapsed().as_secs_f64();
     log::info!(
-        "thumb prefetch: jobs={} generated={} failed={} batches={} secs={:.2}",
+        "thumb prefetch: jobs={} generated={} failed={} batches={} secs={:.2} color_converted={} color_failed={} color_secs={:.2}",
         total,
         outcome.generated,
         outcome.failed,
         outcome.batches,
-        stats.thumb_prefetch_secs
+        stats.thumb_prefetch_secs,
+        stats.thumb_color_converted,
+        stats.thumb_color_failed,
+        stats.thumb_color_secs
     );
     cached_exif
 }
@@ -4421,7 +4527,7 @@ fn index_file(
     rename: RenamePolicy<'_>,
     ignore: &CompiledIgnoreRules,
     other_roots: &[PathBuf],
-    prefetched_exif: Option<(media::ExifData, Option<u64>)>,
+    prefetched_exif: Option<(media::ExifData, Option<u64>, color::ExifColorSpace)>,
 ) -> Result<FileIndexOutcome> {
     let metadata =
         std::fs::metadata(path).with_context(|| format!("读取文件信息 {}", path.display()))?;
@@ -4508,11 +4614,15 @@ fn index_file(
     } else {
         None
     };
-    let (mut exif, captured_at) = prefetched_exif.unwrap_or_else(|| {
+    let (mut exif, captured_at, color_hint) = prefetched_exif.unwrap_or_else(|| {
         if video_kind {
-            (media::ExifData::default(), None)
+            (
+                media::ExifData::default(),
+                None,
+                color::ExifColorSpace::Unspecified,
+            )
         } else {
-            media::read_exif(path)
+            media::read_exif_with_color(path)
         }
     });
     if let Some(cached) = cached_video {
@@ -4523,7 +4633,14 @@ fn index_file(
     }
     let metadata_json = serde_json::to_string(&exif).unwrap_or_else(|_| "{}".to_string());
     let thumb_started = Instant::now();
-    let thumbnail = ensure_thumb(path, &state.cache_dir, mtime, bytes, exif.orientation);
+    let thumbnail = ensure_thumb_with_hint(
+        path,
+        &state.cache_dir,
+        mtime,
+        bytes,
+        exif.orientation,
+        color_hint,
+    );
     outcome.thumb_secs = thumb_started.elapsed().as_secs_f64();
     let stored_dimensions = stored_media
         .as_ref()
@@ -5266,6 +5383,19 @@ fn backfill_tile_thumbs(state: &Arc<AppState>, cancel: &AtomicBool) {
     );
 }
 
+/// 缩略图缓存键版本。
+///
+/// - v3：旧版（未做颜色管理）。
+/// - v4：F-064 起，带非 sRGB ICC / EXIF 色彩空间的图片会先转换到 sRGB 再编码；
+///   无 ICC 或 sRGB ICC 的图片仍保持原有字节路径。
+///
+/// 迁移：v3 文件名哈希与 v4 不同，`thumb_cache_current` 只认精确路径，因此旧
+/// 缩略图绝不会被当成新缓存复用；下一次扫描会按当前版本重建一次（与历史上
+/// v2→v3 的做法相同）。旧 v3 文件留在目录里，继续由原有 10 GiB 预算/清理逻辑
+/// 淘汰，不新增也不改变清理语义。查看器的 sRGB 预览另用 `thumbs/previews/`，
+/// 不计入缩略图预算。
+pub(crate) const THUMB_CACHE_VERSION: &str = "v4";
+
 pub(crate) fn thumb_target(
     path: &Path,
     cache_dir: &Path,
@@ -5274,7 +5404,8 @@ pub(crate) fn thumb_target(
     orientation: u8,
 ) -> PathBuf {
     let mut key = format!(
-        "v3-{}-{}-{}-{}",
+        "{}-{}-{}-{}-{}",
+        THUMB_CACHE_VERSION,
         path.to_string_lossy(),
         mtime,
         bytes,
@@ -5296,6 +5427,24 @@ fn ensure_thumb(
     mtime: u64,
     bytes: u64,
     orientation: u8,
+) -> Result<(Option<PathBuf>, u32, u32)> {
+    ensure_thumb_with_hint(
+        path,
+        cache_dir,
+        mtime,
+        bytes,
+        orientation,
+        color::ExifColorSpace::Unspecified,
+    )
+}
+
+fn ensure_thumb_with_hint(
+    path: &Path,
+    cache_dir: &Path,
+    mtime: u64,
+    bytes: u64,
+    orientation: u8,
+    color_hint: color::ExifColorSpace,
 ) -> Result<(Option<PathBuf>, u32, u32)> {
     std::fs::create_dir_all(cache_dir)?;
     let target = thumb_target(path, cache_dir, mtime, bytes, orientation);
@@ -5359,12 +5508,9 @@ fn ensure_thumb(
         let _ = std::fs::remove_file(&target);
     }
 
-    let decoded = image::ImageReader::open(path)
-        .and_then(|reader| reader.with_guessed_format())
-        .map_err(image::ImageError::IoError)
-        .and_then(|reader| reader.decode());
-    let mut image = match decoded {
-        Ok(image) => image,
+    let decoded = color::decode_with_hint(path, color_hint);
+    let (mut image, color_profile) = match decoded {
+        Ok(decoded) => (decoded.image, decoded.profile),
         Err(error) => {
             // `image` 0.25 has no AVIF/PSD decoder. The scan prefetch normally
             // fills the cache; watch events and evicted thumbnails arrive here
@@ -5382,6 +5528,16 @@ fn ensure_thumb(
                     &|_, _| {},
                 );
                 if outcome.generated == 1 && target.exists() {
+                    // F-064：ffmpeg 缩放不处理 ICC；能读到源色彩空间时补一次转换。
+                    let profile = color::source_profile_with_hint(path, color_hint);
+                    if profile.needs_conversion()
+                        && let Err(error) = color::convert_file_to_srgb(&target, &profile)
+                    {
+                        log::warn!(
+                            "color-manage thumbnail {}: {error:#}; keeping untagged cache",
+                            target.display()
+                        );
+                    }
                     if (5..=8).contains(&orientation) {
                         std::mem::swap(&mut width, &mut height);
                     }
@@ -5407,6 +5563,9 @@ fn ensure_thumb(
             ((source[2] as u32 * alpha + 255 * inverse) / 255) as u8,
         ]);
     }
+    // F-064：缩略图缩放完成后再转色，转换成本固定在 512 档，与查看器用的
+    // 同一套 lcms2 sRGB 目标保持一致。无 ICC / sRGB 时这里是零拷贝直通。
+    let rgb = color::convert_rgb8(rgb, &color_profile);
     image::DynamicImage::ImageRgb8(rgb).save_with_format(&target, ImageFormat::Jpeg)?;
     Ok((Some(target), width, height))
 }
@@ -7516,5 +7675,246 @@ mod tests {
         assert!(writable.is_file() && read_only.is_file());
         drop(state);
         cleanup_dir(&base);
+    }
+
+    fn read_rgb(path: &Path) -> RgbImage {
+        image::ImageReader::open(path)
+            .unwrap()
+            .with_guessed_format()
+            .unwrap()
+            .decode()
+            .unwrap()
+            .to_rgb8()
+    }
+
+    #[test]
+    fn v4_thumb_cache_invalidates_v3_files_without_reusing_them() {
+        let dir = temp_dir("thumb-v4");
+        let cache = dir.join("thumbs");
+        std::fs::create_dir_all(&cache).unwrap();
+        let source = dir.join("a.png");
+        std::fs::write(&source, b"x").unwrap();
+        let v4 = thumb_target(&source, &cache, 1, 2, 1);
+        let v3_key = format!("v3-{}-{}-{}-{}", source.to_string_lossy(), 1, 2, "png");
+        let v3_hash = blake3::hash(v3_key.as_bytes()).to_hex();
+        let v3 = cache.join(format!("{}.jpg", &v3_hash.as_str()[..24]));
+        std::fs::write(&v3, b"old").unwrap();
+        let meta = StoredMeta {
+            mtime: 1,
+            bytes: 2,
+            sha1: Some("a".repeat(40)),
+            blake3: Some("b".repeat(64)),
+            phash: Some(1),
+            width: 10,
+            height: 10,
+            thumb: v3.to_string_lossy().to_string(),
+            captured_at: None,
+            metadata_json: "{}".into(),
+            exif_state: "done".into(),
+            media_kind: crate::model::MediaKind::Image,
+        };
+        assert_ne!(v3, v4, "v4 key must differ from v3");
+        assert!(
+            !thumb_cache_current(&meta, &source, &cache, 1, 2),
+            "an existing v3 file must never satisfy the v4 cache check"
+        );
+        std::fs::write(&v4, b"new").unwrap();
+        let meta = StoredMeta {
+            thumb: v4.to_string_lossy().to_string(),
+            ..meta
+        };
+        assert!(thumb_cache_current(&meta, &source, &cache, 1, 2));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn thumbnails_and_viewer_previews_share_the_srgb_conversion() {
+        let dir = temp_dir("color-consistency");
+        let cache = dir.join("thumbs");
+        let source = dir.join("p3.png");
+        let p3 = color::test_support::display_p3_icc();
+        let raw = RgbImage::from_pixel(256, 192, Rgb([200, 60, 20]));
+        color::test_support::write_png_with_icc(&source, &raw, Some(&p3));
+        let bytes = std::fs::metadata(&source).unwrap().len();
+        let (thumb, width, height) = ensure_thumb(&source, &cache, 1, bytes, 1).unwrap();
+        assert_eq!((width, height), (256, 192));
+        let thumb = thumb.unwrap();
+        let thumb_pixel = *read_rgb(&thumb).get_pixel(0, 0);
+        assert!(
+            thumb_pixel[0] > 210 && thumb_pixel[1] < 50,
+            "P3 orange must be converted in the thumbnail, got {thumb_pixel:?}"
+        );
+
+        let preview_target = color::preview_target(&source, &cache, 1, bytes);
+        assert_eq!(
+            color::prepare_preview(&source, &preview_target).unwrap(),
+            color::PreviewOutcome::Converted
+        );
+        let preview_pixel = *read_rgb(&preview_target).get_pixel(0, 0);
+        for channel in 0..3 {
+            assert!(
+                thumb_pixel[channel].abs_diff(preview_pixel[channel]) <= 8,
+                "thumbnail {thumb_pixel:?} and viewer preview {preview_pixel:?} must match"
+            );
+        }
+
+        // Untagged images keep the historical bytes for both paths.
+        let plain = dir.join("plain.png");
+        color::test_support::write_png_with_icc(&plain, &raw, None);
+        let plain_bytes = std::fs::metadata(&plain).unwrap().len();
+        let (plain_thumb, _, _) = ensure_thumb(&plain, &cache, 1, plain_bytes, 1).unwrap();
+        let plain_pixel = *read_rgb(&plain_thumb.unwrap()).get_pixel(0, 0);
+        for channel in 0..3 {
+            assert!(
+                plain_pixel[channel].abs_diff(raw.get_pixel(0, 0)[channel]) <= 3,
+                "untagged thumbnail must not change: {plain_pixel:?}"
+            );
+        }
+        assert_eq!(
+            color::prepare_preview(&plain, &cache.join("plain-preview.png")).unwrap(),
+            color::PreviewOutcome::Unchanged
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn exif_only_adobe_rgb_hint_converts_thumbnails() {
+        let dir = temp_dir("color-exif-adobe");
+        let cache = dir.join("thumbs");
+        let source = dir.join("adobe.png");
+        let raw = RgbImage::from_pixel(64, 48, Rgb([200, 60, 20]));
+        color::test_support::write_png_with_icc(&source, &raw, None);
+        let bytes = std::fs::metadata(&source).unwrap().len();
+        let (thumb, _, _) = ensure_thumb_with_hint(
+            &source,
+            &cache,
+            1,
+            bytes,
+            1,
+            color::ExifColorSpace::AdobeRgb,
+        )
+        .unwrap();
+        let pixel = *read_rgb(&thumb.unwrap()).get_pixel(0, 0);
+        assert!(
+            pixel[0].abs_diff(200) > 5 || pixel[1].abs_diff(60) > 5,
+            "EXIF-only Adobe RGB must be converted, got {pixel:?}"
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// F-064 performance probe (not part of the normal suite):
+    /// `CARGO_TARGET_DIR=… cargo test -p kanalib-core color_thumbnail_1k_perf -- --ignored --nocapture`
+    #[test]
+    #[ignore = "1k cold thumbnail colour-management benchmark"]
+    fn color_thumbnail_1k_perf() {
+        let total = std::env::var("KANALIB_COLOR_PERF_IMAGES")
+            .ok()
+            .and_then(|value| value.parse::<usize>().ok())
+            .unwrap_or(1000);
+        let dir = std::env::temp_dir().join(format!(
+            "kanalib-color-perf-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let p3 = color::test_support::display_p3_icc();
+        let srgb = color::test_support::srgb_icc();
+        let sets: [(&str, Option<&[u8]>); 3] = [
+            ("untagged", None),
+            ("srgb-icc", Some(&srgb)),
+            ("p3-icc", Some(&p3)),
+        ];
+        for (name, icc) in sets {
+            if std::env::var("KANALIB_COLOR_PERF_SET")
+                .ok()
+                .is_some_and(|only| only != name)
+            {
+                continue;
+            }
+            let source_dir = dir.join(name);
+            std::fs::create_dir_all(&source_dir).unwrap();
+            let mut paths = Vec::with_capacity(total);
+            for index in 0..total {
+                let path = source_dir.join(format!("{index}.png"));
+                let image = RgbImage::from_fn(640, 480, |x, y| {
+                    Rgb([(x / 3) as u8, (y / 2) as u8, ((x + y) / 4) as u8])
+                });
+                color::test_support::write_png_with_icc(&path, &image, icc);
+                paths.push(path);
+            }
+            let cache = dir.join(format!("{name}-cache"));
+            let started = Instant::now();
+            let mut thumb_bytes = 0u64;
+            for path in &paths {
+                let bytes = std::fs::metadata(path).unwrap().len();
+                let (thumb, _, _) = ensure_thumb(path, &cache, 1, bytes, 1).unwrap();
+                thumb_bytes += std::fs::metadata(thumb.unwrap()).unwrap().len();
+            }
+            let elapsed = started.elapsed().as_secs_f64();
+            println!(
+                "COLOR_PERF set={name} images={total} cold_thumb_secs={elapsed:.3} per_image_ms={:.2} thumb_mb={:.1}",
+                elapsed * 1000.0 / total as f64,
+                thumb_bytes as f64 / (1024.0 * 1024.0)
+            );
+            if name == "untagged" {
+                let probe_started = Instant::now();
+                for path in &paths {
+                    let _ = color::source_profile_with_hint(
+                        path,
+                        color::ExifColorSpace::Unspecified,
+                    );
+                }
+                println!(
+                    "COLOR_PERF prefetch_profile_probe images={total} secs={:.3} per_image_ms={:.2}",
+                    probe_started.elapsed().as_secs_f64(),
+                    probe_started.elapsed().as_secs_f64() * 1000.0 / total as f64
+                );
+            }
+            if name == "p3-icc" {
+                let profile = color::ColorProfile::Icc(p3.clone());
+                let convert_started = Instant::now();
+                let mut converted = 0usize;
+                for path in paths.iter().take(200) {
+                    let bytes = std::fs::metadata(path).unwrap().len();
+                    let (thumb, _, _) =
+                        ensure_thumb(path, &cache, 1, bytes, 1).unwrap();
+                    if color::convert_file_to_srgb(&thumb.unwrap(), &profile).unwrap() {
+                        converted += 1;
+                    }
+                }
+                println!(
+                    "COLOR_PERF ffmpeg_style_convert_serial samples={converted} secs={:.3} per_image_ms={:.2}",
+                    convert_started.elapsed().as_secs_f64(),
+                    convert_started.elapsed().as_secs_f64() * 1000.0 / converted.max(1) as f64
+                );
+
+                // 与 prefetch 实际使用的并行后处理一致。
+                let jobs = paths
+                    .iter()
+                    .take(200)
+                    .map(|path| {
+                        let bytes = std::fs::metadata(path).unwrap().len();
+                        ThumbJob {
+                            source: path.clone(),
+                            target: thumb_target(path, &cache, 1, bytes, 1),
+                            alpha: false,
+                        }
+                    })
+                    .collect::<Vec<_>>();
+                let parallel_started = Instant::now();
+                let (converted, failed) = color_manage_prefetched(
+                    &jobs,
+                    &HashMap::new(),
+                    &AtomicBool::new(false),
+                );
+                println!(
+                    "COLOR_PERF ffmpeg_style_convert_parallel samples={converted} failed={failed} secs={:.3} per_image_ms={:.2}",
+                    parallel_started.elapsed().as_secs_f64(),
+                    parallel_started.elapsed().as_secs_f64() * 1000.0 / converted.max(1) as f64
+                );
+            }
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -4,8 +4,71 @@ use crate::format::{
     is_animation_container, is_remote_asset, open_asset_with_system, video_fact_rows, video_meta,
 };
 use crate::theme::*;
+use kanalib_core::color::{self, PreviewOutcome};
 
 pub(crate) const VIEWER_CONTEXT: &str = "KanalibViewer";
+
+/// On-demand sRGB preview for the viewer's "original" mode. Previews are
+/// per-image, outside the thumbnail budget, and released when the viewer
+/// switches image or leaves original mode.
+#[derive(Clone, Debug)]
+struct PendingPreview {
+    target: PathBuf,
+    epoch: u64,
+}
+
+#[derive(Clone, Debug)]
+enum ViewerPreview {
+    Pending(PendingPreview),
+    Ready(PathBuf),
+    /// Source is sRGB (or untagged); the original file can be shown directly.
+    Passthrough,
+    Failed,
+}
+
+fn viewer_previews() -> &'static std::sync::Mutex<HashMap<PathBuf, ViewerPreview>> {
+    static PREVIEWS: std::sync::OnceLock<
+        std::sync::Mutex<HashMap<PathBuf, ViewerPreview>>,
+    > = std::sync::OnceLock::new();
+    PREVIEWS.get_or_init(|| std::sync::Mutex::new(HashMap::new()))
+}
+
+fn next_preview_epoch() -> u64 {
+    static EPOCH: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    EPOCH.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+}
+
+fn preview_state(path: &Path) -> Option<ViewerPreview> {
+    viewer_previews().lock().unwrap().get(path).cloned()
+}
+
+fn viewer_preview_target(path: &Path, cache_dir: &Path) -> Option<PathBuf> {
+    let metadata = std::fs::metadata(path).ok()?;
+    let bytes = metadata.len();
+    let mtime = metadata
+        .modified()
+        .ok()
+        .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
+        .map(|duration| duration.as_secs())
+        .unwrap_or(0);
+    Some(color::preview_target(path, cache_dir, mtime, bytes))
+}
+
+fn release_viewer_preview(path: &Path, cx: &mut App) {
+    let state = viewer_previews().lock().unwrap().remove(path);
+    let target = match state {
+        Some(ViewerPreview::Pending(pending)) => Some(pending.target),
+        Some(ViewerPreview::Ready(target)) => Some(target),
+        _ => None,
+    };
+    if let Some(target) = target {
+        let resource = Resource::from(target.clone());
+        cx.remove_asset::<gpui::ImageAssetLoader>(&resource);
+        cx.remove_asset::<gpui::ImgResourceLoader>(&resource);
+        let _ = std::fs::remove_file(&target);
+    }
+}
+
 
 pub(crate) fn viewer_caption(asset: &Asset) -> SharedString {
     let general = asset
@@ -99,6 +162,117 @@ impl KanalibApp {
             cx.remove_asset::<gpui::ImageAssetLoader>(&resource);
             cx.remove_asset::<gpui::ImgResourceLoader>(&resource);
         }
+        release_viewer_preview(path, cx);
+    }
+
+    /// Start the background sRGB conversion for an original-mode image. Until
+    /// it finishes the viewer keeps showing the thumbnail, so the UI thread
+    /// never decodes or converts a full-resolution image.
+    pub(crate) fn request_viewer_preview(&mut self, path: &Path, cx: &mut Context<Self>) {
+        if viewer_previews().lock().unwrap().contains_key(path) {
+            return;
+        }
+        let Some(target) = viewer_preview_target(path, &self.state.cache_dir()) else {
+            log::warn!("viewer preview: cannot stat {}", path.display());
+            return;
+        };
+        let epoch = next_preview_epoch();
+        viewer_previews().lock().unwrap().insert(
+            path.to_path_buf(),
+            ViewerPreview::Pending(PendingPreview {
+                target: target.clone(),
+                epoch,
+            }),
+        );
+        let source = path.to_path_buf();
+        let task_source = source.clone();
+        let task_target = target.clone();
+        let task = cx
+            .background_executor()
+            .spawn(async move { color::prepare_preview(&task_source, &task_target) });
+        let weak = cx.entity().downgrade();
+        cx.spawn(async move |_, cx| {
+            let result = task.await.map_err(|error| format!("{error:#}"));
+            let _ = weak.update(cx, |app, cx| {
+                app.finish_viewer_preview(&source, epoch, &target, result, cx)
+            });
+        })
+        .detach();
+    }
+
+    fn finish_viewer_preview(
+        &mut self,
+        source: &Path,
+        epoch: u64,
+        target: &Path,
+        result: Result<PreviewOutcome, String>,
+        cx: &mut Context<Self>,
+    ) {
+        let pending = {
+            let previews = viewer_previews().lock().unwrap();
+            match previews.get(source) {
+                Some(ViewerPreview::Pending(pending)) if pending.epoch == epoch => pending.clone(),
+                Some(ViewerPreview::Pending(_)) => return,
+                Some(_) => return,
+                None => {
+                    // Released while the background task was running; remove
+                    // anything it managed to write.
+                    if matches!(result, Ok(PreviewOutcome::Converted)) {
+                        let _ = std::fs::remove_file(target);
+                    }
+                    return;
+                }
+            }
+        };
+        let wanted = self.viewer_original
+            && self
+                .viewer_at
+                .and_then(|at| self.viewer_slides.get(at))
+                .is_some_and(|(path, _)| path == source);
+        match result {
+            Ok(PreviewOutcome::Unchanged) => {
+                if wanted {
+                    viewer_previews()
+                        .lock()
+                        .unwrap()
+                        .insert(source.to_path_buf(), ViewerPreview::Passthrough);
+                    cx.notify();
+                } else {
+                    viewer_previews().lock().unwrap().remove(source);
+                }
+            }
+            Ok(PreviewOutcome::Converted) => {
+                if wanted && pending.target.exists() {
+                    viewer_previews().lock().unwrap().insert(
+                        source.to_path_buf(),
+                        ViewerPreview::Ready(pending.target.clone()),
+                    );
+                    cx.notify();
+                } else {
+                    viewer_previews().lock().unwrap().remove(source);
+                    let _ = std::fs::remove_file(&pending.target);
+                }
+            }
+            Err(error) => {
+                log::warn!("viewer preview {}: {error}", source.display());
+                if wanted {
+                    viewer_previews()
+                        .lock()
+                        .unwrap()
+                        .insert(source.to_path_buf(), ViewerPreview::Failed);
+                    push_toast(
+                        &self.toaster,
+                        cx,
+                        "无法生成 sRGB 预览，已显示缩略图",
+                        Severity::Warning,
+                    );
+                    cx.notify();
+                } else {
+                    viewer_previews().lock().unwrap().remove(source);
+                    let _ = std::fs::remove_file(&pending.target);
+                }
+            }
+        }
     }
 
     pub(crate) fn close_viewer(&mut self, cx: &mut Context<Self>) {
@@ -135,6 +309,12 @@ impl KanalibApp {
         {
             self.remove_viewer_asset(&previous, cx);
         }
+        if self.viewer_original
+            && let Some((path, _)) = self.viewer_slides.get(at)
+        {
+            let path = path.clone();
+            self.request_viewer_preview(&path, cx);
+        }
         cx.notify();
     }
 
@@ -168,6 +348,9 @@ impl KanalibApp {
         }
         self.viewer_original = !self.viewer_original;
         self.remove_viewer_asset(&path, cx);
+        if self.viewer_original {
+            self.request_viewer_preview(&path, cx);
+        }
         cx.notify();
     }
 
@@ -228,10 +411,18 @@ impl KanalibApp {
         };
         // 视频固定首帧；远端虚拟路径没有本地原图，同样不能切“原图”。
         let show_original = !is_video && !remote;
-        let source = if show_original && self.viewer_original {
-            Some(path.clone())
-        } else {
-            thumb.or_else(|| show_original.then(|| path.clone()))
+        // 原图模式绝不直接交给 ImageViewer 未转换的广色域文件：
+        // sRGB 源（Passthrough）才显示原图，其余先等后台生成的 sRGB 预览；
+        // 等待/失败期间继续用缩略图。
+        let preview = (show_original && self.viewer_original)
+            .then(|| preview_state(&path))
+            .flatten();
+        let source = match &preview {
+            Some(ViewerPreview::Ready(preview)) => Some(preview.clone()),
+            Some(ViewerPreview::Passthrough) => Some(path.clone()),
+            _ => thumb
+                .clone()
+                .or_else(|| (!self.viewer_original && show_original).then(|| path.clone())),
         };
         let count = self.viewer_slides.len();
         let animated = is_animation_container(&path);
@@ -261,7 +452,25 @@ impl KanalibApp {
         if remote {
             hint_parts.push("远端只读 · 未下载原图");
         }
+        if show_original && self.viewer_original {
+            match &preview {
+                Some(ViewerPreview::Ready(_)) => hint_parts.push("广色域原图 · 已转换到 sRGB"),
+                Some(ViewerPreview::Pending(_)) => hint_parts.push("正在生成 sRGB 预览"),
+                Some(ViewerPreview::Failed) => hint_parts.push("sRGB 预览失败 · 显示缩略图"),
+                Some(ViewerPreview::Passthrough) | None => {}
+            }
+        }
         let hint = hint_parts.join(" · ");
+        let empty_label = if show_original && self.viewer_original {
+            match &preview {
+                Some(ViewerPreview::Failed) => "无法生成 sRGB 预览（未显示未转换原图）",
+                _ => "正在生成 sRGB 预览…",
+            }
+        } else if is_video {
+            "暂无视频首帧（生成首帧需要 FFmpeg）"
+        } else {
+            "远端资产未下载原图，暂无预览"
+        };
         let preview: AnyElement = match source {
             Some(source) => ImageViewer::new("kanalib-viewer", source).into_any_element(),
             None => div()
@@ -271,11 +480,7 @@ impl KanalibApp {
                 .justify_center()
                 .text_sm()
                 .text_color(colors.subtle)
-                .child(if is_video {
-                    "暂无视频首帧（生成首帧需要 FFmpeg）"
-                } else {
-                    "远端资产未下载原图，暂无预览"
-                })
+                .child(empty_label)
                 .into_any_element(),
         };
         let title = path
