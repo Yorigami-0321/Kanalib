@@ -1,9 +1,9 @@
-use crate::*;
 use crate::app::{KanalibApp, push_toast};
 use crate::format::{
     is_animation_container, is_remote_asset, open_asset_with_system, video_fact_rows, video_meta,
 };
 use crate::theme::*;
+use crate::*;
 use kanalib_core::color::{self, PreviewOutcome};
 
 pub(crate) const VIEWER_CONTEXT: &str = "KanalibViewer";
@@ -27,9 +27,8 @@ enum ViewerPreview {
 }
 
 fn viewer_previews() -> &'static std::sync::Mutex<HashMap<PathBuf, ViewerPreview>> {
-    static PREVIEWS: std::sync::OnceLock<
-        std::sync::Mutex<HashMap<PathBuf, ViewerPreview>>,
-    > = std::sync::OnceLock::new();
+    static PREVIEWS: std::sync::OnceLock<std::sync::Mutex<HashMap<PathBuf, ViewerPreview>>> =
+        std::sync::OnceLock::new();
     PREVIEWS.get_or_init(|| std::sync::Mutex::new(HashMap::new()))
 }
 
@@ -69,7 +68,6 @@ fn release_viewer_preview(path: &Path, cx: &mut App) {
     }
 }
 
-
 pub(crate) fn viewer_caption(asset: &Asset) -> SharedString {
     let general = asset
         .all_tags()
@@ -101,11 +99,12 @@ pub(crate) fn viewer_caption(asset: &Asset) -> SharedString {
 impl KanalibApp {
     pub(crate) fn open_viewer_at(&mut self, path: &Path) {
         let (slides, at) = {
+            let indices = self.current_visible_indices();
             let shared = self.state.shared.lock().unwrap();
             let assets = shared.assets.read().unwrap();
             let mut slides = Vec::new();
             let mut at = None;
-            for &index in self.view.visible_indices.iter() {
+            for &index in indices.iter() {
                 let Some(asset) = assets.get(index) else {
                     continue;
                 };
@@ -114,11 +113,11 @@ impl KanalibApp {
                 }
                 slides.push((asset.path.clone(), viewer_caption(asset)));
             }
-            if at.is_none() {
-                if let Some(asset) = assets.iter().find(|asset| asset.path.as_path() == path) {
-                    slides = vec![(asset.path.clone(), viewer_caption(asset))];
-                    at = Some(0);
-                }
+            if at.is_none()
+                && let Some(asset) = assets.iter().find(|asset| asset.path.as_path() == path)
+            {
+                slides = vec![(asset.path.clone(), viewer_caption(asset))];
+                at = Some(0);
             }
             (slides, at)
         };
@@ -136,14 +135,7 @@ impl KanalibApp {
             self.viewer_at = Some(at);
             self.focus_viewer_pending = true;
             self.viewer_original = false;
-            self.viewer_origin_filter = Some(
-                self.state
-                    .shared
-                    .lock()
-                    .unwrap()
-                    .filter
-                    .clone(),
-            );
+            self.viewer_origin_filter = Some(self.state.shared.lock().unwrap().filter.clone());
             self.viewer_origin_search = self.last_search.clone();
         }
     }
@@ -374,10 +366,10 @@ impl KanalibApp {
     }
 
     pub(crate) fn take_viewer_cleanup(&mut self) -> Vec<PathBuf> {
-        if let Some(at) = self.viewer_at {
-            if let Some((path, _)) = self.viewer_slides.get(at) {
-                self.viewer_viewed.insert(path.clone());
-            }
+        if let Some(at) = self.viewer_at
+            && let Some((path, _)) = self.viewer_slides.get(at)
+        {
+            self.viewer_viewed.insert(path.clone());
         }
         self.viewer_at = None;
         self.viewer_slides.clear();
@@ -428,9 +420,8 @@ impl KanalibApp {
         let animated = is_animation_container(&path);
         let external_path = path.clone();
         let external_toaster = self.toaster.clone();
-        let can_external = (is_video || animated)
-            && !remote
-            && kanalib_core::open::can_open_externally(&path);
+        let can_external =
+            (is_video || animated) && !remote && kanalib_core::open::can_open_externally(&path);
         let external_label = if is_video {
             "用系统播放器打开"
         } else {
@@ -551,8 +542,7 @@ impl KanalibApp {
                                 .size(ControlSize::Sm)
                                 .variant(ButtonVariant::Ghost)
                                 .on_click(move |_, _, cx| {
-                                    let _ =
-                                        back_button.update(cx, |app, cx| app.close_viewer(cx));
+                                    let _ = back_button.update(cx, |app, cx| app.close_viewer(cx));
                                 }),
                             )
                             .child(
@@ -579,7 +569,11 @@ impl KanalibApp {
                             .children(show_original.then(|| {
                                 Button::new(
                                     "viewer-source",
-                                    if self.viewer_original { "预览" } else { "原图" },
+                                    if self.viewer_original {
+                                        "预览"
+                                    } else {
+                                        "原图"
+                                    },
                                 )
                                 .size(ControlSize::Sm)
                                 .variant(ButtonVariant::Ghost)
@@ -594,9 +588,7 @@ impl KanalibApp {
                                     .variant(ButtonVariant::Ghost)
                                     .icon(IconName::Play)
                                     .on_click(move |_, _, cx| {
-                                        if let Err(error) =
-                                            open_asset_with_system(&external_path)
-                                        {
+                                        if let Err(error) = open_asset_with_system(&external_path) {
                                             push_toast(
                                                 &external_toaster,
                                                 cx,
@@ -619,8 +611,8 @@ impl KanalibApp {
                                     .size(ControlSize::Sm)
                                     .tooltip("关闭 (Esc)")
                                     .on_click(move |_, _, cx| {
-                                        let _ = close_button
-                                            .update(cx, |app, cx| app.close_viewer(cx));
+                                        let _ =
+                                            close_button.update(cx, |app, cx| app.close_viewer(cx));
                                     }),
                             ),
                     ),
@@ -656,9 +648,8 @@ impl KanalibApp {
                                     .tooltip("上一张 (←)")
                                     .disabled(prev_disabled)
                                     .on_click(move |_, _, cx| {
-                                        let _ = prev_button.update(cx, |app, cx| {
-                                            app.step_viewer(-1, false, cx)
-                                        });
+                                        let _ = prev_button
+                                            .update(cx, |app, cx| app.step_viewer(-1, false, cx));
                                     }),
                             )
                             .child(
@@ -667,9 +658,8 @@ impl KanalibApp {
                                     .tooltip("下一张 (→)")
                                     .disabled(next_disabled)
                                     .on_click(move |_, _, cx| {
-                                        let _ = next_button.update(cx, |app, cx| {
-                                            app.step_viewer(1, false, cx)
-                                        });
+                                        let _ = next_button
+                                            .update(cx, |app, cx| app.step_viewer(1, false, cx));
                                     }),
                             )
                             .child(
@@ -691,5 +681,4 @@ impl KanalibApp {
             .into_any_element(),
         )
     }
-
 }

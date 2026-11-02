@@ -1,7 +1,7 @@
-use crate::*;
 use crate::app::{KanalibApp, push_toast};
 use crate::platform::*;
 use crate::theme::*;
+use crate::*;
 use kanalib_core::model::{Collection, DuplicateNameError};
 
 pub(crate) const SIDEBAR_MIN_WIDTH: f32 = 200.;
@@ -27,11 +27,7 @@ pub(crate) enum OrgDialog {
     RenameSavedSearch { id: i64, name: String },
     NewAlbum,
     RenameAlbum { id: i64, name: String },
-    DeleteAlbum {
-        id: i64,
-        name: String,
-        count: usize,
-    },
+    DeleteAlbum { id: i64, name: String, count: usize },
 }
 
 /// 相册列表与「资产属于哪些相册」的只读缓存。
@@ -63,7 +59,10 @@ pub(crate) fn canonicalize_org_name(name: &str) -> String {
 
 /// 同名冲突提示统一文案；判定始终来自核心 `DuplicateNameError`，不看错误字符串。
 pub(crate) fn duplicate_name_message(name: &str) -> String {
-    format!("名称「{}」已被占用；未覆盖已有条目，请换一个名称", name.trim())
+    format!(
+        "名称「{}」已被占用；未覆盖已有条目，请换一个名称",
+        name.trim()
+    )
 }
 
 pub(crate) fn source_label(root: &Path, aliases: &HashMap<PathBuf, String>) -> String {
@@ -188,7 +187,10 @@ pub(crate) fn source_row(
         Some(status) if status.error.is_some() => ("错误", colors.warning),
         _ => ("", colors.subtle),
     };
-    let aria = match (status_text, status.as_ref().and_then(|status| status.error.as_deref())) {
+    let aria = match (
+        status_text,
+        status.as_ref().and_then(|status| status.error.as_deref()),
+    ) {
         ("", _) => root.display().to_string(),
         (text, Some(error)) => format!("{}（{text}：{error}）", root.display()),
         (text, None) => format!("{}（{text}）", root.display()),
@@ -240,12 +242,7 @@ pub(crate) fn source_row(
                     .items_center()
                     .gap(px(3.))
                     .child(div().size(px(6.)).rounded_full().bg(status_color))
-                    .child(
-                        div()
-                            .text_xs()
-                            .text_color(status_color)
-                            .child(status_text),
-                    )
+                    .child(div().text_xs().text_color(status_color).child(status_text))
             }))
             .child(
                 div()
@@ -548,10 +545,7 @@ impl KanalibApp {
     }
 
     pub(crate) fn collapse_sidebar_sections(&mut self, cx: &mut Context<Self>) {
-        self.sidebar_collapsed = SIDEBAR_SECTIONS
-            .iter()
-            .map(|key| key.to_string())
-            .collect();
+        self.sidebar_collapsed = SIDEBAR_SECTIONS.iter().map(|key| key.to_string()).collect();
         let mut keys = self.sidebar_collapsed.iter().cloned().collect::<Vec<_>>();
         keys.sort();
         self.persist_setting("ui.sidebar_collapsed", keys.join(","));
@@ -952,170 +946,167 @@ impl KanalibApp {
                 ),
         );
         if self.sidebar_section_open("tags") {
-        body = body.child(
-            div()
-                .px(px(8.))
-                .pb(px(4.))
-                .child(Input::new(tag_search).clearable().least("搜索标签")),
-        );
-        let mut category_chips = div()
-            .flex()
-            .flex_wrap()
-            .gap(px(3.))
-            .px(px(8.))
-            .pb(px(4.));
-        for (key, label) in [
-            ("general", "通用"),
-            ("character", "角色"),
-            ("copyright", "作品"),
-            ("style", "风格"),
-            ("meta", "元数据"),
-            ("manual", "手工"),
-        ] {
-            let this = this.clone();
-            let active = self.tag_pane_category == key;
-            category_chips = category_chips.child(
-                div()
-                    .id(SharedString::from(format!("tag-category-{key}")))
-                    .px(px(6.))
-                    .py(px(2.))
-                    .rounded(px(4.))
-                    .text_xs()
-                    .cursor_pointer()
-                    .text_color(if active { colors.fg } else { colors.muted })
-                    .when(active, |chip| chip.bg(colors.selection))
-                    .hover(move |chip| chip.bg(colors.hover))
-                    .on_click(move |_, _, cx| {
-                        let _ = this.update(cx, |app, cx| {
-                            app.tag_pane_category = key.to_string();
-                            app.tag_pane_expanded = false;
-                            cx.notify();
-                        });
-                    })
-                    .child(label),
-            );
-        }
-        body = body.child(category_chips);
-
-        let needle = tag_query.trim().to_lowercase();
-        let mut pane_tags = tag_vocab
-            .iter()
-            .filter(|tag| {
-                tag.count > 0
-                    && tag.category == self.tag_pane_category
-                    && !blocked_tags.contains(&tag.name)
-                    && (needle.is_empty() || tag.name.to_lowercase().contains(&needle))
-            })
-            .collect::<Vec<_>>();
-        if self.tag_pane_sort_name {
-            pane_tags.sort_by(|a, b| a.name.cmp(&b.name));
-        } else {
-            pane_tags.sort_by(|a, b| b.count.cmp(&a.count).then_with(|| a.name.cmp(&b.name)));
-        }
-        let total = pane_tags.len();
-        let limit = if self.tag_pane_expanded { 200 } else { 10 };
-        pane_tags.truncate(limit);
-        if pane_tags.is_empty() {
             body = body.child(
                 div()
                     .px(px(8.))
                     .pb(px(4.))
-                    .text_xs()
-                    .text_color(colors.subtle)
-                    .child(if needle.is_empty() {
-                        "这个类别还没有标签"
-                    } else {
-                        "没有匹配的标签"
-                    }),
+                    .child(Input::new(tag_search).clearable().least("搜索标签")),
             );
-        }
-        for tag in pane_tags {
-            let name = tag.name.clone();
-            let display_name = name.clone();
-            let count = tag.count;
-            let active = library && filter == &Filter::Tag(name.clone());
-            let this_click = this.clone();
-            let state_click = state.clone();
-            let search_click = search.clone();
-            let mut row = div()
-                .id(SharedString::from(format!("filter-tag-{name}")))
-                .role(Role::Button)
-                .aria_label(SharedString::from(format!("#{name}")))
-                .flex()
-                .items_center()
-                .justify_between()
-                .px(px(8.))
-                .py(px(5.))
-                .rounded(px(5.))
-                .cursor_pointer()
-                .hover(move |row| row.bg(colors.hover));
-            if active {
-                row = row.bg(colors.selection);
-            }
-            body = body.child(
-                row.on_click(move |event, _, cx| {
-                    let modifiers = match event {
-                        ClickEvent::Mouse(event) => event.down.modifiers,
-                        ClickEvent::Keyboard(_) | ClickEvent::Touch(_) => Modifiers::default(),
-                    };
-                    if modifiers.secondary() || modifiers.shift {
-                        let current = search_click.read(cx).text().to_string();
-                        let next = if current.trim().is_empty() {
-                            format!("tag:{name}")
-                        } else {
-                            format!("{current} tag:{name}")
-                        };
-                        search_click.update(cx, |input, cx| input.set_text(next, cx));
-                    } else {
-                        state_click.set_filter(Filter::Tag(name.clone()));
-                    }
-                    let _ = this_click.update(cx, |app, cx| {
-                        app.screen = Screen::Library;
-                        app.dedup_confirm = None;
-                        cx.notify();
-                    });
-                })
-                .child(
+            let mut category_chips = div().flex().flex_wrap().gap(px(3.)).px(px(8.)).pb(px(4.));
+            for (key, label) in [
+                ("general", "通用"),
+                ("character", "角色"),
+                ("copyright", "作品"),
+                ("style", "风格"),
+                ("meta", "元数据"),
+                ("manual", "手工"),
+            ] {
+                let this = this.clone();
+                let active = self.tag_pane_category == key;
+                category_chips = category_chips.child(
                     div()
-                        .flex_1()
-                        .min_w(px(0.))
-                        .truncate()
+                        .id(SharedString::from(format!("tag-category-{key}")))
+                        .px(px(6.))
+                        .py(px(2.))
+                        .rounded(px(4.))
                         .text_xs()
-                        .text_color(colors.fg)
-                        .child(format!("#{display_name}")),
-                )
-                .child(
+                        .cursor_pointer()
+                        .text_color(if active { colors.fg } else { colors.muted })
+                        .when(active, |chip| chip.bg(colors.selection))
+                        .hover(move |chip| chip.bg(colors.hover))
+                        .on_click(move |_, _, cx| {
+                            let _ = this.update(cx, |app, cx| {
+                                app.tag_pane_category = key.to_string();
+                                app.tag_pane_expanded = false;
+                                cx.notify();
+                            });
+                        })
+                        .child(label),
+                );
+            }
+            body = body.child(category_chips);
+
+            let needle = tag_query.trim().to_lowercase();
+            let mut pane_tags = tag_vocab
+                .iter()
+                .filter(|tag| {
+                    tag.count > 0
+                        && tag.category == self.tag_pane_category
+                        && !blocked_tags.contains(&tag.name)
+                        && (needle.is_empty() || tag.name.to_lowercase().contains(&needle))
+                })
+                .collect::<Vec<_>>();
+            if self.tag_pane_sort_name {
+                pane_tags.sort_by(|a, b| a.name.cmp(&b.name));
+            } else {
+                pane_tags.sort_by(|a, b| b.count.cmp(&a.count).then_with(|| a.name.cmp(&b.name)));
+            }
+            let total = pane_tags.len();
+            let limit = if self.tag_pane_expanded { 200 } else { 10 };
+            pane_tags.truncate(limit);
+            if pane_tags.is_empty() {
+                body = body.child(
                     div()
-                        .flex_none()
+                        .px(px(8.))
+                        .pb(px(4.))
                         .text_xs()
                         .text_color(colors.subtle)
-                        .child(count.to_string()),
-                ),
-            );
-        }
-        if total > limit {
-            let this_more = this.clone();
-            body = body.child(
-                div().px(px(8.)).pb(px(4.)).child(
-                    Button::new(
-                        "tag-pane-more",
-                        if self.tag_pane_expanded {
-                            "收起".to_string()
+                        .child(if needle.is_empty() {
+                            "这个类别还没有标签"
                         } else {
-                            format!("查看更多（{total}）")
-                        },
+                            "没有匹配的标签"
+                        }),
+                );
+            }
+            for tag in pane_tags {
+                let name = tag.name.clone();
+                let display_name = name.clone();
+                let count = tag.count;
+                let active = library && filter == &Filter::Tag(name.clone());
+                let this_click = this.clone();
+                let search_click = search.clone();
+                let mut row = div()
+                    .id(SharedString::from(format!("filter-tag-{name}")))
+                    .role(Role::Button)
+                    .aria_label(SharedString::from(format!("#{name}")))
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .px(px(8.))
+                    .py(px(5.))
+                    .rounded(px(5.))
+                    .cursor_pointer()
+                    .hover(move |row| row.bg(colors.hover));
+                if active {
+                    row = row.bg(colors.selection);
+                }
+                body = body.child(
+                    row.on_click(move |event, _, cx| {
+                        let modifiers = match event {
+                            ClickEvent::Mouse(event) => event.down.modifiers,
+                            ClickEvent::Keyboard(_) | ClickEvent::Touch(_) => Modifiers::default(),
+                        };
+                        if modifiers.secondary() || modifiers.shift {
+                            let current = search_click.read(cx).text().to_string();
+                            let next = if current.trim().is_empty() {
+                                format!("tag:{name}")
+                            } else {
+                                format!("{current} tag:{name}")
+                            };
+                            search_click.update(cx, |input, cx| input.set_text(next, cx));
+                            let _ = this_click.update(cx, |app, cx| {
+                                app.screen = Screen::Library;
+                                app.dedup_confirm = None;
+                                cx.notify();
+                            });
+                        } else {
+                            let tag = name.clone();
+                            let _ = this_click.update(cx, |app, cx| {
+                                app.set_filter(Filter::Tag(tag), cx);
+                                app.dedup_confirm = None;
+                            });
+                        }
+                    })
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w(px(0.))
+                            .truncate()
+                            .text_xs()
+                            .text_color(colors.fg)
+                            .child(format!("#{display_name}")),
                     )
-                    .size(ControlSize::Sm)
-                    .on_click(move |_, _, cx| {
-                        let _ = this_more.update(cx, |app, cx| {
-                            app.tag_pane_expanded = !app.tag_pane_expanded;
-                            cx.notify();
-                        });
-                    }),
-                ),
-            );
-        }
-
+                    .child(
+                        div()
+                            .flex_none()
+                            .text_xs()
+                            .text_color(colors.subtle)
+                            .child(count.to_string()),
+                    ),
+                );
+            }
+            if total > limit {
+                let this_more = this.clone();
+                body = body.child(
+                    div().px(px(8.)).pb(px(4.)).child(
+                        Button::new(
+                            "tag-pane-more",
+                            if self.tag_pane_expanded {
+                                "收起".to_string()
+                            } else {
+                                format!("查看更多（{total}）")
+                            },
+                        )
+                        .size(ControlSize::Sm)
+                        .on_click(move |_, _, cx| {
+                            let _ = this_more.update(cx, |app, cx| {
+                                app.tag_pane_expanded = !app.tag_pane_expanded;
+                                cx.notify();
+                            });
+                        }),
+                    ),
+                );
+            }
         }
 
         let screen_title = match screen {
@@ -1148,16 +1139,14 @@ impl KanalibApp {
                     }),
             );
         if scanning {
-            more_menu = more_menu.item(
-                MenuItem::new("停止扫描")
-                    .icon(IconName::Square)
-                    .on_click(move |_, cx| {
-                        let _ = this_stop.update(cx, |app, cx| {
-                            app.state.stop();
-                            cx.notify();
-                        });
-                    }),
-            );
+            more_menu = more_menu.item(MenuItem::new("停止扫描").icon(IconName::Square).on_click(
+                move |_, cx| {
+                    let _ = this_stop.update(cx, |app, cx| {
+                        app.state.stop();
+                        cx.notify();
+                    });
+                },
+            ));
         }
         if counts.failed > 0 {
             more_menu = more_menu.item(
@@ -1218,64 +1207,54 @@ impl KanalibApp {
                     .hover(move |style| style.bg(colors.accent)),
             )
             .child(
-                canvas(
-                    |_, _, _| {},
-                    {
-                        let this = this.clone();
-                        move |_, _, window, _| {
-                            let pressed = this.clone();
-                            let panel_right = ACTIVITY_BAR_WIDTH + panel_width;
-                            window.on_mouse_event(
-                                move |event: &MouseDownEvent, phase, _, cx| {
-                                    if phase != DispatchPhase::Capture
-                                        || event.button != MouseButton::Left
-                                        || event.position.y.as_f32() < TITLEBAR_HEIGHT
-                                        || (event.position.x.as_f32() - panel_right).abs() > 4.
-                                    {
-                                        return;
-                                    }
-                                    cx.stop_propagation();
-                                    let _ = pressed.update(cx, |app, cx| {
-                                        app.sidebar_resizing = true;
-                                        cx.notify();
-                                    });
-                                },
-                            );
-                            let moved = this.clone();
-                            window.on_mouse_event(
-                                move |event: &MouseMoveEvent, phase, _, cx| {
-                                    if phase != DispatchPhase::Bubble {
-                                        return;
-                                    }
-                                    if !moved.read(cx).sidebar_resizing {
-                                        return;
-                                    }
-                                    let width =
-                                        event.position.x.as_f32() - ACTIVITY_BAR_WIDTH;
-                                    let _ = moved.update(cx, |app, cx| {
-                                        app.set_sidebar_width(width, cx)
-                                    });
-                                },
-                            );
-                            let lifted = this.clone();
-                            window.on_mouse_event(move |_: &MouseUpEvent, phase, _, cx| {
-                                if phase != DispatchPhase::Bubble {
-                                    return;
-                                }
-                                let _ = lifted.update(cx, |app, cx| {
-                                    if app.sidebar_resizing {
-                                        app.sidebar_resizing = false;
-                                        app.persist_setting(
-                                            "ui.sidebar_width",
-                                            format!("{:.0}", app.sidebar_width),
-                                        );
-                                        cx.notify();
-                                    }
-                                });
+                canvas(|_, _, _| {}, {
+                    let this = this.clone();
+                    move |_, _, window, _| {
+                        let pressed = this.clone();
+                        let panel_right = ACTIVITY_BAR_WIDTH + panel_width;
+                        window.on_mouse_event(move |event: &MouseDownEvent, phase, _, cx| {
+                            if phase != DispatchPhase::Capture
+                                || event.button != MouseButton::Left
+                                || event.position.y.as_f32() < TITLEBAR_HEIGHT
+                                || (event.position.x.as_f32() - panel_right).abs() > 4.
+                            {
+                                return;
+                            }
+                            cx.stop_propagation();
+                            let _ = pressed.update(cx, |app, cx| {
+                                app.sidebar_resizing = true;
+                                cx.notify();
                             });
-                        }
-                    },
-                )
+                        });
+                        let moved = this.clone();
+                        window.on_mouse_event(move |event: &MouseMoveEvent, phase, _, cx| {
+                            if phase != DispatchPhase::Bubble {
+                                return;
+                            }
+                            if !moved.read(cx).sidebar_resizing {
+                                return;
+                            }
+                            let width = event.position.x.as_f32() - ACTIVITY_BAR_WIDTH;
+                            let _ = moved.update(cx, |app, cx| app.set_sidebar_width(width, cx));
+                        });
+                        let lifted = this.clone();
+                        window.on_mouse_event(move |_: &MouseUpEvent, phase, _, cx| {
+                            if phase != DispatchPhase::Bubble {
+                                return;
+                            }
+                            let _ = lifted.update(cx, |app, cx| {
+                                if app.sidebar_resizing {
+                                    app.sidebar_resizing = false;
+                                    app.persist_setting(
+                                        "ui.sidebar_width",
+                                        format!("{:.0}", app.sidebar_width),
+                                    );
+                                    cx.notify();
+                                }
+                            });
+                        });
+                    }
+                })
                 .absolute()
                 .top_0()
                 .left_0()
@@ -1478,8 +1457,7 @@ impl KanalibApp {
                             id,
                             name: rename_name.clone(),
                         };
-                        let _ = menu_rename
-                            .update(cx, |app, cx| app.open_org_dialog(dialog, cx));
+                        let _ = menu_rename.update(cx, |app, cx| app.open_org_dialog(dialog, cx));
                     }),
             )
             .item(
@@ -1571,11 +1549,8 @@ impl KanalibApp {
                     ),
             )
             .child(
-                OverflowMenu::new(
-                    SharedString::from(format!("saved-search-menu-{id}")),
-                    menu,
-                )
-                .tooltip("管理智能集合"),
+                OverflowMenu::new(SharedString::from(format!("saved-search-menu-{id}")), menu)
+                    .tooltip("管理智能集合"),
             )
             .into_any_element()
     }
@@ -1664,7 +1639,11 @@ impl KanalibApp {
                     .gap(px(4.))
                     .px(px(4.))
                     .py(px(2.))
-                    .child(Icon::new(IconName::Folder).size(IconSize::Xs).color(colors.subtle))
+                    .child(
+                        Icon::new(IconName::Folder)
+                            .size(IconSize::Xs)
+                            .color(colors.subtle),
+                    )
                     .child(
                         div()
                             .flex_1()
@@ -1683,11 +1662,8 @@ impl KanalibApp {
                     ),
             )
             .child(
-                OverflowMenu::new(
-                    SharedString::from(format!("album-menu-{id}")),
-                    menu,
-                )
-                .tooltip("管理相册"),
+                OverflowMenu::new(SharedString::from(format!("album-menu-{id}")), menu)
+                    .tooltip("管理相册"),
             )
             .into_any_element()
     }
@@ -1702,13 +1678,13 @@ impl KanalibApp {
         let dialog = self.org_dialog.clone()?;
         let epoch = self.org_dialog_epoch;
         let mut prompt = |title: &'static str,
-                      placeholder: &'static str,
-                      initial: String,
-                      label: String,
-                      submit_label: &'static str,
-                      target: OrgDialog,
-                      close: Entity<Self>,
-                      submit: Entity<Self>| {
+                          placeholder: &'static str,
+                          initial: String,
+                          label: String,
+                          submit_label: &'static str,
+                          target: OrgDialog,
+                          close: Entity<Self>,
+                          submit: Entity<Self>| {
             let holder = window.use_keyed_state(
                 SharedString::from(format!("kanalib-org-field-{epoch}")),
                 cx,
@@ -1817,7 +1793,9 @@ impl KanalibApp {
             return;
         }
         match dialog {
-            OrgDialog::RenameSavedSearch { id, .. } => self.rename_saved_search_checked(id, &name, cx),
+            OrgDialog::RenameSavedSearch { id, .. } => {
+                self.rename_saved_search_checked(id, &name, cx)
+            }
             OrgDialog::NewAlbum => self.create_album(&name, cx),
             OrgDialog::RenameAlbum { id, .. } => self.rename_album(id, &name, cx),
             OrgDialog::DeleteAlbum { .. } => {}
@@ -2059,7 +2037,6 @@ impl KanalibApp {
         cx.notify();
     }
 }
-
 
 #[cfg(test)]
 mod tests {

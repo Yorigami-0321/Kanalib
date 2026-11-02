@@ -1,7 +1,7 @@
 use std::collections::HashSet;
 use std::path::PathBuf;
 
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 
 #[derive(Clone, Debug, Default)]
 pub struct TrashReport {
@@ -160,27 +160,11 @@ mod tests {
 
     #[test]
     fn missing_files_are_reported_for_library_cleanup() {
-        let path = std::env::temp_dir().join(format!(
-            "kanalib-trash-missing-{}.bin",
-            std::process::id()
-        ));
+        let path =
+            std::env::temp_dir().join(format!("kanalib-trash-missing-{}.bin", std::process::id()));
         let _ = std::fs::remove_file(&path);
-        let report = move_to_recycle_bin(&[path.clone()]).unwrap();
+        let report = move_to_recycle_bin(std::slice::from_ref(&path)).unwrap();
         assert_eq!(report.moved, vec![path]);
-        assert!(report.failed.is_empty());
-    }
-
-    #[test]
-    #[ignore = "writes to the user's recycle bin"]
-    fn moves_temp_file_to_recycle_bin() {
-        let path = std::env::temp_dir().join(format!(
-            "kanalib-trash-test-{}.bin",
-            std::process::id()
-        ));
-        std::fs::write(&path, b"kanalib").unwrap();
-        let report = move_to_recycle_bin(&[path.clone()]).unwrap();
-        assert!(!path.exists());
-        assert!(report.moved.contains(&path));
         assert!(report.failed.is_empty());
     }
 }

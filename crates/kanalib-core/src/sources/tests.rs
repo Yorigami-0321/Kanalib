@@ -339,7 +339,7 @@ fn remote_sources_are_listed_next_to_local_roots_and_paths_are_distinct() {
         last_sync_at: None,
         sync_cursor: None,
     };
-    let sources = source_infos(&[dir.clone()], &[record]);
+    let sources = source_infos(std::slice::from_ref(&dir), &[record]);
     assert_eq!(sources.len(), 2);
     assert_eq!(sources[0].kind, SourceKind::Local);
     assert_eq!(sources[1].kind, SourceKind::Immich);
@@ -360,8 +360,8 @@ fn remote_sources_are_listed_next_to_local_roots_and_paths_are_distinct() {
 
 #[test]
 fn read_only_local_sources_exclude_writable_scanner_roots() {
-    let record = |kind: &str, locator: &str, config: &str, read_only: bool| {
-        crate::db::SourceRecord {
+    let record =
+        |kind: &str, locator: &str, config: &str, read_only: bool| crate::db::SourceRecord {
             id: 1,
             kind: kind.to_string(),
             name: locator.to_string(),
@@ -370,8 +370,7 @@ fn read_only_local_sources_exclude_writable_scanner_roots() {
             read_only,
             last_sync_at: None,
             sync_cursor: None,
-        }
-    };
+        };
     let root = PathBuf::from("C:/lib");
 
     // 扫描器为本地根创建的 FK 记录（read_only=1 + {"path": locator}）仍可写。
@@ -679,13 +678,12 @@ fn directory_contains(dir: &Path, needle: &str) -> bool {
             if directory_contains(&path, needle) {
                 return true;
             }
-        } else if let Ok(bytes) = std::fs::read(&path) {
-            if bytes
+        } else if let Ok(bytes) = std::fs::read(&path)
+            && bytes
                 .windows(needle.len())
                 .any(|window| window == needle.as_bytes())
-            {
-                return true;
-            }
+        {
+            return true;
         }
     }
     false
@@ -887,7 +885,9 @@ fn webdav_sync_parses_tree_limits_concurrency_and_skips_sha1_grouping() {
             == Some("Basic dXNlcjpwYXNzd29yZA==")
     }));
     assert_eq!(db.source_asset_count(id).unwrap(), 8);
-    let assets = db.load_library(&[info.locator.clone()]).unwrap();
+    let assets = db
+        .load_library(std::slice::from_ref(&info.locator))
+        .unwrap();
     assert!(assets.iter().all(|asset| asset.sha1.is_none()));
     let mut dedup = DedupState::default();
     dedup.rebuild(&assets);

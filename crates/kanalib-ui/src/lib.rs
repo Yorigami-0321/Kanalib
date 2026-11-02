@@ -19,28 +19,27 @@ use gpui::{
     AnyElement, App, ClickEvent, ClipboardItem, Context, DispatchPhase, Entity, FocusHandle,
     Focusable, FontWeight, Hsla, ImageCache, ImageCacheError, ImageCacheItem, IntoElement,
     KeyBinding, Modifiers, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ObjectFit,
-    ParentElement,
-    Pixels, Render, RenderImage, Resource, Role, ScrollStrategy, SharedString, Styled, Task,
-    UniformListScrollHandle, WeakEntity, Window, canvas, div, image_cache, img, px, uniform_list,
-    white,
+    ParentElement, Pixels, Render, RenderImage, Resource, Role, ScrollStrategy, SharedString,
+    Styled, Task, UniformListScrollHandle, WeakEntity, Window, canvas, div, image_cache, img, px,
+    uniform_list, white,
 };
 #[cfg(feature = "frame-profiler")]
 use hdrhistogram::Histogram;
 
+use kanalib_core::backup;
+use kanalib_core::db::{SearchPageRequest, SearchSort};
 use kanalib_core::dedup::{
     DedupSummary, DuplicateGroup, GroupKind, ReviewState, is_protected,
     similarity_pct_from_distance,
 };
-use kanalib_core::model::{
-    Asset, Counts, DiagnosticSnapshot, Filter, RetagSummary, SavedSearch, ScanFilterConfig,
-    SearchQuery, SourceScanStatus, TagCandidateReview, TagHit, TagJobError, TagQueueStatus,
-    TagRecomputeSummary, TagReviewState, TagSummary, TagThresholds, TAG_CANDIDATE_MIN_SCORE,
-    default_category_thresholds, is_ffmpeg_only, normalize_tag_name,
-};
-use kanalib_core::backup;
-use kanalib_core::db::{SearchPageRequest, SearchSort};
 use kanalib_core::diagnostics::{self, DiagnosticsContext};
 use kanalib_core::export;
+use kanalib_core::model::{
+    Asset, Counts, DiagnosticSnapshot, Filter, RetagSummary, SavedSearch, ScanFilterConfig,
+    SearchQuery, SourceScanStatus, TAG_CANDIDATE_MIN_SCORE, TagCandidateReview, TagHit,
+    TagJobError, TagQueueStatus, TagRecomputeSummary, TagReviewState, TagSummary, TagThresholds,
+    default_category_thresholds, is_ffmpeg_only, normalize_tag_name,
+};
 use kanalib_core::state::{AppState, CacheStats};
 
 pub use app::KanalibApp;
@@ -341,7 +340,7 @@ impl GroupMode {
 fn resolve_view_mode(saved: Option<&str>, legacy_density: Option<&str>) -> ViewMode {
     saved
         .and_then(ViewMode::from_key)
-        .unwrap_or_else(|| match legacy_density {
+        .unwrap_or(match legacy_density {
             Some("small") => ViewMode::IconsSmall,
             Some("large") => ViewMode::IconsLarge,
             _ => ViewMode::IconsMedium,
@@ -511,7 +510,10 @@ mod tests {
     fn view_mode_migrates_legacy_density() {
         use super::{ViewMode, resolve_view_mode};
         assert_eq!(resolve_view_mode(None, Some("small")), ViewMode::IconsSmall);
-        assert_eq!(resolve_view_mode(None, Some("medium")), ViewMode::IconsMedium);
+        assert_eq!(
+            resolve_view_mode(None, Some("medium")),
+            ViewMode::IconsMedium
+        );
         assert_eq!(resolve_view_mode(None, Some("large")), ViewMode::IconsLarge);
         assert_eq!(resolve_view_mode(None, None), ViewMode::IconsMedium);
         assert_eq!(

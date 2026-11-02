@@ -70,6 +70,25 @@ def main() -> None:
     sys.stdout.reconfigure(encoding="utf-8", newline="\n")
     sys.stderr.reconfigure(encoding="utf-8", newline="\n")
 
+    if args.output.exists():
+        try:
+            same = os.path.samefile(args.input, args.output)
+        except OSError:
+            same = False
+        if same:
+            print(
+                json.dumps(
+                    {
+                        "ok": False,
+                        "error": "导出路径不能与原图相同",
+                        "error_detail": "output resolves to the input file",
+                    },
+                    ensure_ascii=False,
+                ),
+                flush=True,
+            )
+            raise SystemExit(1)
+
     try:
         image, strict_error = load_tolerant(args.input)
         image = flatten(image)

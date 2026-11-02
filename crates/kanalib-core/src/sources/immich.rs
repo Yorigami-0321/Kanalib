@@ -306,6 +306,7 @@ impl ImmichSource {
             ..Default::default()
         };
         let mut cursor: Option<(u64, String)> = None;
+        let mut sync_failed = false;
         let mut page = 1usize;
         loop {
             if context
@@ -356,6 +357,7 @@ impl ImmichSource {
                         }
                     }
                     Err(error) => {
+                        sync_failed = true;
                         report.failed += 1;
                         report
                             .warnings
@@ -379,7 +381,13 @@ impl ImmichSource {
         if report.cancelled {
             return Err(SourceError::cancelled());
         }
-        let cursor = cursor.map(|(_, raw)| raw).or(existing_cursor);
+        // 有入库失败时不推进 cursor：Immich 只返回 updatedAfter 之后的变化，
+        // 推进会让失败资产永远不再出现；下次同步会重拉本页并重试。
+        let cursor = if sync_failed {
+            existing_cursor.clone()
+        } else {
+            cursor.map(|(_, raw)| raw).or(existing_cursor)
+        };
         let now = unix_now();
         context
             .db

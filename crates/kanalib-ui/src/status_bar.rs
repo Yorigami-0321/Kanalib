@@ -1,8 +1,8 @@
-use crate::*;
 use crate::app::KanalibApp;
 use crate::settings::format_tag_eta;
 use crate::sidebar::source_label;
 use crate::theme::*;
+use crate::*;
 use kanalib_core::model::{ScanPhase, ScanProgress, ScanSummary};
 
 /// 扫描阶段的中文标签；底栏与设置页共用。
@@ -34,7 +34,11 @@ pub(crate) fn format_scan_summary(summary: &ScanSummary, compact: bool) -> Strin
     if compact {
         return format!("上次扫描 · 新增 {}", summary.imported);
     }
-    let cancelled = if summary.cancelled { " · 已停止" } else { "" };
+    let cancelled = if summary.cancelled {
+        " · 已停止"
+    } else {
+        ""
+    };
     format!(
         "上次扫描 · 新增 {} · 更新 {} · 跳过 {} · 移除 {} · 失败 {} · {:.1}s{}",
         summary.imported,
@@ -173,28 +177,14 @@ impl KanalibApp {
                     .child(SharedString::from(scan_progress_counts(&progress))),
             );
             if progress.throughput > 0.0 && !compact {
-                left = left.child(
-                    div()
-                        .px(px(6.))
-                        .text_xs()
-                        .text_color(colors.muted)
-                        .child(SharedString::from(format!(
-                            "{:.1} 张/秒",
-                            progress.throughput
-                        ))),
-                );
+                left = left.child(div().px(px(6.)).text_xs().text_color(colors.muted).child(
+                    SharedString::from(format!("{:.1} 张/秒", progress.throughput)),
+                ));
             }
             if let Some(eta) = progress.eta_secs {
-                left = left.child(
-                    div()
-                        .px(px(6.))
-                        .text_xs()
-                        .text_color(colors.muted)
-                        .child(SharedString::from(format!(
-                            "剩余 {}",
-                            format_tag_eta(Some(eta))
-                        ))),
-                );
+                left = left.child(div().px(px(6.)).text_xs().text_color(colors.muted).child(
+                    SharedString::from(format!("剩余 {}", format_tag_eta(Some(eta)))),
+                ));
             }
             if let Some(source) = &progress.source {
                 let label = if progress.source_total > 1 {
@@ -366,25 +356,18 @@ impl KanalibApp {
                 colors,
                 library && *filter == Filter::Damaged,
                 move |_, _, cx| {
-                    let _ = this_damaged
-                        .update(cx, |app, cx| app.set_filter(Filter::Damaged, cx));
+                    let _ = this_damaged.update(cx, |app, cx| app.set_filter(Filter::Damaged, cx));
                 },
             ));
         }
 
-        let mut right = div()
-            .flex_none()
-            .flex()
-            .items_center()
-            .gap(px(2.));
+        let mut right = div().flex_none().flex().items_center().gap(px(2.));
         if !compact {
             let this_queue = this.clone();
             let queue_label = if queue_pending + queue_running + queue_error == 0 {
                 "队列空闲".to_string()
             } else {
-                format!(
-                    "队列 等待 {queue_pending} · 运行 {queue_running} · 失败 {queue_error}"
-                )
+                format!("队列 等待 {queue_pending} · 运行 {queue_running} · 失败 {queue_error}")
             };
             right = right.child(status_bar_item(
                 "status-queue",
@@ -440,18 +423,12 @@ impl KanalibApp {
                     .size(IconSize::Xs)
                     .color(colors.muted),
             )
-            .children((!compact).then(|| {
-                div()
-                    .text_xs()
-                    .text_color(colors.muted)
-                    .child("命令面板")
-            }))
-            .children((!compact).then(|| {
-                div()
-                    .text_xs()
-                    .text_color(colors.subtle)
-                    .child("Ctrl+K")
-            }));
+            .children(
+                (!compact).then(|| div().text_xs().text_color(colors.muted).child("命令面板")),
+            )
+            .children(
+                (!compact).then(|| div().text_xs().text_color(colors.subtle).child("Ctrl+K")),
+            );
         right = right.child(palette);
 
         let progress_fraction = if scanning {

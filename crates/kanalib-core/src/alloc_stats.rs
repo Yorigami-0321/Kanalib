@@ -1,8 +1,8 @@
 //! 取证档全局分配器：按 2 的幂尺寸档统计存活字节，定位「谁持有 2GB」。
 //! 只在 frame-profiler feature 下编译进二进制；日志由 KANALIB_ALLOC_STATS=<秒> 门控。
 use std::alloc::{GlobalAlloc, Layout, System};
-use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
 use std::sync::Once;
+use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
 
 const MIN_SHIFT: u32 = 10;
 const MAX_SHIFT: u32 = 26;
@@ -49,7 +49,9 @@ pub mod traces {
     }
 
     fn map() -> std::sync::MutexGuard<'static, Option<HashMap<usize, (usize, Backtrace)>>> {
-        let guard = LIVE_TRACES.lock().unwrap_or_else(|poison| poison.into_inner());
+        let guard = LIVE_TRACES
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
         guard
     }
 
@@ -101,7 +103,11 @@ pub mod traces {
         }
         let mut ordered: Vec<_> = groups.into_values().collect();
         ordered.sort_by(|a, b| b.1.cmp(&a.1));
-        log::info!("alloc traces: live_blocks={} groups={}", map.len(), ordered.len());
+        log::info!(
+            "alloc traces: live_blocks={} groups={}",
+            map.len(),
+            ordered.len()
+        );
         for (count, bytes, sample) in ordered.into_iter().take(4) {
             let head: String = sample
                 .lines()
@@ -109,7 +115,10 @@ pub mod traces {
                 .take(60)
                 .collect::<Vec<_>>()
                 .join(" | ");
-            log::info!("alloc trace group: blocks={count} mb={:.1} stack={head}", bytes as f64 / 1e6);
+            log::info!(
+                "alloc trace group: blocks={count} mb={:.1} stack={head}",
+                bytes as f64 / 1e6
+            );
         }
         INSIDE.with(|inside| inside.set(false));
     }
@@ -198,28 +207,34 @@ pub fn spawn_logger() {
     };
     static START: Once = Once::new();
     START.call_once(|| {
-        std::thread::spawn(move || loop {
-            std::thread::sleep(std::time::Duration::from_secs(interval));
-            let mut parts = Vec::new();
-            for (index, counter) in LIVE.iter().enumerate() {
-                let bytes = counter.load(Relaxed);
-                if bytes > 0 {
-                    let shift = MIN_SHIFT + index as u32;
-                    parts.push(format!("\"{}K_mb\":{:.1}", 1u64 << shift >> 10, bytes as f64 / 1e6));
+        std::thread::spawn(move || {
+            loop {
+                std::thread::sleep(std::time::Duration::from_secs(interval));
+                let mut parts = Vec::new();
+                for (index, counter) in LIVE.iter().enumerate() {
+                    let bytes = counter.load(Relaxed);
+                    if bytes > 0 {
+                        let shift = MIN_SHIFT + index as u32;
+                        parts.push(format!(
+                            "\"{}K_mb\":{:.1}",
+                            1u64 << shift >> 10,
+                            bytes as f64 / 1e6
+                        ));
+                    }
                 }
+                let allocs = ALLOC_CNT[TRACE_BUCKET].load(Relaxed);
+                let frees = FREE_CNT[TRACE_BUCKET].load(Relaxed);
+                let counts = format!(
+                    "\"256K_cnt\":{{\"alloc\":{allocs},\"free\":{frees},\"live_blk\":{}}}",
+                    allocs as i64 - frees as i64,
+                );
+                log::info!(
+                    "alloc stats: {{\"total_mb\":{:.1},{},{}}}",
+                    LIVE_TOTAL.load(Relaxed) as f64 / 1e6,
+                    parts.join(","),
+                    counts,
+                );
             }
-            let allocs = ALLOC_CNT[TRACE_BUCKET].load(Relaxed);
-            let frees = FREE_CNT[TRACE_BUCKET].load(Relaxed);
-            let counts = format!(
-                "\"256K_cnt\":{{\"alloc\":{allocs},\"free\":{frees},\"live_blk\":{}}}",
-                allocs as i64 - frees as i64,
-            );
-            log::info!(
-                "alloc stats: {{\"total_mb\":{:.1},{},{}}}",
-                LIVE_TOTAL.load(Relaxed) as f64 / 1e6,
-                parts.join(","),
-                counts,
-            );
         });
     });
 }

@@ -17,6 +17,7 @@ use anyhow::{Context, Result, bail};
 use exif::{In, Tag};
 use image::{
     DynamicImage, ImageDecoder, ImageError, ImageFormat, ImageReader, RgbImage, RgbaImage,
+    metadata::Orientation,
 };
 use lcms2::{
     CIExyY, CIExyYTRIPLE, ColorSpaceSignature, Intent, PixelFormat, Profile, ToneCurve, Transform,
@@ -25,7 +26,7 @@ use lcms2::{
 /// Prefix used by the on-demand viewer preview cache. Previews live in
 /// `thumbs/previews/` and are removed when the viewer switches image or exits;
 /// they are deliberately outside the 10 GiB thumbnail budget/cleanup scan.
-pub const PREVIEW_CACHE_VERSION: &str = "p1";
+pub const PREVIEW_CACHE_VERSION: &str = "p2";
 
 /// EXIF `ColorSpace` / `InteroperabilityIndex` hint. Used only when a file has
 /// no ICC profile; a real ICC profile always wins.
@@ -79,6 +80,7 @@ impl ColorProfile {
 pub struct DecodedImage {
     pub image: DynamicImage,
     pub profile: ColorProfile,
+    pub orientation: Orientation,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -95,12 +97,10 @@ pub fn exif_color_space(exif: &exif::Exif) -> ExifColorSpace {
     // `kamadak-exif` models ColorSpace in the Exif sub-IFD, but some writers put
     // it in IFD0 (Tiff context). Match by tag number so both are recognised.
     let color_space_tag = Tag::ColorSpace.number();
-    let field = exif
-        .get_field(Tag::ColorSpace, In::PRIMARY)
-        .or_else(|| {
-            exif.fields()
-                .find(|field| field.tag.number() == color_space_tag)
-        });
+    let field = exif.get_field(Tag::ColorSpace, In::PRIMARY).or_else(|| {
+        exif.fields()
+            .find(|field| field.tag.number() == color_space_tag)
+    });
     match field.and_then(|field| field.value.get_uint(0)) {
         Some(1) => ExifColorSpace::Srgb,
         Some(2) => ExifColorSpace::AdobeRgb,
@@ -156,8 +156,13 @@ fn decode_inner(
         .map_err(ImageError::IoError)?;
     let mut decoder = reader.into_decoder()?;
     let profile = profile_from_decoder(&mut decoder, path, hint);
+    let orientation = decoder.orientation().unwrap_or(Orientation::NoTransforms);
     let image = DynamicImage::from_decoder(decoder)?;
-    Ok(DecodedImage { image, profile })
+    Ok(DecodedImage {
+        image,
+        profile,
+        orientation,
+    })
 }
 
 /// Inspect a source file without decoding pixels. Returns `Srgb` when the
@@ -191,9 +196,7 @@ pub fn source_profile_with_hint(path: &Path, hint: ExifColorSpace) -> ColorProfi
     }
 }
 
-fn open_decoder(
-    path: &Path,
-) -> std::result::Result<impl ImageDecoder + '_, ImageError> {
+fn open_decoder(path: &Path) -> std::result::Result<impl ImageDecoder + '_, ImageError> {
     let reader = ImageReader::open(path)
         .and_then(|reader| reader.with_guessed_format())
         .map_err(ImageError::IoError)?;
@@ -311,8 +314,12 @@ fn profile_is_effectively_srgb(profile: &Profile) -> bool {
         return false;
     }
     let destination = Profile::new_srgb();
-    let Ok(transform) = build_transform(profile, PixelFormat::RGB_8, &destination, PixelFormat::RGB_8)
-    else {
+    let Ok(transform) = build_transform(
+        profile,
+        PixelFormat::RGB_8,
+        &destination,
+        PixelFormat::RGB_8,
+    ) else {
         return false;
     };
     let source = [
@@ -354,9 +361,7 @@ fn build_transform(
 fn source_lcms_profile(profile: &ColorProfile) -> Result<Profile> {
     match profile {
         ColorProfile::Srgb => Ok(Profile::new_srgb()),
-        ColorProfile::Icc(bytes) => {
-            Profile::new_icc(bytes).context("parse embedded ICC profile")
-        }
+        ColorProfile::Icc(bytes) => Profile::new_icc(bytes).context("parse embedded ICC profile"),
         ColorProfile::AdobeRgb => adobe_rgb_profile(),
     }
 }
@@ -498,9 +503,11 @@ pub fn convert_file_to_srgb(target: &Path, profile: &ColorProfile) -> Result<boo
     DynamicImage::ImageRgb8(converted)
         .save_with_format(&temp, ImageFormat::Jpeg)
         .with_context(|| format!("write {}", temp.display()))?;
-    let _ = std::fs::remove_file(target);
-    std::fs::rename(&temp, target)
-        .with_context(|| format!("replace {} with {}", target.display(), temp.display()))?;
+    if let Err(error) = std::fs::rename(&temp, target) {
+        let _ = std::fs::remove_file(&temp);
+        return Err(error)
+            .with_context(|| format!("replace {} with {}", target.display(), temp.display()));
+    }
     Ok(true)
 }
 
@@ -525,23 +532,25 @@ pub fn prepare_preview(source: &Path, target: &Path) -> Result<PreviewOutcome> {
     if !profile.needs_conversion() {
         return Ok(PreviewOutcome::Unchanged);
     }
-    let decoded = decode(source)
-        .with_context(|| format!("decode {} for color preview", source.display()))?;
+    let decoded =
+        decode(source).with_context(|| format!("decode {} for color preview", source.display()))?;
     if !decoded.profile.needs_conversion() {
         return Ok(PreviewOutcome::Unchanged);
     }
-    let converted = convert_to_srgb(decoded.image, &decoded.profile);
+    let mut converted = convert_to_srgb(decoded.image, &decoded.profile);
+    converted.apply_orientation(decoded.orientation);
     if let Some(parent) = target.parent() {
-        std::fs::create_dir_all(parent)
-            .with_context(|| format!("create {}", parent.display()))?;
+        std::fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
     }
     let temp = target.with_extension("png.tmp");
     converted
         .save_with_format(&temp, ImageFormat::Png)
         .with_context(|| format!("write {}", temp.display()))?;
-    let _ = std::fs::remove_file(target);
-    std::fs::rename(&temp, target)
-        .with_context(|| format!("replace {} with {}", target.display(), temp.display()))?;
+    if let Err(error) = std::fs::rename(&temp, target) {
+        let _ = std::fs::remove_file(&temp);
+        return Err(error)
+            .with_context(|| format!("replace {} with {}", target.display(), temp.display()));
+    }
     Ok(PreviewOutcome::Converted)
 }
 
@@ -612,8 +621,8 @@ mod tests {
     use image::{Rgb, RgbImage};
     use lcms2::Profile;
 
-    use super::{ColorProfile, PreviewOutcome, decode, prepare_preview, source_profile};
     use super::test_support::{display_p3_icc, srgb_icc, write_png_with_icc};
+    use super::{ColorProfile, PreviewOutcome, decode, prepare_preview, source_profile};
 
     fn temp_dir(tag: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!(
@@ -712,7 +721,11 @@ mod tests {
     fn invalid_icc_degrades_without_failing_decode() {
         let dir = temp_dir("invalid-icc");
         let path = sample_path(&dir, "bad-icc.png");
-        write_png_with_icc(&path, &solid(16, 16, [12, 34, 56]), Some(b"not an ICC profile"));
+        write_png_with_icc(
+            &path,
+            &solid(16, 16, [12, 34, 56]),
+            Some(b"not an ICC profile"),
+        );
         assert_eq!(source_profile(&path), ColorProfile::Srgb);
         let decoded = decode(&path).expect("invalid ICC must not fail decoding");
         assert_eq!(decoded.profile, ColorProfile::Srgb);
@@ -816,7 +829,10 @@ mod tests {
             prepare_preview(&plain, &plain_target).unwrap(),
             PreviewOutcome::Unchanged
         );
-        assert!(!plain_target.exists(), "untagged files need no preview file");
+        assert!(
+            !plain_target.exists(),
+            "untagged files need no preview file"
+        );
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }

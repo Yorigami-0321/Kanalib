@@ -37,6 +37,8 @@ CANDIDATE_CAPS = {
     "rating": 4,
 }
 CANDIDATE_FLOOR = 0.005
+# 448 输入只需缩略图；显式限制像素数，避免超大图在 RGBA 画布/tensor 上吃满内存。
+MAX_TAG_PIXELS = 100_000_000
 
 
 def classify_error(exc: BaseException) -> tuple[str, str, str]:
@@ -51,6 +53,8 @@ def classify_error(exc: BaseException) -> tuple[str, str, str]:
         return "unreadable", "无法识别的图片，文件可能已损坏", detail
     if "decompression bomb" in text:
         return "too_large", "图片尺寸超出安全上限", detail
+    if "too large" in text:
+        return "too_large", "图片尺寸超出安全上限", detail
     if isinstance(exc, FileNotFoundError):
         return "missing", "文件不存在或已被移动", detail
     if isinstance(exc, PermissionError):
@@ -63,6 +67,8 @@ def load_rgb(path: Path, tolerant: bool = False) -> Image.Image:
     ImageFile.LOAD_TRUNCATED_IMAGES = tolerant
     try:
         img = Image.open(path)
+        if img.width * img.height > MAX_TAG_PIXELS:
+            raise ValueError(f"image too large: {img.width}x{img.height}")
         img.load()
         img = ImageOps.exif_transpose(img)
         if img.mode != "RGB":
@@ -82,7 +88,7 @@ def preprocess(images: list[Image.Image], size: int) -> torch.Tensor:
         h, w = t.shape[-2:]
         if h != size or w != size:
             scale = min(size / h, size / w)
-            new_h, new_w = int(h * scale), int(w * scale)
+            new_h, new_w = max(1, int(h * scale)), max(1, int(w * scale))
             pad_h, pad_w = size - new_h, size - new_w
             left, top = pad_w // 2, pad_h // 2
             t = vF.resize(t, [new_h, new_w])

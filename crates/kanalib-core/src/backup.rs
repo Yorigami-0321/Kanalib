@@ -147,9 +147,7 @@ pub fn load_plan(db: &Db) -> BackupPlan {
 }
 
 pub fn save_plan(db: &Db, plan: &BackupPlan) -> Result<()> {
-    let json = plan
-        .to_json()
-        .context("序列化自动备份计划失败")?;
+    let json = plan.to_json().context("序列化自动备份计划失败")?;
     db.set_setting(BACKUP_PLAN_KEY, &json)
 }
 
@@ -248,11 +246,7 @@ pub fn default_backup_path(data_dir: &Path) -> PathBuf {
 /// 只依赖数据库路径，不访问 `AppState`，UI 可直接在后台线程调用。
 /// `scanning` 为 true 时明确拒绝（扫描期间库处于大量写入状态），错误信息可直接
 /// 展示给用户。目标文件已存在时拒绝覆盖；失败不会修改源库。
-pub fn backup_database(
-    db_path: &Path,
-    destination: &Path,
-    scanning: bool,
-) -> Result<BackupReport> {
+pub fn backup_database(db_path: &Path, destination: &Path, scanning: bool) -> Result<BackupReport> {
     if scanning {
         bail!("图库正在扫描，数据库持续写入，请等待扫描结束后再备份。");
     }
@@ -318,9 +312,8 @@ fn parse_stamp(stamp: &str) -> Option<SystemTime> {
     if !bytes[..8].iter().all(u8::is_ascii_digit) || !bytes[9..].iter().all(u8::is_ascii_digit) {
         return None;
     }
-    let number = |range: std::ops::Range<usize>| -> i64 {
-        stamp[range].parse::<i64>().unwrap_or(-1)
-    };
+    let number =
+        |range: std::ops::Range<usize>| -> i64 { stamp[range].parse::<i64>().unwrap_or(-1) };
     let year = number(0..4);
     let month = number(4..6);
     let day = number(6..8);
@@ -368,7 +361,11 @@ pub fn latest_managed_backup(dir: &Path) -> Option<(PathBuf, SystemTime)> {
     let entries = fs::read_dir(dir).ok()?;
     for entry in entries.flatten() {
         let path = entry.path();
-        if !entry.file_type().map(|kind| kind.is_file()).unwrap_or(false) {
+        if !entry
+            .file_type()
+            .map(|kind| kind.is_file())
+            .unwrap_or(false)
+        {
             continue;
         }
         let Some(time) = managed_backup_time(&path) else {
@@ -392,7 +389,8 @@ pub fn prune_backups(dir: &Path, plan: &BackupPlan, now: SystemTime) -> Result<P
     }
     let plan = plan.clone().sanitized();
     let mut managed: Vec<(SystemTime, PathBuf)> = Vec::new();
-    for entry in fs::read_dir(dir).with_context(|| format!("读取备份目录 {}", dir.display()))? {
+    for entry in fs::read_dir(dir).with_context(|| format!("读取备份目录 {}", dir.display()))?
+    {
         let entry = match entry {
             Ok(entry) => entry,
             Err(error) => {
@@ -401,7 +399,11 @@ pub fn prune_backups(dir: &Path, plan: &BackupPlan, now: SystemTime) -> Result<P
             }
         };
         let path = entry.path();
-        if !entry.file_type().map(|kind| kind.is_file()).unwrap_or(false) {
+        if !entry
+            .file_type()
+            .map(|kind| kind.is_file())
+            .unwrap_or(false)
+        {
             continue;
         }
         let Some(time) = managed_backup_time(&path) else {
@@ -469,10 +471,7 @@ pub fn format_utc_datetime(time: SystemTime) -> String {
 fn validate_restore_candidate(path: &Path) -> Result<(BackupInspection, Vec<String>)> {
     let inspection = Db::inspect_database(path)?;
     if !inspection.integrity_ok() {
-        bail!(
-            "候选备份完整性校验失败：{}",
-            inspection.integrity
-        );
+        bail!("候选备份完整性校验失败：{}", inspection.integrity);
     }
     for required in ["settings", "assets"] {
         if inspection.table_rows(required).is_none() {
@@ -535,11 +534,7 @@ fn remove_database_files(path: &Path) {
 ///
 /// 运行中的应用不会被替换；调用方需保证扫描/打标未运行，并提示用户重启。
 /// 失败时当前库不变；可能留下安全备份（有效备份文件，便于人工回退）。
-pub fn stage_restore(
-    data_dir: &Path,
-    db_path: &Path,
-    candidate: &Path,
-) -> Result<RestoreReport> {
+pub fn stage_restore(data_dir: &Path, db_path: &Path, candidate: &Path) -> Result<RestoreReport> {
     if !candidate.is_file() {
         bail!("候选备份不存在：{}", candidate.display());
     }
@@ -553,16 +548,12 @@ pub fn stage_restore(
     }
     if staged.exists() {
         // 只有暂存库没有标记：上次复制中断的残留，不会在启动时应用，直接清掉。
-        log::warn!(
-            "remove incomplete restore staging {}",
-            staged.display()
-        );
+        log::warn!("remove incomplete restore staging {}", staged.display());
         remove_database_files(&staged);
     }
     let (inspection, mut warnings) = validate_restore_candidate(candidate)?;
 
-    fs::create_dir_all(data_dir)
-        .with_context(|| format!("创建数据目录 {}", data_dir.display()))?;
+    fs::create_dir_all(data_dir).with_context(|| format!("创建数据目录 {}", data_dir.display()))?;
     ensure_backups_dir(data_dir)?;
     let safety = if db_path.is_file() {
         let target = safety_backup_path(data_dir);
@@ -592,7 +583,10 @@ pub fn stage_restore(
         let _ = fs::remove_file(&marker_path);
         if let Some(safety) = &safety {
             // 安全备份是有效文件，保留并提示；不自动删除用户可用的回退点。
-            log::warn!("restore staged copy failed; safety backup kept at {}", safety.display());
+            log::warn!(
+                "restore staged copy failed; safety backup kept at {}",
+                safety.display()
+            );
         }
         return Err(error);
     }
@@ -610,8 +604,8 @@ pub fn stage_restore(
     };
     let marker_tmp = data_dir.join(format!(".{PENDING_RESTORE_MARKER_NAME}.{nonce}.tmp"));
     let marker_json = serde_json::to_vec_pretty(&marker).context("序列化待恢复标记失败")?;
-    if let Err(error) = fs::write(&marker_tmp, &marker_json)
-        .and_then(|()| fs::rename(&marker_tmp, &marker_path))
+    if let Err(error) =
+        fs::write(&marker_tmp, &marker_json).and_then(|()| fs::rename(&marker_tmp, &marker_path))
     {
         let _ = fs::remove_file(&marker_tmp);
         remove_database_files(&staged);
@@ -641,8 +635,7 @@ fn stage_restore_copy(
     staged: &Path,
     expected: &BackupInspection,
 ) -> Result<()> {
-    fs::copy(candidate, temp)
-        .with_context(|| format!("复制候选备份到 {}", temp.display()))?;
+    fs::copy(candidate, temp).with_context(|| format!("复制候选备份到 {}", temp.display()))?;
     for suffix in ["-wal", "-shm"] {
         let source = sidecar(candidate, suffix);
         if source.is_file() {
@@ -650,17 +643,18 @@ fn stage_restore_copy(
                 .with_context(|| format!("复制备份边车文件 {}", source.display()))?;
         }
     }
-    let conn = Connection::open(temp)
-        .with_context(|| format!("打开恢复暂存库 {}", temp.display()))?;
+    let conn =
+        Connection::open(temp).with_context(|| format!("打开恢复暂存库 {}", temp.display()))?;
     conn.busy_timeout(Duration::from_secs(5))?;
     // 合并候选可能的 WAL，并转成单文件 DELETE 模式，重启时可直接替换主库。
-    let _ = conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |row| {
-        Ok((
-            row.get::<_, i64>(0)?,
-            row.get::<_, i64>(1)?,
-            row.get::<_, i64>(2)?,
-        ))
-    });
+    let busy = conn
+        .query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |row| {
+            row.get::<_, i64>(0)
+        })
+        .with_context(|| format!("合并恢复暂存库 WAL 失败 {}", temp.display()))?;
+    if busy != 0 {
+        bail!("恢复暂存库正被占用，无法安全合并 WAL：{}", temp.display());
+    }
     conn.query_row("PRAGMA journal_mode=DELETE", [], |row| {
         row.get::<_, String>(0)
     })
@@ -671,10 +665,7 @@ fn stage_restore_copy(
     }
     let staged_inspection = Db::inspect_database(temp)?;
     if !staged_inspection.integrity_ok() {
-        bail!(
-            "恢复暂存库完整性校验失败：{}",
-            staged_inspection.integrity
-        );
+        bail!("恢复暂存库完整性校验失败：{}", staged_inspection.integrity);
     }
     if staged_inspection.user_version != expected.user_version {
         bail!(
@@ -686,8 +677,7 @@ fn stage_restore_copy(
     if !tables_equal(&staged_inspection.tables, &expected.tables) {
         bail!("恢复暂存库关键表行数与候选不一致，已中止");
     }
-    fs::rename(temp, staged)
-        .with_context(|| format!("保存恢复暂存库 {}", staged.display()))?;
+    fs::rename(temp, staged).with_context(|| format!("保存恢复暂存库 {}", staged.display()))?;
     Ok(())
 }
 
@@ -713,10 +703,7 @@ pub fn apply_pending_restore(data_dir: &Path) -> Result<Option<RestoreApplied>> 
         }
         let inspection = Db::inspect_database(&staged)?;
         if !inspection.integrity_ok() {
-            bail!(
-                "待恢复暂存库完整性校验失败：{}",
-                inspection.integrity
-            );
+            bail!("待恢复暂存库完整性校验失败：{}", inspection.integrity);
         }
         if inspection.user_version != marker.user_version {
             bail!(
@@ -749,13 +736,15 @@ pub fn apply_pending_restore(data_dir: &Path) -> Result<Option<RestoreApplied>> 
         let conn = Connection::open(&db_path)
             .with_context(|| format!("打开当前数据库 {}", db_path.display()))?;
         conn.busy_timeout(Duration::from_secs(5))?;
-        let _ = conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |row| {
-            Ok((
-                row.get::<_, i64>(0)?,
-                row.get::<_, i64>(1)?,
-                row.get::<_, i64>(2)?,
-            ))
-        });
+        // busy != 0 表示还有提交页在 WAL；此时删除边车文件会让回滚副本丢数据。
+        let busy = conn
+            .query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .with_context(|| format!("合并当前库 WAL 失败 {}", db_path.display()))?;
+        if busy != 0 {
+            bail!("当前数据库正被其他进程占用，无法安全准备恢复；请关闭其他实例后重试");
+        }
         drop(conn);
         for suffix in ["-wal", "-shm", "-journal"] {
             let _ = fs::remove_file(sidecar(&db_path, suffix));
@@ -798,10 +787,7 @@ pub fn apply_pending_restore(data_dir: &Path) -> Result<Option<RestoreApplied>> 
         Err(error) => {
             remove_database_files(&db_path);
             let rollback_error = if had_current {
-                match fs::rename(&rollback, &db_path) {
-                    Ok(()) => None,
-                    Err(rollback_error) => Some(rollback_error),
-                }
+                fs::rename(&rollback, &db_path).err()
             } else {
                 None
             };
@@ -846,18 +832,14 @@ pub fn discard_pending_restore(data_dir: &Path) -> Result<bool> {
         Ok(()) => {}
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
         Err(error) => {
-            return Err(error)
-                .with_context(|| format!("删除待恢复标记 {}", marker_path.display()));
+            return Err(error).with_context(|| format!("删除待恢复标记 {}", marker_path.display()));
         }
     }
     Ok(existed)
 }
 
 fn utc_stamp(now: SystemTime) -> String {
-    let secs = now
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
+    let secs = now.duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
     let days = (secs / 86_400) as i64;
     let rem = secs % 86_400;
     let (year, month, day) = civil_from_days(days);
@@ -1001,7 +983,8 @@ mod test {
         );
         drop(copy);
 
-        let conn = Connection::open_with_flags(&backup_path, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+        let conn =
+            Connection::open_with_flags(&backup_path, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
         let archived: i64 = conn
             .query_row("SELECT COUNT(*) FROM assets", [], |row| row.get(0))
             .unwrap();
@@ -1032,7 +1015,9 @@ mod test {
 
         // 扫描中拒绝。
         let scanned = root.join("scan.db");
-        let err = backup_database(&db_path, &scanned, true).unwrap_err().to_string();
+        let err = backup_database(&db_path, &scanned, true)
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("扫描"), "{err}");
         assert!(!scanned.exists());
 
@@ -1091,8 +1076,14 @@ mod test {
         let epoch = UNIX_EPOCH + Duration::from_secs(1_775_000_000);
         let stamp = super::utc_stamp(epoch);
         assert_eq!(stamp.len(), 15, "{stamp}");
-        assert!(stamp.chars().all(|c| c.is_ascii_digit() || c == '-'), "{stamp}");
-        assert_eq!(super::utc_stamp(UNIX_EPOCH + Duration::from_secs(0)), "19700101-000000");
+        assert!(
+            stamp.chars().all(|c| c.is_ascii_digit() || c == '-'),
+            "{stamp}"
+        );
+        assert_eq!(
+            super::utc_stamp(UNIX_EPOCH + Duration::from_secs(0)),
+            "19700101-000000"
+        );
         assert_eq!(
             super::utc_stamp(UNIX_EPOCH + Duration::from_secs(951_782_400)),
             "20000229-000000"
@@ -1112,10 +1103,9 @@ mod test {
         assert_eq!(plan.keep_days, Some(1));
         assert!(!BackupPlan::parse(Some("not json")).enabled);
         assert!(!BackupPlan::parse(None).enabled);
-        let parsed = BackupPlan::from_json(
-            r#"{"enabled":true,"frequency":"daily","keep_files":3}"#,
-        )
-        .unwrap();
+        let parsed =
+            BackupPlan::from_json(r#"{"enabled":true,"frequency":"daily","keep_files":3}"#)
+                .unwrap();
         assert_eq!(parsed.keep_files, 3);
         assert_eq!(parsed.keep_days, None);
 
@@ -1131,7 +1121,10 @@ mod test {
         // 跨天：昨晚 23:00 备份，今天 01:00 仍未到期；次日 23:30 到期。
         let evening = start;
         assert!(!daily.is_due(evening + Duration::from_secs(2 * 3_600), Some(evening)));
-        assert!(daily.is_due(evening + Duration::from_secs(24 * 3_600 + 1_800), Some(evening)));
+        assert!(daily.is_due(
+            evening + Duration::from_secs(24 * 3_600 + 1_800),
+            Some(evening)
+        ));
         assert_eq!(
             daily.next_due_at(evening + Duration::from_secs(25 * 3_600), Some(evening)),
             Some(evening + Duration::from_secs(86_400))
@@ -1200,9 +1193,13 @@ mod test {
             fs::write(dir.join(name), b"user").unwrap();
         }
         assert!(super::is_managed_backup_name("kanalib-20260101-000000.db"));
-        assert!(super::is_managed_backup_name("kanalib-20260101-000000-2.db"));
+        assert!(super::is_managed_backup_name(
+            "kanalib-20260101-000000-2.db"
+        ));
         assert!(!super::is_managed_backup_name("kanalib-notes.db"));
-        assert!(!super::is_managed_backup_name("kanalib-pre-restore-20260101-000000.db"));
+        assert!(!super::is_managed_backup_name(
+            "kanalib-pre-restore-20260101-000000.db"
+        ));
         assert!(!super::is_managed_backup_name("my-backup.db"));
 
         let plan = BackupPlan {
@@ -1263,7 +1260,10 @@ mod test {
             ..Default::default()
         };
         prune_backups(&only_dir, &plan, now).unwrap();
-        assert!(only_path.exists(), "the only/newest backup must never be pruned");
+        assert!(
+            only_path.exists(),
+            "the only/newest backup must never be pruned"
+        );
         fs::remove_dir_all(&root).unwrap();
         fs::remove_dir_all(&only_root).unwrap();
     }
@@ -1344,7 +1344,10 @@ mod test {
         }
         let report = stage_restore(&data, &db_path, &candidate).unwrap();
         assert!(report.staged.is_file());
-        assert!(!sidecar(&staged, "-wal").exists(), "stale sidecar must be removed");
+        assert!(
+            !sidecar(&staged, "-wal").exists(),
+            "stale sidecar must be removed"
+        );
         assert!(pending_restore(&data).is_some());
         assert_eq!(fs::read(&user_backup).unwrap(), b"user");
         assert_eq!(

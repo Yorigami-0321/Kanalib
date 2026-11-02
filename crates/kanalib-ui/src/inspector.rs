@@ -1,8 +1,8 @@
-use crate::*;
 use crate::app::{KanalibApp, prompt_for, push_toast};
 use crate::format::*;
 use crate::sidebar::source_label;
 use crate::theme::*;
+use crate::*;
 
 pub(crate) fn friendly_media_error(message: &str) -> String {
     let text = message.to_lowercase();
@@ -28,8 +28,7 @@ pub(crate) fn friendly_media_error(message: &str) -> String {
         "FFmpeg 解码失败，缩略图与打标可能不可用".to_string()
     } else if text.contains("truncated") || text.contains("unexpected end of file") {
         "文件不完整（图片数据被截断）".to_string()
-    } else if text.contains("cannot identify image file")
-        || text.contains("unidentifiedimageerror")
+    } else if text.contains("cannot identify image file") || text.contains("unidentifiedimageerror")
     {
         "无法识别的图片，文件可能已损坏".to_string()
     } else if text.contains("decompression bomb") {
@@ -115,17 +114,15 @@ pub(crate) fn format_capability_note(path: &Path) -> String {
 }
 
 pub(crate) fn exif_panel(asset: &Asset, colors: UiColors) -> Option<AnyElement> {
-    let meta =
-        serde_json::from_str::<kanalib_core::media::ExifData>(&asset.metadata_json)
-            .unwrap_or_default();
+    let meta = serde_json::from_str::<kanalib_core::media::ExifData>(&asset.metadata_json)
+        .unwrap_or_default();
     let video = asset.is_video();
     // 视频即使 ffprobe 缺失也要显示分辨率行，因此不能按 ExifData 为空直接隐藏。
     if !video && meta.is_empty() && asset.captured_at.is_none() {
         return None;
     }
-    let video_facts = video.then(|| {
-        video_fact_rows(&video_meta(&asset.metadata_json), asset.width, asset.height)
-    });
+    let video_facts = video
+        .then(|| video_fact_rows(&video_meta(&asset.metadata_json), asset.width, asset.height));
     let mut rows: Vec<(&'static str, String)> = Vec::new();
     if let Some(captured) = asset.captured_at {
         rows.push(("拍摄时间", format_date(captured)));
@@ -163,7 +160,11 @@ pub(crate) fn exif_panel(asset: &Asset, colors: UiColors) -> Option<AnyElement> 
                     .text_xs()
                     .font_weight(FontWeight::SEMIBOLD)
                     .text_color(colors.subtle)
-                    .child(if video { "视频信息" } else { "拍摄信息" }),
+                    .child(if video {
+                        "视频信息"
+                    } else {
+                        "拍摄信息"
+                    }),
             )
             .children(rows.into_iter().map(|(label, value)| {
                 div()
@@ -189,75 +190,6 @@ pub(crate) fn exif_panel(asset: &Asset, colors: UiColors) -> Option<AnyElement> 
             }))
             .into_any_element(),
     )
-}
-
-#[cfg(test)]
-mod tests {
-    use std::path::Path;
-
-    #[test]
-    fn friendly_format_label_maps_known_extensions() {
-        assert_eq!(super::friendly_format_label(Path::new("a.TIFF")), "TIFF");
-        assert_eq!(super::friendly_format_label(Path::new("b.avif")), "AVIF");
-        assert_eq!(super::friendly_format_label(Path::new("c.qoi")), "QOI");
-        assert_eq!(super::friendly_format_label(Path::new("d.psd")), "PSD");
-        assert_eq!(super::friendly_format_label(Path::new("e.HEIC")), "HEIC/HEIF");
-        assert_eq!(super::friendly_format_label(Path::new("f.cr2")), "RAW");
-        assert_eq!(super::friendly_format_label(Path::new("clip.MP4")), "MP4");
-        assert_eq!(super::friendly_format_label(Path::new("clip.mov")), "MOV");
-        assert_eq!(super::friendly_format_label(Path::new("clip.mkv")), "MKV");
-        assert_eq!(super::friendly_format_label(Path::new("clip.webm")), "WebM");
-        assert_eq!(super::friendly_format_label(Path::new("clip.avi")), "AVI");
-        assert_eq!(super::friendly_format_label(Path::new("d.xyz")), "XYZ");
-        assert_eq!(super::friendly_format_label(Path::new("noext")), "未知格式");
-    }
-
-    #[test]
-    fn friendly_media_error_points_avif_at_ffmpeg() {
-        assert!(
-            super::friendly_media_error("The image format Avif is not supported")
-                .contains("FFmpeg")
-        );
-        assert!(
-            super::friendly_media_error("ffmpeg exited with code 1")
-                .contains("FFmpeg")
-        );
-        assert!(super::friendly_media_error("unexpected end of file").contains("截断"));
-        assert!(super::friendly_media_error("unsupported color type").contains("不支持"));
-    }
-
-    #[test]
-    fn format_capability_note_marks_ffmpeg_only_formats() {
-        assert_eq!(
-            super::format_capability_note(Path::new("a.png")),
-            "内置解码".to_string()
-        );
-        assert!(
-            super::format_capability_note(Path::new("a.avif")).contains("需要 FFmpeg 解码")
-        );
-        let psd = super::format_capability_note(Path::new("a.PSD"));
-        assert!(psd.contains("需要 FFmpeg 解码"), "{psd}");
-        assert!(psd.contains("仅合成图"), "{psd}");
-        let gif = super::format_capability_note(Path::new("a.gif"));
-        assert!(gif.contains("动画仅首帧"), "{gif}");
-        let heic = super::format_capability_note(Path::new("a.heic"));
-        assert!(heic.contains("未接入"), "{heic}");
-        assert!(!heic.contains("内置解码"), "{heic}");
-        let raw = super::format_capability_note(Path::new("a.nef"));
-        assert!(raw.contains("未接入"), "{raw}");
-        let video = super::format_capability_note(Path::new("clip.MP4"));
-        assert!(video.contains("首帧"), "{video}");
-        assert!(video.contains("系统播放器"), "{video}");
-    }
-
-    #[test]
-    fn friendly_media_error_covers_psd_and_heic() {
-        let psd = super::friendly_media_error("ffmpeg psd decoder failed: unsupported format");
-        assert!(psd.contains("PSD") && psd.contains("FFmpeg"), "{psd}");
-        let heic = super::friendly_media_error("libheif: no decoder for heic");
-        assert!(heic.contains("HEIC") && heic.contains("不支持"), "{heic}");
-    }
-
 }
 
 impl KanalibApp {
@@ -442,12 +374,7 @@ impl KanalibApp {
             .gap(px(8.))
             .id("preview-inspector-scroll")
             .overflow_y_scroll()
-            .child(
-                div()
-                    .text_sm()
-                    .font_weight(FontWeight::BOLD)
-                    .child("预览"),
-            )
+            .child(div().text_sm().font_weight(FontWeight::BOLD).child("预览"))
             .child(content)
     }
 
@@ -546,7 +473,10 @@ impl KanalibApp {
                     .map(|value| normalize_tag_name(value))
                     .filter(|value| !value.is_empty())
                     .collect::<HashSet<_>>();
-                let added = next_set.difference(&manual_initial).cloned().collect::<Vec<_>>();
+                let added = next_set
+                    .difference(&manual_initial)
+                    .cloned()
+                    .collect::<Vec<_>>();
                 let removed = manual_initial
                     .difference(&next_set)
                     .cloned()
@@ -582,12 +512,7 @@ impl KanalibApp {
                         Severity::Danger,
                     );
                 } else if changed > 0 {
-                    push_toast(
-                        &manual_toaster,
-                        cx,
-                        "标签已更新",
-                        Severity::Success,
-                    );
+                    push_toast(&manual_toaster, cx, "标签已更新", Severity::Success);
                 } else if !added.is_empty() || !removed.is_empty() {
                     push_toast(
                         &manual_toaster,
@@ -627,7 +552,6 @@ impl KanalibApp {
                 );
                 for hit in hits {
                     let filter = Filter::Tag(hit.tag.clone());
-                    let filter_state = state.clone();
                     let filter_this = this.clone();
                     let remove_state = state.clone();
                     let remove_this = this.clone();
@@ -651,10 +575,9 @@ impl KanalibApp {
                             .cursor_pointer()
                             .hover(move |style| style.bg(colors.hover))
                             .on_click(move |_, _, cx| {
-                                filter_state.set_filter(filter.clone());
+                                let filter = filter.clone();
                                 let _ = filter_this.update(cx, |app, cx| {
-                                    app.screen = Screen::Library;
-                                    cx.notify();
+                                    app.set_filter(filter, cx);
                                 });
                             })
                             .child(
@@ -684,35 +607,37 @@ impl KanalibApp {
                                         )
                                         .size(ControlSize::Sm)
                                         .tooltip("移除标签")
-                                        .on_click(move |_, _, cx| {
-                                            cx.stop_propagation();
-                                            match remove_state.remove_tags(
-                                                std::slice::from_ref(&remove_path),
-                                                &remove_tag,
-                                            ) {
-                                                Ok(updated) => push_toast(
-                                                    &remove_toaster,
-                                                    cx,
-                                                    if updated > 0 {
-                                                        format!("已移除标签 #{remove_tag}")
-                                                    } else {
-                                                        "没有可移除的标签".to_string()
-                                                    },
-                                                    if updated > 0 {
-                                                        Severity::Success
-                                                    } else {
-                                                        Severity::Warning
-                                                    },
-                                                ),
-                                                Err(error) => push_toast(
-                                                    &remove_toaster,
-                                                    cx,
-                                                    format!("移除标签失败：{error:#}"),
-                                                    Severity::Danger,
-                                                ),
-                                            }
-                                            let _ = remove_this.update(cx, |_, cx| cx.notify());
-                                        }),
+                                        .on_click(
+                                            move |_, _, cx| {
+                                                cx.stop_propagation();
+                                                match remove_state.remove_tags(
+                                                    std::slice::from_ref(&remove_path),
+                                                    &remove_tag,
+                                                ) {
+                                                    Ok(updated) => push_toast(
+                                                        &remove_toaster,
+                                                        cx,
+                                                        if updated > 0 {
+                                                            format!("已移除标签 #{remove_tag}")
+                                                        } else {
+                                                            "没有可移除的标签".to_string()
+                                                        },
+                                                        if updated > 0 {
+                                                            Severity::Success
+                                                        } else {
+                                                            Severity::Warning
+                                                        },
+                                                    ),
+                                                    Err(error) => push_toast(
+                                                        &remove_toaster,
+                                                        cx,
+                                                        format!("移除标签失败：{error:#}"),
+                                                        Severity::Danger,
+                                                    ),
+                                                }
+                                                let _ = remove_this.update(cx, |_, cx| cx.notify());
+                                            },
+                                        ),
                                     ),
                             ),
                     );
@@ -787,17 +712,22 @@ impl KanalibApp {
             .size(ControlSize::Sm)
             .icon(IconName::Heart)
             .on_click(move |_, _, cx| {
-                match favorite_state.set_favorite(std::slice::from_ref(&favorite_path), !favorite) {
-                    Ok(updated) => push_toast(
-                        &favorite_toaster,
-                        cx,
-                        if favorite {
-                            format!("已取消收藏 {updated} 张")
-                        } else {
-                            format!("已收藏 {updated} 张")
-                        },
-                        Severity::Success,
-                    ),
+                let changed = match favorite_state
+                    .set_favorite(std::slice::from_ref(&favorite_path), !favorite)
+                {
+                    Ok(updated) => {
+                        push_toast(
+                            &favorite_toaster,
+                            cx,
+                            if favorite {
+                                format!("已取消收藏 {updated} 张")
+                            } else {
+                                format!("已收藏 {updated} 张")
+                            },
+                            Severity::Success,
+                        );
+                        true
+                    }
                     Err(error) => {
                         favorite_state.set_error(format!("收藏失败：{error:#}"));
                         push_toast(
@@ -806,9 +736,16 @@ impl KanalibApp {
                             format!("收藏失败：{error:#}"),
                             Severity::Danger,
                         );
+                        false
                     }
+                };
+                if changed {
+                    let path = favorite_path.clone();
+                    let became_favorite = !favorite;
+                    let _ = favorite_this.update(cx, |app, cx| {
+                        app.after_favorite_change(&path, became_favorite, cx)
+                    });
                 }
-                let _ = favorite_this.update(cx, |_, cx| cx.notify());
             });
             if favorite {
                 favorite_button = favorite_button.primary();
@@ -926,8 +863,7 @@ impl KanalibApp {
                             let result = state.export_repaired_copy(path.clone(), output);
                             let _ = weak.update(cx, |app, cx| {
                                 if let Err(error) = result {
-                                    app.state
-                                        .set_error(format!("导出修复副本失败：{error:#}"));
+                                    app.state.set_error(format!("导出修复副本失败：{error:#}"));
                                 }
                                 cx.notify();
                             });
@@ -984,54 +920,49 @@ impl KanalibApp {
             let albums = self.asset_album_names(&asset.path);
             let album_path = asset.path.clone();
             let album_this = this.clone();
-            let mut album_section = div()
-                .flex()
-                .flex_col()
-                .gap(px(4.))
-                .child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .justify_between()
-                        .child(
-                            div()
-                                .text_xs()
-                                .font_weight(FontWeight::SEMIBOLD)
-                                .text_color(colors.subtle)
-                                .child("所属相册"),
+            let mut album_section = div().flex().flex_col().gap(px(4.)).child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .child(
+                        div()
+                            .text_xs()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(colors.subtle)
+                            .child("所属相册"),
+                    )
+                    .children((!albums.is_empty()).then(|| {
+                        let mut menu = Menu::new();
+                        let mut entries = self.albums_snapshot();
+                        entries.sort_by_key(|a| a.name.to_lowercase());
+                        for album in entries {
+                            let add_this = album_this.clone();
+                            let add_path = album_path.clone();
+                            menu = menu.item(
+                                MenuItem::new(album.name.clone())
+                                    .icon(IconName::Folder)
+                                    .on_click(move |_, cx| {
+                                        let _ = add_this.update(cx, |app, cx| {
+                                            app.add_paths_to_album(
+                                                album.id,
+                                                vec![add_path.clone()],
+                                                cx,
+                                            );
+                                        });
+                                    }),
+                            );
+                        }
+                        OverflowMenu::new(
+                            SharedString::from(format!(
+                                "inspector-album-more-{}",
+                                album_path.display()
+                            )),
+                            menu,
                         )
-                        .children((!albums.is_empty()).then(|| {
-                            let mut menu = Menu::new();
-                            let mut entries = self.albums_snapshot();
-                            entries
-                                .sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
-                            for album in entries {
-                                let add_this = album_this.clone();
-                                let add_path = album_path.clone();
-                                menu = menu.item(
-                                    MenuItem::new(album.name.clone())
-                                        .icon(IconName::Folder)
-                                        .on_click(move |_, cx| {
-                                            let _ = add_this.update(cx, |app, cx| {
-                                                app.add_paths_to_album(
-                                                    album.id,
-                                                    vec![add_path.clone()],
-                                                    cx,
-                                                );
-                                            });
-                                        }),
-                                );
-                            }
-                            OverflowMenu::new(
-                                SharedString::from(format!(
-                                    "inspector-album-more-{}",
-                                    album_path.display()
-                                )),
-                                menu,
-                            )
-                            .tooltip("加入相册")
-                        })),
-                );
+                        .tooltip("加入相册")
+                    })),
+            );
             if albums.is_empty() {
                 album_section = album_section.child(
                     div()
@@ -1267,5 +1198,70 @@ impl KanalibApp {
             )
             .child(content)
     }
+}
 
+#[cfg(test)]
+mod tests {
+    use std::path::Path;
+
+    #[test]
+    fn friendly_format_label_maps_known_extensions() {
+        assert_eq!(super::friendly_format_label(Path::new("a.TIFF")), "TIFF");
+        assert_eq!(super::friendly_format_label(Path::new("b.avif")), "AVIF");
+        assert_eq!(super::friendly_format_label(Path::new("c.qoi")), "QOI");
+        assert_eq!(super::friendly_format_label(Path::new("d.psd")), "PSD");
+        assert_eq!(
+            super::friendly_format_label(Path::new("e.HEIC")),
+            "HEIC/HEIF"
+        );
+        assert_eq!(super::friendly_format_label(Path::new("f.cr2")), "RAW");
+        assert_eq!(super::friendly_format_label(Path::new("clip.MP4")), "MP4");
+        assert_eq!(super::friendly_format_label(Path::new("clip.mov")), "MOV");
+        assert_eq!(super::friendly_format_label(Path::new("clip.mkv")), "MKV");
+        assert_eq!(super::friendly_format_label(Path::new("clip.webm")), "WebM");
+        assert_eq!(super::friendly_format_label(Path::new("clip.avi")), "AVI");
+        assert_eq!(super::friendly_format_label(Path::new("d.xyz")), "XYZ");
+        assert_eq!(super::friendly_format_label(Path::new("noext")), "未知格式");
+    }
+
+    #[test]
+    fn friendly_media_error_points_avif_at_ffmpeg() {
+        assert!(
+            super::friendly_media_error("The image format Avif is not supported")
+                .contains("FFmpeg")
+        );
+        assert!(super::friendly_media_error("ffmpeg exited with code 1").contains("FFmpeg"));
+        assert!(super::friendly_media_error("unexpected end of file").contains("截断"));
+        assert!(super::friendly_media_error("unsupported color type").contains("不支持"));
+    }
+
+    #[test]
+    fn format_capability_note_marks_ffmpeg_only_formats() {
+        assert_eq!(
+            super::format_capability_note(Path::new("a.png")),
+            "内置解码".to_string()
+        );
+        assert!(super::format_capability_note(Path::new("a.avif")).contains("需要 FFmpeg 解码"));
+        let psd = super::format_capability_note(Path::new("a.PSD"));
+        assert!(psd.contains("需要 FFmpeg 解码"), "{psd}");
+        assert!(psd.contains("仅合成图"), "{psd}");
+        let gif = super::format_capability_note(Path::new("a.gif"));
+        assert!(gif.contains("动画仅首帧"), "{gif}");
+        let heic = super::format_capability_note(Path::new("a.heic"));
+        assert!(heic.contains("未接入"), "{heic}");
+        assert!(!heic.contains("内置解码"), "{heic}");
+        let raw = super::format_capability_note(Path::new("a.nef"));
+        assert!(raw.contains("未接入"), "{raw}");
+        let video = super::format_capability_note(Path::new("clip.MP4"));
+        assert!(video.contains("首帧"), "{video}");
+        assert!(video.contains("系统播放器"), "{video}");
+    }
+
+    #[test]
+    fn friendly_media_error_covers_psd_and_heic() {
+        let psd = super::friendly_media_error("ffmpeg psd decoder failed: unsupported format");
+        assert!(psd.contains("PSD") && psd.contains("FFmpeg"), "{psd}");
+        let heic = super::friendly_media_error("libheif: no decoder for heic");
+        assert!(heic.contains("HEIC") && heic.contains("不支持"), "{heic}");
+    }
 }

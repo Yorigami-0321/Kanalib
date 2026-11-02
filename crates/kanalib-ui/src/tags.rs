@@ -1,7 +1,7 @@
-use crate::*;
-use crate::settings::TAG_ROW_HEIGHT;
 use crate::app::{KanalibApp, push_toast};
+use crate::settings::TAG_ROW_HEIGHT;
 use crate::theme::*;
+use crate::*;
 
 /// 低置信度审核最多加载的候选条数。
 pub(crate) const TAG_REVIEW_LIMIT: usize = 80;
@@ -20,12 +20,7 @@ pub(crate) enum TagManagerFilter {
 }
 
 impl TagManagerFilter {
-    pub(crate) const ALL: [Self; 4] = [
-        Self::All,
-        Self::Unused,
-        Self::LowFrequency,
-        Self::AutoOnly,
-    ];
+    pub(crate) const ALL: [Self; 4] = [Self::All, Self::Unused, Self::LowFrequency, Self::AutoOnly];
 
     pub(crate) fn label(self) -> &'static str {
         match self {
@@ -108,9 +103,12 @@ pub(crate) fn filter_tag_summaries(
 pub(crate) fn sort_tag_summaries(tags: &mut [TagSummary], sort: TagManagerSort) {
     match sort {
         TagManagerSort::Default => {}
-        TagManagerSort::Name => {
-            tags.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()).then_with(|| a.name.cmp(&b.name)))
-        }
+        TagManagerSort::Name => tags.sort_by(|a, b| {
+            a.name
+                .to_lowercase()
+                .cmp(&b.name.to_lowercase())
+                .then_with(|| a.name.cmp(&b.name))
+        }),
         TagManagerSort::UsageAsc => tags.sort_by(|a, b| {
             a.count
                 .cmp(&b.count)
@@ -211,7 +209,12 @@ impl KanalibApp {
     }
 
     /// 按资产批量处理该资产的全部待审候选。
-    pub(crate) fn apply_asset_review(&mut self, path: PathBuf, state: TagReviewState, cx: &mut Context<Self>) {
+    pub(crate) fn apply_asset_review(
+        &mut self,
+        path: PathBuf,
+        state: TagReviewState,
+        cx: &mut Context<Self>,
+    ) {
         self.apply_tag_review_async(path, None, state, cx);
     }
 
@@ -487,11 +490,7 @@ impl KanalibApp {
             TextInput::new(window, cx).placeholder("筛选标签名 / 类别")
         });
         let query = search.read(cx).text().trim().to_lowercase();
-        let tags = filter_tag_summaries(
-            &self.tag_list,
-            &query,
-            self.tag_manager_filter,
-        );
+        let tags = filter_tag_summaries(&self.tag_list, &query, self.tag_manager_filter);
         let filtered = {
             let mut tags = tags;
             sort_tag_summaries(&mut tags, self.tag_manager_sort);
@@ -526,10 +525,7 @@ impl KanalibApp {
                 let active = self.tag_manager_filter == filter;
                 bar = bar.child(
                     div()
-                        .id(SharedString::from(format!(
-                            "tag-filter-{}",
-                            filter.slug()
-                        )))
+                        .id(SharedString::from(format!("tag-filter-{}", filter.slug())))
                         .px(px(9.))
                         .py(px(4.))
                         .rounded(px(5.))
@@ -645,18 +641,15 @@ impl KanalibApp {
                                             })
                                             .child(name),
                                     )
-                                    .child(
-                                        div()
-                                            .text_xs()
-                                            .text_color(colors.subtle)
-                                            .child(format!(
-                                                "#{} · {} 张 · 手工 {} 次{}",
-                                                tag.category,
-                                                tag.count,
-                                                tag.manual_count,
-                                                if blocked_row { " · 已屏蔽" } else { "" }
-                                            )),
-                                    ),
+                                    .child(div().text_xs().text_color(colors.subtle).child(
+                                        format!(
+                                            "#{} · {} 张 · 手工 {} 次{}",
+                                            tag.category,
+                                            tag.count,
+                                            tag.manual_count,
+                                            if blocked_row { " · 已屏蔽" } else { "" }
+                                        ),
+                                    )),
                             )
                             .child(
                                 div()
@@ -665,52 +658,55 @@ impl KanalibApp {
                                     .gap(px(4.))
                                     .child(
                                         IconButton::new(
-                                            SharedString::from(format!(
-                                                "rename-tag-{rename_name}"
-                                            )),
+                                            SharedString::from(format!("rename-tag-{rename_name}")),
                                             IconName::Pencil,
                                         )
                                         .size(ControlSize::Sm)
                                         .tooltip("重命名")
-                                        .on_click(move |_, _, cx| {
-                                            let _ = this_rename.update(cx, |app, cx| {
-                                                app.open_tag_rename(rename_name.clone(), cx)
-                                            });
-                                        }),
+                                        .on_click(
+                                            move |_, _, cx| {
+                                                let _ = this_rename.update(cx, |app, cx| {
+                                                    app.open_tag_rename(rename_name.clone(), cx)
+                                                });
+                                            },
+                                        ),
                                     )
                                     .child(
                                         IconButton::new(
-                                            SharedString::from(format!(
-                                                "merge-tag-{merge_name}"
-                                            )),
+                                            SharedString::from(format!("merge-tag-{merge_name}")),
                                             IconName::Merge,
                                         )
                                         .size(ControlSize::Sm)
                                         .tooltip("合并到其他标签")
-                                        .on_click(move |_, _, cx| {
-                                            let _ = this_merge.update(cx, |app, cx| {
-                                                app.open_tag_merge(merge_name.clone(), cx)
-                                            });
-                                        }),
+                                        .on_click(
+                                            move |_, _, cx| {
+                                                let _ = this_merge.update(cx, |app, cx| {
+                                                    app.open_tag_merge(merge_name.clone(), cx)
+                                                });
+                                            },
+                                        ),
                                     )
                                     .child(
                                         Button::new(
-                                            SharedString::from(format!(
-                                                "block-tag-{}",
-                                                block_name
-                                            )),
-                                            if blocked_row { "取消屏蔽" } else { "屏蔽" },
+                                            SharedString::from(format!("block-tag-{}", block_name)),
+                                            if blocked_row {
+                                                "取消屏蔽"
+                                            } else {
+                                                "屏蔽"
+                                            },
                                         )
                                         .size(ControlSize::Sm)
-                                        .on_click(move |_, _, cx| {
-                                            let _ = this_block.update(cx, |app, cx| {
-                                                app.set_tag_blocked(
-                                                    block_name.clone(),
-                                                    !blocked_row,
-                                                    cx,
-                                                )
-                                            });
-                                        }),
+                                        .on_click(
+                                            move |_, _, cx| {
+                                                let _ = this_block.update(cx, |app, cx| {
+                                                    app.set_tag_blocked(
+                                                        block_name.clone(),
+                                                        !blocked_row,
+                                                        cx,
+                                                    )
+                                                });
+                                            },
+                                        ),
                                     ),
                             )
                     })
@@ -795,7 +791,6 @@ impl KanalibApp {
             .child(filter_bar)
             .child(body)
     }
-
 }
 
 #[cfg(test)]
@@ -820,7 +815,8 @@ mod tests {
             tag("popular", 8, 3),
             tag("auto", 9, 0),
         ];
-        assert!(TagManagerFilter::All.matches(&tags[0]));        assert!(TagManagerFilter::Unused.matches(&tags[0]));
+        assert!(TagManagerFilter::All.matches(&tags[0]));
+        assert!(TagManagerFilter::Unused.matches(&tags[0]));
         assert!(!TagManagerFilter::Unused.matches(&tags[1]));
         assert!(TagManagerFilter::LowFrequency.matches(&tags[1]));
         assert!(TagManagerFilter::LowFrequency.matches(&tags[2]));
@@ -846,12 +842,18 @@ mod tests {
         let mut sorted = filtered;
         sort_tag_summaries(&mut sorted, TagManagerSort::UsageAsc);
         assert_eq!(
-            sorted.iter().map(|tag| tag.name.as_str()).collect::<Vec<_>>(),
+            sorted
+                .iter()
+                .map(|tag| tag.name.as_str())
+                .collect::<Vec<_>>(),
             vec!["gamma", "alpha", "Beta"]
         );
         sort_tag_summaries(&mut sorted, TagManagerSort::UsageDesc);
         assert_eq!(
-            sorted.iter().map(|tag| tag.name.as_str()).collect::<Vec<_>>(),
+            sorted
+                .iter()
+                .map(|tag| tag.name.as_str())
+                .collect::<Vec<_>>(),
             vec!["alpha", "Beta", "gamma"]
         );
         sort_tag_summaries(&mut sorted, TagManagerSort::ManualDesc);

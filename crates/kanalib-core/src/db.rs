@@ -235,14 +235,10 @@ enum FtsPlacement {
     External,
 }
 
-/// 宽结果集下的排序计划。产品路径固定用覆盖索引；`TempSort` 只给
-/// 基准测试复现「没有覆盖索引的旧 SQL」做同库对照，不对外暴露。
+/// 宽结果集下的排序计划。产品路径固定用覆盖索引，不对外暴露。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum SortPlan {
     CoverIndex,
-    /// 仅供基准测试复现旧计划。
-    #[cfg(test)]
-    TempSort,
 }
 
 #[derive(Debug)]
@@ -341,9 +337,7 @@ fn sort_primary_expr(sort: SearchSort) -> Option<String> {
         SearchSort::Size => "assets.bytes".to_string(),
         SearchSort::Resolution => "assets.width * assets.height".to_string(),
         SearchSort::Star => "assets.star".to_string(),
-        SearchSort::Favorite => {
-            "CASE WHEN assets.favorite <> 0 THEN 1 ELSE 0 END".to_string()
-        }
+        SearchSort::Favorite => "CASE WHEN assets.favorite <> 0 THEN 1 ELSE 0 END".to_string(),
         SearchSort::Rating => "CASE lower(assets.rating) \
              WHEN 'g' THEN 1 WHEN 's' THEN 2 WHEN 'q' THEN 3 WHEN 'e' THEN 4 ELSE 0 END"
             .to_string(),
@@ -364,10 +358,9 @@ fn sort_cover_index(sort: SearchSort) -> Option<&'static str> {
         SearchSort::Captured => "idx_assets_sort_captured_desc",
         SearchSort::Size => "idx_assets_sort_size_desc",
         SearchSort::Rating => "idx_assets_sort_rating_desc",
-        SearchSort::Name
-        | SearchSort::Resolution
-        | SearchSort::Star
-        | SearchSort::Favorite => return None,
+        SearchSort::Name | SearchSort::Resolution | SearchSort::Star | SearchSort::Favorite => {
+            return None;
+        }
     })
 }
 
@@ -384,7 +377,6 @@ fn register_sql_functions(conn: &Connection) -> Result<()> {
     )?;
     Ok(())
 }
-
 
 const SCHEMA_V2: &str = r#"
 CREATE TABLE IF NOT EXISTS sources (
@@ -780,13 +772,15 @@ impl Db {
         let mut temp = BackupTemp::new(temp_path.clone());
         let mut warnings = Vec::new();
 
-        match self.conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |row| {
-            Ok((
-                row.get::<_, i64>(0)?,
-                row.get::<_, i64>(1)?,
-                row.get::<_, i64>(2)?,
-            ))
-        }) {
+        match self
+            .conn
+            .query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, i64>(2)?,
+                ))
+            }) {
             Ok((busy, log, checkpointed)) => {
                 if busy != 0 || checkpointed != log {
                     warnings.push(format!(
@@ -1114,6 +1108,39 @@ impl Db {
         self.load_asset(path)
     }
 
+    /// 路径对应的文件内容被替换：清除派生的自动标签/候选/评级/分组，保留
+    /// 人工标签与收藏/星级，并重置打标状态，让后续 `enqueue_tag_jobs` 重新排队。
+    pub fn reset_asset_analysis(&self, path: &Path) -> Result<bool> {
+        let path_string = path.to_string_lossy().to_string();
+        let tx = self.conn.unchecked_transaction()?;
+        let asset_id: Option<i64> = tx
+            .query_row(
+                "SELECT id FROM assets WHERE path = ?1",
+                [&path_string],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let Some(asset_id) = asset_id else {
+            return Ok(false);
+        };
+        tx.execute(
+            "DELETE FROM asset_tags WHERE asset_id = ?1 AND origin = 'auto'",
+            [asset_id],
+        )?;
+        tx.execute("DELETE FROM asset_scores WHERE asset_id = ?1", [asset_id])?;
+        tx.execute(
+            "UPDATE assets
+             SET tagged = 0, tag_state = 'pending', tag_attempts = 0,
+                 rating = '', group_name = '', error = NULL
+             WHERE id = ?1",
+            [asset_id],
+        )?;
+        refresh_auto_tags_json(&tx, asset_id)?;
+        refresh_tags_text(&tx, asset_id)?;
+        tx.commit()?;
+        Ok(true)
+    }
+
     pub fn update_tags(&self, asset: &Asset) -> Result<()> {
         let path = asset.path.to_string_lossy().to_string();
         let tags_json = serde_json::to_string(&asset.tags)?;
@@ -1191,15 +1218,15 @@ impl Db {
 
     pub fn tag_thresholds(&self) -> Result<TagThresholds> {
         let mut categories = default_category_thresholds();
-        if let Some(raw) = self.setting(TAG_THRESHOLDS_KEY)? {
-            if let Ok(stored) = serde_json::from_str::<HashMap<String, f32>>(&raw) {
-                for (category, value) in stored {
-                    let category = category.to_ascii_lowercase();
-                    if let Some(slot) = categories.get_mut(&category)
-                        && value.is_finite()
-                    {
-                        *slot = value.clamp(0.0, 1.0);
-                    }
+        if let Some(raw) = self.setting(TAG_THRESHOLDS_KEY)?
+            && let Ok(stored) = serde_json::from_str::<HashMap<String, f32>>(&raw)
+        {
+            for (category, value) in stored {
+                let category = category.to_ascii_lowercase();
+                if let Some(slot) = categories.get_mut(&category)
+                    && value.is_finite()
+                {
+                    *slot = value.clamp(0.0, 1.0);
                 }
             }
         }
@@ -3145,9 +3172,7 @@ impl Db {
             return Ok(empty_search_page(request.include_total));
         }
         let parts = request.query.parts();
-        if parts.impossible
-            || (parts.duplicates_only && request.duplicate_paths.is_none())
-        {
+        if parts.impossible || (parts.duplicates_only && request.duplicate_paths.is_none()) {
             return Ok(empty_search_page(request.include_total));
         }
         if let Some(cursor) = request.cursor {
@@ -3187,14 +3212,8 @@ impl Db {
         let (empty, broad) = match total {
             Some(total) => (total == 0, total > threshold),
             None => {
-                let (count, broad) = self.search_extent(
-                    folders,
-                    &request,
-                    &parts,
-                    &built,
-                    threshold,
-                    preferred,
-                )?;
+                let (count, broad) =
+                    self.search_extent(folders, &request, &parts, &built, threshold, preferred)?;
                 (count == 0, broad)
             }
         };
@@ -3241,7 +3260,10 @@ impl Db {
             None
         };
         Ok(SearchPage {
-            paths: rows.into_iter().map(|row| PathBuf::from(row.path)).collect(),
+            paths: rows
+                .into_iter()
+                .map(|row| PathBuf::from(row.path))
+                .collect(),
             next,
             total,
         })
@@ -3305,10 +3327,12 @@ impl Db {
         let primary_expr = sort_primary_expr(request.sort);
         let direction = if request.ascending { "ASC" } else { "DESC" };
         let order_sql = match &primary_expr {
-            None => format!("{name_expr} {direction}, {path_expr} {direction}, assets.id {direction}"),
-            Some(primary) => format!(
-                "{primary} {direction}, {name_expr} ASC, {path_expr} ASC, assets.id ASC"
-            ),
+            None => {
+                format!("{name_expr} {direction}, {path_expr} {direction}, assets.id {direction}")
+            }
+            Some(primary) => {
+                format!("{primary} {direction}, {name_expr} ASC, {path_expr} ASC, assets.id ASC")
+            }
         };
         let select_sql = match &primary_expr {
             None => format!("assets.path, NULL, {name_expr}, {path_expr}, assets.id"),
@@ -3384,8 +3408,7 @@ impl Db {
         hint: Option<&'static str>,
     ) -> Result<(usize, bool)> {
         if let Some(fts_query) = built.fts_query.clone() {
-            let (sql, mut params) =
-                self.fts_extent_query(folders, request, parts, &fts_query)?;
+            let (sql, mut params) = self.fts_extent_query(folders, request, parts, &fts_query)?;
             params.push(Value::Integer(threshold as i64 + 1));
             let mut statement = self.conn.prepare(&sql)?;
             let rows = statement.query_map(rusqlite::params_from_iter(params.iter()), |row| {
@@ -3945,7 +3968,9 @@ impl Db {
 
     /// 删除来源行；`assets.source_id` 外键级联删除该来源的资产记录。
     pub fn delete_source(&self, id: i64) -> Result<usize> {
-        Ok(self.conn.execute("DELETE FROM sources WHERE id = ?1", [id])?)
+        Ok(self
+            .conn
+            .execute("DELETE FROM sources WHERE id = ?1", [id])?)
     }
 
     pub fn source_asset_count(&self, id: i64) -> Result<usize> {
@@ -4055,10 +4080,7 @@ fn add_like_clause(args: &mut SqlArgs, tokens: &[String]) {
     }
 }
 
-fn preferred_probe_index(
-    filter: &Filter,
-    parts: &SearchQueryParts<'_>,
-) -> Option<&'static str> {
+fn preferred_probe_index(filter: &Filter, parts: &SearchQueryParts<'_>) -> Option<&'static str> {
     if !parts.free.is_empty() {
         return None;
     }
@@ -4134,9 +4156,8 @@ fn add_tag_exists(
     );
     let mut values = Vec::new();
     if let Some(category) = category {
-        clause.push_str(
-            " AND instr(kanalib_lower(t.name), ?) > 0 AND t.category = ? COLLATE NOCASE",
-        );
+        clause
+            .push_str(" AND instr(kanalib_lower(t.name), ?) > 0 AND t.category = ? COLLATE NOCASE");
         values.push(value.to_lowercase());
         values.push(category.to_string());
     } else if case_insensitive {
@@ -4162,12 +4183,10 @@ fn numeric_expr(field: NumField) -> String {
         NumField::Size => "CAST(assets.bytes AS REAL)".to_string(),
         NumField::Width => "CAST(assets.width AS REAL)".to_string(),
         NumField::Height => "CAST(assets.height AS REAL)".to_string(),
-        NumField::Ratio => {
-            "CASE WHEN assets.height > 0
+        NumField::Ratio => "CASE WHEN assets.height > 0
                 THEN CAST(assets.width AS REAL) / CAST(assets.height AS REAL)
                 ELSE NULL END"
-                .to_string()
-        }
+            .to_string(),
     }
 }
 
@@ -4287,12 +4306,7 @@ fn build_keyset_sql(
         bail!("搜索游标与排序方式不匹配，请从第一页重新开始");
     }
     match (&cursor.key, primary_expr) {
-        (
-            CursorKey::Name {
-                name, path, id, ..
-            },
-            None,
-        ) => {
+        (CursorKey::Name { name, path, id, .. }, None) => {
             let op = if ascending { ">" } else { "<" };
             let sql = format!("({name_expr}, {path_expr}, assets.id) {op} (?, ?, ?)");
             Ok((
@@ -5260,9 +5274,7 @@ fn migrate_v1(conn: &Connection) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        Db, NameFold, SearchPageRequest, SearchSort, SortPlan, sort_cover_index, sort_primary_expr,
-    };
+    use super::{Db, NameFold, SearchPageRequest, SearchSort, sort_cover_index, sort_primary_expr};
     use crate::dedup::{DuplicateReview, ReviewState};
     use crate::media::ContentHashes;
     use crate::model::{Asset, Filter, MediaKind, SearchQuery, TagHit, TagReviewState};
@@ -5502,8 +5514,9 @@ mod tests {
             assert_eq!(db.tags_missing_vocab().unwrap().len(), 2);
 
             let clara_path = PathBuf::from("C:\\lib\\克拉拉.png");
-            db.set_favorite(&[clara_path.clone()], true).unwrap();
-            db.set_star(&[clara_path.clone()], 4).unwrap();
+            db.set_favorite(std::slice::from_ref(&clara_path), true)
+                .unwrap();
+            db.set_star(std::slice::from_ref(&clara_path), 4).unwrap();
             let clara = db
                 .load_folder("C:\\lib")
                 .unwrap()
@@ -5513,7 +5526,7 @@ mod tests {
             assert!(clara.favorite);
             assert_eq!(clara.star, 4);
 
-            db.add_manual_tags(&[clara_path.clone()], "manualtag", "manual")
+            db.add_manual_tags(std::slice::from_ref(&clara_path), "manualtag", "manual")
                 .unwrap();
             let clara = db
                 .load_folder("C:\\lib")
@@ -5536,7 +5549,8 @@ mod tests {
                 .expect("manual tag summary");
             assert_eq!((summary.count, summary.manual_count), (1, 1));
             assert_eq!(
-                db.remove_tags(&[clara_path.clone()], "manualtag").unwrap(),
+                db.remove_tags(std::slice::from_ref(&clara_path), "manualtag")
+                    .unwrap(),
                 1
             );
             let clara = db
@@ -6264,12 +6278,16 @@ mod tests {
                 .any(|tag| tag.tag == "keep_me")
         );
 
-        let again = db.retag_paths(&[b.clone()]).unwrap();
+        let again = db.retag_paths(std::slice::from_ref(&b)).unwrap();
         assert_eq!((again.queued, again.recomputed), (1, 0));
         assert_eq!(db.tag_queue_totals(&["C:\\lib".into()]).unwrap().pending, 1);
 
-        db.retag_paths(&[c.clone()]).unwrap();
-        assert_eq!(db.prioritize_tag_jobs(&[b.clone()], 10).unwrap(), 1);
+        db.retag_paths(std::slice::from_ref(&c)).unwrap();
+        assert_eq!(
+            db.prioritize_tag_jobs(std::slice::from_ref(&b), 10)
+                .unwrap(),
+            1
+        );
         let jobs = db.claim_tag_jobs("C:\\lib", 10).unwrap();
         assert_eq!(jobs.len(), 2);
         assert_eq!(jobs[0].path, b);
@@ -6330,11 +6348,7 @@ mod tests {
         let roots = vec!["C:\\lib".to_string(), "C:\\lib2".to_string()];
         let assets = db.load_library(&roots).unwrap();
         assert_eq!(assets.len(), 2);
-        assert!(
-            assets
-                .iter()
-                .any(|asset| asset.library_root == PathBuf::from("C:\\lib2"))
-        );
+        assert!(assets.iter().any(|asset| asset.library_root == *"C:\\lib2"));
         assert!(
             assets
                 .iter()
@@ -6365,11 +6379,7 @@ mod tests {
         SearchSort::Rating,
     ];
 
-    fn legacy_search_paths(
-        db: &Db,
-        folders: &[String],
-        tokens: &[String],
-    ) -> HashSet<PathBuf> {
+    fn legacy_search_paths(db: &Db, folders: &[String], tokens: &[String]) -> HashSet<PathBuf> {
         if tokens.is_empty() || folders.is_empty() {
             return HashSet::new();
         }
@@ -6467,15 +6477,12 @@ mod tests {
         let mut hits = assets
             .iter()
             .filter(|asset| {
-                filter.matches(asset)
-                    && query.matches(asset, fts_paths.as_ref(), Some(duplicates))
+                filter.matches(asset) && query.matches(asset, fts_paths.as_ref(), Some(duplicates))
             })
             .collect::<Vec<&Asset>>();
         match sort {
             SearchSort::Name => {
-                hits.sort_by_cached_key(|asset| {
-                    (asset.title().to_lowercase(), asset.path.clone())
-                });
+                hits.sort_by_cached_key(|asset| (asset.title().to_lowercase(), asset.path.clone()));
                 if !ascending {
                     hits.reverse();
                 }
@@ -6543,15 +6550,7 @@ mod tests {
             let bytes = 1_000u64 + index as u64 * 137;
             let mtime = 1_700_000_000u64 + index as u64 * 3_600;
             db.upsert_meta(
-                root,
-                &path,
-                None,
-                width,
-                height,
-                bytes,
-                mtime,
-                &hashes,
-                false,
+                root, &path, None, width, height, bytes, mtime, &hashes, false,
             )
             .unwrap();
             db.set_exif(
@@ -6987,9 +6986,8 @@ mod tests {
         // 320 > limit * 8（且 >= 256），search_page 会走“命中很多”的分支。
         for sort in SEARCH_SORTS {
             for ascending in [true, false] {
-                let expected = memory_search_paths(
-                    &db, &roots, &filter, &query, &duplicates, sort, ascending,
-                );
+                let expected =
+                    memory_search_paths(&db, &roots, &filter, &query, &duplicates, sort, ascending);
                 assert_eq!(expected.len(), 320);
                 let mut actual = Vec::new();
                 let mut cursor = None;
@@ -7088,77 +7086,6 @@ mod tests {
         assert!(
             plan.iter().any(|line| line.contains("TEMP B-TREE")),
             "unicode fold should not use lower() index: {plan:?}"
-        );
-        let _ = fs::remove_dir_all(&root);
-    }
-
-    #[test]
-    #[ignore = "manual query-plan probe with keyset cursor"]
-    fn search_page_keyset_plan_probe() {
-        let (root, roots, db) = broad_search_fixture(300);
-        db.conn
-            .execute_batch(
-                "UPDATE assets SET mtime = 100, captured_at = NULL, star = 0,
-                    favorite = 0, rating = 'S', bytes = 777, width = 10, height = 10;",
-            )
-            .unwrap();
-        let filter = Filter::All;
-        let query = SearchQuery::parse("synthetic");
-        let parts = query.parts();
-        let first = db
-            .search_page(
-                &roots,
-                SearchPageRequest {
-                    filter: &filter,
-                    query: &query,
-                    sort: SearchSort::Star,
-                    ascending: false,
-                    limit: 3,
-                    cursor: None,
-                    duplicate_paths: None,
-                    include_total: false,
-                },
-            )
-            .unwrap();
-        let cursor = first.next.expect("cursor");
-        let request = SearchPageRequest {
-            filter: &filter,
-            query: &query,
-            sort: SearchSort::Star,
-            ascending: false,
-            limit: 3,
-            cursor: Some(&cursor),
-            duplicate_paths: None,
-            include_total: false,
-        };
-        let mut built = db.build_search_sql(&roots, &request, &parts).unwrap();
-        built.force_index = sort_cover_index(SearchSort::Rating);
-        let mut params = built.where_params.clone();
-        params.extend(built.keyset_params.iter().cloned());
-        params.push(Value::Integer(4));
-        eprintln!("page2 sql: {}", built.page_sql());
-        eprintln!("page2 plan: {:?}", explain_with(&db, &built.page_sql(), &params));
-        let started = std::time::Instant::now();
-        for _ in 0..20 {
-            let _ = db
-                .search_page(
-                    &roots,
-                    SearchPageRequest {
-                        filter: &filter,
-                        query: &query,
-                        sort: SearchSort::Star,
-                        ascending: false,
-                        limit: 3,
-                        cursor: Some(&cursor),
-                        duplicate_paths: None,
-                        include_total: false,
-                    },
-                )
-                .unwrap();
-        }
-        eprintln!(
-            "page2 20x ms={:.1}",
-            started.elapsed().as_secs_f64() * 1000.0
         );
         let _ = fs::remove_dir_all(&root);
     }
@@ -7311,9 +7238,7 @@ mod tests {
         let parts = query.parts();
         let built = db.build_search_sql(&roots, &request, &parts).unwrap();
         let fts = built.fts_query.clone().expect("omega should use FTS");
-        let (sql, mut params) = db
-            .fts_extent_query(&roots, &request, &parts, &fts)
-            .unwrap();
+        let (sql, mut params) = db.fts_extent_query(&roots, &request, &parts, &fts).unwrap();
         params.push(Value::Integer(4097));
         let plan = explain_with(&db, &sql, &params);
         assert!(
@@ -7332,7 +7257,9 @@ mod tests {
             .conn
             .prepare("SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = 'assets'")
             .unwrap();
-        let rows = statement.query_map([], |row| row.get::<_, String>(0)).unwrap();
+        let rows = statement
+            .query_map([], |row| row.get::<_, String>(0))
+            .unwrap();
         rows.collect::<rusqlite::Result<HashSet<_>>>().unwrap()
     }
 
@@ -7390,7 +7317,10 @@ mod tests {
             "idx_assets_sort_star_desc",
             "idx_assets_sort_favorite_desc",
         ] {
-            assert!(!names.contains(removed), "retired index still exists: {removed}");
+            assert!(
+                !names.contains(removed),
+                "retired index still exists: {removed}"
+            );
         }
         drop(db);
         let db = Db::open(&root.join("kanalib.db")).unwrap();
@@ -7405,7 +7335,8 @@ mod tests {
             ),
         );
         assert!(
-            plan.iter().any(|line| line.contains("idx_assets_name_lower")),
+            plan.iter()
+                .any(|line| line.contains("idx_assets_name_lower")),
             "name plan: {plan:?}"
         );
         // 非名称排序的覆盖索引必须与 ORDER BY 完全匹配（含并列值 tie-breaker），
@@ -7436,10 +7367,7 @@ mod tests {
                 "{sort:?} still sorts: {plan:?}"
             );
         }
-        let plan = explain(
-            &db,
-            "SELECT assets.path FROM assets WHERE assets.star = 3",
-        );
+        let plan = explain(&db, "SELECT assets.path FROM assets WHERE assets.star = 3");
         assert!(
             plan.iter().any(|line| line.contains("idx_assets_star")),
             "star plan: {plan:?}"
@@ -7449,7 +7377,8 @@ mod tests {
             "SELECT assets.path FROM assets WHERE assets.rating = 'S' COLLATE NOCASE",
         );
         assert!(
-            plan.iter().any(|line| line.contains("idx_assets_rating_nocase")),
+            plan.iter()
+                .any(|line| line.contains("idx_assets_rating_nocase")),
             "rating plan: {plan:?}"
         );
         let plan = explain(
@@ -7473,715 +7402,6 @@ mod tests {
         let _ = fs::remove_dir_all(&root);
     }
 
-    fn percentile(values: &[f64], percent: f64) -> f64 {
-        if values.is_empty() {
-            return 0.0;
-        }
-        let index = ((values.len() as f64 * percent / 100.0) as usize).min(values.len() - 1);
-        values[index]
-    }
-
-    fn report_metrics(label: &str, mut values: Vec<f64>) {
-        values.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-        eprintln!(
-            "search bench: {label} runs={} p50={:.2}ms p95={:.2}ms max={:.2}ms",
-            values.len(),
-            percentile(&values, 50.0),
-            percentile(&values, 95.0),
-            values.last().copied().unwrap_or(0.0)
-        );
-    }
-
-    fn copy_bench_database(source: &Path, target: &Path) {
-        fs::copy(source, target).unwrap();
-        for suffix in ["-wal", "-shm"] {
-            let mut side = source.as_os_str().to_owned();
-            side.push(suffix);
-            let side = PathBuf::from(side);
-            if side.exists() {
-                let mut target_side = target.as_os_str().to_owned();
-                target_side.push(suffix);
-                fs::copy(&side, PathBuf::from(target_side)).unwrap();
-            }
-        }
-    }
-
-    fn generate_bench_database(db_path: &Path, count: usize) {
-        let db = Db::open(db_path).unwrap();
-        let root = "C:\\bench".to_string();
-        db.conn
-            .execute(
-                "INSERT OR IGNORE INTO sources(kind, name, locator, config_json, read_only)
-                 VALUES('local', ?1, ?1, '{}', 1)",
-                [root.as_str()],
-            )
-            .unwrap();
-        let source_id: i64 = db
-            .conn
-            .query_row(
-                "SELECT id FROM sources WHERE kind = 'local' AND locator = ?1",
-                [root.as_str()],
-                |row| row.get(0),
-            )
-            .unwrap();
-        let words = ["sky", "forest", "city", "portrait", "abstract", "gradient"];
-        let chinese = ["风景", "角色", "合成", "图集"];
-        let ratings = ["", "G", "S", "Q", "E"];
-        let tx = db.conn.unchecked_transaction().unwrap();
-        for index in 0..count {
-            let name = format!(
-                "synthetic_{index:05}_{}_{}.jpg",
-                words[index % words.len()],
-                chinese[index % chinese.len()]
-            );
-            let folder = format!("{root}\\set{:02}_{}", index % 20, words[index % words.len()]);
-            let path = format!("{folder}\\{name}");
-            let tags = if index % 3 == 0 {
-                "[{\"tag\":\"sky\",\"category\":\"general\",\"score\":0.9}]"
-            } else {
-                "[]"
-            };
-            let tags_text = if index % 3 == 0 { "sky" } else { "" };
-            tx.execute(
-                "INSERT INTO assets(
-                    source_id, path, folder, name, media_kind, mime, width, height, bytes,
-                    mtime, captured_at, rating, group_name, tags_json, tags_text, tagged,
-                    favorite, star, error, damage
-                 ) VALUES(?1, ?2, ?3, ?4, 'image', 'image/jpeg', ?5, ?6, ?7, ?8, ?9,
-                    ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)",
-                rusqlite::params![
-                    source_id,
-                    path,
-                    root,
-                    name,
-                    [100i64, 200, 320, 640][index % 4],
-                    [80i64, 100, 240, 480][index % 4],
-                    1_000i64 + index as i64 * 37,
-                    1_700_000_000i64 + index as i64 * 3_600,
-                    (index % 4 != 0).then_some(1_680_000_000i64 + index as i64 * 86_400),
-                    ratings[index % ratings.len()],
-                    ["角色: A", "作品: B", ""][index % 3],
-                    tags,
-                    tags_text,
-                    i64::from(index % 4 != 0),
-                    i64::from(index % 5 == 0),
-                    (index % 6) as i64,
-                    (index % 101 == 0).then_some("failed"),
-                    (index % 137 == 0).then_some("damaged"),
-                ],
-            )
-            .unwrap();
-        }
-        tx.commit().unwrap();
-        db.conn
-            .execute("INSERT INTO assets_fts(assets_fts) VALUES('rebuild')", [])
-            .unwrap();
-    }
-
-    fn bench_warm_page(
-        label: &str,
-        db: &Db,
-        folders: &[String],
-        filter: &Filter,
-        query: &SearchQuery,
-        sort: SearchSort,
-        ascending: bool,
-        limit: usize,
-        runs: usize,
-        plan: SortPlan,
-    ) {
-        for _ in 0..3 {
-            db.search_page_with_plan(
-                folders,
-                SearchPageRequest::new(filter, query, sort, ascending, limit),
-                plan,
-            )
-            .unwrap();
-        }
-        let hits = db
-            .search_page_with_plan(
-                folders,
-                SearchPageRequest {
-                    filter,
-                    query,
-                    sort,
-                    ascending,
-                    limit,
-                    cursor: None,
-                    duplicate_paths: None,
-                    include_total: true,
-                },
-                plan,
-            )
-            .unwrap()
-            .total
-            .unwrap_or(0);
-        let mut durations = Vec::with_capacity(runs);
-        for _ in 0..runs {
-            let started = std::time::Instant::now();
-            let page = db
-                .search_page_with_plan(
-                    folders,
-                    SearchPageRequest::new(filter, query, sort, ascending, limit),
-                    plan,
-                )
-                .unwrap();
-            assert!(page.paths.len() <= limit);
-            durations.push(started.elapsed().as_secs_f64() * 1000.0);
-        }
-        report_metrics(&format!("{label} hits={hits}"), durations);
-    }
-
-    #[test]
-    #[ignore = "manual query-plan probe; set KANALIB_BENCH_KEEP_DB to a synthetic db"]
-    fn search_sort_plan_probe() {
-        let Some(source) = std::env::var_os("KANALIB_BENCH_KEEP_DB").map(PathBuf::from) else {
-            return;
-        };
-        let temp = temp_root("plan-probe");
-        let db_path = temp.join("probe.db");
-        copy_bench_database(&source, &db_path);
-        let db = Db::open(&db_path).unwrap();
-        let separator = std::path::MAIN_SEPARATOR as u32;
-        let name = "lower(assets.name)";
-        let path = &format!("replace(assets.path, char({separator}), char(1))");
-        let folder = "C:\\bench";
-        let matcher = "\"synthetic\"";
-        let sorts = [
-            ("modified", "assets.mtime"),
-            ("captured", "COALESCE(assets.captured_at, assets.mtime)"),
-            ("size", "assets.bytes"),
-            ("resolution", "assets.width * assets.height"),
-            ("star", "assets.star"),
-            ("favorite", "CASE WHEN assets.favorite <> 0 THEN 1 ELSE 0 END"),
-            (
-                "rating",
-                "CASE lower(assets.rating) WHEN 'g' THEN 1 WHEN 's' THEN 2 \
-                 WHEN 'q' THEN 3 WHEN 'e' THEN 4 ELSE 0 END",
-            ),
-        ];
-        // 候选：每个排序键 × 方向一条复合索引（覆盖 ORDER BY 的全部列）。
-        for (key, expr) in sorts {
-            let unqualified = expr.replace("assets.", "");
-            for (suffix, direction) in [("desc", "DESC"), ("asc", "ASC")] {
-                db.conn
-                    .execute_batch(&format!(
-                        "CREATE INDEX IF NOT EXISTS idx_probe_{key}_{suffix}
-                         ON assets({unqualified} {direction}, lower(name) ASC,
-                                  replace(path, char({separator}), char(1)) ASC, id ASC);"
-                    ))
-                    .unwrap();
-            }
-        }
-        let plan = |sql: &str| {
-            let mut statement = db
-                .conn
-                .prepare(&format!("EXPLAIN QUERY PLAN {sql}"))
-                .unwrap();
-            let rows = statement
-                .query_map([folder, matcher], |row| row.get::<_, String>(3))
-                .unwrap();
-            rows.collect::<rusqlite::Result<Vec<_>>>().unwrap()
-        };
-        let base_where = format!(
-            "assets.folder IN (?) AND assets.id IN
-             (SELECT rowid FROM assets_fts WHERE assets_fts MATCH ?)"
-        );
-        for (key, expr) in sorts {
-            let select = format!("assets.path, {expr}, {name}, {path}, assets.id");
-            for ascending in [false, true] {
-                let (direction, suffix) = if ascending {
-                    ("ASC", "asc")
-                } else {
-                    ("DESC", "desc")
-                };
-                let order = format!("{expr} {direction}, {name} ASC, {path} ASC, assets.id ASC");
-                for (label, from) in [
-                    ("auto", "assets".to_string()),
-                    (suffix, format!("assets INDEXED BY idx_probe_{key}_{suffix}")),
-                ] {
-                    let sql = format!(
-                        "SELECT {select} FROM {from} WHERE {base_where} ORDER BY {order} LIMIT 201"
-                    );
-                    eprintln!("probe {key}/{direction}/{label}: {:?}", plan(&sql));
-                    let mut statement = db.conn.prepare(&sql).unwrap();
-                    let mut best = f64::MAX;
-                    for _ in 0..8 {
-                        let started = std::time::Instant::now();
-                        let rows = statement
-                            .query_map([folder, matcher], |row| row.get::<_, String>(0))
-                            .unwrap()
-                            .count();
-                        best = best.min(started.elapsed().as_secs_f64() * 1000.0);
-                        assert!(rows > 0);
-                    }
-                    eprintln!("probe {key}/{direction}/{label}: best={best:.2}ms");
-                }
-            }
-        }
-        db.conn
-            .execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")
-            .unwrap();
-        eprintln!(
-            "probe db size: {} bytes",
-            fs::metadata(&db_path).map(|meta| meta.len()).unwrap_or(0)
-        );
-        drop(db);
-        let _ = fs::remove_dir_all(&temp);
-    }
-
-    #[test]
-    #[ignore = "single-query open/search probe; KANALIB_PROBE_DB"]
-    fn probe_open_and_search_one_query() {
-        let Some(path) = std::env::var_os("KANALIB_PROBE_DB").map(PathBuf::from) else {
-            return;
-        };
-        let text = std::env::var("KANALIB_PROBE_QUERY")
-            .unwrap_or_else(|_| "synthetic_0004".to_string());
-        let limit = std::env::var("KANALIB_PROBE_LIMIT")
-            .ok()
-            .and_then(|value| value.parse::<usize>().ok())
-            .unwrap_or(512);
-        let folder = std::env::var("KANALIB_PROBE_FOLDER")
-            .unwrap_or_else(|_| "C:\\bench".to_string());
-        let started = std::time::Instant::now();
-        let db = Db::open(&path).unwrap();
-        eprintln!("probe open={:?}", started.elapsed());
-        let folders = vec![folder];
-        let filter = Filter::All;
-        let query = SearchQuery::parse(&text);
-        let request = SearchPageRequest {
-            filter: &filter,
-            query: &query,
-            sort: SearchSort::Name,
-            ascending: true,
-            limit,
-            cursor: None,
-            duplicate_paths: None,
-            include_total: false,
-        };
-        let parts = query.parts();
-        let started = std::time::Instant::now();
-        let built = db
-            .build_search_sql(&folders, &request, &parts)
-            .unwrap();
-        eprintln!("probe build={:?}", started.elapsed());
-        let started = std::time::Instant::now();
-        let extent = db
-            .search_extent(&folders, &request, &parts, &built, limit * 8, None)
-            .unwrap();
-        eprintln!("probe extent={:?} {:?}", started.elapsed(), extent);
-        let started = std::time::Instant::now();
-        let mut statement = db.conn.prepare(&built.page_sql()).unwrap();
-        let mut params = built.where_params.clone();
-        params.extend(built.keyset_params.iter().cloned());
-        params.push(Value::Integer(limit as i64 + 1));
-        let rows = statement
-            .query_map(rusqlite::params_from_iter(params.iter()), |row| {
-                row.get::<_, String>(0)
-            })
-            .unwrap();
-        let mut count = 0;
-        for row in rows {
-            let _ = row.unwrap();
-            count += 1;
-        }
-        eprintln!("probe page_exec={:?} rows={count}", started.elapsed());
-        let started = std::time::Instant::now();
-        let page = db.search_page(&folders, request.clone()).unwrap();
-        eprintln!(
-            "probe search_page={:?} limit={limit} rows={}",
-            started.elapsed(),
-            page.paths.len()
-        );
-        eprintln!("probe sql={}", built.page_sql());
-        let mut statement = db
-            .conn
-            .prepare(&format!("EXPLAIN QUERY PLAN {}", built.page_sql()))
-            .unwrap();
-        let mut plan_params = built.where_params.clone();
-        plan_params.push(Value::Integer(limit as i64 + 1));
-        let rows = statement
-            .query_map(rusqlite::params_from_iter(plan_params.iter()), |row| {
-                row.get::<_, String>(3)
-            })
-            .unwrap();
-        for row in rows {
-            eprintln!("probe plan {:?}", row.unwrap());
-        }
-    }
-
-    #[test]
-    #[ignore = "manual performance benchmark; set KANALIB_BENCH_DB or generate 10k rows"]
-    fn search_page_benchmark() {
-        let temp = temp_root("search-bench");
-        let source = std::env::var_os("KANALIB_BENCH_DB").map(PathBuf::from);
-        // `KANALIB_BENCH_KEEP_DB` 把合成库留在固定路径（首次生成，之后复用），
-        // 让「改前/改后」两次基准跑在同一份库上，避免旧库/新库数字混用。
-        let keep = std::env::var_os("KANALIB_BENCH_KEEP_DB").map(PathBuf::from);
-        let db_path = match (&keep, &source) {
-            (Some(keep), _) => {
-                if !keep.exists() {
-                    let count = std::env::var("KANALIB_BENCH_ROWS")
-                        .ok()
-                        .and_then(|value| value.parse::<usize>().ok())
-                        .unwrap_or(10_000)
-                        .max(1);
-                    if let Some(parent) = keep.parent() {
-                        fs::create_dir_all(parent).unwrap();
-                    }
-                    generate_bench_database(keep, count);
-                }
-                keep.clone()
-            }
-            (None, Some(source)) => {
-                let db_path = temp.join("kanalib.db");
-                copy_bench_database(source, &db_path);
-                db_path
-            }
-            (None, None) => {
-                let db_path = temp.join("kanalib.db");
-                let count = std::env::var("KANALIB_BENCH_ROWS")
-                    .ok()
-                    .and_then(|value| value.parse::<usize>().ok())
-                    .unwrap_or(10_000)
-                    .max(1);
-                generate_bench_database(&db_path, count);
-                db_path
-            }
-        };
-        let runs = std::env::var("KANALIB_BENCH_RUNS")
-            .ok()
-            .and_then(|value| value.parse::<usize>().ok())
-            .unwrap_or(30)
-            .max(3);
-        let db = Db::open(&db_path).unwrap();
-        let folders = {
-            let mut statement = db
-                .conn
-                .prepare("SELECT DISTINCT folder FROM assets ORDER BY folder")
-                .unwrap();
-            let rows = statement.query_map([], |row| row.get::<_, String>(0)).unwrap();
-            rows.collect::<rusqlite::Result<Vec<_>>>().unwrap()
-        };
-        let total: i64 = db
-            .conn
-            .query_row("SELECT COUNT(*) FROM assets", [], |row| row.get(0))
-            .unwrap();
-        eprintln!(
-            "search bench: source={} assets={total} folders={} runs={runs} db={}",
-            source
-                .as_ref()
-                .map(|path| path.display().to_string())
-                .unwrap_or_else(|| {
-                    if keep.is_some() {
-                        "kept".to_string()
-                    } else {
-                        "generated".to_string()
-                    }
-                }),
-            folders.len(),
-            db_path.display()
-        );
-
-        // 同库对照：复制一份到临时目录并删掉 4 个产品排序覆盖索引（同时清理
-        // 3 个已淘汰的实验索引），再用 `SortPlan::TempSort` 执行同一批查询，
-        // 等价于改造前“按筛选索引取行 + 临时 B 树排序”的计划。
-        let baseline_root = temp_root("search-baseline");
-        let baseline_path = baseline_root.join("kanalib.db");
-        copy_bench_database(&db_path, &baseline_path);
-        let baseline_db = Db::open(&baseline_path).unwrap();
-        baseline_db
-            .conn
-            .execute_batch(
-                "DROP INDEX IF EXISTS idx_assets_sort_modified_desc;
-                 DROP INDEX IF EXISTS idx_assets_sort_captured_desc;
-                 DROP INDEX IF EXISTS idx_assets_sort_size_desc;
-                 DROP INDEX IF EXISTS idx_assets_sort_resolution_desc;
-                 DROP INDEX IF EXISTS idx_assets_sort_star_desc;
-                 DROP INDEX IF EXISTS idx_assets_sort_favorite_desc;
-                 DROP INDEX IF EXISTS idx_assets_sort_rating_desc;
-                 PRAGMA wal_checkpoint(TRUNCATE);",
-            )
-            .unwrap();
-        eprintln!(
-            "search bench: baseline={} (same rows, 7 sort indexes dropped)",
-            baseline_path.display()
-        );
-
-        let filter = Filter::All;
-        // 基准分段：默认全跑；`KANALIB_BENCH_SECTIONS=sorts` 只跑排序对照，
-        // 便于机器繁忙时缩短窗口（只是一个测试开关，不进产品路径）。
-        let sections = std::env::var("KANALIB_BENCH_SECTIONS").unwrap_or_default();
-        let section = |name: &str| {
-            sections.is_empty()
-                || sections
-                    .split(',')
-                    .any(|value| value.trim().eq_ignore_ascii_case(name))
-        };
-        for (label, text) in [
-            ("free=synthetic", "synthetic"),
-            ("free=合成", "合成"),
-            ("free=sky", "sky"),
-            ("free=1girl", "1girl"),
-            ("free=syn(short)", "syn"),
-            ("free=synthetic+sky(mixed)", "synthetic sky"),
-        ] {
-            if !section("name") {
-                break;
-            }
-            let query = SearchQuery::parse(text);
-            for (plan, suffix) in [
-                (SortPlan::CoverIndex, "cover"),
-                (SortPlan::TempSort, "baseline"),
-            ] {
-                let target = if plan == SortPlan::CoverIndex {
-                    &db
-                } else {
-                    &baseline_db
-                };
-                bench_warm_page(
-                    &format!("{suffix} name/sort={label}"),
-                    target,
-                    &folders,
-                    &filter,
-                    &query,
-                    SearchSort::Name,
-                    true,
-                    200,
-                    runs,
-                    plan,
-                );
-            }
-        }
-
-        let query = SearchQuery::parse("synthetic");
-        for sort in SEARCH_SORTS {
-            if !section("sorts") {
-                break;
-            }
-            for (plan, suffix) in [
-                (SortPlan::CoverIndex, "cover"),
-                (SortPlan::TempSort, "baseline"),
-            ] {
-                let target = if plan == SortPlan::CoverIndex {
-                    &db
-                } else {
-                    &baseline_db
-                };
-                bench_warm_page(
-                    &format!("{suffix} free=synthetic sort={sort:?}"),
-                    target,
-                    &folders,
-                    &filter,
-                    &query,
-                    sort,
-                    sort != SearchSort::Name,
-                    200,
-                    runs,
-                    plan,
-                );
-            }
-        }
-
-        // 选择性查询 + 非名称排序：覆盖索引可能在“命中占比不高”时被迫扫过
-        // 更多索引项，这里专门记录与旧计划的差异。
-        for text in [
-            "synthetic sky",
-            "group:角色",
-            "date:>2024",
-            "rating:s",
-            "star:>=3",
-            "is:damaged",
-        ] {
-            if !section("selective") {
-                break;
-            }
-            let query = SearchQuery::parse(text);
-            for (plan, suffix) in [
-                (SortPlan::CoverIndex, "cover"),
-                (SortPlan::TempSort, "baseline"),
-            ] {
-                let target = if plan == SortPlan::CoverIndex {
-                    &db
-                } else {
-                    &baseline_db
-                };
-                bench_warm_page(
-                    &format!("{suffix} selective={text} sort=Modified"),
-                    target,
-                    &folders,
-                    &filter,
-                    &query,
-                    SearchSort::Modified,
-                    false,
-                    200,
-                    runs,
-                    plan,
-                );
-            }
-        }
-
-        for (label, text) in [
-            ("is:damaged", "is:damaged"),
-            ("is:failed", "is:failed"),
-            ("star:>=3", "star:>=3"),
-            ("rating:s", "rating:s"),
-            ("is:fav", "is:fav"),
-            ("size:>5kb", "size:>5kb"),
-            ("group:角色", "group:角色"),
-            ("date:>2024", "date:>2024"),
-        ] {
-            if !section("filters") {
-                break;
-            }
-            let query = SearchQuery::parse(text);
-            bench_warm_page(
-                &format!("filter={label}"),
-                &db,
-                &folders,
-                &filter,
-                &query,
-                SearchSort::Name,
-                true,
-                200,
-                runs,
-                SortPlan::CoverIndex,
-            );
-        }
-
-        // UI `run_search` 等价路径：state 每次查询都新开连接，先取
-        // `MAX_SEARCH_PAGE` 条首页，超限时再取自由文本命中集合供内存回退。
-        // 渲染/内存过滤在 UI 线程，核心侧不测（留给 E1）。
-        if section("ui") {
-            for (label, sort, ascending) in [
-            ("ui-run-search name", SearchSort::Name, true),
-            ("ui-run-search modified", SearchSort::Modified, false),
-        ] {
-            for text in ["synthetic", "sky"] {
-                let query = SearchQuery::parse(text);
-                let mut durations = Vec::with_capacity(runs);
-                let mut open_ms = Vec::with_capacity(runs);
-                let mut page_ms = Vec::with_capacity(runs);
-                let mut open2_ms = Vec::with_capacity(runs);
-                let mut paths_ms = Vec::with_capacity(runs);
-                let mut truncated = false;
-                let mut hits = 0usize;
-                for _ in 0..runs {
-                    let started = std::time::Instant::now();
-                    let opened = Db::open(&db_path).unwrap();
-                    open_ms.push(started.elapsed().as_secs_f64() * 1000.0);
-                    let page_started = std::time::Instant::now();
-                    let page = opened
-                        .search_page(
-                            &folders,
-                            SearchPageRequest {
-                                filter: &filter,
-                                query: &query,
-                                sort,
-                                ascending,
-                                limit: super::MAX_SEARCH_PAGE,
-                                cursor: None,
-                                duplicate_paths: None,
-                                include_total: false,
-                            },
-                        )
-                        .unwrap();
-                    page_ms.push(page_started.elapsed().as_secs_f64() * 1000.0);
-                    truncated = page.next.is_some();
-                    hits = page.paths.len();
-                    let free = query.free_text();
-                    if !free.is_empty() {
-                        let tokens =
-                            free.split_whitespace().map(str::to_string).collect::<Vec<_>>();
-                        let open_started = std::time::Instant::now();
-                        let opened = Db::open(&db_path).unwrap();
-                        open2_ms.push(open_started.elapsed().as_secs_f64() * 1000.0);
-                        let paths_started = std::time::Instant::now();
-                        opened.search_paths_in(&folders, &tokens).unwrap();
-                        paths_ms.push(paths_started.elapsed().as_secs_f64() * 1000.0);
-                    }
-                    durations.push(started.elapsed().as_secs_f64() * 1000.0);
-                }
-                let label = format!("{label} free={text}");
-                report_metrics(
-                    &format!("{label} page={hits} truncated={truncated} open+page+fts"),
-                    durations,
-                );
-                report_metrics(&format!("{label} db-open-1"), open_ms);
-                report_metrics(&format!("{label} search-page"), page_ms);
-                report_metrics(&format!("{label} db-open-2"), open2_ms);
-                report_metrics(&format!("{label} fts-paths"), paths_ms);
-            }
-            }
-        }
-
-        // 冷入口：每次新建连接 + 搜索，等价于 AppState 当前打开方式。
-        if section("cold") {
-            let query = SearchQuery::parse("synthetic");
-            let mut legacy = Vec::with_capacity(runs);
-            let mut opened = Vec::with_capacity(runs);
-            for _ in 0..runs {
-                let started = std::time::Instant::now();
-                let opened_db = Db::open(&db_path).unwrap();
-                opened_db
-                    .search_paths_in(&folders, &["synthetic".to_string()])
-                    .unwrap();
-                legacy.push(started.elapsed().as_secs_f64() * 1000.0);
-
-                let started = std::time::Instant::now();
-                let opened_db = Db::open(&db_path).unwrap();
-                opened_db
-                    .search_page(
-                        &folders,
-                        SearchPageRequest::new(&filter, &query, SearchSort::Name, true, 200),
-                    )
-                    .unwrap();
-                opened.push(started.elapsed().as_secs_f64() * 1000.0);
-            }
-            report_metrics("open+legacy_search_paths free=synthetic", legacy);
-            report_metrics("open+search_page name free=synthetic", opened);
-
-            // keyset 第二页：不重复排序，验证分页成本。
-            let first = db
-                .search_page(
-                    &folders,
-                    SearchPageRequest::new(&filter, &query, SearchSort::Name, true, 200),
-                )
-                .unwrap();
-            if let Some(cursor) = first.next {
-                let mut durations = Vec::with_capacity(runs);
-                for _ in 0..runs {
-                    let started = std::time::Instant::now();
-                    let page = db
-                        .search_page(
-                            &folders,
-                            SearchPageRequest {
-                                filter: &filter,
-                                query: &query,
-                                sort: SearchSort::Name,
-                                ascending: true,
-                                limit: 200,
-                                cursor: Some(&cursor),
-                                duplicate_paths: None,
-                                include_total: false,
-                            },
-                        )
-                        .unwrap();
-                    assert_eq!(page.paths.len(), 200);
-                    durations.push(started.elapsed().as_secs_f64() * 1000.0);
-                }
-                report_metrics("keyset page2 name free=synthetic", durations);
-            }
-        }
-        drop(db);
-        drop(baseline_db);
-        let _ = fs::remove_dir_all(&baseline_root);
-        if keep.is_none() {
-            let _ = fs::remove_dir_all(&temp);
-        }
-    }
-
     #[test]
     fn name_fold_setting_is_cached_and_updated_by_upsert() {
         let root = temp_root("name-fold");
@@ -8200,8 +7420,18 @@ mod tests {
             Some("0")
         );
         let unicode = PathBuf::from("C:/lib/Éclair.jpg");
-        db.upsert_meta("C:/lib", &unicode, None, 10, 10, 1_000, 1, &hash('b'), false)
-            .unwrap();
+        db.upsert_meta(
+            "C:/lib",
+            &unicode,
+            None,
+            10,
+            10,
+            1_000,
+            1,
+            &hash('b'),
+            false,
+        )
+        .unwrap();
         assert_eq!(
             db.setting(super::NAME_FOLD_KEY).unwrap().as_deref(),
             Some("1")
@@ -8455,11 +7685,13 @@ mod tests {
         );
         // 重复加入幂等；同一资产可属于多个相册。
         assert_eq!(
-            db.add_assets_to_collection(trip.id, &[a.clone()]).unwrap(),
+            db.add_assets_to_collection(trip.id, std::slice::from_ref(&a))
+                .unwrap(),
             0
         );
         assert_eq!(
-            db.add_assets_to_collection(picks.id, &[a.clone()]).unwrap(),
+            db.add_assets_to_collection(picks.id, std::slice::from_ref(&a))
+                .unwrap(),
             1
         );
         assert_eq!(db.collection_asset_count(trip.id).unwrap(), 2);
@@ -8486,7 +7718,7 @@ mod tests {
         assert_eq!(renamed.asset_count, 2);
         assert!(db.rename_collection(picks.id, "旅行 2026").is_err());
         assert_eq!(
-            db.remove_assets_from_collection(trip.id, &[b.clone()])
+            db.remove_assets_from_collection(trip.id, std::slice::from_ref(&b))
                 .unwrap(),
             1
         );
@@ -8514,7 +7746,7 @@ mod tests {
         assert_eq!(orphan, 0);
 
         // 删除资产时级联清理关系行。
-        assert_eq!(db.delete_assets(&[a.clone()]).unwrap(), 1);
+        assert_eq!(db.delete_assets(std::slice::from_ref(&a)).unwrap(), 1);
         assert_eq!(db.collection_asset_count(picks.id).unwrap(), 0);
         let relations: i64 = db
             .conn
@@ -8550,7 +7782,7 @@ mod tests {
             db.upsert_meta("C:\\lib", &path, None, 10, 20, 100, 10, &hash('a'), false)
                 .unwrap();
             let collection = db.create_collection("相册").unwrap();
-            db.add_assets_to_collection(collection.id, &[path.clone()])
+            db.add_assets_to_collection(collection.id, std::slice::from_ref(&path))
                 .unwrap();
             collection.id
         };

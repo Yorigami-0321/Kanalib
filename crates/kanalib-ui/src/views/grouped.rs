@@ -74,7 +74,10 @@ impl GroupLayout {
     }
 
     pub(crate) fn group_of_row(&self, row: usize) -> usize {
-        match self.groups.binary_search_by(|group| group.start_row.cmp(&row)) {
+        match self
+            .groups
+            .binary_search_by(|group| group.start_row.cmp(&row))
+        {
             Ok(index) => index,
             Err(0) => 0,
             Err(index) => index - 1,
@@ -84,12 +87,8 @@ impl GroupLayout {
     fn group_of_px(&self, y: f32) -> usize {
         match self
             .groups
-            .binary_search_by(|group| {
-                group
-                    .start_px
-                    .partial_cmp(&y)
-                    .unwrap_or(Ordering::Equal)
-            }) {
+            .binary_search_by(|group| group.start_px.partial_cmp(&y).unwrap_or(Ordering::Equal))
+        {
             Ok(index) => index,
             Err(0) => 0,
             Err(index) => index - 1,
@@ -114,9 +113,7 @@ impl GroupLayout {
         if local == 0 {
             group.start_px
         } else {
-            group.start_px
-                + GROUP_HEADER_HEIGHT
-                + (local - 1) as f32 * self.row_height
+            group.start_px + GROUP_HEADER_HEIGHT + (local - 1) as f32 * self.row_height
         }
     }
 
@@ -521,7 +518,8 @@ pub(crate) struct GroupedListFrameState {
 }
 
 pub(crate) type RowRender = Rc<dyn Fn(usize, &mut Window, &mut App) -> AnyElement>;
-pub(crate) type HeaderRender = Rc<dyn Fn(usize, bool, &mut Window, &mut App) -> AnyElement>;/// 变高行（固定内容行高 + 固定组头高）的虚拟列表；滚动与 `UniformListScrollHandle` 兼容。
+pub(crate) type HeaderRender = Rc<dyn Fn(usize, bool, &mut Window, &mut App) -> AnyElement>;
+/// 变高行（固定内容行高 + 固定组头高）的虚拟列表；滚动与 `UniformListScrollHandle` 兼容。
 pub(crate) struct GroupedList {
     id: ElementId,
     layout: Arc<GroupLayout>,
@@ -619,11 +617,13 @@ impl Element for GroupedList {
                     window.request_measured_layout(
                         style,
                         move |known_dimensions, available_space, _window, _cx| {
-                            let width = known_dimensions.width.unwrap_or(match available_space.width
-                            {
-                                AvailableSpace::Definite(width) => width,
-                                _ => px(0.),
-                            });
+                            let width =
+                                known_dimensions
+                                    .width
+                                    .unwrap_or(match available_space.width {
+                                        AvailableSpace::Definite(width) => width,
+                                        _ => px(0.),
+                                    });
                             let height = match available_space.height {
                                 AvailableSpace::Definite(height) => height.min(px(total_height)),
                                 _ => px(total_height),
@@ -680,12 +680,11 @@ impl Element for GroupedList {
                 }
 
                 let mut requested = None;
-                if let Some(handle) = &scroll_handle {
-                    if let Some(deferred) = handle.0.borrow_mut().deferred_scroll_to_item.take() {
-                        if let Some(row) = layout.scroll_target_row(deferred.item_index) {
-                            requested = Some((row, deferred.strategy));
-                        }
-                    }
+                if let Some(handle) = &scroll_handle
+                    && let Some(deferred) = handle.0.borrow_mut().deferred_scroll_to_item.take()
+                    && let Some(row) = layout.scroll_target_row(deferred.item_index)
+                {
+                    requested = Some((row, deferred.strategy));
                 }
                 if let Some(row) = reveal_row {
                     requested = Some((row, ScrollStrategy::Top));
@@ -742,8 +741,7 @@ impl Element for GroupedList {
                         y += height;
                         row += 1;
                     }
-                    if let Some((group, sticky_y)) =
-                        layout.sticky(scroll_top, GROUP_HEADER_HEIGHT)
+                    if let Some((group, sticky_y)) = layout.sticky(scroll_top, GROUP_HEADER_HEIGHT)
                     {
                         let mut element = render_header(group, true, window, cx);
                         element.layout_as_root(
@@ -986,10 +984,7 @@ mod tests {
         assert_eq!(expanded.total_rows, 2 + 2);
         assert_eq!(collapsed.total_rows, 2 + 1);
         assert!(collapsed.groups[1].collapsed);
-        assert_eq!(
-            collapsed.total_height,
-            expanded.total_height - 150.
-        );
+        assert_eq!(collapsed.total_height, expanded.total_height - 150.);
         // 折叠组的内容行应落到组头。
         let start = collapsed.groups[1].start_asset;
         assert_eq!(
@@ -1019,10 +1014,7 @@ mod tests {
         assert_eq!(layout.groups[1].start_row, 2);
         assert_eq!(layout.row_y(0), 0.);
         assert_eq!(layout.row_y(1), GROUP_HEADER_HEIGHT);
-        assert_eq!(
-            layout.row_y(2),
-            GROUP_HEADER_HEIGHT + 150.
-        );
+        assert_eq!(layout.row_y(2), GROUP_HEADER_HEIGHT + 150.);
         assert_eq!(layout.row_at(0.), 0);
         assert_eq!(layout.row_at(GROUP_HEADER_HEIGHT + 1.), 1);
         assert_eq!(layout.row_at(GROUP_HEADER_HEIGHT + 150.), 2);

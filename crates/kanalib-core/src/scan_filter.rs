@@ -185,8 +185,7 @@ pub fn collect_images_with_ignores(
     let ignores = CompiledIgnoreRules::new(root, rules);
     let merged = ignores.merged_config(config);
     let mut walk = collect_images(root, &merged)?;
-    walk.files
-        .retain(|path| !ignores.path_ignored(path));
+    walk.files.retain(|path| !ignores.path_ignored(path));
     Ok(walk)
 }
 
@@ -347,7 +346,10 @@ impl IgnoreRules {
                 self.globs.insert(value.clone(), Vec::new());
                 value
             });
-        let globs = self.globs.get_mut(&stored).expect("ignore glob root present");
+        let globs = self
+            .globs
+            .get_mut(&stored)
+            .expect("ignore glob root present");
         if globs.iter().any(|item| item == pattern) {
             return Ok(false);
         }
@@ -405,7 +407,11 @@ impl CompiledIgnoreRules {
     pub fn new(root: &Path, rules: &IgnoreRules) -> Self {
         Self {
             root: root.to_path_buf(),
-            paths: rules.paths.iter().map(|path| path_key(Path::new(path))).collect(),
+            paths: rules
+                .paths
+                .iter()
+                .map(|path| path_key(Path::new(path)))
+                .collect(),
             sha1: rules
                 .sha1
                 .iter()
@@ -479,7 +485,8 @@ pub fn save_ignore_rules(db: &Db, rules: &IgnoreRules) -> Result<()> {
 }
 
 /// 从 settings 读取所有来源的排除规则。
-pub fn load_filters(db: &Db) -> Result<HashMap<PathBuf, ScanFilterConfig>> {    let Some(value) = db.setting(SCAN_FILTERS_SETTING_KEY)? else {
+pub fn load_filters(db: &Db) -> Result<HashMap<PathBuf, ScanFilterConfig>> {
+    let Some(value) = db.setting(SCAN_FILTERS_SETTING_KEY)? else {
         return Ok(HashMap::new());
     };
     let parsed = serde_json::from_str::<HashMap<String, ScanFilterConfig>>(&value)

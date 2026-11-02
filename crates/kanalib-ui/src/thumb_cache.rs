@@ -4,6 +4,9 @@ use crate::*;
 /// 多少张 BGRA（512 档约 1MB/张，10k 库跑一遍就是 GB 级），这里换成按 LRU 限量的缓存。
 pub(crate) const IMAGE_CACHE_LIMIT: usize = 128;
 
+/// 解码失败后隔多久允许同一资源重试；避免坏缩略图整会话空白，也避免每帧重试。
+const THUMB_RETRY_MS: u64 = 30_000;
+
 fn clamp_cache_limit(limit: usize) -> usize {
     limit.max(1)
 }
@@ -43,6 +46,7 @@ pub(crate) enum ThumbEntry {
     Gpui(ImageCacheItem),
     Loading,
     Loaded(Result<Arc<RenderImage>, ImageCacheError>),
+    Failed { at: u64, error: ImageCacheError },
 }
 
 /// 有界的解码图缓存：可见 tile 每帧都会 touch，所以只会被更近的挤掉，不会被自己挤掉。
@@ -130,10 +134,7 @@ impl ThumbCache {
         let snapshot = self
             .access
             .iter()
-            .filter_map(|(path, used)| {
-                path.to_str()
-                    .map(|path| (path.to_string(), *used))
-            })
+            .filter_map(|(path, used)| path.to_str().map(|path| (path.to_string(), *used)))
             .collect::<HashMap<_, _>>();
         let Ok(json) = serde_json::to_vec(&snapshot) else {
             return;
@@ -159,7 +160,11 @@ impl ThumbCache {
     }
 
     /// 按磁盘预算淘汰最少使用的缩略图组；当前解码/可见图与最近访问的组不动。
-    pub(crate) fn cleanup_to_budget(&mut self, budget_bytes: u64, cx: &mut Context<Self>) -> CacheCleanup {
+    pub(crate) fn cleanup_to_budget(
+        &mut self,
+        budget_bytes: u64,
+        cx: &mut Context<Self>,
+    ) -> CacheCleanup {
         let mut report = CacheCleanup {
             budget_bytes,
             ..Default::default()
@@ -239,11 +244,8 @@ impl ThumbCache {
                     .get(path)
                     .is_some_and(|used| *used >= recently_used)
             });
-            let is_protected = recently_accessed
-                || group
-                    .files
-                    .iter()
-                    .any(|(path, _)| protected.contains(path));
+            let is_protected =
+                recently_accessed || group.files.iter().any(|(path, _)| protected.contains(path));
             if is_protected {
                 report.protected_groups += 1;
                 continue;
@@ -292,7 +294,13 @@ impl ThumbCache {
             let result = task.await;
             let _ = weak.update(cx, |cache, cx| {
                 if let Some((entry, _)) = cache.entries.get_mut(&key) {
-                    *entry = ThumbEntry::Loaded(result);
+                    *entry = match result {
+                        Ok(image) => ThumbEntry::Loaded(Ok(image)),
+                        Err(error) => ThumbEntry::Failed {
+                            at: wall_millis(),
+                            error,
+                        },
+                    };
                 }
                 cx.notify();
             });
@@ -351,7 +359,7 @@ fn decode_thumb(
     let image =
         image::load_from_memory(&bytes).map_err(|error| ImageCacheError::Image(Arc::new(error)))?;
     let mut buffer = image.into_rgba8();
-    for pixel in buffer.chunks_exact_mut(4) {
+    for pixel in buffer.as_chunks_mut::<4>().0 {
         pixel.swap(0, 2);
     }
     Ok(Arc::new(RenderImage::new([image::Frame::new(buffer)])))
@@ -377,11 +385,22 @@ impl ImageCache for ThumbCache {
                 .insert(PathBuf::from(path.as_ref()), wall_millis());
             self.access_dirty += 1;
         }
+        let mut retry_failed = false;
         if let Some((entry, used)) = self.entries.get_mut(resource) {
             self.hits += 1;
             *used = clock;
-            if let ThumbEntry::Gpui(item) = entry {
-                let _ = item.use_image(window);
+            match entry {
+                ThumbEntry::Gpui(item) => {
+                    let _ = item.use_image(window);
+                }
+                ThumbEntry::Failed { at, .. }
+                    if wall_millis().saturating_sub(*at) >= THUMB_RETRY_MS =>
+                {
+                    // 失败过期：重新排队解码，而不是把错误永久钉在缓存里。
+                    *entry = ThumbEntry::Loading;
+                    retry_failed = true;
+                }
+                _ => {}
             }
         } else {
             self.misses += 1;
@@ -398,8 +417,13 @@ impl ImageCache for ThumbCache {
                 }
             }
         }
+        if retry_failed {
+            self.misses += 1;
+            self.spawn_decode(resource.clone(), cx);
+        }
         let result = match self.entries.get(resource) {
             Some((ThumbEntry::Loaded(result), _)) => Some(result.clone()),
+            Some((ThumbEntry::Failed { error, .. }, _)) => Some(Err(error.clone())),
             Some((ThumbEntry::Gpui(item), _)) => item.use_image(window),
             _ => None,
         };
@@ -443,11 +467,8 @@ impl ImageCache for ThumbCache {
     }
 }
 
-
 #[cfg(test)]
 mod tests {
-    #[cfg(feature = "frame-profiler")]
-    use super::decode_thumb;
     use super::{cache_victims, clamp_cache_limit};
     use gpui::Resource;
     use std::collections::HashMap;
@@ -478,36 +499,4 @@ mod tests {
         assert_eq!(clamp_cache_limit(0), 1);
         assert_eq!(clamp_cache_limit(128), 128);
     }
-
-    /// 手动取证：解码 300 张 t256 后立即丢弃，观察 256K 档是否有泄漏。
-    #[cfg(feature = "frame-profiler")]
-    #[test]
-    #[ignore]
-    fn decode_does_not_leak_256k_bucket() {
-        let library = std::path::Path::new(".kanalib/thumbs");
-        let mut files: Vec<std::path::PathBuf> = walkdir::WalkDir::new(library)
-            .into_iter()
-            .filter_map(|entry| entry.ok())
-            .filter(|entry| {
-                entry.file_type().is_file() && entry.file_name().to_string_lossy().contains("-t256")
-            })
-            .map(|entry| entry.into_path())
-            .take(300)
-            .collect();
-        files.sort();
-        assert!(!files.is_empty(), "stress library with t256 files required");
-        let bucket = 18 - 10;
-        let before = kanalib_core::alloc_stats::live_bucket_bytes(bucket);
-        for path in &files {
-            let result = decode_thumb(&Resource::from(path.clone()));
-            assert!(result.is_ok(), "decode failed for {}", path.display());
-        }
-        let after = kanalib_core::alloc_stats::live_bucket_bytes(bucket);
-        eprintln!(
-            "decode bucket delta: files={} before={before} after={after} delta_kb={}",
-            files.len(),
-            (after as i64 - before as i64) / 1024,
-        );
-    }
-
 }

@@ -1,5 +1,5 @@
-use crate::*;
 use super::*;
+use crate::*;
 
 pub(crate) fn tile(
     asset: Asset,
@@ -187,23 +187,19 @@ pub(crate) fn tile(
             .items_center()
             .justify_between()
             .gap(px(4.))
-            .child(
-                div()
-                    .truncate()
-                    .text_xs()
-                    .text_color(colors.subtle)
-                    .child(if rating.is_empty() {
-                        if star > 0 {
-                            format!("★ {star}")
-                        } else {
-                            "未评级".to_string()
-                        }
-                    } else if star > 0 {
-                        format!("评级 {rating} · ★ {star}")
+            .child(div().truncate().text_xs().text_color(colors.subtle).child(
+                if rating.is_empty() {
+                    if star > 0 {
+                        format!("★ {star}")
                     } else {
-                        format!("评级 {rating}")
-                    }),
-            )
+                        "未评级".to_string()
+                    }
+                } else if star > 0 {
+                    format!("评级 {rating} · ★ {star}")
+                } else {
+                    format!("评级 {rating}")
+                },
+            ))
             .child(
                 div()
                     .flex_none()

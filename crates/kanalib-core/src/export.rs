@@ -93,16 +93,23 @@ pub fn to_json(assets: &[Asset]) -> serde_json::Result<String> {
 }
 
 fn csv_field(value: &str) -> String {
-    if value.contains([',', '"', '\n', '\r']) {
-        format!("\"{}\"", value.replace('"', "\"\""))
+    // Excel/LibreOffice 把 = + - @ 开头的单元格当公式；用户文件名/标签
+    // 可能来自外部库，导出前统一前置单引号，避免 CSV 公式注入。
+    let guarded = if value.starts_with(['=', '+', '-', '@', '\t', '\r']) {
+        format!("'{value}")
     } else {
         value.to_string()
+    };
+    if guarded.contains([',', '"', '\n', '\r']) {
+        format!("\"{}\"", guarded.replace('"', "\"\""))
+    } else {
+        guarded
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{to_csv, to_json};
+    use super::{csv_field, to_csv, to_json};
     use crate::model::{Asset, TagHit};
     use std::path::PathBuf;
 
@@ -150,6 +157,16 @@ mod tests {
         assert!(csv.contains("\"C:\\lib\\a,\"\"b\"\".png\""));
         assert!(csv.contains(",1girl,custom_tag,"));
         assert!(csv.contains(",0000000000001234,"));
+    }
+
+    #[test]
+    fn csv_neutralises_formula_prefixes() {
+        for value in ["=cmd", "+1", "-2", "@sum"] {
+            assert_eq!(csv_field(value), format!("'{value}"));
+        }
+        assert_eq!(csv_field(" =safe"), " =safe");
+        assert_eq!(csv_field("a,b"), "\"a,b\"");
+        assert_eq!(csv_field("='x',\"y\""), "\"'='x',\"\"y\"\"\"");
     }
 
     #[test]

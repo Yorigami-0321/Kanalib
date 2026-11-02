@@ -5,9 +5,9 @@
 static ALLOC: kanalib_core::alloc_stats::CountingAlloc = kanalib_core::alloc_stats::CountingAlloc;
 
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::atomic::AtomicBool;
-use std::sync::Arc;
 
 use ely_gpui_component::{
     Assets,
@@ -16,9 +16,7 @@ use ely_gpui_component::{
 };
 use gpui::{App, AppContext as _, Bounds, TitlebarOptions, WindowBounds, WindowOptions, px, size};
 use kanalib_core::state;
-use kanalib_ui::{
-    KanalibApp, MIN_WINDOW_HEIGHT, MIN_WINDOW_WIDTH, WindowState, WorkArea,
-};
+use kanalib_ui::{KanalibApp, MIN_WINDOW_HEIGHT, MIN_WINDOW_WIDTH, WindowState, WorkArea};
 
 mod logging;
 
@@ -41,9 +39,7 @@ mod single_instance {
         CreateEventW, CreateMutexW, EVENT_MODIFY_STATE, OpenEventW, ReleaseMutex, SetEvent,
         WaitForSingleObject,
     };
-    use windows_sys::Win32::UI::WindowsAndMessaging::{
-        ASFW_ANY, AllowSetForegroundWindow,
-    };
+    use windows_sys::Win32::UI::WindowsAndMessaging::{ASFW_ANY, AllowSetForegroundWindow};
 
     pub enum Startup {
         /// 本进程持有命名 mutex，并在后台等待激活事件。
@@ -151,7 +147,9 @@ mod single_instance {
                 AllowSetForegroundWindow(ASFW_ANY);
                 return match signal_existing(&event) {
                     Ok(()) => {
-                        log::info!("single instance: another instance owns this data root; activation sent");
+                        log::info!(
+                            "single instance: another instance owns this data root; activation sent"
+                        );
                         Startup::Secondary
                     }
                     Err(error) => {
@@ -165,7 +163,9 @@ mod single_instance {
             let event_handle = CreateEventW(std::ptr::null(), 0, 0, event.as_ptr());
             if event_handle.is_null() {
                 let error = std::io::Error::last_os_error();
-                log::warn!("single instance: CreateEventW failed: {error}; continuing without guard");
+                log::warn!(
+                    "single instance: CreateEventW failed: {error}; continuing without guard"
+                );
                 ReleaseMutex(mutex_handle);
                 CloseHandle(mutex_handle);
                 return Startup::Degraded;
@@ -296,6 +296,7 @@ fn work_areas(cx: &App) -> Vec<WorkArea> {
 
 fn main() {
     let log_path = logging::init();
+    logging::install_panic_hook();
     if let Some(path) = &log_path {
         log::info!("Kanalib starting; log file: {}", path.display());
     }
@@ -414,8 +415,8 @@ fn main() {
             let window_size = work_area
                 .map(|work| {
                     size(
-                        px((work.width.as_f32() - 80.).min(1280.).max(960.)),
-                        px((work.height.as_f32() - 80.).min(820.).max(640.)),
+                        px((work.width.as_f32() - 80.).clamp(960., 1280.)),
+                        px((work.height.as_f32() - 80.).clamp(640., 820.)),
                     )
                 })
                 .unwrap_or_else(|| size(px(1280.), px(820.)));

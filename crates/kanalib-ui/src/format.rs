@@ -309,5 +309,4 @@ mod tests {
         assert!(error.contains("远端只读"), "{error}");
         assert!(error.contains("未下载原图"), "{error}");
     }
-
 }

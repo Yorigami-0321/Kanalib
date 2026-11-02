@@ -1,6 +1,6 @@
-use crate::*;
 use super::*;
 use crate::inspector::friendly_media_error;
+use crate::*;
 
 pub(crate) fn content_row_content(
     asset: &Asset,
@@ -9,7 +9,10 @@ pub(crate) fn content_row_content(
     colors: UiColors,
 ) -> AnyElement {
     let title = display_name(asset, show_extensions);
-    let error = asset.error.clone().map(|value| friendly_media_error(&value));
+    let error = asset
+        .error
+        .clone()
+        .map(|value| friendly_media_error(&value));
     let summary = error
         .clone()
         .or_else(|| asset.damage.clone())

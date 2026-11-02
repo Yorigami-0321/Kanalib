@@ -1,6 +1,6 @@
-use crate::*;
 use crate::app::{KanalibApp, push_toast};
 use crate::theme::*;
+use crate::*;
 
 /// 搜索输入停止多久后才真正查询（毫秒）。
 pub(crate) const SEARCH_DEBOUNCE_MS: u64 = 220;
@@ -117,69 +117,14 @@ impl SearchBundle {
     }
 }
 
-#[cfg(test)]
-mod tests {
-
-    use super::*;
-
-    #[test]
-    fn query_wants_duplicates_only_for_dup_true() {
-        assert!(super::query_wants_duplicates("dup:true"));
-        assert!(super::query_wants_duplicates("sky dup:true"));
-        assert!(super::query_wants_duplicates("DUP:TRUE"));
-        assert!(!super::query_wants_duplicates("dup:false"));
-        assert!(!super::query_wants_duplicates("-dup:true"));
-        assert!(!super::query_wants_duplicates("sky"));
-        assert!(!super::query_wants_duplicates(""));
-    }
-
-    #[test]
-    fn search_history_parses_filters_and_truncates() {
-        assert_eq!(parse_search_history("not json"), Vec::<String>::new());
-        assert_eq!(parse_search_history("[]"), Vec::<String>::new());
-        let raw = r#"["  sky  ","","Sky","tag:clara","sky","a","b","c","d","e","f","g","h"]"#;
-        let history = parse_search_history(raw);
-        assert_eq!(history.len(), SEARCH_HISTORY_LIMIT);
-        // 大小写不敏感去重，保留最后一次写法；空项被丢弃。
-        assert_eq!(history.iter().filter(|entry| entry.eq_ignore_ascii_case("sky")).count(), 1);
-        assert!(history.contains(&"tag:clara".to_string()));
-    }
-
-    #[test]
-    fn search_history_records_move_to_front_and_ignore_empty() {
-        let mut history = vec!["b".to_string(), "a".to_string()];
-        assert!(record_search_history(&mut history, " a "));
-        assert_eq!(history, vec!["a".to_string(), "b".to_string()]);
-        assert!(!record_search_history(&mut history, "  "));
-        assert!(!record_search_history(&mut history, "a"));
-        assert_eq!(history, vec!["a".to_string(), "b".to_string()]);
-        for index in 0..20 {
-            record_search_history(&mut history, &format!("q{index}"));
-        }
-        assert_eq!(history.len(), SEARCH_HISTORY_LIMIT);
-        assert_eq!(history.first().map(String::as_str), Some("q19"));
-    }
-
-    #[test]
-    fn search_chips_split_and_remove_tokens() {
-        assert_eq!(search_tokens("  tag:sky  size:>1mb "), vec![
-            "tag:sky".to_string(),
-            "size:>1mb".to_string()
-        ]);
-        assert_eq!(remove_search_token("tag:sky size:>1mb", 0), "size:>1mb");
-        assert_eq!(remove_search_token("tag:sky size:>1mb", 1), "tag:sky");
-        assert_eq!(remove_search_token("tag:sky", 9), "tag:sky");
-        assert_eq!(remove_search_token("", 0), "");
-    }
-
-}
-
 impl KanalibApp {
     /// 清空搜索状态；切换来源或重扫后调用。
     pub(crate) fn reset_search(&mut self) {
         self.last_search.clear();
         self.search_pending.clear();
         self.search_bundle = None;
+        self.search_epoch = self.search_epoch.wrapping_add(1);
+        self.search_running = false;
         self.view.search_revision = self.view.search_revision.wrapping_add(1);
     }
 
@@ -242,8 +187,12 @@ impl KanalibApp {
             .as_ref()
             .is_some_and(|bundle| bundle.matches(text.as_str(), revision, &filter, sort, ascending))
         {
+            self.search_running = false;
             return;
         }
+        // 每次查询都推进代次；被取代的旧回包在写回前丢弃，避免旧结果覆盖新输入。
+        self.search_epoch = self.search_epoch.wrapping_add(1);
+        let epoch = self.search_epoch;
         self.search_running = true;
         let started = Instant::now();
         let mut query = SearchQuery::parse(&text);
@@ -283,6 +232,9 @@ impl KanalibApp {
             let (page, truncated, fts_paths, page_ms) = task.await;
             let task_ms = started.elapsed().as_secs_f64() * 1000.0;
             let _ = weak.update(cx, |app, cx| {
+                if app.search_epoch != epoch {
+                    return;
+                }
                 app.search_running = false;
                 let page_paths = match page {
                     Some(page) if !truncated => Some(Arc::new(page.paths)),
@@ -476,5 +428,67 @@ impl KanalibApp {
     pub(crate) fn remove_search_token(&mut self, index: usize, cx: &mut Context<Self>) {
         let next = remove_search_token(&self.last_search, index);
         self.apply_search_text(next, cx);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+
+    use super::*;
+
+    #[test]
+    fn query_wants_duplicates_only_for_dup_true() {
+        assert!(super::query_wants_duplicates("dup:true"));
+        assert!(super::query_wants_duplicates("sky dup:true"));
+        assert!(super::query_wants_duplicates("DUP:TRUE"));
+        assert!(!super::query_wants_duplicates("dup:false"));
+        assert!(!super::query_wants_duplicates("-dup:true"));
+        assert!(!super::query_wants_duplicates("sky"));
+        assert!(!super::query_wants_duplicates(""));
+    }
+
+    #[test]
+    fn search_history_parses_filters_and_truncates() {
+        assert_eq!(parse_search_history("not json"), Vec::<String>::new());
+        assert_eq!(parse_search_history("[]"), Vec::<String>::new());
+        let raw = r#"["  sky  ","","Sky","tag:clara","sky","a","b","c","d","e","f","g","h"]"#;
+        let history = parse_search_history(raw);
+        assert_eq!(history.len(), SEARCH_HISTORY_LIMIT);
+        // 大小写不敏感去重，保留最后一次写法；空项被丢弃。
+        assert_eq!(
+            history
+                .iter()
+                .filter(|entry| entry.eq_ignore_ascii_case("sky"))
+                .count(),
+            1
+        );
+        assert!(history.contains(&"tag:clara".to_string()));
+    }
+
+    #[test]
+    fn search_history_records_move_to_front_and_ignore_empty() {
+        let mut history = vec!["b".to_string(), "a".to_string()];
+        assert!(record_search_history(&mut history, " a "));
+        assert_eq!(history, vec!["a".to_string(), "b".to_string()]);
+        assert!(!record_search_history(&mut history, "  "));
+        assert!(!record_search_history(&mut history, "a"));
+        assert_eq!(history, vec!["a".to_string(), "b".to_string()]);
+        for index in 0..20 {
+            record_search_history(&mut history, &format!("q{index}"));
+        }
+        assert_eq!(history.len(), SEARCH_HISTORY_LIMIT);
+        assert_eq!(history.first().map(String::as_str), Some("q19"));
+    }
+
+    #[test]
+    fn search_chips_split_and_remove_tokens() {
+        assert_eq!(
+            search_tokens("  tag:sky  size:>1mb "),
+            vec!["tag:sky".to_string(), "size:>1mb".to_string()]
+        );
+        assert_eq!(remove_search_token("tag:sky size:>1mb", 0), "size:>1mb");
+        assert_eq!(remove_search_token("tag:sky size:>1mb", 1), "tag:sky");
+        assert_eq!(remove_search_token("tag:sky", 9), "tag:sky");
+        assert_eq!(remove_search_token("", 0), "");
     }
 }

@@ -2,7 +2,7 @@
 //!
 //! 路径优先级：
 //! 1. `KANALIB_LOG_FILE`：精确路径覆盖（追加写，不滚动），保持既有调试习惯；
-//! 2. `KANALIB_HEADLESS`：`<project_root>/.kanalib/headless.log`，保持既有 headless 行为；
+//! 2. `KANALIB_HEADLESS`：`<project_root>/.kanalib/headless.log`，按大小滚动；
 //! 3. 正常 GUI：`<project_root>/.kanalib/logs/kanalib.log`，按大小滚动并清理过期文件。
 //!
 //! 滚动默认值：10 MiB / 保留 5 个滚动文件 / 保留 14 天，分别可用
@@ -57,7 +57,7 @@ fn init_once() -> Option<PathBuf> {
                 data_dir.display()
             );
         }
-        return start_exact(&data_dir.join("headless.log"));
+        return start_rolling(&data_dir.join("headless.log"), settings);
     }
 
     let path = default_log_path(&data_dir);
@@ -74,7 +74,7 @@ fn init_once() -> Option<PathBuf> {
     start_rolling(&path, settings)
 }
 
-/// 精确路径模式：追加写，不滚动（`KANALIB_LOG_FILE` / headless）。
+/// 精确路径模式：追加写，不滚动（仅 `KANALIB_LOG_FILE`）。
 fn start_exact(path: &Path) -> Option<PathBuf> {
     let file_spec = match FileSpec::try_from(path) {
         Ok(spec) => spec,
@@ -145,6 +145,22 @@ fn start_stderr() -> Option<PathBuf> {
             None
         }
     }
+}
+
+/// 安装 panic hook：GUI release 构建没有可见 stderr，崩溃必须落到日志文件。
+pub fn install_panic_hook() {
+    static INSTALLED: OnceLock<()> = OnceLock::new();
+    if INSTALLED.set(()).is_err() {
+        return;
+    }
+    let default_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        log::error!(
+            "panic: {info}\n{}",
+            std::backtrace::Backtrace::force_capture()
+        );
+        default_hook(info);
+    }));
 }
 
 fn base_logger() -> Logger {
@@ -240,7 +256,8 @@ fn parse_u64(value: Option<&str>) -> Option<u64> {
 
 /// 启动时按修改时间删除超过 `retention_days` 的滚动日志。
 ///
-/// 不删除当前写入文件；只处理 `kanalib*.log`，避免误删同目录其他文件。
+/// 不删除当前写入文件；只处理本应用生成的 `kanalib.log` / `kanalib_r*.log`，
+/// 避免误删同目录其他文件（如用户自建的 `kanalib-notes.log`）。
 /// 返回删除数量。`retention_days == 0` 时不做任何事。
 fn cleanup_old_logs(
     directory: &Path,
@@ -273,7 +290,9 @@ fn cleanup_old_logs(
             .extension()
             .and_then(|extension| extension.to_str())
             .is_some_and(|extension| extension.eq_ignore_ascii_case("log"));
-        if !name.starts_with(LOG_BASENAME) || !is_log {
+        let lower = name.to_ascii_lowercase();
+        let is_managed = lower == "kanalib.log" || lower.starts_with("kanalib_r");
+        if !is_managed || !is_log {
             continue;
         }
         let Ok(modified) = entry.metadata().and_then(|meta| meta.modified()) else {
@@ -365,12 +384,13 @@ mod tests {
         let fresh = directory.join("kanalib_r2026-10-27_00-00-00.log");
         let current = directory.join("kanalib.log");
         let other = directory.join("other_r2026-01-01_00-00-00.log");
-        for path in [&old, &fresh, &current, &other] {
+        let notes = directory.join("kanalib-notes.log");
+        for path in [&old, &fresh, &current, &other, &notes] {
             fs::write(path, b"x").unwrap();
         }
         let thirty_days_ago = now - Duration::from_secs(30 * 24 * 60 * 60);
-        // 当前文件即使很旧也不能删；其他前缀不归本应用管理。
-        for path in [&old, &current, &other] {
+        // 当前文件即使很旧也不能删；其他前缀/同前缀手写文件不归本应用管理。
+        for path in [&old, &current, &other, &notes] {
             set_modified(path, thirty_days_ago);
         }
         set_modified(&fresh, now);
@@ -381,6 +401,7 @@ mod tests {
         assert!(fresh.exists());
         assert!(current.exists());
         assert!(other.exists());
+        assert!(notes.exists());
 
         // 0 天表示关闭清理。
         assert_eq!(cleanup_old_logs(&directory, &current, 0, now), 0);

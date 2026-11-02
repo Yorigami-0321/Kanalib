@@ -1,9 +1,9 @@
-use crate::*;
 use crate::app::{KanalibApp, push_toast};
 use crate::format::*;
-use crate::theme::*;
 use crate::platform::*;
+use crate::theme::*;
 use crate::thumb_cache::ThumbCache;
+use crate::*;
 use std::rc::Rc;
 
 mod content;
@@ -15,9 +15,7 @@ mod list;
 use self::content::content_row_content;
 use self::details::{DetailColumns, detail_columns, details_header, details_row_content};
 use self::grid::tile;
-use self::grouped::{
-    GroupLayout, GroupedList, HeaderRender, RowRender, group_header,
-};
+use self::grouped::{GroupLayout, GroupedList, HeaderRender, RowRender, group_header};
 use self::list::list_row_content;
 
 pub(crate) use self::grouped::{GroupCache, initial_group_mode};
@@ -93,9 +91,7 @@ pub(crate) fn asset_row_shell(
         .items_center()
         .px(px(GRID_PADDING))
         .cursor_pointer()
-        .when(divider, |row| {
-            row.border_b_1().border_color(colors.border)
-        })
+        .when(divider, |row| row.border_b_1().border_color(colors.border))
         .hover(move |style| style.bg(colors.hover))
         .when(selected, |row| row.bg(colors.selection))
         .on_click(move |event, window, cx| {
@@ -218,7 +214,11 @@ pub(crate) fn asset_context_menu(asset: &Asset, this: &Entity<KanalibApp>) -> Me
     } else {
         "在资源管理器中显示"
     };
-    let open_icon = if video { IconName::Play } else { IconName::Image };
+    let open_icon = if video {
+        IconName::Play
+    } else {
+        IconName::Image
+    };
     Menu::new()
         .item(
             MenuItem::new("快速查看")
@@ -307,12 +307,7 @@ pub(crate) fn asset_context_menu(asset: &Asset, this: &Entity<KanalibApp>) -> Me
                 .on_click(move |_, cx| {
                     if !can_touch_local_file(&reveal_file) {
                         let _ = reveal_this.update(cx, |app, cx| {
-                            push_toast(
-                                &app.toaster,
-                                cx,
-                                REMOTE_READONLY_NOTE,
-                                Severity::Warning,
-                            );
+                            push_toast(&app.toaster, cx, REMOTE_READONLY_NOTE, Severity::Warning);
                         });
                         return;
                     }
@@ -360,9 +355,8 @@ impl KanalibApp {
                     MenuItem::new("添加标签…")
                         .icon(IconName::Tag)
                         .on_click(move |_, cx| {
-                            let _ = add.update(cx, |app, cx| {
-                                app.open_tag_dialog(TagDialogMode::Add, cx)
-                            });
+                            let _ = add
+                                .update(cx, |app, cx| app.open_tag_dialog(TagDialogMode::Add, cx));
                         }),
                 )
                 .item(
@@ -463,7 +457,9 @@ impl KanalibApp {
                             .pt(px(ROW_PADDING))
                             .pb(px(ROW_PADDING));
                         for &asset_index in &rows_for_list[start..end] {
-                            let asset = &assets[asset_index];
+                            let Some(asset) = assets.get(asset_index) else {
+                                continue;
+                            };
                             let is_selected = selection_for_list.contains(&asset.path);
                             line = line.child(tile(
                                 asset.clone(),
@@ -503,7 +499,9 @@ impl KanalibApp {
                 };
                 range
                     .map(|position| {
-                        let asset = &assets[rows_for_list[position]];
+                        let Some(asset) = assets.get(rows_for_list[position]) else {
+                            return div().h(px(row_height)).into_any_element();
+                        };
                         let is_selected = selection_for_list.contains(&asset.path);
                         let content = match view_mode {
                             ViewMode::Details => details_row_content(

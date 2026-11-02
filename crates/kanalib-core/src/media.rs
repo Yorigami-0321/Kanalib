@@ -4,7 +4,7 @@ use std::path::Path;
 
 use anyhow::{Context, Result};
 use exif::{In, Tag};
-use image::{imageops::FilterType, DynamicImage};
+use image::{DynamicImage, imageops::FilterType};
 use serde::{Deserialize, Serialize};
 use sha1::{Digest, Sha1};
 
@@ -143,9 +143,7 @@ pub fn read_exif(path: &Path) -> (ExifData, Option<u64>) {
 
 /// 与 [`read_exif`] 相同，但一并返回 F-064 的颜色空间提示，供缩略图预取
 /// 判断「无 ICC、仅 EXIF 声明 Adobe RGB」的图片，避免再解析一次 EXIF。
-pub fn read_exif_with_color(
-    path: &Path,
-) -> (ExifData, Option<u64>, crate::color::ExifColorSpace) {
+pub fn read_exif_with_color(path: &Path) -> (ExifData, Option<u64>, crate::color::ExifColorSpace) {
     let file = match File::open(path) {
         Ok(file) => file,
         Err(_) => return (ExifData::default(), None, Default::default()),
@@ -250,7 +248,11 @@ pub fn hash_file(path: &Path) -> Result<ContentHashes> {
                     "decode {} needs ffmpeg (not available); hashes kept, phash skipped",
                     path.display()
                 );
-                (0, false, Some(format!("需要 FFmpeg 解码 {}", ffmpeg_only_label(path))))
+                (
+                    0,
+                    false,
+                    Some(format!("需要 FFmpeg 解码 {}", ffmpeg_only_label(path))),
+                )
             }
         }
         Err(error) => {
@@ -387,9 +389,7 @@ fn ispe_dimensions(body: &[u8]) -> Option<(u32, u32)> {
 }
 
 pub fn perceptual_hash(image: &DynamicImage) -> u64 {
-    let small = image
-        .resize_exact(32, 32, FilterType::Triangle)
-        .to_luma8();
+    let small = image.resize_exact(32, 32, FilterType::Triangle).to_luma8();
     let mut pixels = vec![0f32; 32 * 32];
     for (index, pixel) in small.pixels().enumerate() {
         pixels[index] = pixel[0] as f32;
@@ -422,8 +422,7 @@ fn dct_2d(input: &[f32], size: usize) -> Vec<f32> {
         }
     };
     let cos = |position: usize, frequency: usize| {
-        (std::f32::consts::PI * (2 * position + 1) as f32 * frequency as f32
-            / (2 * size) as f32)
+        (std::f32::consts::PI * (2 * position + 1) as f32 * frequency as f32 / (2 * size) as f32)
             .cos()
     };
     let mut rows = vec![0f32; size * size];
@@ -699,7 +698,10 @@ mod tests {
         match hashes.decode_error {
             Some(message) => {
                 assert!(message.contains("PSD"), "unexpected message: {message}");
-                assert!(!message.contains("不完整"), "PSD is not a damaged file: {message}");
+                assert!(
+                    !message.contains("不完整"),
+                    "PSD is not a damaged file: {message}"
+                );
             }
             None => assert!(crate::ffmpeg::available()),
         }

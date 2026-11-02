@@ -1,12 +1,12 @@
-use crate::*;
 use crate::app::{KanalibApp, push_toast};
-use crate::thumb_cache::CacheCleanup;
 use crate::format::*;
 use crate::platform::*;
 use crate::sidebar::source_label;
 use crate::status_bar::{format_scan_summary, scan_phase_label, scan_progress_counts};
 use crate::tags::group_reviews_by_asset;
 use crate::theme::*;
+use crate::thumb_cache::CacheCleanup;
+use crate::*;
 use kanalib_core::sources::{SourceInfo, SourceKind};
 
 pub(crate) const SETTINGS_MAX_WIDTH: f32 = 1080.;
@@ -290,147 +290,12 @@ pub(crate) fn backup_next_due_text(status: &backup::BackupStatus) -> String {
         return "自动备份未启用".to_string();
     }
     match status.next_due {
-        Some(due) if due <= SystemTime::now() => "自动备份已到期，将在扫描/打标空闲时执行".to_string(),
+        Some(due) if due <= SystemTime::now() => {
+            "自动备份已到期，将在扫描/打标空闲时执行".to_string()
+        }
         Some(due) => format!("下次自动备份：{}", backup::format_utc_datetime(due)),
         None => "下次备份时间待计算".to_string(),
     }
-}
-
-#[cfg(test)]
-mod tests {
-
-    #[test]
-    fn tag_threshold_step_rounds_and_clamps() {
-        assert_eq!(super::threshold_step(0.17, 0.01), 0.18);
-        assert_eq!(super::threshold_step(0.005, -0.01), 0.0);
-        assert_eq!(super::threshold_step(0.99, 0.01), 1.0);
-        assert_eq!(super::threshold_step(0.0, -0.01), 0.0);
-    }
-
-    #[test]
-    fn tag_threshold_input_rejects_invalid_values() {
-        assert_eq!(super::parse_tag_threshold_text("0.5").unwrap(), 0.5);
-        assert_eq!(super::parse_tag_threshold_text(" 1 ").unwrap(), 1.0);
-        for bad in ["", "-0.01", "1.01", "nan", "abc"] {
-            assert!(
-                super::parse_tag_threshold_text(bad).is_err(),
-                "expected error for {bad:?}"
-            );
-        }
-    }
-
-    #[test]
-    fn tag_eta_and_category_labels_are_stable() {
-        assert_eq!(super::format_tag_eta(None), "—");
-        assert_eq!(super::format_tag_eta(Some(0)), "0 秒");
-        assert_eq!(super::format_tag_eta(Some(12)), "12 秒");
-        assert_eq!(super::format_tag_eta(Some(65)), "1 分 05 秒");
-        assert_eq!(super::format_tag_eta(Some(3_700)), "1 小时 01 分");
-        assert_eq!(super::tag_category_label("general"), "通用");
-        assert_eq!(super::tag_category_label("rating"), "分级");
-        assert_eq!(super::tag_category_label("unknown"), "未知类别");
-    }
-
-    #[test]
-    fn scan_filter_summary_reports_config() {
-        let filter = kanalib_core::model::ScanFilterConfig {
-            exclude_globs: vec!["**/.git/**".into(), "*_cache".into()],
-            include_hidden: false,
-            min_bytes: Some(1024),
-            max_bytes: Some(2 * 1024 * 1024),
-        };
-        let summary = super::scan_filter_summary(&filter);
-        assert!(summary.contains("2 条 glob"));
-        assert!(summary.contains("排除隐藏"));
-        assert!(summary.contains("1.0 KB"));
-        assert!(summary.contains("2.0 MB"));
-    }
-
-    #[test]
-    fn remote_url_validation_requires_http_and_host() {
-        assert_eq!(
-            super::validate_remote_url(" https://photos.example.com/dav ").unwrap(),
-            "https://photos.example.com/dav"
-        );
-        assert_eq!(
-            super::validate_remote_url("HTTP://127.0.0.1:2283").unwrap(),
-            "HTTP://127.0.0.1:2283"
-        );
-        for bad in [
-            "",
-            "   ",
-            "ftp://example.com",
-            "https://",
-            "https:///dav",
-            "http:// example.com",
-        ] {
-            assert!(
-                super::validate_remote_url(bad).is_err(),
-                "expected error for {bad:?}"
-            );
-        }
-    }
-
-    #[test]
-    fn remote_add_kind_labels_and_source_kind_match() {
-        use kanalib_core::sources::SourceKind;
-        assert_eq!(super::RemoteAddKind::Immich.kind(), SourceKind::Immich);
-        assert_eq!(super::RemoteAddKind::WebDav.kind(), SourceKind::WebDav);
-        assert_eq!(super::RemoteAddKind::Immich.label(), "Immich");
-        assert_eq!(super::RemoteAddKind::WebDav.label(), "WebDAV");
-        assert_eq!(super::RemoteAddKind::from_kind(SourceKind::Local), None);
-        assert_eq!(
-            super::RemoteAddKind::from_kind(SourceKind::WebDav),
-            Some(super::RemoteAddKind::WebDav)
-        );
-    }
-
-    #[test]
-    fn remote_last_sync_text_treats_zero_as_never() {
-        use std::time::{SystemTime, UNIX_EPOCH};
-        assert_eq!(super::remote_last_sync_text(None), "从未");
-        assert_eq!(super::remote_last_sync_text(Some(0)), "从未");
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
-        assert_eq!(super::remote_last_sync_text(Some(now)), "刚刚");
-    }
-
-    #[test]
-    fn filter_size_input_accepts_empty_or_bytes() {
-        assert_eq!(super::parse_optional_bytes("  ", "最小大小").unwrap(), None);
-        assert_eq!(
-            super::parse_optional_bytes("2048", "最小大小").unwrap(),
-            Some(2048)
-        );
-        assert!(super::parse_optional_bytes("2MB", "最小大小").is_err());
-        assert!(super::parse_optional_bytes("-1", "最小大小").is_err());
-    }
-
-    #[test]
-    fn backup_summary_and_next_due_text_cover_plan_states() {
-        let mut plan = kanalib_core::backup::BackupPlan::default();
-        let mut status = kanalib_core::backup::BackupStatus::default();
-        assert!(super::backup_plan_summary(&plan).contains("未启用"));
-        assert_eq!(super::backup_next_due_text(&status), "自动备份未启用");
-
-        plan.enabled = true;
-        plan.frequency = kanalib_core::backup::BackupFrequency::Weekly;
-        plan.keep_files = 5;
-        plan.keep_days = Some(14);
-        let summary = super::backup_plan_summary(&plan);
-        assert!(summary.contains("每周"), "{summary}");
-        assert!(summary.contains("5"), "{summary}");
-        assert!(summary.contains("14"), "{summary}");
-
-        status.plan = plan;
-        status.next_due = Some(std::time::SystemTime::now() + std::time::Duration::from_secs(3600));
-        assert!(super::backup_next_due_text(&status).contains("下次自动备份"));
-        status.next_due = Some(std::time::SystemTime::UNIX_EPOCH);
-        assert!(super::backup_next_due_text(&status).contains("已到期"));
-    }
-
 }
 
 impl KanalibApp {
@@ -486,10 +351,7 @@ impl KanalibApp {
         value: f32,
         cx: &mut Context<Self>,
     ) {
-        if !TAG_CATEGORY_LABELS
-            .iter()
-            .any(|(key, _)| *key == category)
-        {
+        if !TAG_CATEGORY_LABELS.iter().any(|(key, _)| *key == category) {
             self.tag_settings_notice = Some(format!("未知标签类别：{category}"));
             cx.notify();
             return;
@@ -511,7 +373,12 @@ impl KanalibApp {
         cx.notify();
     }
 
-    pub(crate) fn step_category_threshold(&mut self, category: &str, delta: f32, cx: &mut Context<Self>) {
+    pub(crate) fn step_category_threshold(
+        &mut self,
+        category: &str,
+        delta: f32,
+        cx: &mut Context<Self>,
+    ) {
         let current = self.category_threshold_value(category);
         let next = threshold_step(current, delta);
         if (next - current).abs() < 0.0005 {
@@ -537,12 +404,7 @@ impl KanalibApp {
         let tag = normalize_tag_name(name);
         if tag.is_empty() {
             self.tag_settings_notice = Some("请输入要覆盖的标签名".to_string());
-            push_toast(
-                &self.toaster,
-                cx,
-                "请输入要覆盖的标签名",
-                Severity::Warning,
-            );
+            push_toast(&self.toaster, cx, "请输入要覆盖的标签名", Severity::Warning);
             cx.notify();
             return;
         }
@@ -616,12 +478,7 @@ impl KanalibApp {
         if paths.is_empty() {
             self.tag_settings_notice =
                 Some("没有可重算的图片：先选择图片或打开有内容的视图".to_string());
-            push_toast(
-                &self.toaster,
-                cx,
-                "没有可重算的图片",
-                Severity::Warning,
-            );
+            push_toast(&self.toaster, cx, "没有可重算的图片", Severity::Warning);
             cx.notify();
             return;
         }
@@ -686,7 +543,12 @@ impl KanalibApp {
         cx.notify();
     }
 
-    pub(crate) fn start_retag(&mut self, paths: Vec<PathBuf>, scope: &'static str, cx: &mut Context<Self>) {
+    pub(crate) fn start_retag(
+        &mut self,
+        paths: Vec<PathBuf>,
+        scope: &'static str,
+        cx: &mut Context<Self>,
+    ) {
         if self.tag_retag_running {
             self.tag_settings_notice = Some("已有重打标任务在运行，请稍候".to_string());
             cx.notify();
@@ -753,8 +615,7 @@ impl KanalibApp {
                     Some("选中图片没有等待中的打标任务（可能已完成或正在运行）".to_string());
             }
             Ok(count) => {
-                self.tag_settings_notice =
-                    Some(format!("已把 {count} 个打标任务提升到高优先级"));
+                self.tag_settings_notice = Some(format!("已把 {count} 个打标任务提升到高优先级"));
             }
             Err(error) => {
                 let message = format!("提升打标优先级失败：{error:#}");
@@ -781,8 +642,7 @@ impl KanalibApp {
             }
         } else {
             self.state.pause_tag_queue();
-            self.tag_settings_notice =
-                Some("已暂停打标；当前批完成后不再认领新任务".to_string());
+            self.tag_settings_notice = Some("已暂停打标；当前批完成后不再认领新任务".to_string());
         }
         self.refresh_tag_settings(cx);
         cx.notify();
@@ -790,8 +650,7 @@ impl KanalibApp {
 
     pub(crate) fn cancel_tag_queue(&mut self, cx: &mut Context<Self>) {
         self.state.cancel_tag_queue();
-        self.tag_settings_notice =
-            Some("正在取消打标；已完成的结果会保留".to_string());
+        self.tag_settings_notice = Some("正在取消打标；已完成的结果会保留".to_string());
         self.refresh_tag_settings(cx);
         cx.notify();
     }
@@ -902,19 +761,18 @@ impl KanalibApp {
                             report.destination.display(),
                             format_bytes(report.bytes),
                             report.elapsed_ms,
-                            if report.integrity_ok { "通过" } else { "异常" }
+                            if report.integrity_ok {
+                                "通过"
+                            } else {
+                                "异常"
+                            }
                         );
                         if !report.warnings.is_empty() {
-                            summary.push_str(&format!(
-                                " · 警告：{}",
-                                report.warnings.join("；")
-                            ));
+                            summary.push_str(&format!(" · 警告：{}", report.warnings.join("；")));
                         }
                         app.last_backup = Some(summary);
-                        app.settings_notice = Some(format!(
-                            "备份完成：{}",
-                            report.destination.display()
-                        ));
+                        app.settings_notice =
+                            Some(format!("备份完成：{}", report.destination.display()));
                         push_toast(
                             &app.toaster,
                             cx,
@@ -1061,10 +919,7 @@ impl KanalibApp {
             return;
         }
         self.backup_running = true;
-        self.settings_notice = Some(format!(
-            "正在校验备份并准备恢复：{}",
-            candidate.display()
-        ));
+        self.settings_notice = Some(format!("正在校验备份并准备恢复：{}", candidate.display()));
         let state = self.state.clone();
         let task = cx
             .background_executor()
@@ -1089,9 +944,8 @@ impl KanalibApp {
                             summary.push_str(&format!(" · 注意：{warning}"));
                         }
                         app.last_backup = Some(summary);
-                        app.settings_notice = Some(
-                            "备份校验通过；关闭并重新启动 Kanalib 后应用恢复。".to_string(),
-                        );
+                        app.settings_notice =
+                            Some("备份校验通过；关闭并重新启动 Kanalib 后应用恢复。".to_string());
                         push_toast(
                             &app.toaster,
                             cx,
@@ -1229,7 +1083,9 @@ impl KanalibApp {
             format_bytes(report.after_bytes),
             format_bytes(report.budget_bytes)
         ));
-        if report.removed_files > 0 && let Ok(stats) = self.state.cache_stats() {
+        if report.removed_files > 0
+            && let Ok(stats) = self.state.cache_stats()
+        {
             self.cache_stats = Some(stats);
         }
         if manual {
@@ -1276,23 +1132,18 @@ impl KanalibApp {
         colors: UiColors,
     ) -> AnyElement {
         let page_padding = px(24.);
-        let tag_override_name = window.use_keyed_state(
-            "kanalib-tag-override-name",
-            cx,
-            |window, cx| TextInput::new(window, cx).placeholder("标签名，如 long_hair"),
-        );
-        let tag_override_value = window.use_keyed_state(
-            "kanalib-tag-override-value",
-            cx,
-            |window, cx| TextInput::new(window, cx).placeholder("0.00–1.00"),
-        );
-        let protected_entry_input = window.use_keyed_state(
-            "kanalib-protected-entry",
-            cx,
-            |window, cx| {
+        let tag_override_name =
+            window.use_keyed_state("kanalib-tag-override-name", cx, |window, cx| {
+                TextInput::new(window, cx).placeholder("标签名，如 long_hair")
+            });
+        let tag_override_value =
+            window.use_keyed_state("kanalib-tag-override-value", cx, |window, cx| {
+                TextInput::new(window, cx).placeholder("0.00–1.00")
+            });
+        let protected_entry_input =
+            window.use_keyed_state("kanalib-protected-entry", cx, |window, cx| {
                 TextInput::new(window, cx).placeholder("glob 或文件夹路径，如 **/原图/**")
-            },
-        );
+            });
         let this_back = this.clone();
         let this_refresh_cache = this.clone();
         let this_cleanup_cache = this.clone();
@@ -1437,60 +1288,60 @@ impl KanalibApp {
                                 .gap(px(4.))
                                 .child(
                                     Button::new(
-                                        SharedString::from(format!(
-                                            "preview-protected-{index}"
-                                        )),
+                                        SharedString::from(format!("preview-protected-{index}")),
                                         "预览命中",
                                     )
                                     .size(ControlSize::Sm)
                                     .icon(IconName::Eye)
-                                    .on_click(move |_, _, cx| {
-                                        let path = preview_path.clone();
-                                        let _ = this_preview.update(cx, |app, cx| {
-                                            match app.state.preview_protected_path(&path) {
-                                                Ok(preview) => {
-                                                    app.settings_notice = Some(format!(
-                                                        "「{}」命中 {} / {} 张资产",
-                                                        path.display(),
-                                                        preview.matched,
-                                                        preview.total
-                                                    ));
+                                    .on_click(
+                                        move |_, _, cx| {
+                                            let path = preview_path.clone();
+                                            let _ = this_preview.update(cx, |app, cx| {
+                                                match app.state.preview_protected_path(&path) {
+                                                    Ok(preview) => {
+                                                        app.settings_notice = Some(format!(
+                                                            "「{}」命中 {} / {} 张资产",
+                                                            path.display(),
+                                                            preview.matched,
+                                                            preview.total
+                                                        ));
+                                                    }
+                                                    Err(error) => {
+                                                        app.settings_notice =
+                                                            Some(format!("预览失败: {error:#}"));
+                                                    }
                                                 }
-                                                Err(error) => {
-                                                    app.settings_notice =
-                                                        Some(format!("预览失败: {error:#}"));
-                                                }
-                                            }
-                                            cx.notify();
-                                        });
-                                    }),
+                                                cx.notify();
+                                            });
+                                        },
+                                    ),
                                 )
                                 .child(
                                     Button::new(
-                                        SharedString::from(format!(
-                                            "remove-protected-{index}"
-                                        )),
+                                        SharedString::from(format!("remove-protected-{index}")),
                                         "移除",
                                     )
                                     .size(ControlSize::Sm)
-                                    .on_click(move |_, _, cx| {
-                                        let path = path.clone();
-                                        let _ = this_remove.update(cx, |app, cx| {
-                                            match app.state.remove_protected_path(&path) {
-                                                Ok(()) => {
-                                                    app.settings_notice = Some(format!(
-                                                        "已移除保护路径：{}",
-                                                        path.display()
-                                                    ));
+                                    .on_click(
+                                        move |_, _, cx| {
+                                            let path = path.clone();
+                                            let _ = this_remove.update(cx, |app, cx| {
+                                                match app.state.remove_protected_path(&path) {
+                                                    Ok(()) => {
+                                                        app.settings_notice = Some(format!(
+                                                            "已移除保护路径：{}",
+                                                            path.display()
+                                                        ));
+                                                    }
+                                                    Err(error) => {
+                                                        app.settings_notice =
+                                                            Some(format!("移除失败: {error:#}"));
+                                                    }
                                                 }
-                                                Err(error) => {
-                                                    app.settings_notice =
-                                                        Some(format!("移除失败: {error:#}"));
-                                                }
-                                            }
-                                            cx.notify();
-                                        });
-                                    }),
+                                                cx.notify();
+                                            });
+                                        },
+                                    ),
                                 ),
                         ),
                 );
@@ -1628,28 +1479,26 @@ impl KanalibApp {
             true,
             colors,
         );
-        let similar_section = div()
-            .p(px(16.))
-            .rounded(px(10.))
-            .border_1()
-            .border_color(colors.border)
-            .bg(colors.surface)
-            .flex()
-            .flex_col()
-            .gap(px(10.))
-            .child(
-                div()
-                    .text_sm()
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .child("相似图片"),
-            )
-            .child(
-                div()
-                    .text_xs()
-                    .text_color(colors.muted)
-                    .child("默认阈值用于相似扫描与「查找相似」；滑杆先给临时值，确认后再设为默认。"),
-            )
-            .child(threshold_editor);
+        let similar_section =
+            div()
+                .p(px(16.))
+                .rounded(px(10.))
+                .border_1()
+                .border_color(colors.border)
+                .bg(colors.surface)
+                .flex()
+                .flex_col()
+                .gap(px(10.))
+                .child(
+                    div()
+                        .text_sm()
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .child("相似图片"),
+                )
+                .child(div().text_xs().text_color(colors.muted).child(
+                    "默认阈值用于相似扫描与「查找相似」；滑杆先给临时值，确认后再设为默认。",
+                ))
+                .child(threshold_editor);
 
         let path_row = |label: &'static str, value: PathBuf, colors: UiColors| {
             div()
@@ -1862,11 +1711,13 @@ impl KanalibApp {
                                         "重扫",
                                     )
                                     .size(ControlSize::Sm)
-                                    .on_click(move |_, _, cx| {
-                                        let _ = this_rescan.update(cx, |app, cx| {
-                                            app.rescan_source(root_for_rescan.clone(), cx);
-                                        });
-                                    }),
+                                    .on_click(
+                                        move |_, _, cx| {
+                                            let _ = this_rescan.update(cx, |app, cx| {
+                                                app.rescan_source(root_for_rescan.clone(), cx);
+                                            });
+                                        },
+                                    ),
                                 )
                                 .child(
                                     Button::new(
@@ -1877,14 +1728,13 @@ impl KanalibApp {
                                         "重命名",
                                     )
                                     .size(ControlSize::Sm)
-                                    .on_click(move |_, _, cx| {
-                                        let _ = this_rename.update(cx, |app, cx| {
-                                            app.open_source_rename(
-                                                root_for_rename.clone(),
-                                                cx,
-                                            );
-                                        });
-                                    }),
+                                    .on_click(
+                                        move |_, _, cx| {
+                                            let _ = this_rename.update(cx, |app, cx| {
+                                                app.open_source_rename(root_for_rename.clone(), cx);
+                                            });
+                                        },
+                                    ),
                                 )
                                 .child(
                                     Button::new(
@@ -1895,13 +1745,15 @@ impl KanalibApp {
                                         "移除",
                                     )
                                     .size(ControlSize::Sm)
-                                    .on_click(move |_, _, cx| {
-                                        let _ = this_remove.update(cx, |app, cx| {
-                                            app.source_remove_confirm =
-                                                Some(root_for_remove.clone());
-                                            cx.notify();
-                                        });
-                                    }),
+                                    .on_click(
+                                        move |_, _, cx| {
+                                            let _ = this_remove.update(cx, |app, cx| {
+                                                app.source_remove_confirm =
+                                                    Some(root_for_remove.clone());
+                                                cx.notify();
+                                            });
+                                        },
+                                    ),
                                 ),
                         ),
                 );
@@ -1926,14 +1778,11 @@ impl KanalibApp {
             .child(
                 div()
                     .flex()
-                    .child(
-                        Button::new("add-source", "添加文件夹")
-                            .primary()
-                            .on_click(move |_, _, cx| {
-                                let _ = this_add_source
-                                    .update(cx, |app, cx| app.choose_folder(cx));
-                            }),
-                    ),
+                    .child(Button::new("add-source", "添加文件夹").primary().on_click(
+                        move |_, _, cx| {
+                            let _ = this_add_source.update(cx, |app, cx| app.choose_folder(cx));
+                        },
+                    )),
             )
             .child(
                 div()
@@ -2038,7 +1887,7 @@ impl KanalibApp {
         }
 
         let mut overrides = thresholds.overrides.iter().collect::<Vec<_>>();
-        overrides.sort_by(|(left, _), (right, _)| left.cmp(right));
+        overrides.sort_by_key(|(left, _)| *left);
         let override_count = overrides.len();
         let override_rows: AnyElement = if overrides.is_empty() {
             div()
@@ -2157,10 +2006,7 @@ impl KanalibApp {
             Some(false) => "GPU 不可用",
             None => "GPU 状态未知",
         };
-        let queue_device = queue
-            .device
-            .clone()
-            .unwrap_or_else(|| "未加载".to_string());
+        let queue_device = queue.device.clone().unwrap_or_else(|| "未加载".to_string());
         let queue_status_rows = div()
             .id("tag-queue-status")
             .aria_label("打标队列状态")
@@ -2196,12 +2042,10 @@ impl KanalibApp {
                 format!("{queue_device} · {queue_gpu}"),
                 colors.muted,
             ));
-        let queue_message = queue.message.clone().map(|message| {
-            div()
-                .text_xs()
-                .text_color(colors.accent)
-                .child(message)
-        });
+        let queue_message = queue
+            .message
+            .clone()
+            .map(|message| div().text_xs().text_color(colors.accent).child(message));
         let queue_last_error = queue.last_error.clone().map(|error| {
             let path = queue
                 .last_error_path
@@ -2256,8 +2100,8 @@ impl KanalibApp {
                     .size(ControlSize::Sm)
                     .icon(IconName::RefreshCw)
                     .on_click(move |_, _, cx| {
-                        let _ = this_queue_refresh
-                            .update(cx, |app, cx| app.refresh_tag_settings(cx));
+                        let _ =
+                            this_queue_refresh.update(cx, |app, cx| app.refresh_tag_settings(cx));
                     }),
             )
             .child(
@@ -2286,8 +2130,7 @@ impl KanalibApp {
                     .size(ControlSize::Sm)
                     .icon(IconName::ArrowUp)
                     .on_click(move |_, _, cx| {
-                        let _ = this_prioritize
-                            .update(cx, |app, cx| app.prioritize_selected(cx));
+                        let _ = this_prioritize.update(cx, |app, cx| app.prioritize_selected(cx));
                     }),
             )
             .child(
@@ -2295,68 +2138,61 @@ impl KanalibApp {
                     .size(ControlSize::Sm)
                     .icon(IconName::WandSparkles)
                     .on_click(move |_, _, cx| {
-                        let _ = this_retag_selected
-                            .update(cx, |app, cx| app.request_retag(true, cx));
+                        let _ =
+                            this_retag_selected.update(cx, |app, cx| app.request_retag(true, cx));
                     }),
             )
             .child(
                 Button::new("tag-retag-view", "重打标当前视图")
                     .size(ControlSize::Sm)
                     .on_click(move |_, _, cx| {
-                        let _ = this_retag_view
-                            .update(cx, |app, cx| app.request_retag(false, cx));
+                        let _ = this_retag_view.update(cx, |app, cx| app.request_retag(false, cx));
                     }),
             );
 
-        let error_rows: AnyElement = if self.tag_job_errors.is_empty() {
-            div()
-                .text_xs()
-                .text_color(colors.subtle)
-                .child("最近失败：无")
-                .into_any_element()
-        } else {
-            let mut rows = div().flex().flex_col().gap(px(3.));
-            for error in &self.tag_job_errors {
-                let file_name = error
-                    .path
-                    .file_name()
-                    .map(|name| name.to_string_lossy().to_string())
-                    .unwrap_or_else(|| error.path.display().to_string());
-                rows = rows.child(
-                    div()
-                        .flex()
-                        .flex_col()
-                        .gap(px(1.))
-                        .px(px(8.))
-                        .py(px(3.))
-                        .rounded(px(4.))
-                        .bg(colors.sunken)
-                        .child(
+        let error_rows: AnyElement =
+            if self.tag_job_errors.is_empty() {
+                div()
+                    .text_xs()
+                    .text_color(colors.subtle)
+                    .child("最近失败：无")
+                    .into_any_element()
+            } else {
+                let mut rows = div().flex().flex_col().gap(px(3.));
+                for error in &self.tag_job_errors {
+                    let file_name = error
+                        .path
+                        .file_name()
+                        .map(|name| name.to_string_lossy().to_string())
+                        .unwrap_or_else(|| error.path.display().to_string());
+                    rows =
+                        rows.child(
                             div()
-                                .truncate()
-                                .text_xs()
-                                .text_color(colors.fg)
-                                .child(format!(
-                                    "#{} · 尝试 {} 次 · {}",
-                                    error.job_id, error.attempts, file_name
-                                )),
-                        )
-                        .child(
-                            div()
-                                .truncate()
-                                .text_xs()
-                                .text_color(colors.danger)
+                                .flex()
+                                .flex_col()
+                                .gap(px(1.))
+                                .px(px(8.))
+                                .py(px(3.))
+                                .rounded(px(4.))
+                                .bg(colors.sunken)
+                                .child(div().truncate().text_xs().text_color(colors.fg).child(
+                                    format!(
+                                        "#{} · 尝试 {} 次 · {}",
+                                        error.job_id, error.attempts, file_name
+                                    ),
+                                ))
                                 .child(
-                                    error
-                                        .last_error
-                                        .clone()
-                                        .unwrap_or_else(|| "没有错误详情".to_string()),
+                                    div().truncate().text_xs().text_color(colors.danger).child(
+                                        error
+                                            .last_error
+                                            .clone()
+                                            .unwrap_or_else(|| "没有错误详情".to_string()),
+                                    ),
                                 ),
-                        ),
-                );
-            }
-            rows.into_any_element()
-        };
+                        );
+                }
+                rows.into_any_element()
+            };
 
         let tag_section = div()
             .p(px(16.))
@@ -2483,8 +2319,7 @@ impl KanalibApp {
                 .icon(IconName::RefreshCw)
                 .disabled(self.tag_review_running)
                 .on_click(move |_, _, cx| {
-                    let _ = this_review_refresh
-                        .update(cx, |app, cx| app.refresh_tag_reviews(cx));
+                    let _ = this_review_refresh.update(cx, |app, cx| app.refresh_tag_reviews(cx));
                 }),
             )
             .child(
@@ -2538,7 +2373,10 @@ impl KanalibApp {
                                     .truncate()
                                     .text_xs()
                                     .text_color(colors.fg)
-                                    .child(format!("#{tag_name} · {}", tag_category_label(&category))),
+                                    .child(format!(
+                                        "#{tag_name} · {}",
+                                        tag_category_label(&category)
+                                    )),
                             )
                             .child(
                                 div()
@@ -2627,15 +2465,17 @@ impl KanalibApp {
                                         "整张接受",
                                     )
                                     .size(ControlSize::Sm)
-                                    .on_click(move |_, _, cx| {
-                                        let _ = this_accept_all.update(cx, |app, cx| {
-                                            app.apply_asset_review(
-                                                accept_all_path.clone(),
-                                                TagReviewState::Accepted,
-                                                cx,
-                                            );
-                                        });
-                                    }),
+                                    .on_click(
+                                        move |_, _, cx| {
+                                            let _ = this_accept_all.update(cx, |app, cx| {
+                                                app.apply_asset_review(
+                                                    accept_all_path.clone(),
+                                                    TagReviewState::Accepted,
+                                                    cx,
+                                                );
+                                            });
+                                        },
+                                    ),
                                 )
                                 .child(
                                     Button::new(
@@ -2645,15 +2485,17 @@ impl KanalibApp {
                                         "整张忽略",
                                     )
                                     .size(ControlSize::Sm)
-                                    .on_click(move |_, _, cx| {
-                                        let _ = this_ignore_all.update(cx, |app, cx| {
-                                            app.apply_asset_review(
-                                                ignore_all_path.clone(),
-                                                TagReviewState::Ignored,
-                                                cx,
-                                            );
-                                        });
-                                    }),
+                                    .on_click(
+                                        move |_, _, cx| {
+                                            let _ = this_ignore_all.update(cx, |app, cx| {
+                                                app.apply_asset_review(
+                                                    ignore_all_path.clone(),
+                                                    TagReviewState::Ignored,
+                                                    cx,
+                                                );
+                                            });
+                                        },
+                                    ),
                                 ),
                         )
                         .child(tag_rows),
@@ -2661,35 +2503,32 @@ impl KanalibApp {
             }
             rows.into_any_element()
         };
-        let review_section = div()
-            .p(px(16.))
-            .rounded(px(10.))
-            .border_1()
-            .border_color(colors.border)
-            .bg(colors.surface)
-            .flex()
-            .flex_col()
-            .gap(px(8.))
-            .child(
-                div()
-                    .text_sm()
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .child("低置信度审核"),
-            )
-            .child(
-                div()
-                    .text_xs()
-                    .text_color(colors.muted)
-                    .child("分数低于有效阈值、尚未处理的候选。接受会写入标签，忽略会标记为已处理。"),
-            )
-            .children(self.tag_review_notice.clone().map(|notice| {
-                div()
-                    .text_xs()
-                    .text_color(colors.accent)
-                    .child(notice)
-            }))
-            .child(review_actions)
-            .child(review_rows);
+        let review_section =
+            div()
+                .p(px(16.))
+                .rounded(px(10.))
+                .border_1()
+                .border_color(colors.border)
+                .bg(colors.surface)
+                .flex()
+                .flex_col()
+                .gap(px(8.))
+                .child(
+                    div()
+                        .text_sm()
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .child("低置信度审核"),
+                )
+                .child(div().text_xs().text_color(colors.muted).child(
+                    "分数低于有效阈值、尚未处理的候选。接受会写入标签，忽略会标记为已处理。",
+                ))
+                .children(
+                    self.tag_review_notice
+                        .clone()
+                        .map(|notice| div().text_xs().text_color(colors.accent).child(notice)),
+                )
+                .child(review_actions)
+                .child(review_rows);
 
         let data_section = div()
             .p(px(16.))
@@ -2992,12 +2831,7 @@ impl KanalibApp {
                     .flex_wrap()
                     .items_center()
                     .gap(px(6.))
-                    .child(
-                        div()
-                            .text_xs()
-                            .text_color(colors.muted)
-                            .child("仅保留最近"),
-                    )
+                    .child(div().text_xs().text_color(colors.muted).child("仅保留最近"))
                     .child(
                         Button::new("backup-days-less", "−")
                             .size(ControlSize::Sm)
@@ -3289,10 +3123,9 @@ impl KanalibApp {
                     .child("诊断信息"),
             )
             .child(
-                div()
-                    .text_xs()
-                    .text_color(colors.muted)
-                    .child("只读快照：版本、数据目录、数据库与缓存大小、队列、来源状态与最近错误。"),
+                div().text_xs().text_color(colors.muted).child(
+                    "只读快照：版本、数据目录、数据库与缓存大小、队列、来源状态与最近错误。",
+                ),
             )
             .child(diagnostics_rows)
             .child(
@@ -3315,17 +3148,13 @@ impl KanalibApp {
                             .size(ControlSize::Sm)
                             .icon(IconName::FolderOpen)
                             .on_click(move |_, _, cx| {
-                                let _ =
-                                    this_open_logs.update(cx, |app, cx| app.open_log_dir(cx));
+                                let _ = this_open_logs.update(cx, |app, cx| app.open_log_dir(cx));
                             }),
                     ),
             )
-            .child(
-                div()
-                    .text_xs()
-                    .text_color(colors.subtle)
-                    .child("诊断信息不包含凭据或完整环境变量；日志路径受 KANALIB_LOG_FILE 影响时以快照为准。"),
-            );
+            .child(div().text_xs().text_color(colors.subtle).child(
+                "诊断信息不包含凭据或完整环境变量；日志路径受 KANALIB_LOG_FILE 影响时以快照为准。",
+            ));
 
         let safety_section = div()
             .p(px(16.))
@@ -3368,18 +3197,8 @@ impl KanalibApp {
                     .items_center()
                     .justify_between()
                     .gap(px(12.))
-                    .child(
-                        div()
-                            .text_xs()
-                            .text_color(colors.fg)
-                            .child(description),
-                    )
-                    .child(
-                        div()
-                            .text_xs()
-                            .text_color(colors.subtle)
-                            .child(keys),
-                    ),
+                    .child(div().text_xs().text_color(colors.fg).child(description))
+                    .child(div().text_xs().text_color(colors.subtle).child(keys)),
             );
         }
         let shortcut_section = div()
@@ -3452,10 +3271,7 @@ impl KanalibApp {
                     crate::settings::format_tag_eta(scan_progress.eta_secs)
                 )
             } else {
-                format!(
-                    "空闲 · 最近阶段 {}",
-                    scan_phase_label(scan_progress.phase)
-                )
+                format!("空闲 · 最近阶段 {}", scan_phase_label(scan_progress.phase))
             },
             if scanning_now {
                 colors.accent
@@ -3514,7 +3330,11 @@ impl KanalibApp {
                         source.counts.removed,
                         source.counts.failed,
                         source.elapsed_secs,
-                        if source.cancelled { " · 已停止" } else { "" },
+                        if source.cancelled {
+                            " · 已停止"
+                        } else {
+                            ""
+                        },
                         source
                             .error
                             .as_ref()
@@ -3619,11 +3439,12 @@ impl KanalibApp {
                     )
                     .child(
                         Button::new(
-                            SharedString::from(format!(
-                                "edit-scan-filter-{}",
-                                root.display()
-                            )),
-                            if is_open { "收起" } else { "编辑排除规则" },
+                            SharedString::from(format!("edit-scan-filter-{}", root.display())),
+                            if is_open {
+                                "收起"
+                            } else {
+                                "编辑排除规则"
+                            },
                         )
                         .size(ControlSize::Sm)
                         .on_click(move |_, _, cx| {
@@ -3691,11 +3512,7 @@ impl KanalibApp {
                 cx,
                 |window, cx| TextInput::new(window, cx).placeholder("忽略 glob，如 *_tmp.png"),
             );
-            let mut glob_chips = div()
-                .flex()
-                .flex_wrap()
-                .items_center()
-                .gap(px(6.));
+            let mut glob_chips = div().flex().flex_wrap().items_center().gap(px(6.));
             if globs.is_empty() {
                 glob_chips = glob_chips.child(
                     div()
@@ -3715,12 +3532,7 @@ impl KanalibApp {
                         .py(px(2.))
                         .rounded(px(4.))
                         .bg(colors.surface)
-                        .child(
-                            div()
-                                .text_xs()
-                                .text_color(colors.fg)
-                                .child(glob.clone()),
-                        )
+                        .child(div().text_xs().text_color(colors.fg).child(glob.clone()))
                         .child(
                             Button::new(
                                 SharedString::from(format!(
@@ -3758,17 +3570,12 @@ impl KanalibApp {
             let root_for_ignore = root.clone();
             let impact_rows = impact.as_ref().map(|impact| {
                 let mut rows = div().flex().flex_col().gap(px(2.));
-                rows = rows.child(
-                    div()
-                        .text_xs()
-                        .text_color(colors.fg)
-                        .child(format!(
-                            "命中预览：已入库 {} 张 · 排除 {} 张 · 保留 {} 张",
-                            impact.indexed,
-                            impact.excluded.len(),
-                            impact.kept
-                        )),
-                );
+                rows = rows.child(div().text_xs().text_color(colors.fg).child(format!(
+                    "命中预览：已入库 {} 张 · 排除 {} 张 · 保留 {} 张",
+                    impact.indexed,
+                    impact.excluded.len(),
+                    impact.kept
+                )));
                 for path in impact.excluded.iter().take(5) {
                     rows = rows.child(
                         div()
@@ -3895,9 +3702,11 @@ impl KanalibApp {
                                     .size(ControlSize::Sm)
                                     .on_click(move |_, _, cx| {
                                         let _ = this_cancel.update(cx, |app, cx| {
-                                            if app.scan_filter_draft.as_ref().is_some_and(|draft| {
-                                                draft.confirm_remove
-                                            }) {
+                                            if app
+                                                .scan_filter_draft
+                                                .as_ref()
+                                                .is_some_and(|draft| draft.confirm_remove)
+                                            {
                                                 app.cancel_scan_filter_remove(cx);
                                             } else {
                                                 app.close_scan_filter_editor(cx);
@@ -3907,12 +3716,11 @@ impl KanalibApp {
                             ),
                     )
                     .children(impact_rows)
-                    .children(notice.map(|message| {
-                        div()
-                            .text_xs()
-                            .text_color(colors.accent)
-                            .child(message)
-                    }))
+                    .children(
+                        notice.map(|message| {
+                            div().text_xs().text_color(colors.accent).child(message)
+                        }),
+                    )
                     .child(
                         div()
                             .flex()
@@ -3920,9 +3728,9 @@ impl KanalibApp {
                             .items_center()
                             .gap(px(6.))
                             .child(
-                                div()
-                                    .w(px(240.))
-                                    .child(Input::new(&ignore_field).least("忽略 glob，如 *_tmp.png")),
+                                div().w(px(240.)).child(
+                                    Input::new(&ignore_field).least("忽略 glob，如 *_tmp.png"),
+                                ),
                             )
                             .child(
                                 Button::new("ignore-glob-add", "加入忽略列表")
@@ -4028,15 +3836,10 @@ impl KanalibApp {
                     );
                 }
                 if ignore_rules.paths.len() > 12 {
-                    ignore_rows = ignore_rows.child(
-                        div()
-                            .text_xs()
-                            .text_color(colors.subtle)
-                            .child(format!(
-                                "另有 {} 条路径未展开",
-                                ignore_rules.paths.len() - 12
-                            )),
-                    );
+                    ignore_rows =
+                        ignore_rows.child(div().text_xs().text_color(colors.subtle).child(
+                            format!("另有 {} 条路径未展开", ignore_rules.paths.len() - 12),
+                        ));
                 }
             }
             if !ignore_rules.sha1.is_empty() {
@@ -4089,26 +3892,20 @@ impl KanalibApp {
                         div()
                             .text_xs()
                             .text_color(colors.subtle)
-                            .child(format!(
-                                "另有 {} 条哈希未展开",
-                                ignore_rules.sha1.len() - 8
-                            )),
+                            .child(format!("另有 {} 条哈希未展开", ignore_rules.sha1.len() - 8)),
                     );
                 }
             }
             for (root, globs) in &ignore_rules.globs {
                 let root_path = PathBuf::from(root);
-                ignore_rows = ignore_rows.child(
-                    div()
-                        .truncate()
-                        .text_xs()
-                        .text_color(colors.fg)
-                        .child(format!(
+                ignore_rows =
+                    ignore_rows.child(div().truncate().text_xs().text_color(colors.fg).child(
+                        format!(
                             "忽略 glob · {}（{} 条）",
                             source_label(&root_path, source_aliases),
                             globs.len()
-                        )),
-                );
+                        ),
+                    ));
                 for (index, glob) in globs.iter().take(12).enumerate() {
                     let this_restore = this.clone();
                     let restore_root = root_path.clone();
@@ -4941,5 +4738,141 @@ impl KanalibApp {
             });
         })
         .detach();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+
+    #[test]
+    fn tag_threshold_step_rounds_and_clamps() {
+        assert_eq!(super::threshold_step(0.17, 0.01), 0.18);
+        assert_eq!(super::threshold_step(0.005, -0.01), 0.0);
+        assert_eq!(super::threshold_step(0.99, 0.01), 1.0);
+        assert_eq!(super::threshold_step(0.0, -0.01), 0.0);
+    }
+
+    #[test]
+    fn tag_threshold_input_rejects_invalid_values() {
+        assert_eq!(super::parse_tag_threshold_text("0.5").unwrap(), 0.5);
+        assert_eq!(super::parse_tag_threshold_text(" 1 ").unwrap(), 1.0);
+        for bad in ["", "-0.01", "1.01", "nan", "abc"] {
+            assert!(
+                super::parse_tag_threshold_text(bad).is_err(),
+                "expected error for {bad:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn tag_eta_and_category_labels_are_stable() {
+        assert_eq!(super::format_tag_eta(None), "—");
+        assert_eq!(super::format_tag_eta(Some(0)), "0 秒");
+        assert_eq!(super::format_tag_eta(Some(12)), "12 秒");
+        assert_eq!(super::format_tag_eta(Some(65)), "1 分 05 秒");
+        assert_eq!(super::format_tag_eta(Some(3_700)), "1 小时 01 分");
+        assert_eq!(super::tag_category_label("general"), "通用");
+        assert_eq!(super::tag_category_label("rating"), "分级");
+        assert_eq!(super::tag_category_label("unknown"), "未知类别");
+    }
+
+    #[test]
+    fn scan_filter_summary_reports_config() {
+        let filter = kanalib_core::model::ScanFilterConfig {
+            exclude_globs: vec!["**/.git/**".into(), "*_cache".into()],
+            include_hidden: false,
+            min_bytes: Some(1024),
+            max_bytes: Some(2 * 1024 * 1024),
+        };
+        let summary = super::scan_filter_summary(&filter);
+        assert!(summary.contains("2 条 glob"));
+        assert!(summary.contains("排除隐藏"));
+        assert!(summary.contains("1.0 KB"));
+        assert!(summary.contains("2.0 MB"));
+    }
+
+    #[test]
+    fn remote_url_validation_requires_http_and_host() {
+        assert_eq!(
+            super::validate_remote_url(" https://photos.example.com/dav ").unwrap(),
+            "https://photos.example.com/dav"
+        );
+        assert_eq!(
+            super::validate_remote_url("HTTP://127.0.0.1:2283").unwrap(),
+            "HTTP://127.0.0.1:2283"
+        );
+        for bad in [
+            "",
+            "   ",
+            "ftp://example.com",
+            "https://",
+            "https:///dav",
+            "http:// example.com",
+        ] {
+            assert!(
+                super::validate_remote_url(bad).is_err(),
+                "expected error for {bad:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn remote_add_kind_labels_and_source_kind_match() {
+        use kanalib_core::sources::SourceKind;
+        assert_eq!(super::RemoteAddKind::Immich.kind(), SourceKind::Immich);
+        assert_eq!(super::RemoteAddKind::WebDav.kind(), SourceKind::WebDav);
+        assert_eq!(super::RemoteAddKind::Immich.label(), "Immich");
+        assert_eq!(super::RemoteAddKind::WebDav.label(), "WebDAV");
+        assert_eq!(super::RemoteAddKind::from_kind(SourceKind::Local), None);
+        assert_eq!(
+            super::RemoteAddKind::from_kind(SourceKind::WebDav),
+            Some(super::RemoteAddKind::WebDav)
+        );
+    }
+
+    #[test]
+    fn remote_last_sync_text_treats_zero_as_never() {
+        use std::time::{SystemTime, UNIX_EPOCH};
+        assert_eq!(super::remote_last_sync_text(None), "从未");
+        assert_eq!(super::remote_last_sync_text(Some(0)), "从未");
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        assert_eq!(super::remote_last_sync_text(Some(now)), "刚刚");
+    }
+
+    #[test]
+    fn filter_size_input_accepts_empty_or_bytes() {
+        assert_eq!(super::parse_optional_bytes("  ", "最小大小").unwrap(), None);
+        assert_eq!(
+            super::parse_optional_bytes("2048", "最小大小").unwrap(),
+            Some(2048)
+        );
+        assert!(super::parse_optional_bytes("2MB", "最小大小").is_err());
+        assert!(super::parse_optional_bytes("-1", "最小大小").is_err());
+    }
+
+    #[test]
+    fn backup_summary_and_next_due_text_cover_plan_states() {
+        let mut plan = kanalib_core::backup::BackupPlan::default();
+        let mut status = kanalib_core::backup::BackupStatus::default();
+        assert!(super::backup_plan_summary(&plan).contains("未启用"));
+        assert_eq!(super::backup_next_due_text(&status), "自动备份未启用");
+
+        plan.enabled = true;
+        plan.frequency = kanalib_core::backup::BackupFrequency::Weekly;
+        plan.keep_files = 5;
+        plan.keep_days = Some(14);
+        let summary = super::backup_plan_summary(&plan);
+        assert!(summary.contains("每周"), "{summary}");
+        assert!(summary.contains("5"), "{summary}");
+        assert!(summary.contains("14"), "{summary}");
+
+        status.plan = plan;
+        status.next_due = Some(std::time::SystemTime::now() + std::time::Duration::from_secs(3600));
+        assert!(super::backup_next_due_text(&status).contains("下次自动备份"));
+        status.next_due = Some(std::time::SystemTime::UNIX_EPOCH);
+        assert!(super::backup_next_due_text(&status).contains("已到期"));
     }
 }

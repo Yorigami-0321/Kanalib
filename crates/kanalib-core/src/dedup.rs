@@ -221,13 +221,8 @@ impl ProtectedMatcher {
 
     /// 用户保护项（不含只读来源）是否命中。
     pub fn matches_entry(&self, path: &Path) -> bool {
-        self.literals
-            .iter()
-            .any(|root| path_under(path, root))
-            || self
-                .globs
-                .iter()
-                .any(|glob| glob_matches(glob, path))
+        self.literals.iter().any(|root| path_under(path, root))
+            || self.globs.iter().any(|glob| glob_matches(glob, path))
     }
 
     /// 只读来源命中时返回来源类型；`None` 表示可写。
@@ -384,11 +379,7 @@ fn pick_protected_keeper(assets: &[Asset], protected: &ProtectedMatcher) -> Opti
     }
     candidates.sort_by(|a, b| {
         (b.width as u64 * b.height as u64, b.bytes, b.tags.len())
-            .cmp(&(
-                a.width as u64 * a.height as u64,
-                a.bytes,
-                a.tags.len(),
-            ))
+            .cmp(&(a.width as u64 * a.height as u64, a.bytes, a.tags.len()))
             .then_with(|| a.mtime.cmp(&b.mtime))
             .then_with(|| a.path.cmp(&b.path))
     });
@@ -675,7 +666,7 @@ fn preview_seed_indices(count: usize, sample: usize) -> Vec<usize> {
     let mut scored = (0..count)
         .map(|index| (splitmix64(index as u64 ^ PREVIEW_SAMPLE_SALT), index))
         .collect::<Vec<_>>();
-    scored.sort_unstable_by(|a, b| a.0.cmp(&b.0));
+    scored.sort_unstable_by_key(|a| a.0);
     scored.truncate(sample);
     scored.sort_unstable_by_key(|entry| entry.1);
     scored.into_iter().map(|entry| entry.1).collect()
@@ -812,12 +803,8 @@ impl DedupState {
     }
 
     pub fn rebuild_exact(&mut self, assets: &[Asset]) {
-        let groups = build_exact_groups_matched(
-            assets,
-            &self.reviews,
-            &self.groups,
-            &self.protected,
-        );
+        let groups =
+            build_exact_groups_matched(assets, &self.reviews, &self.groups, &self.protected);
         self.groups = Arc::new(groups);
     }
 
@@ -938,8 +925,7 @@ impl DedupState {
             if members.len() < 2 {
                 continue;
             }
-            let (suggested, suggested_reason) =
-                suggest_exact_keeper(&members, &self.protected);
+            let (suggested, suggested_reason) = suggest_exact_keeper(&members, &self.protected);
             rebuilt.push(make_group(
                 GroupKind::Exact,
                 key.clone(),
@@ -1009,7 +995,8 @@ impl DedupState {
             member_count: group.member_count,
             signature: group.signature.clone(),
         };
-        self.reviews.insert(review.group_key.clone(), review.clone());
+        self.reviews
+            .insert(review.group_key.clone(), review.clone());
         Some(review)
     }
 
@@ -1029,7 +1016,8 @@ impl DedupState {
             member_count: group.member_count,
             signature: group.signature.clone(),
         };
-        self.reviews.insert(review.group_key.clone(), review.clone());
+        self.reviews
+            .insert(review.group_key.clone(), review.clone());
         Some(review)
     }
 
@@ -1282,8 +1270,16 @@ fn suggest_exact_keeper(assets: &[Asset], protected: &ProtectedMatcher) -> (Path
     if let Some(path) = pick_protected_keeper(assets, protected) {
         return (path, "保护路径".to_string());
     }
-    let max_tags = assets.iter().map(|asset| asset.tags.len()).max().unwrap_or(0);
-    let min_tags = assets.iter().map(|asset| asset.tags.len()).min().unwrap_or(0);
+    let max_tags = assets
+        .iter()
+        .map(|asset| asset.tags.len())
+        .max()
+        .unwrap_or(0);
+    let min_tags = assets
+        .iter()
+        .map(|asset| asset.tags.len())
+        .min()
+        .unwrap_or(0);
     if max_tags > 0 && max_tags != min_tags {
         let mut tagged = assets
             .iter()
@@ -1337,15 +1333,26 @@ fn suggest_similar_keeper(assets: &[Asset], protected: &ProtectedMatcher) -> (Pa
         }
     }
 
-    let max_tags = assets.iter().map(|asset| asset.tags.len()).max().unwrap_or(0);
-    let min_tags = assets.iter().map(|asset| asset.tags.len()).min().unwrap_or(0);
+    let max_tags = assets
+        .iter()
+        .map(|asset| asset.tags.len())
+        .max()
+        .unwrap_or(0);
+    let min_tags = assets
+        .iter()
+        .map(|asset| asset.tags.len())
+        .min()
+        .unwrap_or(0);
     if max_tags > 0 && max_tags != min_tags {
         let candidates = assets
             .iter()
             .filter(|asset| asset.tags.len() == max_tags)
             .collect::<Vec<_>>();
         if candidates.len() == 1 {
-            return (candidates[0].path.clone(), format!("标签最多（{max_tags} 个）"));
+            return (
+                candidates[0].path.clone(),
+                format!("标签最多（{max_tags} 个）"),
+            );
         }
     }
 
@@ -1508,7 +1515,6 @@ impl UnionFind {
 mod tests {
     use super::*;
     use crate::model::TagHit;
-    use std::time::{Duration, Instant};
 
     fn asset(path: &str, tags: usize, mtime: u64) -> Asset {
         asset_with(path, "aaa", 1, 100, mtime, 100, 100, tags)
@@ -1614,7 +1620,10 @@ mod tests {
             .set_keeper(&key, Path::new("C:/lib/b.png"), GroupKind::Exact)
             .expect("keeper review");
         assert_eq!(review.state, ReviewState::Pending);
-        assert_eq!(review.keeper_path.as_deref(), Some(Path::new("C:/lib/b.png")));
+        assert_eq!(
+            review.keeper_path.as_deref(),
+            Some(Path::new("C:/lib/b.png"))
+        );
         state.rebuild(&assets);
         assert_eq!(
             state.groups[0].keeper.as_deref(),
@@ -1737,20 +1746,13 @@ mod tests {
 
         let c = asset("C:/lib/c.png", 0, 1);
         let assets = vec![a.clone(), b.clone(), c.clone()];
-        state.apply_exact_changes(
-            &assets,
-            &HashSet::from([c.path.clone()]),
-            &HashSet::new(),
-        );
+        state.apply_exact_changes(&assets, &HashSet::from([c.path.clone()]), &HashSet::new());
         assert_eq!(
             state.groups[0].keeper.as_deref(),
             Some(b.path.as_path()),
             "新增成员不得丢弃已选 keeper"
         );
-        assert!(
-            !state.similar_groups.is_empty(),
-            "监听新增不得清空相似组"
-        );
+        assert!(!state.similar_groups.is_empty(), "监听新增不得清空相似组");
         assert!(state.similar_scanned);
         assert_eq!(state.similar_threshold, 0);
     }
@@ -1782,78 +1784,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "perf: 100k 资产去重刷新成本；用 --ignored --nocapture 运行"]
-    fn exact_dedup_refresh_100k_cost() {
-        // 5 万组 × 2 张完全相同 = 10 万资产，覆盖“组数量最多”的最坏情况。
-        let mut assets = (0..100_000u32)
-            .map(|index| {
-                asset_with(
-                    &format!("C:/lib/{index:06}.png"),
-                    &format!("sha1-{:06}", index / 2),
-                    1,
-                    100,
-                    10,
-                    4,
-                    4,
-                    0,
-                )
-            })
-            .collect::<Vec<_>>();
-
-        let mut state = DedupState::default();
-        let mut full = Duration::MAX;
-        for _ in 0..3 {
-            let started = Instant::now();
-            state.rebuild_exact(&assets);
-            full = full.min(started.elapsed());
-        }
-        assert_eq!(state.groups.len(), 50_000);
-
-        // 小批次：5 个组各新增 1 个副本 + 5 个唯一新文件。
-        let mut touched = HashSet::new();
-        for group in 0..5u32 {
-            let path = format!("C:/lib/new-{group:02}.png");
-            assets.push(asset_with(
-                &path,
-                &format!("sha1-{:06}", group),
-                1,
-                100,
-                10,
-                4,
-                4,
-                0,
-            ));
-            touched.insert(PathBuf::from(path));
-        }
-        for index in 0..5u32 {
-            let path = format!("C:/lib/unique-{index:02}.png");
-            assets.push(asset_with(
-                &path,
-                &format!("unique-{index:02}"),
-                1,
-                100,
-                10,
-                4,
-                4,
-                0,
-            ));
-            touched.insert(PathBuf::from(path));
-        }
-        let mut incremental = Duration::MAX;
-        for _ in 0..3 {
-            let started = Instant::now();
-            state.apply_exact_changes(&assets, &touched, &HashSet::new());
-            incremental = incremental.min(started.elapsed());
-        }
-
-        eprintln!(
-            "100k assets / 50k exact groups: rebuild_exact(best of 3) = {full:?}; \
-             apply_exact_changes(10 paths, best of 3) = {incremental:?}"
-        );
-        assert_eq!(state.groups.len(), 50_000);
-    }
-
-    #[test]
     fn equal_tag_counts_fall_back_to_the_oldest_file() {
         let assets = vec![asset("C:/lib/a.png", 2, 20), asset("C:/lib/b.png", 2, 10)];
         let groups = build_exact_groups(&assets, &HashMap::new(), &[], &[]);
@@ -1875,8 +1805,18 @@ mod tests {
         assert_eq!(group.kind, GroupKind::Similar);
         assert!(group.key.starts_with("sim:"));
         assert_eq!(group.assets.len(), 2);
-        assert!(group.assets.iter().any(|asset| asset.path.ends_with("b.png")));
-        assert!(group.assets.iter().any(|asset| asset.path.ends_with("c.png")));
+        assert!(
+            group
+                .assets
+                .iter()
+                .any(|asset| asset.path.ends_with("b.png"))
+        );
+        assert!(
+            group
+                .assets
+                .iter()
+                .any(|asset| asset.path.ends_with("c.png"))
+        );
         assert_eq!(group.suggested_reason, "分辨率最高");
         assert!(group.similarity_pct().is_some());
     }
@@ -1931,17 +1871,17 @@ mod tests {
             Some(Path::new("C:/protected/a.png"))
         );
         assert_eq!(groups[0].suggested_reason, "保护路径");
-        assert!(is_protected(
-            Path::new("C:/protected/a.png"),
-            &protected
-        ));
+        assert!(is_protected(Path::new("C:/protected/a.png"), &protected));
         assert!(!is_protected(Path::new("C:/other/b.png"), &protected));
     }
 
     #[test]
     fn protected_globs_match_separators_case_and_directories() {
         let matcher = ProtectedMatcher::new(
-            &[PathBuf::from("C:/lib/**/cache/**"), PathBuf::from("D:/原图/*.psd")],
+            &[
+                PathBuf::from("C:/lib/**/cache/**"),
+                PathBuf::from("D:/原图/*.psd"),
+            ],
             &[],
         );
         assert!(matcher.matches_entry(Path::new("C:/lib/2024/cache/a.png")));
@@ -2377,31 +2317,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "10k similar-scan benchmark"]
-    fn benchmark_similar_10k() {
-        let mut assets = Vec::with_capacity(10_000);
-        for index in 0..10_000u64 {
-            let path = format!("C:/lib/{index:05}.png");
-            let sha1 = format!("{index:040x}");
-            let phash = index
-                .wrapping_mul(0x9E37_79B9_7F4A_7C15)
-                .rotate_left(17);
-            assets.push(asset_with(
-                &path, &sha1, phash, 100, 10, 100, 100, 0,
-            ));
-        }
-        for threshold in [6u8, 10, 14] {
-            let started = std::time::Instant::now();
-            let groups = compute_similar_groups(&assets, threshold, &HashMap::new(), &[], &[]);
-            let elapsed_ms = started.elapsed().as_secs_f64() * 1000.0;
-            println!(
-                "similar 10k: threshold={threshold} groups={} elapsed_ms={elapsed_ms:.0}",
-                groups.len(),
-            );
-        }
-    }
-
-    #[test]
     fn parallel_similar_matches_serial_reference() {
         let mut seed = 0x9E37_79B9_7F4A_7C15u64;
         let mut next = || {
@@ -2452,252 +2367,6 @@ mod tests {
                 .collect::<Vec<_>>();
             actual.sort();
             assert_eq!(actual, expected, "threshold={threshold}");
-        }
-    }
-
-    #[test]
-    #[ignore = "100k similar-scan benchmark"]
-    fn benchmark_similar_100k() {
-        let mut assets = Vec::with_capacity(100_000);
-        for index in 0..100_000u64 {
-            let path = format!("C:/lib/{index:06}.png");
-            let sha1 = format!("{index:040x}");
-            let phash = index
-                .wrapping_mul(0x9E37_79B9_7F4A_7C15)
-                .rotate_left(17);
-            assets.push(asset_with(&path, &sha1, phash, 100, 10, 100, 100, 0));
-        }
-        for threshold in [10u8, 14] {
-            let started = std::time::Instant::now();
-            let groups = compute_similar_groups(&assets, threshold, &HashMap::new(), &[], &[]);
-            let elapsed_ms = started.elapsed().as_secs_f64() * 1000.0;
-            println!(
-                "similar 100k: threshold={threshold} groups={} elapsed_ms={elapsed_ms:.0}",
-                groups.len(),
-            );
-        }
-    }
-
-    fn load_bench_assets(db: &Path) -> Vec<Asset> {
-        let connection =
-            rusqlite::Connection::open_with_flags(db, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
-                .expect("open benchmark db read-only");
-        let mut statement = connection
-            .prepare(
-                "SELECT path, phash, sha1 FROM assets
-                 WHERE phash IS NOT NULL AND deleted_at IS NULL
-                 ORDER BY path",
-            )
-            .expect("prepare benchmark query");
-        let rows = statement
-            .query_map([], |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, i64>(1)?,
-                    row.get::<_, Option<String>>(2)?,
-                ))
-            })
-            .expect("query benchmark rows");
-        rows.map(|row| {
-            let (path, phash, sha1) = row.expect("benchmark row");
-            asset_with(
-                &path,
-                sha1.as_deref().unwrap_or_default(),
-                phash as u64,
-                100,
-                10,
-                100,
-                100,
-                0,
-            )
-        })
-        .collect()
-    }
-
-    fn percentile(sorted: &[f64], percent: f64) -> f64 {
-        if sorted.is_empty() {
-            return 0.0;
-        }
-        let rank = ((percent / 100.0) * sorted.len() as f64).ceil() as usize;
-        sorted[rank.saturating_sub(1).min(sorted.len() - 1)]
-    }
-
-    /// 单锚点查询基准（默认跳过）：
-    /// `KANALIB_BENCH_DB=<db 副本> cargo test -p kanalib-core -- --ignored --nocapture benchmark_anchor_query`
-    #[test]
-    #[ignore = "100k anchor-query benchmark (KANALIB_BENCH_DB)"]
-    fn benchmark_anchor_query_100k() {
-        let Some(db) = std::env::var_os("KANALIB_BENCH_DB") else {
-            eprintln!("KANALIB_BENCH_DB 未设置，跳过基准");
-            return;
-        };
-        let assets = load_bench_assets(Path::new(&db));
-        println!("anchor benchmark assets={}", assets.len());
-        let limit = 500usize;
-        let sample = 100usize;
-        let step = (assets.len() / sample).max(1);
-        let anchors = (0..sample)
-            .map(|index| assets[index * step].path.clone())
-            .collect::<Vec<_>>();
-        for threshold in [6u8, 10, 14, 32] {
-            for anchor in anchors.iter().take(5) {
-                let _ = similar_to_anchor(&assets, anchor, threshold, limit);
-            }
-            let mut timings = Vec::with_capacity(anchors.len());
-            let mut hit_total = 0usize;
-            for anchor in &anchors {
-                let started = std::time::Instant::now();
-                let result =
-                    similar_to_anchor(&assets, anchor, threshold, limit).expect("anchor query");
-                timings.push(started.elapsed().as_secs_f64() * 1000.0);
-                hit_total += result.hits.len();
-            }
-            timings.sort_by(|a, b| a.partial_cmp(b).unwrap());
-            println!(
-                "anchor 100k: threshold={threshold} limit={limit} n={} p50={:.2}ms p95={:.2}ms max={:.2}ms avg_hits={:.0}",
-                anchors.len(),
-                percentile(&timings, 50.0),
-                percentile(&timings, 95.0),
-                timings.last().copied().unwrap_or(0.0),
-                hit_total as f64 / anchors.len() as f64,
-            );
-        }
-    }
-
-    /// 阈值预览与全扫的偏差记录（默认跳过）：
-    /// `KANALIB_BENCH_DB=<db 副本> cargo test -p kanalib-core -- --ignored --nocapture benchmark_threshold_preview`
-    #[test]
-    #[ignore = "100k threshold-preview benchmark (KANALIB_BENCH_DB)"]
-    fn benchmark_threshold_preview_100k() {
-        let Some(db) = std::env::var_os("KANALIB_BENCH_DB") else {
-            eprintln!("KANALIB_BENCH_DB 未设置，跳过基准");
-            return;
-        };
-        let assets = load_bench_assets(Path::new(&db));
-        println!(
-            "preview benchmark assets={} sample_limit={} exact_limit={}",
-            assets.len(),
-            PREVIEW_SAMPLE_LIMIT,
-            PREVIEW_EXACT_LIMIT
-        );
-        for threshold in [0u8, 6, 10, 14, 32] {
-            let started = std::time::Instant::now();
-            let preview = preview_similar_threshold(&assets, threshold);
-            let preview_ms = started.elapsed().as_secs_f64() * 1000.0;
-            if threshold == 32 {
-                println!(
-                    "preview 100k: threshold={threshold} sampled={}/{} group={} member={} chain_risk={} chain_groups={} preview_ms={:.1}（32 位全配对过慢，不做全扫对照）",
-                    preview.sampled_assets,
-                    preview.total_assets,
-                    preview.group_count,
-                    preview.member_count,
-                    preview.chain_risk,
-                    preview.chain_groups,
-                    preview_ms,
-                );
-                continue;
-            }
-            let started = std::time::Instant::now();
-            let groups = compute_similar_groups(&assets, threshold, &HashMap::new(), &[], &[]);
-            let scan_ms = started.elapsed().as_secs_f64() * 1000.0;
-            let actual_groups = groups.len();
-            let actual_members = groups.iter().map(|group| group.assets.len()).sum::<usize>();
-            let group_delta = preview.group_count as f64 - actual_groups as f64;
-            let member_delta = preview.member_count as f64 - actual_members as f64;
-            println!(
-                "preview 100k: threshold={threshold} sampled={}/{} group={} actual={} delta={:+.1}% member={} actual={} delta={:+.1}% chain_risk={} chain_groups={} preview_ms={:.1} full_scan_ms={:.0}",
-                preview.sampled_assets,
-                preview.total_assets,
-                preview.group_count,
-                actual_groups,
-                if actual_groups == 0 {
-                    0.0
-                } else {
-                    group_delta * 100.0 / actual_groups as f64
-                },
-                preview.member_count,
-                actual_members,
-                if actual_members == 0 {
-                    0.0
-                } else {
-                    member_delta * 100.0 / actual_members as f64
-                },
-                preview.chain_risk,
-                preview.chain_groups,
-                preview_ms,
-                scan_ms,
-            );
-        }
-    }
-
-    /// 稀疏库（重复占比低、无长链）的抽样偏差：10 万随机 pHash + 2000 组植入近重复对。
-    /// `cargo test -p kanalib-core -- --ignored --nocapture benchmark_preview_synthetic_100k`
-    #[test]
-    #[ignore = "100k synthetic sparse preview benchmark"]
-    fn benchmark_preview_synthetic_100k() {
-        let mut seed = 0x1234_5678_9ABC_DEF0u64;
-        let mut next = || {
-            seed ^= seed << 13;
-            seed ^= seed >> 7;
-            seed ^= seed << 17;
-            seed
-        };
-        let mut assets = Vec::with_capacity(100_000);
-        let mut index = 0usize;
-        while assets.len() < 100_000 {
-            let phash = next();
-            assets.push(asset_with(
-                &format!("C:/lib/{index:06}.png"),
-                &format!("sha{index}"),
-                phash,
-                100,
-                10,
-                100,
-                100,
-                0,
-            ));
-            index += 1;
-            if index % 50 == 0 && assets.len() < 100_000 {
-                // 每 50 张里植入一张与上一张距离 ≤6 的近似副本。
-                let flipped = phash ^ (next() & 0b11_1111);
-                assets.push(asset_with(
-                    &format!("C:/lib/{index:06}.png"),
-                    &format!("sha{index}"),
-                    flipped,
-                    100,
-                    10,
-                    100,
-                    100,
-                    0,
-                ));
-                index += 1;
-            }
-        }
-        for threshold in [6u8, 10, 14] {
-            let started = std::time::Instant::now();
-            let preview = preview_similar_threshold(&assets, threshold);
-            let preview_ms = started.elapsed().as_secs_f64() * 1000.0;
-            let started = std::time::Instant::now();
-            let groups = compute_similar_groups(&assets, threshold, &HashMap::new(), &[], &[]);
-            let scan_ms = started.elapsed().as_secs_f64() * 1000.0;
-            let actual_groups = groups.len();
-            let actual_members = groups.iter().map(|group| group.assets.len()).sum::<usize>();
-            println!(
-                "preview synthetic 100k: threshold={threshold} sampled={}/{} group={} actual={} delta={:+.1}% member={} actual={} delta={:+.1}% chain_risk={} preview_ms={:.1} full_scan_ms={:.0}",
-                preview.sampled_assets,
-                preview.total_assets,
-                preview.group_count,
-                actual_groups,
-                (preview.group_count as f64 - actual_groups as f64) * 100.0
-                    / actual_groups.max(1) as f64,
-                preview.member_count,
-                actual_members,
-                (preview.member_count as f64 - actual_members as f64) * 100.0
-                    / actual_members.max(1) as f64,
-                preview.chain_risk,
-                preview_ms,
-                scan_ms,
-            );
         }
     }
 

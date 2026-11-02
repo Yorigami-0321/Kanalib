@@ -118,9 +118,7 @@ impl WindowState {
                 .get("maximized")
                 .and_then(serde_json::Value::as_bool)
                 .unwrap_or(false),
-            display_id: value
-                .get("display_id")
-                .and_then(serde_json::Value::as_u64),
+            display_id: value.get("display_id").and_then(serde_json::Value::as_u64),
         };
         state.is_sane().then_some(state)
     }
@@ -215,8 +213,10 @@ impl WindowState {
         let x = if state.x.is_finite() { state.x } else { area_x };
         let y = if state.y.is_finite() { state.y } else { area_y };
 
-        let fully_inside =
-            x >= area_x && y >= area_y && x + state.width <= area_right && y + state.height <= area_bottom;
+        let fully_inside = x >= area_x
+            && y >= area_y
+            && x + state.width <= area_right
+            && y + state.height <= area_bottom;
         if fully_inside {
             state.x = x;
             state.y = y;
@@ -346,10 +346,7 @@ pub(crate) fn copy_image_to_clipboard(path: &Path) -> Result<(), String> {
     let dib = dib_from_rgba(width, height, rgba.as_raw())?;
     let mut png = Vec::new();
     image
-        .write_to(
-            &mut std::io::Cursor::new(&mut png),
-            image::ImageFormat::Png,
-        )
+        .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
         .map_err(|error| format!("PNG 编码失败：{error}"))?;
     #[cfg(target_os = "windows")]
     {
@@ -606,7 +603,10 @@ mod tests {
 
     #[test]
     fn recycle_bin_invocation_targets_shell_folder() {
-        assert_eq!(recycle_bin_invocation(), ("explorer", "shell:RecycleBinFolder"));
+        assert_eq!(
+            recycle_bin_invocation(),
+            ("explorer", "shell:RecycleBinFolder")
+        );
     }
 
     #[test]

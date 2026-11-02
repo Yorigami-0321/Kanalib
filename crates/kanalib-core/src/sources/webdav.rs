@@ -323,14 +323,12 @@ impl WebDavSource {
                     not_modified: false,
                 });
             }
-            if status.as_u16() == 429 || status.is_server_error() {
-                if attempt < self.config.retries {
-                    let wait =
-                        retry_after(&response).unwrap_or_else(|| self.config.backoff(attempt));
-                    std::thread::sleep(wait.min(Duration::from_millis(MAX_BACKOFF_MS)));
-                    attempt += 1;
-                    continue;
-                }
+            if (status.as_u16() == 429 || status.is_server_error()) && attempt < self.config.retries
+            {
+                let wait = retry_after(&response).unwrap_or_else(|| self.config.backoff(attempt));
+                std::thread::sleep(wait.min(Duration::from_millis(MAX_BACKOFF_MS)));
+                attempt += 1;
+                continue;
             }
             return Err(SourceError {
                 kind: if status.as_u16() == 429 || status.is_server_error() {
@@ -703,12 +701,12 @@ fn parse_propfind_with_root(
                 | b"getcontenttype" => field = None,
                 b"response" => {
                     field = None;
-                    if let Some(mut entry) = current.take() {
-                        if !entry.href.trim().is_empty() {
-                            entry.path = href_to_relative(&entry.href, request_path, root_path)
-                                .unwrap_or_default();
-                            entries.push(entry);
-                        }
+                    if let Some(mut entry) = current.take()
+                        && !entry.href.trim().is_empty()
+                    {
+                        entry.path = href_to_relative(&entry.href, request_path, root_path)
+                            .unwrap_or_default();
+                        entries.push(entry);
                     }
                 }
                 _ => {}

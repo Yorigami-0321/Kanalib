@@ -1,5 +1,5 @@
-use crate::*;
 use super::*;
+use crate::*;
 
 #[derive(Clone, Copy)]
 pub(crate) struct DetailColumns {
@@ -85,24 +85,24 @@ pub(crate) fn detail_header_cell(
     };
     cell.id(label)
         .on_click(move |_, _, cx| {
-        let _ = this.update(cx, |app, cx| {
-            if app.sort == mode {
-                app.set_sort_ascending(!app.sort_ascending, cx);
-            } else {
-                app.choose_sort_mode(mode, cx);
-            }
-        });
-    })
-    .child(label)
-    .children(active.then(|| {
-        Icon::new(if ascending {
-            IconName::ArrowUp
-        } else {
-            IconName::ArrowDown
+            let _ = this.update(cx, |app, cx| {
+                if app.sort == mode {
+                    app.set_sort_ascending(!app.sort_ascending, cx);
+                } else {
+                    app.choose_sort_mode(mode, cx);
+                }
+            });
         })
-        .size(IconSize::Xs)
-        .color(colors.subtle)
-    }))
+        .child(label)
+        .children(active.then(|| {
+            Icon::new(if ascending {
+                IconName::ArrowUp
+            } else {
+                IconName::ArrowDown
+            })
+            .size(IconSize::Xs)
+            .color(colors.subtle)
+        }))
 }
 
 pub(crate) fn details_header(
@@ -314,5 +314,4 @@ mod tests {
         let no_resolution = super::detail_columns(560.);
         assert!(!no_resolution.resolution && no_resolution.size && no_resolution.modified);
     }
-
 }

@@ -627,7 +627,7 @@ fn parse_date_filter(value: &str) -> Option<DateFilter> {
         .next()
         .map(|value| value.parse::<u8>().ok())
         .unwrap_or(Some(1))?;
-    let day = parts.next().map(|value| value.parse::<u8>().ok()).flatten();
+    let day = parts.next().and_then(|value| value.parse::<u8>().ok());
     if !(1..=12).contains(&month) || day.is_some_and(|day| !(1..=31).contains(&day)) {
         return None;
     }
@@ -979,55 +979,55 @@ impl SearchQuery {
                 return false;
             }
         }
-        if let Some(rating) = &self.rating {
-            if !asset.rating.eq_ignore_ascii_case(rating) {
-                return false;
-            }
+        if let Some(rating) = &self.rating
+            && !asset.rating.eq_ignore_ascii_case(rating)
+        {
+            return false;
         }
-        if let Some(rating) = &self.exclude_rating {
-            if asset.rating.eq_ignore_ascii_case(rating) {
-                return false;
-            }
+        if let Some(rating) = &self.exclude_rating
+            && asset.rating.eq_ignore_ascii_case(rating)
+        {
+            return false;
         }
-        if let Some(tagged) = self.tagged {
-            if asset.tagged != tagged {
-                return false;
-            }
+        if let Some(tagged) = self.tagged
+            && asset.tagged != tagged
+        {
+            return false;
         }
-        if let Some(favorite) = self.favorite {
-            if asset.favorite != favorite {
-                return false;
-            }
+        if let Some(favorite) = self.favorite
+            && asset.favorite != favorite
+        {
+            return false;
         }
-        if let Some(failed) = self.failed {
-            if asset.error.is_some() != failed {
-                return false;
-            }
+        if let Some(failed) = self.failed
+            && asset.error.is_some() != failed
+        {
+            return false;
         }
-        if let Some(damaged) = self.damaged {
-            if asset.damage.is_some() != damaged {
-                return false;
-            }
+        if let Some(damaged) = self.damaged
+            && asset.damage.is_some() != damaged
+        {
+            return false;
         }
-        if let Some(star) = self.star {
-            if asset.star != star {
-                return false;
-            }
+        if let Some(star) = self.star
+            && asset.star != star
+        {
+            return false;
         }
-        if let Some(min) = self.star_min {
-            if asset.star < min {
-                return false;
-            }
+        if let Some(min) = self.star_min
+            && asset.star < min
+        {
+            return false;
         }
-        if let Some(max) = self.star_max {
-            if asset.star > max {
-                return false;
-            }
+        if let Some(max) = self.star_max
+            && asset.star > max
+        {
+            return false;
         }
-        if let Some(star) = self.exclude_star {
-            if asset.star == star {
-                return false;
-            }
+        if let Some(star) = self.exclude_star
+            && asset.star == star
+        {
+            return false;
         }
         for scoped in &self.scoped_tags {
             if !asset.all_tags().any(|hit| {
@@ -1439,9 +1439,7 @@ impl Shared {
     }
 
     pub fn source_info(&self, id: i64) -> Option<&SourceInfo> {
-        self.sources
-            .iter()
-            .find(|source| source.id == Some(id))
+        self.sources.iter().find(|source| source.id == Some(id))
     }
 
     /// 取或创建来源状态；调用方应先确保 root 在 `roots` 中。
@@ -1475,13 +1473,13 @@ impl Shared {
         for root in roots {
             let online = root.is_dir();
             let asset_count = counts.get(&root).copied().unwrap_or(0);
-            let status = self
-                .source_statuses
-                .entry(root.clone())
-                .or_insert_with(|| SourceScanStatus {
-                    root: root.clone(),
-                    ..SourceScanStatus::default()
-                });
+            let status =
+                self.source_statuses
+                    .entry(root.clone())
+                    .or_insert_with(|| SourceScanStatus {
+                        root: root.clone(),
+                        ..SourceScanStatus::default()
+                    });
             status.root = root;
             status.online = online;
             status.asset_count = asset_count;
@@ -1587,7 +1585,8 @@ impl Shared {
         }
     }
 
-    pub fn remove_assets(&mut self, paths: &HashSet<PathBuf>) -> usize {        let mut removed = Vec::new();
+    pub fn remove_assets(&mut self, paths: &HashSet<PathBuf>) -> usize {
+        let mut removed = Vec::new();
         {
             let mut assets = self.assets.write().unwrap();
             assets.retain(|asset| {
@@ -2384,5 +2383,4 @@ mod tests {
         assert!(day_number(2024, 2, 28) < day_number(2024, 2, 29));
         assert!(day_number(2024, 2, 29) < day_number(2024, 3, 1));
     }
-
 }

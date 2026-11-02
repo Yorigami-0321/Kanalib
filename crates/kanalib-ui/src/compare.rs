@@ -1,7 +1,7 @@
-use crate::*;
 use crate::app::{KanalibApp, push_toast};
 use crate::format::*;
 use crate::theme::*;
+use crate::*;
 use gpui::{Bounds, Point};
 
 /// F-003：对比视图的键上下文；Esc 关闭对比，+/-/0 缩放，方向键平移。
@@ -56,8 +56,10 @@ pub(crate) fn zoomed_size(image: (f32, f32), stage: (f32, f32), zoom: f32) -> (f
 pub(crate) fn limited_offset(pan: (f32, f32), shown: (f32, f32), stage: (f32, f32)) -> (f32, f32) {
     let limit = |shown: f32, stage: f32| ((shown - stage) / 2.0).max(0.0);
     (
-        pan.0.clamp(-limit(shown.0, stage.0), limit(shown.0, stage.0)),
-        pan.1.clamp(-limit(shown.1, stage.1), limit(shown.1, stage.1)),
+        pan.0
+            .clamp(-limit(shown.0, stage.0), limit(shown.0, stage.0)),
+        pan.1
+            .clamp(-limit(shown.1, stage.1), limit(shown.1, stage.1)),
     )
 }
 
@@ -78,10 +80,7 @@ pub(crate) fn zoom_about(
     let ratio = next / zoom;
     (
         next,
-        (
-            at.0 - (at.0 - pan.0) * ratio,
-            at.1 - (at.1 - pan.1) * ratio,
-        ),
+        (at.0 - (at.0 - pan.0) * ratio, at.1 - (at.1 - pan.1) * ratio),
     )
 }
 
@@ -390,12 +389,7 @@ impl KanalibApp {
         cx.notify();
     }
 
-    pub(crate) fn compare_zoom_by(
-        &mut self,
-        at: (f32, f32),
-        factor: f32,
-        cx: &mut Context<Self>,
-    ) {
+    pub(crate) fn compare_zoom_by(&mut self, at: (f32, f32), factor: f32, cx: &mut Context<Self>) {
         if self.screen != Screen::Compare {
             return;
         }
@@ -500,16 +494,11 @@ impl KanalibApp {
             } else {
                 estimated_stage
             };
-            panes.push(self.render_compare_pane(
-                this,
-                asset,
-                index,
-                count,
-                &stage,
-                &drag,
-                stage_size,
-                colors,
-            ));
+            panes.push(
+                self.render_compare_pane(
+                    this, asset, index, count, &stage, &drag, stage_size, colors,
+                ),
+            );
         }
         let keeper = self.compare_keeper.clone();
         let rows = compare_metadata_rows(&self.compare_items);
@@ -563,8 +552,7 @@ impl KanalibApp {
                             .size(ControlSize::Sm)
                             .variant(ButtonVariant::Ghost)
                             .on_click(move |_, _, cx| {
-                                let _ = close_button
-                                    .update(cx, |app, cx| app.close_compare(cx));
+                                let _ = close_button.update(cx, |app, cx| app.close_compare(cx));
                             }),
                     )
                     .child(
@@ -601,9 +589,8 @@ impl KanalibApp {
                             .size(ControlSize::Sm)
                             .tooltip("缩小 (-)")
                             .on_click(move |_, _, cx| {
-                                let _ = zoom_out.update(cx, |app, cx| {
-                                    app.compare_zoom_by((0., 0.), 0.8, cx)
-                                });
+                                let _ = zoom_out
+                                    .update(cx, |app, cx| app.compare_zoom_by((0., 0.), 0.8, cx));
                             }),
                     )
                     .child(
@@ -621,21 +608,23 @@ impl KanalibApp {
                             .size(ControlSize::Sm)
                             .tooltip("放大 (+)")
                             .on_click(move |_, _, cx| {
-                                let _ = zoom_in.update(cx, |app, cx| {
-                                    app.compare_zoom_by((0., 0.), 1.25, cx)
-                                });
+                                let _ = zoom_in
+                                    .update(cx, |app, cx| app.compare_zoom_by((0., 0.), 1.25, cx));
                             }),
                     )
                     .child(
                         Button::new(
                             "compare-source",
-                            if self.compare_original { "预览图" } else { "原图" },
+                            if self.compare_original {
+                                "预览图"
+                            } else {
+                                "原图"
+                            },
                         )
                         .size(ControlSize::Sm)
                         .variant(ButtonVariant::Ghost)
                         .on_click(move |_, _, cx| {
-                            let _ = original
-                                .update(cx, |app, cx| app.compare_toggle_original(cx));
+                            let _ = original.update(cx, |app, cx| app.compare_toggle_original(cx));
                         }),
                     ),
             );
@@ -904,11 +893,19 @@ impl KanalibApp {
         let tags = asset.all_tags().count();
         let keeper_button = Button::new(
             SharedString::from(format!("compare-keeper-{index}")),
-            if is_keeper { "取消保留" } else { "标记保留" },
+            if is_keeper {
+                "取消保留"
+            } else {
+                "标记保留"
+            },
         )
         .size(ControlSize::Sm)
         .variant(ButtonVariant::Ghost)
-        .icon(if is_keeper { IconName::Check } else { IconName::Star })
+        .icon(if is_keeper {
+            IconName::Check
+        } else {
+            IconName::Star
+        })
         .on_click({
             let this = this.clone();
             let path = asset.path.clone();
@@ -1091,9 +1088,7 @@ impl KanalibApp {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        compare_metadata_rows, fit_scale, limited_offset, zoom_about, zoomed_size,
-    };
+    use super::{compare_metadata_rows, fit_scale, limited_offset, zoom_about, zoomed_size};
     use kanalib_core::model::Asset;
 
     fn asset(
@@ -1165,7 +1160,10 @@ mod tests {
     fn limited_offset_keeps_small_sides_centered() {
         let shown = zoomed_size((4000., 2000.), (400., 300.), 2.0);
         assert_eq!(shown, (800., 400.));
-        assert_eq!(limited_offset((900., 40.), shown, (400., 300.)), (200., 40.));
+        assert_eq!(
+            limited_offset((900., 40.), shown, (400., 300.)),
+            (200., 40.)
+        );
         assert_eq!(
             limited_offset((0., 0.), (100., 50.), (400., 300.)),
             (0., 0.)
@@ -1204,6 +1202,6 @@ mod tests {
         assert!(row("星级").same);
         assert!(row("评级").same);
         assert!(row("格式").same);
-        assert!(row("路径").same == false);
+        assert!(!row("路径").same);
     }
 }

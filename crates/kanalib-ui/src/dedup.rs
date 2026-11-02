@@ -1,8 +1,8 @@
-use crate::*;
 use crate::app::{KanalibApp, push_toast};
 use crate::format::*;
 use crate::theme::*;
 use crate::views::GRID_CONTEXT;
+use crate::*;
 use kanalib_core::model::{SimilarHit, SimilarThresholdPreview};
 
 pub(crate) const DEDUP_RAIL_WIDTH: f32 = 272.;
@@ -78,13 +78,18 @@ impl TrashAudit {
             at: value.get("at")?.as_u64()?,
             groups: value.get("groups")?.as_u64()? as usize,
             assets: value.get("assets")?.as_u64()? as usize,
-            failed: value.get("failed").and_then(serde_json::Value::as_u64).unwrap_or(0)
-                as usize,
+            failed: value
+                .get("failed")
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or(0) as usize,
             protected_skipped: value
                 .get("protected_skipped")
                 .and_then(serde_json::Value::as_u64)
                 .unwrap_or(0) as usize,
-            bytes: value.get("bytes").and_then(serde_json::Value::as_u64).unwrap_or(0),
+            bytes: value
+                .get("bytes")
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or(0),
             scope: value
                 .get("scope")
                 .and_then(serde_json::Value::as_str)
@@ -204,9 +209,8 @@ pub(crate) fn dedup_group_matches_query(group: &DuplicateGroup, query: &str) -> 
             parse_size_comparison(raw)
                 .is_some_and(|(op, threshold)| compare_bytes(group.total_bytes, op, threshold))
         } else if let Some(raw) = lower.strip_prefix("reclaim:") {
-            parse_size_comparison(raw).is_some_and(|(op, threshold)| {
-                compare_bytes(group.reclaimable(), op, threshold)
-            })
+            parse_size_comparison(raw)
+                .is_some_and(|(op, threshold)| compare_bytes(group.reclaimable(), op, threshold))
         } else if let Some(raw) = lower.strip_prefix("name:") {
             dedup_group_name_key(group).contains(raw)
         } else if let Some(raw) = lower.strip_prefix("path:") {
@@ -246,7 +250,10 @@ pub(crate) fn dedup_visible_indices(
         DedupSort::Default => {}
         DedupSort::Path => {
             indices.sort_by_cached_key(|&index| {
-                (dedup_group_path_key(&groups[index]), groups[index].key.clone())
+                (
+                    dedup_group_path_key(&groups[index]),
+                    groups[index].key.clone(),
+                )
             });
             if descending {
                 indices.reverse();
@@ -254,14 +261,19 @@ pub(crate) fn dedup_visible_indices(
         }
         DedupSort::Name => {
             indices.sort_by_cached_key(|&index| {
-                (dedup_group_name_key(&groups[index]), groups[index].key.clone())
+                (
+                    dedup_group_name_key(&groups[index]),
+                    groups[index].key.clone(),
+                )
             });
             if descending {
                 indices.reverse();
             }
         }
         DedupSort::Size => {
-            indices.sort_by_cached_key(|&index| (groups[index].total_bytes, groups[index].key.clone()));
+            indices.sort_by_cached_key(|&index| {
+                (groups[index].total_bytes, groups[index].key.clone())
+            });
             if descending {
                 indices.reverse();
             }
@@ -623,7 +635,11 @@ pub(crate) fn dedup_asset_card(
         badge = badge.child(small_badge("保护".into(), colors.accent, colors.selection));
     }
     if is_remote {
-        badge = badge.child(small_badge("远端只读".into(), colors.accent, colors.selection));
+        badge = badge.child(small_badge(
+            "远端只读".into(),
+            colors.accent,
+            colors.selection,
+        ));
     }
 
     let mut card = div()
@@ -765,7 +781,10 @@ pub(crate) struct DiffRow {
     best: Option<usize>,
 }
 
-pub(crate) fn best_max<T: Ord + Copy>(assets: &[&Asset], value: impl Fn(&Asset) -> T) -> Option<usize> {
+pub(crate) fn best_max<T: Ord + Copy>(
+    assets: &[&Asset],
+    value: impl Fn(&Asset) -> T,
+) -> Option<usize> {
     let mut best = 0;
     for (index, asset) in assets.iter().enumerate() {
         if value(asset) > value(assets[best]) {
@@ -777,7 +796,10 @@ pub(crate) fn best_max<T: Ord + Copy>(assets: &[&Asset], value: impl Fn(&Asset) 
     (max != min).then_some(best)
 }
 
-pub(crate) fn best_min<T: Ord + Copy>(assets: &[&Asset], value: impl Fn(&Asset) -> T) -> Option<usize> {
+pub(crate) fn best_min<T: Ord + Copy>(
+    assets: &[&Asset],
+    value: impl Fn(&Asset) -> T,
+) -> Option<usize> {
     let mut best = 0;
     for (index, asset) in assets.iter().enumerate() {
         if value(asset) < value(assets[best]) {
@@ -804,7 +826,11 @@ pub(crate) fn push_diff_row(
     }
 }
 
-pub(crate) fn dedup_diff(group: &DuplicateGroup, assets: &[&Asset], colors: UiColors) -> AnyElement {
+pub(crate) fn dedup_diff(
+    group: &DuplicateGroup,
+    assets: &[&Asset],
+    colors: UiColors,
+) -> AnyElement {
     if assets.is_empty() {
         return div().into_any_element();
     }
@@ -1219,15 +1245,13 @@ impl KanalibApp {
                 colors,
             ));
 
-        let more_menu = Menu::new().item(
-            MenuItem::new("重新扫描图库")
-                .disabled(busy)
-                .on_click(move |_, cx| {
-                    let _ = this_rescan.update(cx, |app, cx| {
-                        app.request_rescan(RescanOrigin::Dedup, cx);
-                    });
-                }),
-        );
+        let more_menu = Menu::new().item(MenuItem::new("重新扫描图库").disabled(busy).on_click(
+            move |_, cx| {
+                let _ = this_rescan.update(cx, |app, cx| {
+                    app.request_rescan(RescanOrigin::Dedup, cx);
+                });
+            },
+        ));
         let header = div()
             .px(px(16.))
             .py(px(11.))
@@ -1335,9 +1359,7 @@ impl KanalibApp {
                                 });
                             })
                     }))
-                    .child(
-                        DropdownMenu::new("dedup-more", "更多", more_menu),
-                    )
+                    .child(DropdownMenu::new("dedup-more", "更多", more_menu))
                     .child(
                         Button::new("dedup-library", "返回图库").on_click(move |_, _, cx| {
                             let _ = this_library.update(cx, |app, cx| {
@@ -1693,10 +1715,10 @@ impl KanalibApp {
                     return;
                 }
                 // 筛选输入框获得焦点时不拦截字母键，避免无法输入组名。
-                if let Some(input) = &filter_input_keys {
-                    if window.focused(cx) == Some(input.read(cx).focus_handle(cx)) {
-                        return;
-                    }
+                if let Some(input) = &filter_input_keys
+                    && window.focused(cx) == Some(input.read(cx).focus_handle(cx))
+                {
+                    return;
                 }
                 cx.stop_propagation();
                 let groups = groups_keys.clone();
@@ -2393,8 +2415,7 @@ impl KanalibApp {
                                                         groups: done.groups,
                                                         assets: done.assets,
                                                         failed: done.failed,
-                                                        protected_skipped: done
-                                                            .protected_skipped,
+                                                        protected_skipped: done.protected_skipped,
                                                         bytes: planned_bytes,
                                                         scope: audit_scope.to_string(),
                                                     };
@@ -2438,7 +2459,6 @@ impl KanalibApp {
             .into_any_element();
         Some(overlay)
     }
-
 }
 
 /// 结果视图内的本地筛选：名称、路径、自动标签与手工标签，大小写不敏感。
@@ -2523,7 +2543,11 @@ fn similar_hit_row(
         .px(px(12.))
         .rounded(px(7.))
         .cursor_pointer()
-        .bg(if selected { colors.selection } else { colors.bg })
+        .bg(if selected {
+            colors.selection
+        } else {
+            colors.bg
+        })
         .hover(move |style| style.bg(colors.hover))
         .on_click(move |event, window, cx| {
             window.focus(&focus_click, cx);
@@ -2532,8 +2556,9 @@ fn similar_hit_row(
                 ClickEvent::Keyboard(_) | ClickEvent::Touch(_) => (Modifiers::default(), 1),
             };
             let path = path_click.clone();
-            let _ =
-                this_click.update(cx, |app, cx| app.handle_tile_click(path, modifiers, click_count, cx));
+            let _ = this_click.update(cx, |app, cx| {
+                app.handle_tile_click(path, modifiers, click_count, cx)
+            });
         })
         .on_mouse_down(MouseButton::Right, move |_, window, cx| {
             window.focus(&focus_right, cx);
@@ -2875,7 +2900,8 @@ impl KanalibApp {
         let effective = draft.unwrap_or(default);
         let prefix = if settings { "settings" } else { "dedup" };
         let mut presets = div().flex().items_center().gap(px(5.));
-        for (value, label) in [(6u8, "严格 ≤6"), (10u8, "标准 ≤10"), (14u8, "宽松 ≤14")] {
+        for (value, label) in [(6u8, "严格 ≤6"), (10u8, "标准 ≤10"), (14u8, "宽松 ≤14")]
+        {
             let this_preset = this.clone();
             presets = presets.child(
                 Button::new(
@@ -2937,59 +2963,58 @@ impl KanalibApp {
                 .into_any_element(),
         };
 
-        let preview_note: AnyElement = if self.similar_preview_running
-            && self.similar_preview_threshold == Some(effective)
-        {
-            div()
-                .text_xs()
-                .text_color(colors.accent)
-                .child("预览中…（大库可能 1.8–2.6 秒）")
-                .into_any_element()
-        } else if let Some(preview) = self
-            .similar_preview
-            .as_ref()
-            .filter(|preview| preview.threshold == effective)
-        {
-            let mut row = div()
-                .flex()
-                .items_center()
-                .flex_wrap()
-                .gap(px(5.))
-                .child(div().text_xs().text_color(colors.fg).child(format!(
-                    "预估 {} 组 · {} 张入组",
-                    preview.group_count, preview.member_count
-                )))
-                .child(small_badge(
-                    preview_sample_note(preview),
-                    colors.muted,
-                    colors.sunken,
-                ));
-            if preview.chain_risk {
-                row = row
+        let preview_note: AnyElement =
+            if self.similar_preview_running && self.similar_preview_threshold == Some(effective) {
+                div()
+                    .text_xs()
+                    .text_color(colors.accent)
+                    .child("预览中…（大库可能 1.8–2.6 秒）")
+                    .into_any_element()
+            } else if let Some(preview) = self
+                .similar_preview
+                .as_ref()
+                .filter(|preview| preview.threshold == effective)
+            {
+                let mut row = div()
+                    .flex()
+                    .items_center()
+                    .flex_wrap()
+                    .gap(px(5.))
+                    .child(div().text_xs().text_color(colors.fg).child(format!(
+                        "预估 {} 组 · {} 张入组",
+                        preview.group_count, preview.member_count
+                    )))
                     .child(small_badge(
-                        format!("链式合并风险 · {} 组", preview.chain_groups),
-                        colors.danger,
+                        preview_sample_note(preview),
+                        colors.muted,
                         colors.sunken,
-                    ))
-                    .child(
-                        div()
-                            .text_xs()
-                            .text_color(colors.warning)
-                            .child("低阈值会把间接相似的图串成一组，建议逐组确认或提高阈值。"),
-                    );
-            }
-            row.into_any_element()
-        } else {
-            div()
-                .text_xs()
-                .text_color(colors.subtle)
-                .child(if self.similar_preview_running {
-                    "正在预览其它阈值…"
-                } else {
-                    "尚无该阈值的预览；拖动滑杆或点「刷新预览」。"
-                })
-                .into_any_element()
-        };
+                    ));
+                if preview.chain_risk {
+                    row = row
+                        .child(small_badge(
+                            format!("链式合并风险 · {} 组", preview.chain_groups),
+                            colors.danger,
+                            colors.sunken,
+                        ))
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(colors.warning)
+                                .child("低阈值会把间接相似的图串成一组，建议逐组确认或提高阈值。"),
+                        );
+                }
+                row.into_any_element()
+            } else {
+                div()
+                    .text_xs()
+                    .text_color(colors.subtle)
+                    .child(if self.similar_preview_running {
+                        "正在预览其它阈值…"
+                    } else {
+                        "尚无该阈值的预览；拖动滑杆或点「刷新预览」。"
+                    })
+                    .into_any_element()
+            };
 
         let this_refresh = this.clone();
         let this_apply = this.clone();
@@ -3019,8 +3044,8 @@ impl KanalibApp {
                 .size(ControlSize::Sm)
                 .variant(ButtonVariant::Primary)
                 .on_click(move |_, _, cx| {
-                    let _ = this_scan
-                        .update(cx, |app, cx| app.apply_threshold_and_scan(effective, cx));
+                    let _ =
+                        this_scan.update(cx, |app, cx| app.apply_threshold_and_scan(effective, cx));
                 })
         });
         let discard = draft.map(|_| {
@@ -3072,10 +3097,9 @@ impl KanalibApp {
                     .children(discard),
             )
             .child(
-                div()
-                    .text_xs()
-                    .text_color(colors.subtle)
-                    .child("改动阈值只影响预览与扫描，不清空已审核状态；所有操作都不删除磁盘文件。"),
+                div().text_xs().text_color(colors.subtle).child(
+                    "改动阈值只影响预览与扫描，不清空已审核状态；所有操作都不删除磁盘文件。",
+                ),
             )
             .into_any_element()
     }
@@ -3116,7 +3140,8 @@ impl KanalibApp {
         let this_clear = this.clone();
         let this_quick = this.clone();
         let mut preset_row = div().flex().items_center().gap(px(5.));
-        for (value, label) in [(6u8, "严格 ≤6"), (10u8, "标准 ≤10"), (14u8, "宽松 ≤14")] {
+        for (value, label) in [(6u8, "严格 ≤6"), (10u8, "标准 ≤10"), (14u8, "宽松 ≤14")]
+        {
             let this_preset = this.clone();
             preset_row = preset_row.child(
                 Button::new(
@@ -3227,11 +3252,16 @@ impl KanalibApp {
                             }),
                     )
                     .child(div().flex_1())
-                    .child(div().text_xs().text_color(colors.subtle).child(if scanning {
-                        "图库扫描中，结果可能滞后".to_string()
-                    } else {
-                        "只读查询 · 不删除/移动文件 · 调整阈值不清空审核状态".to_string()
-                    })),
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(colors.subtle)
+                            .child(if scanning {
+                                "图库扫描中，结果可能滞后".to_string()
+                            } else {
+                                "只读查询 · 不删除/移动文件 · 调整阈值不清空审核状态".to_string()
+                            }),
+                    ),
             )
             .child(
                 div()
@@ -3307,31 +3337,35 @@ impl KanalibApp {
             let thumb_cache = self.thumb_cache.clone();
             let focus = self.grid_focus.clone();
             let distances = Arc::new(distances);
-            uniform_list("similar-hits", indices_for_list.len(), move |range, _, _| {
-                let Ok(assets) = assets_for_list.read() else {
-                    return Vec::new();
-                };
-                range
-                    .map(|row| {
-                        let index = indices_for_list[row];
-                        let Some(asset) = assets.get(index) else {
-                            return div().into_any_element();
-                        };
-                        let (distance, pct) =
-                            distances.get(&asset.path).copied().unwrap_or((0, 100));
-                        similar_hit_row(
-                            asset,
-                            distance,
-                            pct,
-                            selection_for_list.contains(&asset.path),
-                            this_for_list.clone(),
-                            thumb_cache.clone(),
-                            focus.clone(),
-                            colors,
-                        )
-                    })
-                    .collect::<Vec<_>>()
-            })
+            uniform_list(
+                "similar-hits",
+                indices_for_list.len(),
+                move |range, _, _| {
+                    let Ok(assets) = assets_for_list.read() else {
+                        return Vec::new();
+                    };
+                    range
+                        .map(|row| {
+                            let index = indices_for_list[row];
+                            let Some(asset) = assets.get(index) else {
+                                return div().into_any_element();
+                            };
+                            let (distance, pct) =
+                                distances.get(&asset.path).copied().unwrap_or((0, 100));
+                            similar_hit_row(
+                                asset,
+                                distance,
+                                pct,
+                                selection_for_list.contains(&asset.path),
+                                this_for_list.clone(),
+                                thumb_cache.clone(),
+                                focus.clone(),
+                                colors,
+                            )
+                        })
+                        .collect::<Vec<_>>()
+                },
+            )
             .track_scroll(&self.grid_scroll)
             .flex_1()
             .w_full()
@@ -3489,7 +3523,12 @@ mod dedup_sort_tests {
         }
     }
 
-    fn group(key: &str, keeper: &str, copies: &[(&str, u64)], state: ReviewState) -> DuplicateGroup {
+    fn group(
+        key: &str,
+        keeper: &str,
+        copies: &[(&str, u64)],
+        state: ReviewState,
+    ) -> DuplicateGroup {
         let keeper_asset = asset(keeper, 100);
         let mut assets = vec![keeper_asset];
         assets.extend(copies.iter().map(|(path, bytes)| asset(path, *bytes)));
@@ -3510,8 +3549,18 @@ mod dedup_sort_tests {
 
     #[test]
     fn dedup_query_matches_name_path_and_size_filters() {
-        let one = group("a", r"C:\pics\Alpha.png", &[(r"C:\pics\Alpha-copy.png", 40)], ReviewState::Pending);
-        let two = group("b", r"C:\pics\Beta.png", &[(r"C:\pics\Beta-copy.png", 400)], ReviewState::Pending);
+        let one = group(
+            "a",
+            r"C:\pics\Alpha.png",
+            &[(r"C:\pics\Alpha-copy.png", 40)],
+            ReviewState::Pending,
+        );
+        let two = group(
+            "b",
+            r"C:\pics\Beta.png",
+            &[(r"C:\pics\Beta-copy.png", 400)],
+            ReviewState::Pending,
+        );
         assert!(dedup_group_matches_query(&one, ""));
         assert!(dedup_group_matches_query(&one, "alpha"));
         assert!(dedup_group_matches_query(&one, "path:copy"));
@@ -3526,34 +3575,66 @@ mod dedup_sort_tests {
     #[test]
     fn dedup_sorting_covers_path_name_size_and_reclaim() {
         let groups = vec![
-            group("b", r"C:\pics\zulu.png", &[(r"C:\pics\zulu-copy.png", 50)], ReviewState::Pending),
-            group("a", r"C:\pics\alpha.png", &[(r"C:\pics\alpha-copy.png", 500)], ReviewState::Pending),
-            group("c", r"C:\pics\mike.png", &[(r"C:\pics\mike-copy.png", 5)], ReviewState::Pending),
+            group(
+                "b",
+                r"C:\pics\zulu.png",
+                &[(r"C:\pics\zulu-copy.png", 50)],
+                ReviewState::Pending,
+            ),
+            group(
+                "a",
+                r"C:\pics\alpha.png",
+                &[(r"C:\pics\alpha-copy.png", 500)],
+                ReviewState::Pending,
+            ),
+            group(
+                "c",
+                r"C:\pics\mike.png",
+                &[(r"C:\pics\mike-copy.png", 5)],
+                ReviewState::Pending,
+            ),
         ];
         let by_path = dedup_visible_indices(&groups, DedupFilter::All, "", DedupSort::Path, false);
         assert_eq!(by_path, vec![1, 2, 0]);
-        let by_name_desc = dedup_visible_indices(&groups, DedupFilter::All, "", DedupSort::Name, true);
+        let by_name_desc =
+            dedup_visible_indices(&groups, DedupFilter::All, "", DedupSort::Name, true);
         assert_eq!(by_name_desc, vec![0, 2, 1]);
         let by_size = dedup_visible_indices(&groups, DedupFilter::All, "", DedupSort::Size, true);
         assert_eq!(by_size, vec![1, 0, 2]);
-        let by_reclaim_asc = dedup_visible_indices(
+        let by_reclaim_asc =
+            dedup_visible_indices(&groups, DedupFilter::All, "", DedupSort::Reclaimable, false);
+        assert_eq!(by_reclaim_asc, vec![2, 0, 1]);
+        let filtered = dedup_visible_indices(
             &groups,
             DedupFilter::All,
-            "",
-            DedupSort::Reclaimable,
+            "alpha",
+            DedupSort::Default,
             false,
         );
-        assert_eq!(by_reclaim_asc, vec![2, 0, 1]);
-        let filtered = dedup_visible_indices(&groups, DedupFilter::All, "alpha", DedupSort::Default, false);
         assert_eq!(filtered, vec![1]);
     }
 
     #[test]
     fn planned_bytes_and_audit_round_trip() {
         let groups = vec![
-            group("a", r"C:\pics\a.png", &[(r"C:\pics\a-copy.png", 40)], ReviewState::Pending),
-            group("b", r"C:\pics\b.png", &[(r"C:\pics\b-copy.png", 60)], ReviewState::Pending),
-            group("c", r"C:\pics\c.png", &[(r"C:\pics\c-copy.png", 90)], ReviewState::Done),
+            group(
+                "a",
+                r"C:\pics\a.png",
+                &[(r"C:\pics\a-copy.png", 40)],
+                ReviewState::Pending,
+            ),
+            group(
+                "b",
+                r"C:\pics\b.png",
+                &[(r"C:\pics\b-copy.png", 60)],
+                ReviewState::Pending,
+            ),
+            group(
+                "c",
+                r"C:\pics\c.png",
+                &[(r"C:\pics\c-copy.png", 90)],
+                ReviewState::Done,
+            ),
         ];
         assert_eq!(planned_reclaim_bytes(&groups, Some("")), 0);
         assert_eq!(planned_reclaim_bytes(&groups, Some("a")), 40);

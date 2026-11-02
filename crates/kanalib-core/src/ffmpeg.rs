@@ -1,6 +1,8 @@
 //! Optional FFmpeg thumbnail backend. The binary is treated as an external
 //! process: GPL builds are allowed for local use but must not be bundled.
 
+use std::fs::File;
+use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -604,12 +606,36 @@ fn flatten_to_jpeg(image: DynamicImage, target: &Path) -> Result<()> {
         .with_context(|| format!("write {}", target.display()))
 }
 
+/// 截断的 JPEG 仍可能读出尺寸头；再确认尾部存在 EOI（FF D9），
+/// 避免 ffmpeg 被超时终止后把半写文件当成有效缓存。
+fn jpeg_has_eoi(target: &Path) -> bool {
+    let Ok(mut file) = File::open(target) else {
+        return false;
+    };
+    let Ok(len) = file.metadata().map(|meta| meta.len()) else {
+        return false;
+    };
+    if len < 4 {
+        return false;
+    }
+    let window = len.min(1024) as i64;
+    if file.seek(SeekFrom::End(-window)).is_err() {
+        return false;
+    }
+    let mut tail = Vec::with_capacity(window as usize);
+    if file.read_to_end(&mut tail).is_err() {
+        return false;
+    }
+    tail.windows(2).any(|pair| pair == [0xFF, 0xD9])
+}
+
 fn validate_jpeg(target: &Path) -> bool {
     ImageReader::open(target)
         .ok()
         .and_then(|reader| reader.with_guessed_format().ok())
         .and_then(|reader| reader.into_dimensions().ok())
         .is_some_and(|(width, height)| width > 0 && height > 0)
+        && jpeg_has_eoi(target)
 }
 
 /// 公开的缩略图完好性校验；`ensure_thumb` 的视频分支复用它。
@@ -929,6 +955,23 @@ mod tests {
         let build = parse_version_output(text).unwrap();
         assert_eq!(build.version, "n8.1.3");
         assert_eq!(build.license, License::Lgpl);
+    }
+
+    #[test]
+    fn jpeg_validation_rejects_missing_eoi() {
+        let dir = sample_dir("jpeg-eoi");
+        let path = dir.join("thumb.jpg");
+        image::RgbImage::from_pixel(4, 4, image::Rgb([10, 20, 30]))
+            .save(&path)
+            .unwrap();
+        assert!(validate_jpeg(&path));
+        let bytes = std::fs::read(&path).unwrap();
+        std::fs::write(&path, &bytes[..bytes.len() - 2]).unwrap();
+        assert!(
+            !validate_jpeg(&path),
+            "a truncated JPEG must not be treated as a valid cached thumbnail"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

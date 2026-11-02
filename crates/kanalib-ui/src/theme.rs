@@ -114,9 +114,7 @@ fn window_control_button(
         .items_center()
         .justify_center()
         .hover(move |style| style.bg(if close { colors.danger } else { colors.hover }))
-        .on_mouse_down(MouseButton::Left, |_, window, _| {
-            window.prevent_default()
-        })
+        .on_mouse_down(MouseButton::Left, |_, window, _| window.prevent_default())
         .on_click(move |_, window, _| match action {
             WindowButtonAction::Minimize => window.minimize_window(),
             WindowButtonAction::Maximize => window.zoom_window(),

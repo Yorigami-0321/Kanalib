@@ -2,7 +2,10 @@ use std::collections::HashMap;
 use std::fs::OpenOptions;
 use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
+use std::process::{Child, ChildStdin, Command, Stdio};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
+use std::thread::JoinHandle;
+use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use serde::Deserialize;
@@ -69,8 +72,27 @@ pub struct ReadyInfo {
 pub struct Sidecar {
     child: Child,
     stdin: BufWriter<ChildStdin>,
-    stdout: BufReader<ChildStdout>,
+    lines: Receiver<String>,
+    reader: Option<JoinHandle<()>>,
     next_id: u64,
+}
+
+/// 单次请求的等待上限；超时后调用方会丢弃整个 sidecar（Drop 负责 kill），
+/// 避免模型/CUDA 卡死时扫描线程永久阻塞。
+const SIDECAR_READY_TIMEOUT: Duration = Duration::from_secs(600);
+const SIDECAR_TAG_TIMEOUT: Duration = Duration::from_secs(600);
+
+fn read_reply(lines: &Receiver<String>, timeout: Duration, what: &str) -> Result<String> {
+    let line = lines.recv_timeout(timeout).map_err(|error| match error {
+        RecvTimeoutError::Timeout => {
+            anyhow::anyhow!("sidecar {what} timeout after {}s", timeout.as_secs())
+        }
+        RecvTimeoutError::Disconnected => anyhow::anyhow!("sidecar exited while {what}"),
+    })?;
+    if line.trim().is_empty() {
+        bail!("sidecar closed stdout while {what}");
+    }
+    Ok(line)
 }
 
 fn exe_dir() -> Option<PathBuf> {
@@ -83,15 +105,14 @@ pub fn project_root() -> PathBuf {
     if let Some(value) = std::env::var_os("KANALIB_ROOT") {
         return PathBuf::from(value);
     }
-    if let Some(dir) = exe_dir() {
-        if dir
+    if let Some(dir) = exe_dir()
+        && dir
             .join("sidecar")
             .join("tagger")
             .join("server.py")
             .exists()
-        {
-            return dir;
-        }
+    {
+        return dir;
     }
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
 }
@@ -187,6 +208,20 @@ fn open_sidecar_log(root: &Path) -> Stdio {
     }
 }
 
+/// Windows 路径大小写不敏感；修复输出若指向原图，会把唯一位流替换成有损重编码。
+fn same_path(left: &Path, right: &Path) -> bool {
+    let canonical =
+        |path: &Path| std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    let left = canonical(left);
+    let right = canonical(right);
+    if cfg!(windows) {
+        left.to_string_lossy()
+            .eq_ignore_ascii_case(&right.to_string_lossy())
+    } else {
+        left == right
+    }
+}
+
 fn append_sidecar_log(root: &Path, label: &str, bytes: &[u8]) {
     let path = sidecar_log_path(root);
     let Some(dir) = path.parent() else {
@@ -203,6 +238,9 @@ fn append_sidecar_log(root: &Path, label: &str, bytes: &[u8]) {
 }
 
 pub fn repair_file(input: &Path, output: &Path, max_size: Option<u32>) -> Result<RepairOutcome> {
+    if same_path(input, output) {
+        bail!("输出路径不能与原图相同");
+    }
     let root = project_root();
     let script = root.join("sidecar").join("tagger").join("repair.py");
     if !script.exists() {
@@ -316,21 +354,33 @@ impl Sidecar {
 
         let stdin = child.stdin.take().context("sidecar stdin")?;
         let stdout = child.stdout.take().context("sidecar stdout")?;
-        let mut sidecar = Self {
+        let (tx, lines) = mpsc::channel();
+        let reader = std::thread::Builder::new()
+            .name("kanalib-sidecar-reader".into())
+            .spawn(move || {
+                let mut stdout = BufReader::new(stdout);
+                loop {
+                    let mut line = String::new();
+                    match stdout.read_line(&mut line) {
+                        Ok(0) | Err(_) => break,
+                        Ok(_) => {
+                            if tx.send(line).is_err() {
+                                break;
+                            }
+                        }
+                    }
+                }
+            })
+            .context("spawn sidecar reader")?;
+        let sidecar = Self {
             child,
             stdin: BufWriter::new(stdin),
-            stdout: BufReader::new(stdout),
+            lines,
+            reader: Some(reader),
             next_id: 1,
         };
 
-        let mut line = String::new();
-        sidecar
-            .stdout
-            .read_line(&mut line)
-            .context("read sidecar ready line")?;
-        if line.trim().is_empty() {
-            bail!("sidecar exited before ready");
-        }
+        let line = read_reply(&sidecar.lines, SIDECAR_READY_TIMEOUT, "ready")?;
         let envelope: Envelope =
             serde_json::from_str(line.trim()).context("parse sidecar ready line")?;
         if envelope.ready != Some(true) {
@@ -362,11 +412,7 @@ impl Sidecar {
         writeln!(self.stdin, "{request}")?;
         self.stdin.flush()?;
 
-        let mut line = String::new();
-        let read = self.stdout.read_line(&mut line)?;
-        if read == 0 {
-            bail!("sidecar exited while tagging");
-        }
+        let line = read_reply(&self.lines, SIDECAR_TAG_TIMEOUT, "tag response")?;
         let envelope: Envelope =
             serde_json::from_str(line.trim()).context("parse sidecar tag response")?;
         if envelope.id != Some(id) {
@@ -388,6 +434,9 @@ impl Drop for Sidecar {
         let _ = self.stdin.flush();
         let _ = self.child.kill();
         let _ = self.child.wait();
+        if let Some(reader) = self.reader.take() {
+            let _ = reader.join();
+        }
     }
 }
 

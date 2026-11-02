@@ -1,4 +1,3 @@
-use crate::*;
 use crate::format::*;
 use crate::search::{SearchBundle, query_wants_duplicates, search_timing_enabled};
 use crate::settings::{
@@ -8,14 +7,15 @@ use crate::sidebar::{
     SIDEBAR_DEFAULT_WIDTH, SIDEBAR_MAX_WIDTH, SIDEBAR_MIN_WIDTH, SIDEBAR_SECTIONS, source_label,
     source_menu,
 };
+use crate::theme::*;
 use crate::thumb_cache::IMAGE_CACHE_LIMIT;
 #[cfg(feature = "frame-profiler")]
 use crate::thumb_cache::watch_enabled;
-use crate::theme::*;
 use crate::viewer::VIEWER_CONTEXT;
 use crate::views::{GRID_CONTEXT, grid_columns};
-use gpui::ExternalPaths;
+use crate::*;
 use ely_gpui_component::forms::InputEvent;
+use gpui::ExternalPaths;
 use kanalib_core::model::{ExcludedAssetAction, SavedSearchView, ScanFilterImpact, is_image};
 
 pub(crate) fn rating_rank(rating: &str) -> u64 {
@@ -118,6 +118,8 @@ pub struct KanalibApp {
     /// 已排入一次“数据变了要重查”的刷新；避免每次渲染都重置防抖计时。
     pub(crate) search_refresh_queued: bool,
     pub(crate) search_running: bool,
+    /// 每次查询自增；后台回包只有代次仍是最新时才允许写回 UI。
+    pub(crate) search_epoch: u64,
     pub(crate) last_scanning: bool,
     pub(crate) view: ViewCache,
     pub(crate) grid_rows: usize,
@@ -295,12 +297,11 @@ impl Render for KanalibApp {
             self.search_input = Some(search.clone());
         }
         if self.search_history_subscription.is_none() {
-            self.search_history_subscription =
-                Some(cx.subscribe(&search, |app, _, event, cx| {
-                    if matches!(event, InputEvent::Submit | InputEvent::Blur) {
-                        app.commit_search_history(cx);
-                    }
-                }));
+            self.search_history_subscription = Some(cx.subscribe(&search, |app, _, event, cx| {
+                if matches!(event, InputEvent::Submit | InputEvent::Blur) {
+                    app.commit_search_history(cx);
+                }
+            }));
         }
         let input_text = search.read(cx).text().to_string();
         if input_text != self.search_pending {
@@ -475,8 +476,14 @@ impl Render for KanalibApp {
         }
         // 资产集合或筛选变了就重跑一次查询；扫描中不重跑，避免和扫描抢数据库。
         let search_sort = SearchSort::from_key(self.sort.key()).unwrap_or(SearchSort::Name);
-        let bundle_stale = self.search_bundle.as_ref().map_or(true, |bundle| {
-            !bundle.matches(&search_text, revision, &filter, search_sort, self.sort_ascending)
+        let bundle_stale = self.search_bundle.as_ref().is_none_or(|bundle| {
+            !bundle.matches(
+                &search_text,
+                revision,
+                &filter,
+                search_sort,
+                self.sort_ascending,
+            )
         });
         if !scanning && bundle_stale && !self.search_refresh_queued {
             self.search_refresh_queued = true;
@@ -566,20 +573,22 @@ impl Render for KanalibApp {
                                     SortMode::Modified => asset.mtime,
                                     SortMode::Captured => asset.taken_or_modified(),
                                     SortMode::Size => asset.bytes,
-                                    SortMode::Resolution => asset.width as u64 * asset.height as u64,
+                                    SortMode::Resolution => {
+                                        asset.width as u64 * asset.height as u64
+                                    }
                                     SortMode::Star => asset.star as u64,
                                     SortMode::Favorite => asset.favorite as u64,
                                     SortMode::Rating => rating_rank(&asset.rating),
-                                SortMode::Name => unreachable!(),
-                            };
-                            let primary = if self.sort_ascending {
-                                primary
-                            } else {
-                                u64::MAX - primary
-                            };
-                            (primary, asset.title().to_lowercase(), asset.path.clone())
-                        });
-                    }
+                                    SortMode::Name => unreachable!(),
+                                };
+                                let primary = if self.sort_ascending {
+                                    primary
+                                } else {
+                                    u64::MAX - primary
+                                };
+                                (primary, asset.title().to_lowercase(), asset.path.clone())
+                            });
+                        }
                     }
                     indices
                 }
@@ -665,7 +674,8 @@ impl Render for KanalibApp {
         // 自动化截图用：PostMessage 合成的点击带不上 Ctrl，允许启动时预选前 N 张；
         // 正常启动不设置该环境变量，不影响手动多选。
         if let Some(count) = self.demo_select_first {
-            let ready = visible_indices.len() >= count || (!scanning && !visible_indices.is_empty());
+            let ready =
+                visible_indices.len() >= count || (!scanning && !visible_indices.is_empty());
             if ready {
                 let paths = {
                     let assets = assets.read().unwrap();
@@ -853,15 +863,8 @@ impl Render for KanalibApp {
             viewer
         } else if self.screen == Screen::Tags {
             let tags_width = (window_width - sidebar_width).max(px(640.));
-            self.render_tags(
-                &this,
-                window,
-                cx,
-                tags_width,
-                &blocked_tags,
-                colors,
-            )
-            .into_any_element()
+            self.render_tags(&this, window, cx, tags_width, &blocked_tags, colors)
+                .into_any_element()
         } else if self.screen == Screen::Settings {
             if !self.remote_sources.loaded {
                 self.refresh_remote_sources();
@@ -941,28 +944,26 @@ impl Render for KanalibApp {
             .into_any_element()
         };
         let inspector = (self.screen == Screen::Library && self.pane_mode != PaneMode::Hidden)
-            .then(|| {
-                match self.pane_mode {
-                    PaneMode::Preview => self
-                        .render_preview_inspector(
-                            &this,
-                            selected_asset.as_ref(),
-                            &source_aliases,
-                            inspector_width,
-                            colors,
-                        )
-                        .into_any_element(),
-                    PaneMode::Details | PaneMode::Hidden => self
-                        .render_inspector(
-                            &this,
-                            selected_asset.as_ref(),
-                            &blocked_tags,
-                            &source_aliases,
-                            inspector_width,
-                            colors,
-                        )
-                        .into_any_element(),
-                }
+            .then(|| match self.pane_mode {
+                PaneMode::Preview => self
+                    .render_preview_inspector(
+                        &this,
+                        selected_asset.as_ref(),
+                        &source_aliases,
+                        inspector_width,
+                        colors,
+                    )
+                    .into_any_element(),
+                PaneMode::Details | PaneMode::Hidden => self
+                    .render_inspector(
+                        &this,
+                        selected_asset.as_ref(),
+                        &blocked_tags,
+                        &source_aliases,
+                        inspector_width,
+                        colors,
+                    )
+                    .into_any_element(),
             });
 
         let palette = self.palette_open.then(|| {
@@ -1064,12 +1065,10 @@ impl Render for KanalibApp {
             .group(
                 "导出",
                 [
-                    Command::new("export:selected-csv", "导出选中 · CSV")
-                        .icon(IconName::Download),
+                    Command::new("export:selected-csv", "导出选中 · CSV").icon(IconName::Download),
                     Command::new("export:selected-json", "导出选中 · JSON")
                         .icon(IconName::Download),
-                    Command::new("export:view-csv", "导出当前视图 · CSV")
-                        .icon(IconName::Download),
+                    Command::new("export:view-csv", "导出当前视图 · CSV").icon(IconName::Download),
                     Command::new("export:view-json", "导出当前视图 · JSON")
                         .icon(IconName::Download),
                 ],
@@ -1091,8 +1090,7 @@ impl Render for KanalibApp {
             .group(
                 "打标",
                 [
-                    Command::new("tag:retag-selected", "重打标选中")
-                        .icon(IconName::WandSparkles),
+                    Command::new("tag:retag-selected", "重打标选中").icon(IconName::WandSparkles),
                     Command::new("tag:prioritize", "提升打标优先级").icon(IconName::ArrowUp),
                     Command::new("tag:queue-toggle", "暂停 / 继续打标").icon(IconName::Pause),
                 ],
@@ -1335,10 +1333,7 @@ impl Render for KanalibApp {
             ConfirmDialog::new(
                 "remove-source-dialog",
                 "移除来源？",
-                format!(
-                    "只会从图库移除，磁盘文件不会删除：\n{}",
-                    root.display()
-                ),
+                format!("只会从图库移除，磁盘文件不会删除：\n{}", root.display()),
                 move |_, cx| {
                     let _ = close.update(cx, |app, cx| {
                         app.source_remove_confirm = None;
@@ -1361,8 +1356,7 @@ impl Render for KanalibApp {
                 SharedString::from(format!("source-rename-field-{epoch}")),
                 cx,
                 move |window, cx| {
-                    let input =
-                        cx.new(|cx| TextInput::new(window, cx).placeholder(placeholder));
+                    let input = cx.new(|cx| TextInput::new(window, cx).placeholder(placeholder));
                     input.update(cx, |input, cx| input.set_text(alias, cx));
                     input
                 },
@@ -1748,40 +1742,38 @@ impl Render for KanalibApp {
             })
             .into_any_element()
         });
-        let drop_overlay = self.drop_highlight.then(|| {
-            div()
-                .absolute()
-                .top(px(0.))
-                .left(px(0.))
-                .size_full()
-                .bg(colors.accent.opacity(0.10))
-                .border_2()
-                .border_color(colors.accent)
-                .flex()
-                .flex_col()
-                .items_center()
-                .justify_center()
-                .gap(px(6.))
-                .child(
-                    Icon::new(IconName::FolderPlus)
-                        .size(IconSize::Lg)
-                        .color(colors.accent),
-                )
-                .child(
-                    div()
-                        .text_lg()
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .text_color(colors.fg)
-                        .child("松开以导入到图库"),
-                )
-                .child(
-                    div()
-                        .text_xs()
-                        .text_color(colors.muted)
-                        .child("文件夹 → 添加为来源 · 来源内的图片 → 定位选中 · 其他图片 → 询问父目录"),
-                )
-                .into_any_element()
-        });
+        let drop_overlay =
+            self.drop_highlight.then(|| {
+                div()
+                    .absolute()
+                    .top(px(0.))
+                    .left(px(0.))
+                    .size_full()
+                    .bg(colors.accent.opacity(0.10))
+                    .border_2()
+                    .border_color(colors.accent)
+                    .flex()
+                    .flex_col()
+                    .items_center()
+                    .justify_center()
+                    .gap(px(6.))
+                    .child(
+                        Icon::new(IconName::FolderPlus)
+                            .size(IconSize::Lg)
+                            .color(colors.accent),
+                    )
+                    .child(
+                        div()
+                            .text_lg()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(colors.fg)
+                            .child("松开以导入到图库"),
+                    )
+                    .child(div().text_xs().text_color(colors.muted).child(
+                        "文件夹 → 添加为来源 · 来源内的图片 → 定位选中 · 其他图片 → 询问父目录",
+                    ))
+                    .into_any_element()
+            });
         let source_context_menu = self.source_menu.as_ref().map(|state| {
             ContextMenu::new(
                 "source-context-global",
@@ -1822,141 +1814,142 @@ impl Render for KanalibApp {
             window_width,
             colors,
         );
-        let shell = div()
-            .flex()
-            .flex_col()
-            .relative()
-            .w_full()
-            .h_full()
-            .bg(colors.bg)
-            .text_color(colors.fg)
-            .font_family(cx.theme().font_family.clone())
-            .child(titlebar)
-            .children(search_chips)
-            .child(
-                div()
-                    .flex_1()
-                    .min_h(px(0.))
-                    .w_full()
-                    .flex()
-                    .flex_row()
-                    .child(sidebar)
-                    .child(content)
-                    .children(inspector),
-            )
-            .child(status_bar)
-            .children(palette)
-            .children(save_dialog)
-            .children(tag_dialog)
-            .children(tag_rename_dialog)
-            .children(tag_merge_dialog)
-            .children(remove_source_dialog)
-            .children(rescan_dialog)
-            .children(tag_retag_dialog)
-            .children(source_rename_dialog)
-            .children(remote_add_dialog)
-            .children(remote_api_key_dialog)
-            .children(remote_remove_dialog)
-            .children(source_context_menu)
-            .children(cleanup_dialog)
-            .children(remove_assets_dialog)
-            .children(drop_dialog)
-            .children(drop_overlay)
-            .children(org_dialog)
-            .child(ToastViewport::new("kanalib-toasts", &self.toaster))
-            .on_action(cx.listener(|this, _: &OpenPalette, _, cx| {
-                if !this.palette_open && this.viewer_at.is_some() {
-                    this.close_viewer(cx);
-                }
-                this.palette_open = !this.palette_open;
-                cx.notify();
-            }))
-            .on_action(cx.listener(|this, _: &ToggleSidebar, _, cx| {
-                this.set_show_sidebar(!this.show_sidebar, cx);
-            }))
-            .on_action(cx.listener(|this, _: &FocusSearch, window, cx| {
-                this.focus_search(window, cx);
-            }))
-            .on_action(cx.listener(|this, _: &SelectPrev, _, cx| this.navigate(-1, cx)))
-            .on_action(cx.listener(|this, _: &SelectNext, _, cx| this.navigate(1, cx)))
-            .on_action(cx.listener(|this, _: &SelectPrevRow, _, cx| {
-                this.navigate(-(this.grid_columns as isize), cx);
-            }))
-            .on_action(cx.listener(|this, _: &SelectNextRow, _, cx| {
-                this.navigate(this.grid_columns as isize, cx);
-            }))
-            .on_action(cx.listener(|this, _: &SelectFirst, _, cx| this.select_edge(false, cx)))
-            .on_action(cx.listener(|this, _: &SelectLast, _, cx| this.select_edge(true, cx)))
-            .on_action(cx.listener(|this, _: &SelectAllVisible, _, cx| {
-                this.select_all_visible(cx);
-            }))
-            .on_action(cx.listener(|this, _: &ClearSelection, _, cx| this.clear_selection(cx)))
-            // F-004：结果视图里 Esc 先关快速查看，再回到图库；图库里仍是清除选择。
-            .on_action(cx.listener(|this, _: &CloseSimilar, _, cx| {
-                if this.screen == Screen::Similar && this.viewer_at.is_none() {
-                    this.close_similar(cx);
-                } else {
-                    this.clear_selection(cx);
-                }
-            }))
-            .on_action(cx.listener(|this, _: &OpenQuickView, _, cx| this.open_quick_view(cx)))
-            .on_action(cx.listener(|this, _: &ToggleFavorite, _, cx| this.toggle_favorite(cx)))
-            .on_action(cx.listener(|this, _: &Undo, _, cx| this.undo_last(cx)))
-            .on_action(cx.listener(|this, _: &Rate0, _, cx| this.apply_star(0, cx)))
-            .on_action(cx.listener(|this, _: &Rate1, _, cx| this.apply_star(1, cx)))
-            .on_action(cx.listener(|this, _: &Rate2, _, cx| this.apply_star(2, cx)))
-            .on_action(cx.listener(|this, _: &Rate3, _, cx| this.apply_star(3, cx)))
-            .on_action(cx.listener(|this, _: &Rate4, _, cx| this.apply_star(4, cx)))
-            .on_action(cx.listener(|this, _: &Rate5, _, cx| this.apply_star(5, cx)))
-            .on_action(cx.listener(|this, _: &ViewIconsLarge, _, cx| {
-                this.set_view_mode(ViewMode::IconsLarge, cx)
-            }))
-            .on_action(cx.listener(|this, _: &ViewIconsMedium, _, cx| {
-                this.set_view_mode(ViewMode::IconsMedium, cx)
-            }))
-            .on_action(cx.listener(|this, _: &ViewIconsSmall, _, cx| {
-                this.set_view_mode(ViewMode::IconsSmall, cx)
-            }))
-            .on_action(cx.listener(|this, _: &ViewList, _, cx| {
-                this.set_view_mode(ViewMode::List, cx)
-            }))
-            .on_action(cx.listener(|this, _: &ViewDetails, _, cx| {
-                this.set_view_mode(ViewMode::Details, cx)
-            }))
-            .on_action(cx.listener(|this, _: &ViewContent, _, cx| {
-                this.set_view_mode(ViewMode::Content, cx)
-            }))
-            // F-036：外部文件拖拽。进入时显示遮罩，释放时按路径类型分流；
-            // 取消（Esc/离开窗口）只清除遮罩，不产生任何副作用。
-            .on_drop::<ExternalPaths>({
-                let this_drop = this.clone();
-                move |paths: &ExternalPaths, _, cx| {
-                    let paths = paths.paths().to_vec();
-                    let _ = this_drop.update(cx, |app, cx| app.handle_external_drop(paths, cx));
-                }
-            })
-            .on_drag_move::<ExternalPaths>({
-                let this_enter = this.clone();
-                move |_event, _, cx| {
-                    let _ = this_enter.update(cx, |app, cx| {
-                        if !app.drop_highlight {
-                            app.drop_highlight = true;
-                            cx.notify();
-                        }
-                    });
-                }
-            })
-            .on_file_drop_exit({
-                let this_exit = this.clone();
-                move |_event, _, cx| {
-                    let _ = this_exit.update(cx, |app, cx| {
-                        if app.drop_highlight {
-                            app.drop_highlight = false;
-                            cx.notify();
-                        }
-                    });
-                }
-            });
+        let shell =
+            div()
+                .flex()
+                .flex_col()
+                .relative()
+                .w_full()
+                .h_full()
+                .bg(colors.bg)
+                .text_color(colors.fg)
+                .font_family(cx.theme().font_family.clone())
+                .child(titlebar)
+                .children(search_chips)
+                .child(
+                    div()
+                        .flex_1()
+                        .min_h(px(0.))
+                        .w_full()
+                        .flex()
+                        .flex_row()
+                        .child(sidebar)
+                        .child(content)
+                        .children(inspector),
+                )
+                .child(status_bar)
+                .children(palette)
+                .children(save_dialog)
+                .children(tag_dialog)
+                .children(tag_rename_dialog)
+                .children(tag_merge_dialog)
+                .children(remove_source_dialog)
+                .children(rescan_dialog)
+                .children(tag_retag_dialog)
+                .children(source_rename_dialog)
+                .children(remote_add_dialog)
+                .children(remote_api_key_dialog)
+                .children(remote_remove_dialog)
+                .children(source_context_menu)
+                .children(cleanup_dialog)
+                .children(remove_assets_dialog)
+                .children(drop_dialog)
+                .children(drop_overlay)
+                .children(org_dialog)
+                .child(ToastViewport::new("kanalib-toasts", &self.toaster))
+                .on_action(cx.listener(|this, _: &OpenPalette, _, cx| {
+                    if !this.palette_open && this.viewer_at.is_some() {
+                        this.close_viewer(cx);
+                    }
+                    this.palette_open = !this.palette_open;
+                    cx.notify();
+                }))
+                .on_action(cx.listener(|this, _: &ToggleSidebar, _, cx| {
+                    this.set_show_sidebar(!this.show_sidebar, cx);
+                }))
+                .on_action(cx.listener(|this, _: &FocusSearch, window, cx| {
+                    this.focus_search(window, cx);
+                }))
+                .on_action(cx.listener(|this, _: &SelectPrev, _, cx| this.navigate(-1, cx)))
+                .on_action(cx.listener(|this, _: &SelectNext, _, cx| this.navigate(1, cx)))
+                .on_action(cx.listener(|this, _: &SelectPrevRow, _, cx| {
+                    this.navigate(-(this.grid_columns as isize), cx);
+                }))
+                .on_action(cx.listener(|this, _: &SelectNextRow, _, cx| {
+                    this.navigate(this.grid_columns as isize, cx);
+                }))
+                .on_action(cx.listener(|this, _: &SelectFirst, _, cx| this.select_edge(false, cx)))
+                .on_action(cx.listener(|this, _: &SelectLast, _, cx| this.select_edge(true, cx)))
+                .on_action(cx.listener(|this, _: &SelectAllVisible, _, cx| {
+                    this.select_all_visible(cx);
+                }))
+                .on_action(cx.listener(|this, _: &ClearSelection, _, cx| this.clear_selection(cx)))
+                // F-004：结果视图里 Esc 先关快速查看，再回到图库；图库里仍是清除选择。
+                .on_action(cx.listener(|this, _: &CloseSimilar, _, cx| {
+                    if this.screen == Screen::Similar && this.viewer_at.is_none() {
+                        this.close_similar(cx);
+                    } else {
+                        this.clear_selection(cx);
+                    }
+                }))
+                .on_action(cx.listener(|this, _: &OpenQuickView, _, cx| this.open_quick_view(cx)))
+                .on_action(cx.listener(|this, _: &ToggleFavorite, _, cx| this.toggle_favorite(cx)))
+                .on_action(cx.listener(|this, _: &Undo, _, cx| this.undo_last(cx)))
+                .on_action(cx.listener(|this, _: &Rate0, _, cx| this.apply_star(0, cx)))
+                .on_action(cx.listener(|this, _: &Rate1, _, cx| this.apply_star(1, cx)))
+                .on_action(cx.listener(|this, _: &Rate2, _, cx| this.apply_star(2, cx)))
+                .on_action(cx.listener(|this, _: &Rate3, _, cx| this.apply_star(3, cx)))
+                .on_action(cx.listener(|this, _: &Rate4, _, cx| this.apply_star(4, cx)))
+                .on_action(cx.listener(|this, _: &Rate5, _, cx| this.apply_star(5, cx)))
+                .on_action(cx.listener(|this, _: &ViewIconsLarge, _, cx| {
+                    this.set_view_mode(ViewMode::IconsLarge, cx)
+                }))
+                .on_action(cx.listener(|this, _: &ViewIconsMedium, _, cx| {
+                    this.set_view_mode(ViewMode::IconsMedium, cx)
+                }))
+                .on_action(cx.listener(|this, _: &ViewIconsSmall, _, cx| {
+                    this.set_view_mode(ViewMode::IconsSmall, cx)
+                }))
+                .on_action(
+                    cx.listener(|this, _: &ViewList, _, cx| this.set_view_mode(ViewMode::List, cx)),
+                )
+                .on_action(cx.listener(|this, _: &ViewDetails, _, cx| {
+                    this.set_view_mode(ViewMode::Details, cx)
+                }))
+                .on_action(cx.listener(|this, _: &ViewContent, _, cx| {
+                    this.set_view_mode(ViewMode::Content, cx)
+                }))
+                // F-036：外部文件拖拽。进入时显示遮罩，释放时按路径类型分流；
+                // 取消（Esc/离开窗口）只清除遮罩，不产生任何副作用。
+                .on_drop::<ExternalPaths>({
+                    let this_drop = this.clone();
+                    move |paths: &ExternalPaths, _, cx| {
+                        let paths = paths.paths().to_vec();
+                        let _ = this_drop.update(cx, |app, cx| app.handle_external_drop(paths, cx));
+                    }
+                })
+                .on_drag_move::<ExternalPaths>({
+                    let this_enter = this.clone();
+                    move |_event, _, cx| {
+                        let _ = this_enter.update(cx, |app, cx| {
+                            if !app.drop_highlight {
+                                app.drop_highlight = true;
+                                cx.notify();
+                            }
+                        });
+                    }
+                })
+                .on_file_drop_exit({
+                    let this_exit = this.clone();
+                    move |_event, _, cx| {
+                        let _ = this_exit.update(cx, |app, cx| {
+                            if app.drop_highlight {
+                                app.drop_highlight = false;
+                                cx.notify();
+                            }
+                        });
+                    }
+                });
         if self.focus_viewer_pending && self.viewer_at.is_some() {
             window.focus(&self.viewer_focus, cx);
             self.focus_viewer_pending = false;
@@ -2342,21 +2335,9 @@ impl KanalibApp {
                 CompareClose,
                 Some(crate::compare::COMPARE_CONTEXT),
             ),
-            KeyBinding::new(
-                "+",
-                CompareZoomIn,
-                Some(crate::compare::COMPARE_CONTEXT),
-            ),
-            KeyBinding::new(
-                "=",
-                CompareZoomIn,
-                Some(crate::compare::COMPARE_CONTEXT),
-            ),
-            KeyBinding::new(
-                "-",
-                CompareZoomOut,
-                Some(crate::compare::COMPARE_CONTEXT),
-            ),
+            KeyBinding::new("+", CompareZoomIn, Some(crate::compare::COMPARE_CONTEXT)),
+            KeyBinding::new("=", CompareZoomIn, Some(crate::compare::COMPARE_CONTEXT)),
+            KeyBinding::new("-", CompareZoomOut, Some(crate::compare::COMPARE_CONTEXT)),
             KeyBinding::new("0", CompareFit, Some(crate::compare::COMPARE_CONTEXT)),
             KeyBinding::new(
                 "left",
@@ -2433,10 +2414,7 @@ impl KanalibApp {
             .setting("dedup.last_trash")
             .and_then(|raw| crate::dedup::TrashAudit::from_json(&raw));
         if theme_dark != cx.theme().is_dark() {
-            Theme::set_mode_now(
-                if theme_dark { Mode::Dark } else { Mode::Light },
-                cx,
-            );
+            Theme::set_mode_now(if theme_dark { Mode::Dark } else { Mode::Light }, cx);
         }
         let cache_dir = state.cache_dir();
         let db_path = state.db_path();
@@ -2470,6 +2448,7 @@ impl KanalibApp {
             search_frame_probe: None,
             search_refresh_queued: false,
             search_running: false,
+            search_epoch: 0,
             last_scanning: false,
             view: ViewCache::default(),
             grid_rows: 0,
@@ -2630,14 +2609,15 @@ impl KanalibApp {
             }
             true
         });
-        self.window_state_subscription = Some(cx.observe_window_bounds(window, |app, window, cx| {
-            app.queue_window_state_save(window, cx);
-        }));
+        self.window_state_subscription =
+            Some(cx.observe_window_bounds(window, |app, window, cx| {
+                app.queue_window_state_save(window, cx);
+            }));
         self.window_state_quit = Some(cx.on_app_quit(|app, _cx| {
-            if let Some(state) = app.window_state_pending.take() {
-                if let Err(error) = state.save(&app.window_state_root) {
-                    log::warn!("save window state on quit: {error}");
-                }
+            if let Some(state) = app.window_state_pending.take()
+                && let Err(error) = state.save(&app.window_state_root)
+            {
+                log::warn!("save window state on quit: {error}");
             }
             async {}
         }));
@@ -2701,11 +2681,11 @@ impl KanalibApp {
                     .await;
                 // 队列状态只在设置页轮询：约 1.2s 一次队列快照，每 ~6s 连阈值与错误一起刷新。
                 ticks = ticks.wrapping_add(1);
-                if ticks % 10 == 0
+                if ticks.is_multiple_of(10)
                     && weak
                         .update(cx, |app, cx| {
                             if app.screen == Screen::Settings {
-                                if ticks % 50 == 0 {
+                                if ticks.is_multiple_of(50) {
                                     app.refresh_tag_settings(cx);
                                 } else {
                                     app.refresh_tag_queue_status(cx);
@@ -2745,17 +2725,19 @@ impl KanalibApp {
             }
         }));
         let weak = cx.entity().downgrade();
-        self.cache_task = Some(cx.spawn(async move |_, cx| loop {
-            cx.background_executor()
-                .timer(Duration::from_secs(600))
-                .await;
-            if weak
-                .update(cx, |app, cx| {
-                    app.run_cache_budget_cleanup(false, cx);
-                })
-                .is_err()
-            {
-                break;
+        self.cache_task = Some(cx.spawn(async move |_, cx| {
+            loop {
+                cx.background_executor()
+                    .timer(Duration::from_secs(600))
+                    .await;
+                if weak
+                    .update(cx, |app, cx| {
+                        app.run_cache_budget_cleanup(false, cx);
+                    })
+                    .is_err()
+                {
+                    break;
+                }
             }
         }));
         if std::env::var_os("KANALIB_UI_SCROLL_TEST").is_some() {
@@ -2907,12 +2889,7 @@ impl KanalibApp {
             let _ = weak.update(cx, |app, cx| {
                 match app.state.add_roots(folders) {
                     Ok(0) => {
-                        push_toast(
-                            &app.toaster,
-                            cx,
-                            "所选文件夹已在图库中",
-                            Severity::Warning,
-                        );
+                        push_toast(&app.toaster, cx, "所选文件夹已在图库中", Severity::Warning);
                         return;
                     }
                     Ok(added) => push_toast(
@@ -3060,31 +3037,33 @@ impl KanalibApp {
     /// 数据目录（数据库所在目录）。
     pub(crate) fn data_dir(&self) -> PathBuf {
         let db_path = self.state.db_path();
-        db_path
-            .parent()
-            .map(Path::to_path_buf)
-            .unwrap_or(db_path)
+        db_path.parent().map(Path::to_path_buf).unwrap_or(db_path)
     }
 
     /// 从核心状态同步来源扫描快照；不额外遍历资产，供每帧布局读取。
     pub(crate) fn sync_source_statuses(&mut self) {
         let mut statuses = {
             let shared = self.state.shared.lock().unwrap();
-            shared
-                .source_statuses
-                .values()
-                .cloned()
-                .collect::<Vec<_>>()
+            shared.source_statuses.values().cloned().collect::<Vec<_>>()
         };
         statuses.sort_by(|left, right| left.root.cmp(&right.root));
         self.source_statuses = statuses;
     }
 
+    /// 当前屏幕实际可见的资产下标：相似结果页与图库各自维护自己的顺序。
+    pub(crate) fn current_visible_indices(&self) -> Arc<Vec<usize>> {
+        if self.screen == Screen::Similar {
+            self.similar_visible.clone()
+        } else {
+            self.view.visible_indices.clone()
+        }
+    }
+
     pub(crate) fn visible_paths(&self) -> Vec<PathBuf> {
+        let indices = self.current_visible_indices();
         let shared = self.state.shared.lock().unwrap();
         let assets = shared.assets.read().unwrap();
-        self.view
-            .visible_indices
+        indices
             .iter()
             .filter_map(|&index| assets.get(index).map(|asset| asset.path.clone()))
             .collect()
@@ -3105,16 +3084,17 @@ impl KanalibApp {
     }
 
     pub(crate) fn range_between(&self, anchor: Option<&Path>, path: &Path) -> Option<Vec<PathBuf>> {
+        let indices = self.current_visible_indices();
         let shared = self.state.shared.lock().unwrap();
         let assets = shared.assets.read().unwrap();
         let anchor_at = anchor.and_then(|anchor| {
-            self.view.visible_indices.iter().position(|&index| {
+            indices.iter().position(|&index| {
                 assets
                     .get(index)
                     .is_some_and(|asset| asset.path.as_path() == anchor)
             })
         })?;
-        let target_at = self.view.visible_indices.iter().position(|&index| {
+        let target_at = indices.iter().position(|&index| {
             assets
                 .get(index)
                 .is_some_and(|asset| asset.path.as_path() == path)
@@ -3125,7 +3105,7 @@ impl KanalibApp {
             (target_at, anchor_at)
         };
         Some(
-            self.view.visible_indices[start..=end]
+            indices[start..=end]
                 .iter()
                 .filter_map(|&index| assets.get(index).map(|asset| asset.path.clone()))
                 .collect(),
@@ -3172,10 +3152,11 @@ impl KanalibApp {
     }
 
     pub(crate) fn select_position(&mut self, position: usize, cx: &mut Context<Self>) {
+        let indices = self.current_visible_indices();
         let path = {
             let shared = self.state.shared.lock().unwrap();
             let assets = shared.assets.read().unwrap();
-            let Some(&index) = self.view.visible_indices.get(position) else {
+            let Some(&index) = indices.get(position) else {
                 return;
             };
             let Some(asset) = assets.get(index) else {
@@ -3186,24 +3167,31 @@ impl KanalibApp {
         self.selection = Arc::new(HashSet::from([path.clone()]));
         self.selection_anchor = Some(path.clone());
         self.state.select(Some(path));
-        let row = position / self.grid_columns.max(1);
+        let row = if self.screen == Screen::Similar {
+            position / self.grid_columns.max(1)
+        } else {
+            self.grouped_layout()
+                .and_then(|layout| layout.scroll_target_row(position))
+                .unwrap_or_else(|| position / self.grid_columns.max(1))
+        };
         self.grid_scroll
             .scroll_to_item(row, ScrollStrategy::Nearest);
         cx.notify();
     }
 
     pub(crate) fn navigate(&mut self, delta: isize, cx: &mut Context<Self>) {
+        let indices = self.current_visible_indices();
         let (len, current) = {
             let shared = self.state.shared.lock().unwrap();
             let assets = shared.assets.read().unwrap();
             let current = shared.selected.as_ref().and_then(|selected| {
-                self.view.visible_indices.iter().position(|&index| {
+                indices.iter().position(|&index| {
                     assets
                         .get(index)
                         .is_some_and(|asset| &asset.path == selected)
                 })
             });
-            (self.view.visible_indices.len(), current)
+            (indices.len(), current)
         };
         if len == 0 {
             return;
@@ -3217,7 +3205,7 @@ impl KanalibApp {
     }
 
     pub(crate) fn select_edge(&mut self, last: bool, cx: &mut Context<Self>) {
-        let len = self.view.visible_indices.len();
+        let len = self.current_visible_indices().len();
         if len > 0 {
             self.select_position(if last { len - 1 } else { 0 }, cx);
         }
@@ -3324,6 +3312,30 @@ impl KanalibApp {
         self.apply_favorite(favorite, cx);
     }
 
+    /// 检查器单图收藏后的收尾：在“收藏”筛选下取消收藏时，该图立即离开可见集。
+    pub(crate) fn after_favorite_change(
+        &mut self,
+        path: &Path,
+        favorite: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let leaving_favorites = {
+            let shared = self.state.shared.lock().unwrap();
+            !favorite && shared.filter == Filter::Favorites
+        };
+        if leaving_favorites {
+            Arc::make_mut(&mut self.selection).remove(path);
+            if self.selection_anchor.as_deref() == Some(path) {
+                self.selection_anchor = None;
+            }
+            if self.state.shared.lock().unwrap().selected.as_deref() == Some(path) {
+                self.state.select(None);
+            }
+            self.auto_select_pending = true;
+        }
+        cx.notify();
+    }
+
     pub(crate) fn apply_star(&mut self, star: u8, cx: &mut Context<Self>) {
         let paths = self.selected_paths();
         if paths.is_empty() {
@@ -3363,6 +3375,18 @@ impl KanalibApp {
         }
         match self.state.undo_last() {
             Ok(outcome) => {
+                // 撤销可能改变收藏/星级/标签，从而改变当前筛选下的可见集合；
+                // 清掉旧选择并让下一帧自动选中首个可见项，避免检查器指向隐藏项。
+                let revalidate = {
+                    let shared = self.state.shared.lock().unwrap();
+                    !matches!(&shared.filter, Filter::All | Filter::Source(_))
+                        || !self.last_search.is_empty()
+                };
+                if revalidate {
+                    self.clear_multi_selection();
+                    self.state.select(None);
+                    self.auto_select_pending = true;
+                }
                 push_toast(
                     &self.toaster,
                     cx,
@@ -3432,11 +3456,7 @@ impl KanalibApp {
                 }
             },
         };
-        let filename = format!(
-            "kanalib-{}.{}",
-            target.slug(),
-            export_format.extension()
-        );
+        let filename = format!("kanalib-{}.{}", target.slug(), export_format.extension());
         let count = assets.len();
         let bytes = content.len() as u64;
         let weak = cx.entity().downgrade();
@@ -3543,9 +3563,7 @@ impl KanalibApp {
             ),
             Err(error) => {
                 let message = crate::platform::image_copy_fallback_message(&path, &error);
-                cx.write_to_clipboard(ClipboardItem::new_string(
-                    path.display().to_string(),
-                ));
+                cx.write_to_clipboard(ClipboardItem::new_string(path.display().to_string()));
                 push_toast(&self.toaster, cx, message, Severity::Warning);
             }
         }
@@ -3782,9 +3800,11 @@ impl KanalibApp {
             .item(menu(this, SortMode::Favorite))
             .item(menu(this, SortMode::Rating))
             .separator()
-            .item(MenuItem::radio("升序", self.sort_ascending).on_click(move |_, cx| {
-                let _ = ascending.update(cx, |app, cx| app.set_sort_ascending(true, cx));
-            }))
+            .item(
+                MenuItem::radio("升序", self.sort_ascending).on_click(move |_, cx| {
+                    let _ = ascending.update(cx, |app, cx| app.set_sort_ascending(true, cx));
+                }),
+            )
             .item(
                 MenuItem::radio("降序", !self.sort_ascending).on_click(move |_, cx| {
                     let _ = descending.update(cx, |app, cx| app.set_sort_ascending(false, cx));
@@ -3801,9 +3821,8 @@ impl KanalibApp {
                 MenuItem::check("侧栏", self.show_sidebar)
                     .icon(IconName::PanelLeft)
                     .on_click(move |_, cx| {
-                        let _ = sidebar.update(cx, |app, cx| {
-                            app.set_show_sidebar(!app.show_sidebar, cx)
-                        });
+                        let _ = sidebar
+                            .update(cx, |app, cx| app.set_show_sidebar(!app.show_sidebar, cx));
                     }),
             )
             .item(
@@ -3840,18 +3859,16 @@ impl KanalibApp {
                 MenuItem::radio("详细信息窗格", self.pane_mode == PaneMode::Details)
                     .icon(IconName::PanelRight)
                     .on_click(move |_, cx| {
-                        let _ = details.update(cx, |app, cx| {
-                            app.toggle_pane_mode(PaneMode::Details, cx)
-                        });
+                        let _ = details
+                            .update(cx, |app, cx| app.toggle_pane_mode(PaneMode::Details, cx));
                     }),
             )
             .item(
                 MenuItem::radio("预览窗格", self.pane_mode == PaneMode::Preview)
                     .icon(IconName::Image)
                     .on_click(move |_, cx| {
-                        let _ = preview.update(cx, |app, cx| {
-                            app.toggle_pane_mode(PaneMode::Preview, cx)
-                        });
+                        let _ = preview
+                            .update(cx, |app, cx| app.toggle_pane_mode(PaneMode::Preview, cx));
                     }),
             )
             .separator()
@@ -3888,10 +3905,9 @@ impl KanalibApp {
                 MenuItem::new("当前视图 · CSV")
                     .icon(IconName::Download)
                     .on_click(move |_, cx| {
-                        let _ = view_csv
-                            .update(cx, |app, cx| {
-                                app.export_assets(ExportTarget::View, ExportFormat::Csv, cx)
-                            });
+                        let _ = view_csv.update(cx, |app, cx| {
+                            app.export_assets(ExportTarget::View, ExportFormat::Csv, cx)
+                        });
                     }),
             )
             .item(
@@ -4022,9 +4038,7 @@ impl KanalibApp {
                 .flex()
                 .items_center()
                 .gap(px(2.))
-                .on_mouse_down(MouseButton::Left, |_, window, _| {
-                    window.prevent_default()
-                })
+                .on_mouse_down(MouseButton::Left, |_, window, _| window.prevent_default())
                 .child(
                     div().flex_1().min_w(px(0.)).child(
                         Input::new(search)
@@ -4097,11 +4111,7 @@ impl KanalibApp {
             );
         }
 
-        let mut controls = div()
-            .flex_none()
-            .flex()
-            .items_center()
-            .gap(px(4.));
+        let mut controls = div().flex_none().flex().items_center().gap(px(4.));
         if library {
             controls = controls
                 .children(sort)
@@ -4176,18 +4186,14 @@ impl KanalibApp {
                         .h_full()
                         .flex()
                         .items_center()
-                        .on_mouse_down(MouseButton::Left, |_, window, _| {
-                            window.prevent_default()
-                        })
+                        .on_mouse_down(MouseButton::Left, |_, window, _| window.prevent_default())
                         .child(search),
                 );
             }
         } else {
             bar = bar.child(left).child(div().flex_1().min_w(px(8.)));
             if let Some(search) = search_field {
-                bar = bar
-                    .child(search)
-                    .child(div().flex_1().min_w(px(8.)));
+                bar = bar.child(search).child(div().flex_1().min_w(px(8.)));
             }
             bar = bar.child(right);
         }
@@ -4199,11 +4205,7 @@ impl KanalibApp {
 
     /// 处理一次外部文件拖放：文件夹提示「添加为来源」，来源内图片定位选中，
     /// 来源外图片询问是否添加父目录；非图片与重复来源只提示，不产生副作用。
-    pub(crate) fn handle_external_drop(
-        &mut self,
-        paths: Vec<PathBuf>,
-        cx: &mut Context<Self>,
-    ) {
+    pub(crate) fn handle_external_drop(&mut self, paths: Vec<PathBuf>, cx: &mut Context<Self>) {
         self.drop_highlight = false;
         if paths.is_empty() {
             cx.notify();
@@ -4275,12 +4277,7 @@ impl KanalibApp {
             return;
         }
         match self.state.add_roots(targets) {
-            Ok(0) => push_toast(
-                &self.toaster,
-                cx,
-                "所选文件夹已在图库中",
-                Severity::Warning,
-            ),
+            Ok(0) => push_toast(&self.toaster, cx, "所选文件夹已在图库中", Severity::Warning),
             Ok(added) => {
                 push_toast(
                     &self.toaster,
@@ -4317,11 +4314,7 @@ impl KanalibApp {
     }
 
     /// 拖入来源内图片：清空搜索/筛选并选中这些图片，下一帧滚动到选中项。
-    pub(crate) fn locate_dropped_paths(
-        &mut self,
-        paths: Vec<PathBuf>,
-        cx: &mut Context<Self>,
-    ) {
+    pub(crate) fn locate_dropped_paths(&mut self, paths: Vec<PathBuf>, cx: &mut Context<Self>) {
         if paths.is_empty() {
             return;
         }
@@ -4437,8 +4430,7 @@ impl KanalibApp {
                 );
             }
             Err(error) => {
-                self.state
-                    .set_error(format!("从图库移除失败：{error:#}"));
+                self.state.set_error(format!("从图库移除失败：{error:#}"));
                 push_toast(
                     &self.toaster,
                     cx,
@@ -4524,9 +4516,11 @@ impl KanalibApp {
         max_text: &str,
         cx: &mut Context<Self>,
     ) {
-        let Some((root, mut config)) = self.scan_filter_draft.as_ref().map(|draft| {
-            (draft.root.clone(), draft.config.clone())
-        }) else {
+        let Some((root, mut config)) = self
+            .scan_filter_draft
+            .as_ref()
+            .map(|draft| (draft.root.clone(), draft.config.clone()))
+        else {
             return;
         };
         match filter_limits(min_text, max_text) {
@@ -4572,7 +4566,11 @@ impl KanalibApp {
         cx: &mut Context<Self>,
     ) {
         let Some((root, mut config, confirmed)) = self.scan_filter_draft.as_ref().map(|draft| {
-            (draft.root.clone(), draft.config.clone(), draft.confirm_remove)
+            (
+                draft.root.clone(),
+                draft.config.clone(),
+                draft.confirm_remove,
+            )
         }) else {
             return;
         };
@@ -4677,7 +4675,12 @@ impl KanalibApp {
 
     // ---- F-037 忽略列表 ----
 
-    pub(crate) fn add_ignored_glob(&mut self, root: PathBuf, pattern: String, cx: &mut Context<Self>) {
+    pub(crate) fn add_ignored_glob(
+        &mut self,
+        root: PathBuf,
+        pattern: String,
+        cx: &mut Context<Self>,
+    ) {
         match self.state.add_ignored_glob(&root, &pattern) {
             Ok(true) => {
                 let message = format!("已添加忽略规则 · {pattern}（只影响后续扫描，不删除文件）");
@@ -4699,11 +4702,7 @@ impl KanalibApp {
         cx.notify();
     }
 
-    pub(crate) fn restore_ignored_paths(
-        &mut self,
-        paths: Vec<PathBuf>,
-        cx: &mut Context<Self>,
-    ) {
+    pub(crate) fn restore_ignored_paths(&mut self, paths: Vec<PathBuf>, cx: &mut Context<Self>) {
         match self.state.restore_ignored_paths(&paths) {
             Ok(restored) => {
                 let message = format!("已恢复 {restored} 条路径忽略项 · 重扫后重新导入");
@@ -4717,11 +4716,7 @@ impl KanalibApp {
         cx.notify();
     }
 
-    pub(crate) fn restore_ignored_hashes(
-        &mut self,
-        hashes: Vec<String>,
-        cx: &mut Context<Self>,
-    ) {
+    pub(crate) fn restore_ignored_hashes(&mut self, hashes: Vec<String>, cx: &mut Context<Self>) {
         match self.state.restore_ignored_hashes(&hashes) {
             Ok(restored) => {
                 let message = format!("已恢复 {restored} 条哈希忽略项 · 重扫后重新导入");
@@ -4761,11 +4756,7 @@ impl KanalibApp {
         let rules = self.state.ignore_rules();
         let mut restored = 0usize;
         if !rules.paths.is_empty() {
-            let paths = rules
-                .paths
-                .iter()
-                .map(PathBuf::from)
-                .collect::<Vec<_>>();
+            let paths = rules.paths.iter().map(PathBuf::from).collect::<Vec<_>>();
             restored += self.state.restore_ignored_paths(&paths).unwrap_or(0);
         }
         if !rules.sha1.is_empty() {

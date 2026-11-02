@@ -111,13 +111,7 @@ pub fn classify_watch_paths(
     paths: impl IntoIterator<Item = PathBuf>,
     probe: impl FnMut(&Path) -> WatchProbe,
 ) -> Result<WatchClassification> {
-    classify_watch_paths_with_ignores(
-        root,
-        config,
-        &IgnoreRules::default(),
-        paths,
-        probe,
-    )
+    classify_watch_paths_with_ignores(root, config, &IgnoreRules::default(), paths, probe)
 }
 
 /// 同时应用 F-032 排除规则与 F-037 持久忽略列表的事件分类。
@@ -170,29 +164,29 @@ pub fn classify_watch_paths_with_ignores(
 
 /// 监听批处理入口（运行在防抖线程上）。
 pub(crate) fn handle_watch_batch(state: &Arc<AppState>, root: &Path, paths: Vec<PathBuf>) {
-    if paths.is_empty() || state.is_scanning() {
+    if paths.is_empty() {
+        return;
+    }
+    if state.is_scanning() {
+        // 扫描文件表在开始时已固定；这些事件必须让扫描收尾后补扫，不能静默丢弃。
+        state.mark_watch_dirty();
         return;
     }
     let config = state.scan_filter(root);
     let rules = state.shared.lock().unwrap().ignore_rules.clone();
-    let classification = match classify_watch_paths_with_ignores(
-        root,
-        &config,
-        &rules,
-        paths,
-        probe_path,
-    ) {
-        Ok(classification) => classification,
-        Err(error) => {
-            log::warn!("watch classify {}: {error:#}", root.display());
-            mark_source_error(
-                state,
-                root,
-                format!("监听事件处理失败：{error:#}；请手动重新扫描该来源"),
-            );
-            return;
-        }
-    };
+    let classification =
+        match classify_watch_paths_with_ignores(root, &config, &rules, paths, probe_path) {
+            Ok(classification) => classification,
+            Err(error) => {
+                log::warn!("watch classify {}: {error:#}", root.display());
+                mark_source_error(
+                    state,
+                    root,
+                    format!("监听事件处理失败：{error:#}；请手动重新扫描该来源"),
+                );
+                return;
+            }
+        };
     if classification.oversized {
         log::warn!(
             "watch storm under {}; falling back to rescan",
@@ -238,7 +232,8 @@ pub(crate) fn apply_watch_batch(
 
     for path in &batch.changed {
         if state.is_scanning() {
-            // 全量扫描已开始，交给扫描对账，避免两边同时写。
+            // 全量扫描已开始，交给扫描对账；剩余事件同样需要补扫。
+            state.mark_watch_dirty();
             return Ok(());
         }
         match state.watch_index_file(&db, root, path) {
@@ -391,10 +386,7 @@ mod tests {
             (root.join("new.png"), WatchProbe::File(10)),
             (root.join("edited.jpg"), WatchProbe::File(20)),
             (root.join("gone.png"), WatchProbe::Missing),
-            (
-                root.join("gone.txt"),
-                WatchProbe::Missing,
-            ),
+            (root.join("gone.txt"), WatchProbe::Missing),
             (root.join("cache").join("x.png"), WatchProbe::File(30)),
             (root.join(".hidden.png"), WatchProbe::File(40)),
             (root.join("sub"), WatchProbe::Directory),
@@ -411,10 +403,7 @@ mod tests {
 
         assert_eq!(
             classification.changed,
-            vec![
-                root.join("edited.jpg"),
-                root.join("new.png"),
-            ]
+            vec![root.join("edited.jpg"), root.join("new.png"),]
         );
         assert_eq!(classification.missing, vec![root.join("gone.png")]);
         assert_eq!(classification.ignored, 6);
@@ -443,8 +432,7 @@ mod tests {
 
         let started = Instant::now();
         let changed =
-            classify_watch_paths(&root, &config(), paths.clone(), |_| WatchProbe::File(1))
-                .unwrap();
+            classify_watch_paths(&root, &config(), paths.clone(), |_| WatchProbe::File(1)).unwrap();
         let changed_cost = started.elapsed();
         assert!(changed.oversized);
         assert!(changed.changed.is_empty(), "风暴批次不能逐文件哈希/缩略图");
@@ -485,19 +473,15 @@ mod tests {
         let root = PathBuf::from("C:/library");
         let existing = root.join("existing.png");
         let denied = root.join("denied.png");
-        let classification = classify_watch_paths(
-            &root,
-            &config(),
-            vec![existing.clone(), denied],
-            |path| {
+        let classification =
+            classify_watch_paths(&root, &config(), vec![existing.clone(), denied], |path| {
                 if path == existing {
                     WatchProbe::File(10)
                 } else {
                     WatchProbe::Uncertain
                 }
-            },
-        )
-        .unwrap();
+            })
+            .unwrap();
         assert_eq!(classification.changed, vec![existing]);
         assert!(classification.missing.is_empty(), "权限/IO 错误一律保留");
         assert_eq!(classification.ignored, 1);
@@ -531,13 +515,11 @@ mod tests {
     fn duplicate_events_are_processed_once() {
         let root = PathBuf::from("C:/library");
         let path = root.join("a.png");
-        let classification = classify_watch_paths(
-            &root,
-            &config(),
-            vec![path.clone(), path.clone()],
-            |_| WatchProbe::File(1),
-        )
-        .unwrap();
+        let classification =
+            classify_watch_paths(&root, &config(), vec![path.clone(), path.clone()], |_| {
+                WatchProbe::File(1)
+            })
+            .unwrap();
         assert_eq!(classification.changed, vec![path]);
     }
 
