@@ -1286,8 +1286,14 @@ impl KanalibApp {
             cx,
             |window, cx| TextInput::new(window, cx).placeholder("0.00–1.00"),
         );
+        let protected_entry_input = window.use_keyed_state(
+            "kanalib-protected-entry",
+            cx,
+            |window, cx| {
+                TextInput::new(window, cx).placeholder("glob 或文件夹路径，如 **/原图/**")
+            },
+        );
         let this_back = this.clone();
-        let this_add = this.clone();
         let this_refresh_cache = this.clone();
         let this_cleanup_cache = this.clone();
         let this_budget_less = this.clone();
@@ -1384,9 +1390,13 @@ impl KanalibApp {
                 .into_any_element()
         } else {
             let mut list = div().flex().flex_col().gap(px(6.));
-            for path in protected_paths {
+            for (index, path) in protected_paths.iter().enumerate() {
                 let path = path.clone();
+                let label = path.display().to_string();
+                let is_glob = kanalib_core::dedup::is_glob_pattern(&label);
                 let this_remove = this.clone();
+                let this_preview = this.clone();
+                let preview_path = path.clone();
                 list = list.child(
                     div()
                         .flex()
@@ -1399,38 +1409,101 @@ impl KanalibApp {
                         .bg(colors.sunken)
                         .child(
                             div()
-                                .truncate()
-                                .text_xs()
-                                .text_color(colors.fg)
-                                .child(path.display().to_string()),
+                                .flex()
+                                .items_center()
+                                .gap(px(6.))
+                                .min_w(px(0.))
+                                .child(
+                                    div()
+                                        .truncate()
+                                        .text_xs()
+                                        .text_color(colors.fg)
+                                        .child(label),
+                                )
+                                .children(is_glob.then(|| {
+                                    div()
+                                        .px(px(4.))
+                                        .rounded(px(3.))
+                                        .bg(colors.surface)
+                                        .text_xs()
+                                        .text_color(colors.accent)
+                                        .child("glob")
+                                })),
                         )
                         .child(
-                            Button::new(
-                                SharedString::from(format!("remove-protected-{}", path.display())),
-                                "移除",
-                            )
-                            .on_click(move |_, _, cx| {
-                                let path = path.clone();
-                                let _ = this_remove.update(cx, |app, cx| {
-                                    match app.state.remove_protected_path(&path) {
-                                        Ok(()) => {
-                                            app.settings_notice =
-                                                Some(format!("已移除保护路径：{}", path.display()));
-                                        }
-                                        Err(error) => {
-                                            app.settings_notice =
-                                                Some(format!("移除失败: {error:#}"));
-                                        }
-                                    }
-                                    cx.notify();
-                                });
-                            }),
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap(px(4.))
+                                .child(
+                                    Button::new(
+                                        SharedString::from(format!(
+                                            "preview-protected-{index}"
+                                        )),
+                                        "预览命中",
+                                    )
+                                    .size(ControlSize::Sm)
+                                    .icon(IconName::Eye)
+                                    .on_click(move |_, _, cx| {
+                                        let path = preview_path.clone();
+                                        let _ = this_preview.update(cx, |app, cx| {
+                                            match app.state.preview_protected_path(&path) {
+                                                Ok(preview) => {
+                                                    app.settings_notice = Some(format!(
+                                                        "「{}」命中 {} / {} 张资产",
+                                                        path.display(),
+                                                        preview.matched,
+                                                        preview.total
+                                                    ));
+                                                }
+                                                Err(error) => {
+                                                    app.settings_notice =
+                                                        Some(format!("预览失败: {error:#}"));
+                                                }
+                                            }
+                                            cx.notify();
+                                        });
+                                    }),
+                                )
+                                .child(
+                                    Button::new(
+                                        SharedString::from(format!(
+                                            "remove-protected-{index}"
+                                        )),
+                                        "移除",
+                                    )
+                                    .size(ControlSize::Sm)
+                                    .on_click(move |_, _, cx| {
+                                        let path = path.clone();
+                                        let _ = this_remove.update(cx, |app, cx| {
+                                            match app.state.remove_protected_path(&path) {
+                                                Ok(()) => {
+                                                    app.settings_notice = Some(format!(
+                                                        "已移除保护路径：{}",
+                                                        path.display()
+                                                    ));
+                                                }
+                                                Err(error) => {
+                                                    app.settings_notice =
+                                                        Some(format!("移除失败: {error:#}"));
+                                                }
+                                            }
+                                            cx.notify();
+                                        });
+                                    }),
+                                ),
                         ),
                 );
             }
             list.into_any_element()
         };
 
+        let this_add_entry = this.clone();
+        let this_preview_entry = this.clone();
+        let this_add_folder = this.clone();
+        let entry_for_add = protected_entry_input.clone();
+        let entry_for_preview = protected_entry_input.clone();
+        let entry_for_clear = protected_entry_input.clone();
         let protected_section = div()
             .p(px(16.))
             .rounded(px(10.))
@@ -1450,26 +1523,60 @@ impl KanalibApp {
                 div()
                     .text_xs()
                     .text_color(colors.muted)
-                    .child("保护路径优先作为保留项；其下文件不会被移入回收站。"),
+                    .child("保护路径优先作为保留项；其下文件不会被移入回收站。支持 glob（如 **/原图/**），普通路径仍按目录前缀匹配。只读来源同样不可移入回收站。"),
             )
             .child(protected_rows)
             .child(
-                div().flex().child(
-                    Button::new("add-protected", "添加保护文件夹")
-                        .primary()
-                        .on_click(move |_, _, cx| {
-                            let weak = this_add.downgrade();
-                            cx.spawn(async move |cx| {
-                                let Some(handle) = rfd::AsyncFileDialog::new().pick_folder().await
-                                else {
-                                    return;
-                                };
-                                let folder = handle.path().to_path_buf();
-                                let _ = weak.update(cx, |app, cx| {
-                                    match app.state.add_protected_path(folder) {
-                                        Ok(()) => {
+                div()
+                    .flex()
+                    .flex_wrap()
+                    .items_center()
+                    .gap(px(6.))
+                    .child(
+                        div()
+                            .w(px(320.))
+                            .child(Input::new(&protected_entry_input)),
+                    )
+                    .child(
+                        Button::new("preview-protected-entry", "预览命中")
+                            .size(ControlSize::Sm)
+                            .icon(IconName::Eye)
+                            .on_click(move |_, _, cx| {
+                                let text = entry_for_preview.read(cx).text().to_string();
+                                let _ = this_preview_entry.update(cx, |app, cx| {
+                                    match app.state.preview_protected_entry(&text) {
+                                        Ok(preview) => {
+                                            app.settings_notice = Some(format!(
+                                                "「{}」命中 {} / {} 张资产",
+                                                text.trim(),
+                                                preview.matched,
+                                                preview.total
+                                            ));
+                                        }
+                                        Err(error) => {
                                             app.settings_notice =
-                                                Some("已添加保护路径".to_string());
+                                                Some(format!("预览失败: {error:#}"));
+                                        }
+                                    }
+                                    cx.notify();
+                                });
+                            }),
+                    )
+                    .child(
+                        Button::new("add-protected-entry", "添加 glob/路径")
+                            .primary()
+                            .size(ControlSize::Sm)
+                            .on_click(move |_, _, cx| {
+                                let text = entry_for_add.read(cx).text().to_string();
+                                let _ = this_add_entry.update(cx, |app, cx| {
+                                    match app.state.add_protected_entry(&text) {
+                                        Ok(preview) => {
+                                            app.settings_notice = Some(format!(
+                                                "已添加保护项：{}（命中 {} / {} 张）",
+                                                text.trim(),
+                                                preview.matched,
+                                                preview.total
+                                            ));
                                         }
                                         Err(error) => {
                                             app.settings_notice =
@@ -1478,10 +1585,39 @@ impl KanalibApp {
                                     }
                                     cx.notify();
                                 });
-                            })
-                            .detach();
-                        }),
-                ),
+                                entry_for_clear
+                                    .update(cx, |input, cx| input.set_text("", cx));
+                            }),
+                    )
+                    .child(
+                        Button::new("add-protected", "添加保护文件夹")
+                            .size(ControlSize::Sm)
+                            .on_click(move |_, _, cx| {
+                                let weak = this_add_folder.downgrade();
+                                cx.spawn(async move |cx| {
+                                    let Some(handle) =
+                                        rfd::AsyncFileDialog::new().pick_folder().await
+                                    else {
+                                        return;
+                                    };
+                                    let folder = handle.path().to_path_buf();
+                                    let _ = weak.update(cx, |app, cx| {
+                                        match app.state.add_protected_path(folder) {
+                                            Ok(()) => {
+                                                app.settings_notice =
+                                                    Some("已添加保护路径".to_string());
+                                            }
+                                            Err(error) => {
+                                                app.settings_notice =
+                                                    Some(format!("添加失败: {error:#}"));
+                                            }
+                                        }
+                                        cx.notify();
+                                    });
+                                })
+                                .detach();
+                            }),
+                    ),
             );
 
         // F-045：0–32 滑杆（保留 6/10/14 快捷档）+ 临时值/默认值 + 后台预估。

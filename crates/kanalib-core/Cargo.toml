@@ -15,6 +15,7 @@ anyhow = "1"
 base64 = "=0.22.1"
 blake3 = "1"
 dirs = "6"
+globset = "0.4"
 ignore = "0.4"
 keyring = { version = "=3.6.3", default-features = false, features = ["windows-native"] }
 # AVIF decode in image 0.25 needs `avif-native` (dav1d, a native library), so

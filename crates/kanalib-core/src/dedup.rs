@@ -1,10 +1,15 @@
+use std::cell::RefCell;
+use std::collections::hash_map::DefaultHasher;
 use std::collections::{HashMap, HashSet};
+use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
+use globset::{GlobBuilder, GlobMatcher};
 
 use crate::model::{Asset, SimilarHit, SimilarQueryResult, SimilarThresholdPreview};
+use crate::sources::{SourceKind, remote_kind_for_path};
 
 pub const DEFAULT_SIMILAR_THRESHOLD: u8 = 10;
 /// 相似阈值语义与去重 6/10/14 预设统一：64 位 pHash 汉明距离 ≤ 阈值。
@@ -139,14 +144,240 @@ pub fn phash_distance(a: u64, b: u64) -> Option<u32> {
     Some((a ^ b).count_ones())
 }
 
-pub fn is_protected(path: &Path, protected: &[PathBuf]) -> bool {
-    protected.iter().any(|root| path.starts_with(root))
+/// 保护项预览：当前图库中命中多少个资产。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ProtectedPreview {
+    pub matched: usize,
+    pub total: usize,
 }
 
-fn pick_protected_keeper(assets: &[Asset], protected: &[PathBuf]) -> Option<PathBuf> {
+/// 统一的保护判定入口：用户保护项（目录前缀或 glob）+ 只读来源。
+///
+/// `dedup.protected_paths` 沿用旧 JSON 数组：不含 `* ? [ ] { }` 的条目仍是
+/// 目录前缀（Windows 下大小写/分隔符等价），含通配符的条目按 glob 解释。
+/// 相对 glob 会自动补 `**/` 前缀，因此 `*.psd` 可匹配任意深度的同名文件。
+/// glob 命中目录时其下资产同样受保护。
+#[derive(Clone, Debug, Default)]
+pub struct ProtectedMatcher {
+    literals: Vec<PathBuf>,
+    globs: Vec<GlobMatcher>,
+    read_only_roots: Vec<PathBuf>,
+}
+
+impl ProtectedMatcher {
+    /// 从持久化条目与只读本地来源构建；非法 glob 退化为普通路径，避免启动失败。
+    pub fn new(entries: &[PathBuf], read_only_roots: &[PathBuf]) -> Self {
+        let mut literals = Vec::new();
+        let mut globs = Vec::new();
+        for entry in entries {
+            let text = entry.to_string_lossy();
+            if text.trim().is_empty() {
+                continue;
+            }
+            if is_glob_pattern(&text) {
+                match compile_protected_glob(&text) {
+                    Ok(matcher) => globs.push(matcher),
+                    Err(error) => {
+                        log::warn!(
+                            "invalid protected glob {:?}, treated as a literal path: {error:#}",
+                            text.as_ref()
+                        );
+                        literals.push(entry.clone());
+                    }
+                }
+            } else {
+                literals.push(entry.clone());
+            }
+        }
+        Self {
+            literals,
+            globs,
+            read_only_roots: read_only_roots.to_vec(),
+        }
+    }
+
+    /// 单个条目的预览/新增用匹配器；非法 glob 返回错误。
+    pub fn from_entry(entry: &Path) -> Result<Self> {
+        validate_protected_entry(entry)?;
+        let text = entry.to_string_lossy();
+        if is_glob_pattern(&text) {
+            Ok(Self {
+                literals: Vec::new(),
+                globs: vec![compile_protected_glob(&text)?],
+                read_only_roots: Vec::new(),
+            })
+        } else {
+            Ok(Self {
+                literals: vec![entry.to_path_buf()],
+                globs: Vec::new(),
+                read_only_roots: Vec::new(),
+            })
+        }
+    }
+
+    pub fn is_protected(&self, path: &Path) -> bool {
+        self.read_only_kind(path).is_some() || self.matches_entry(path)
+    }
+
+    /// 用户保护项（不含只读来源）是否命中。
+    pub fn matches_entry(&self, path: &Path) -> bool {
+        self.literals
+            .iter()
+            .any(|root| path_under(path, root))
+            || self
+                .globs
+                .iter()
+                .any(|glob| glob_matches(glob, path))
+    }
+
+    /// 只读来源命中时返回来源类型；`None` 表示可写。
+    pub fn read_only_kind(&self, path: &Path) -> Option<SourceKind> {
+        if let Some(kind) = remote_kind_for_path(path) {
+            return Some(kind);
+        }
+        self.read_only_roots
+            .iter()
+            .any(|root| path_under(path, root))
+            .then_some(SourceKind::Local)
+    }
+}
+
+/// 条目是否会被当作 glob（与 `dedup.protected_paths` 的持久化语义一致）。
+pub fn is_glob_pattern(text: &str) -> bool {
+    text.chars()
+        .any(|character| matches!(character, '*' | '?' | '[' | ']' | '{' | '}'))
+}
+
+/// 校验单个保护条目；普通路径不检查磁盘是否存在（由调用方决定）。
+pub fn validate_protected_entry(entry: &Path) -> Result<()> {
+    let text = entry.to_string_lossy();
+    if text.trim().is_empty() {
+        bail!("保护项不能为空");
+    }
+    if is_glob_pattern(&text) {
+        compile_protected_glob(&text)?;
+    }
+    Ok(())
+}
+
+/// 校验 glob 语法；供设置页在保存前提示非法规则。
+pub fn validate_protected_glob(pattern: &str) -> Result<()> {
+    compile_protected_glob(pattern).map(|_| ())
+}
+
+fn compile_protected_glob(pattern: &str) -> Result<GlobMatcher> {
+    let pattern = pattern.trim();
+    if pattern.is_empty() {
+        bail!("保护 glob 不能为空");
+    }
+    let anchored = Path::new(pattern).is_absolute()
+        || pattern.starts_with("**/")
+        || pattern.starts_with("**\\");
+    let effective = if anchored {
+        pattern.to_string()
+    } else {
+        format!("**/{pattern}")
+    };
+    GlobBuilder::new(&effective)
+        .literal_separator(true)
+        .case_insensitive(cfg!(windows))
+        .build()
+        .map(|glob| glob.compile_matcher())
+        .with_context(|| format!("无效的保护 glob：{pattern}"))
+}
+
+/// glob 命中路径本身或其任一父目录（保护整个目录子树）。
+fn glob_matches(glob: &GlobMatcher, path: &Path) -> bool {
+    if glob.is_match(path) {
+        return true;
+    }
+    let mut parent = path.parent();
+    while let Some(directory) = parent {
+        if glob.is_match(directory) {
+            return true;
+        }
+        parent = directory.parent();
+    }
+    false
+}
+
+/// 两个保护条目是否等价（Windows 下忽略大小写与 `/`、`\` 差异）。
+pub fn protected_entries_equal(a: &Path, b: &Path) -> bool {
+    #[cfg(windows)]
+    {
+        normalized_path_key(a) == normalized_path_key(b)
+    }
+    #[cfg(not(windows))]
+    {
+        a == b
+    }
+}
+
+fn path_under(path: &Path, root: &Path) -> bool {
+    #[cfg(windows)]
+    {
+        let path = normalized_path_key(path);
+        let root = normalized_path_key(root);
+        if path == root {
+            return true;
+        }
+        let prefix = if root.ends_with('/') {
+            root
+        } else {
+            format!("{root}/")
+        };
+        path.starts_with(&prefix)
+    }
+    #[cfg(not(windows))]
+    {
+        path.starts_with(root)
+    }
+}
+
+#[cfg(windows)]
+fn normalized_path_key(path: &Path) -> String {
+    let mut text = path.to_string_lossy().replace('\\', "/").to_lowercase();
+    while text.len() > 3 && text.ends_with('/') {
+        text.pop();
+    }
+    text
+}
+
+thread_local! {
+    /// `is_protected` 兼容入口的单条缓存；UI 去重页每帧会按同一组路径反复调用。
+    static PROTECTED_CACHE: RefCell<Option<(u64, Arc<ProtectedMatcher>)>> =
+        const { RefCell::new(None) };
+}
+
+/// 兼容入口：只按用户保护项判断（不含只读来源）。
+///
+/// 签名保持不变，UI 的 `dedup.rs` 可继续使用；需要只读来源语义时请用
+/// [`ProtectedMatcher::is_protected`]。glob 条目与目录前缀条目都会被匹配。
+pub fn is_protected(path: &Path, protected: &[PathBuf]) -> bool {
+    if protected.is_empty() {
+        return false;
+    }
+    PROTECTED_CACHE.with(|cache| {
+        let mut hasher = DefaultHasher::new();
+        protected.hash(&mut hasher);
+        let key = hasher.finish();
+        let mut cache = cache.borrow_mut();
+        let matcher = match cache.as_ref() {
+            Some((cached, matcher)) if *cached == key => matcher.clone(),
+            _ => {
+                let matcher = Arc::new(ProtectedMatcher::new(protected, &[]));
+                *cache = Some((key, matcher.clone()));
+                matcher
+            }
+        };
+        matcher.is_protected(path)
+    })
+}
+
+fn pick_protected_keeper(assets: &[Asset], protected: &ProtectedMatcher) -> Option<PathBuf> {
     let mut candidates = assets
         .iter()
-        .filter(|asset| is_protected(&asset.path, protected))
+        .filter(|asset| protected.is_protected(&asset.path))
         .collect::<Vec<_>>();
     if candidates.is_empty() {
         return None;
@@ -537,6 +768,8 @@ pub struct DedupState {
     pub similar_scanning: bool,
     pub similar_threshold: u8,
     pub protected_paths: Vec<PathBuf>,
+    read_only_roots: Vec<PathBuf>,
+    protected: ProtectedMatcher,
     reviews: HashMap<String, DuplicateReview>,
     /// 测试用：监听批次增量刷新的实际执行次数；每批应只增加一次。
     #[cfg(test)]
@@ -552,6 +785,8 @@ impl Default for DedupState {
             similar_scanning: false,
             similar_threshold: DEFAULT_SIMILAR_THRESHOLD,
             protected_paths: Vec::new(),
+            read_only_roots: Vec::new(),
+            protected: ProtectedMatcher::default(),
             reviews: HashMap::new(),
             #[cfg(test)]
             exact_refresh_count: 0,
@@ -577,17 +812,33 @@ impl DedupState {
     }
 
     pub fn rebuild_exact(&mut self, assets: &[Asset]) {
-        let groups = build_exact_groups(
+        let groups = build_exact_groups_matched(
             assets,
             &self.reviews,
             &self.groups,
-            &self.protected_paths,
+            &self.protected,
         );
         self.groups = Arc::new(groups);
     }
 
     pub fn set_protected_paths(&mut self, paths: Vec<PathBuf>) {
+        self.protected = ProtectedMatcher::new(&paths, &self.read_only_roots);
         self.protected_paths = paths;
+    }
+
+    /// 更新只读本地来源（Immich/WebDAV 由虚拟路径前缀直接识别）。
+    pub fn set_read_only_roots(&mut self, roots: Vec<PathBuf>) {
+        self.read_only_roots = roots;
+        self.protected = ProtectedMatcher::new(&self.protected_paths, &self.read_only_roots);
+    }
+
+    pub fn protected_matcher(&self) -> &ProtectedMatcher {
+        &self.protected
+    }
+
+    /// 统一保护判定：用户保护项（目录/glob）或只读来源。
+    pub fn is_protected(&self, path: &Path) -> bool {
+        self.protected.is_protected(path)
     }
 
     pub fn clear_groups(&mut self) {
@@ -688,7 +939,7 @@ impl DedupState {
                 continue;
             }
             let (suggested, suggested_reason) =
-                suggest_exact_keeper(&members, &self.protected_paths);
+                suggest_exact_keeper(&members, &self.protected);
             rebuilt.push(make_group(
                 GroupKind::Exact,
                 key.clone(),
@@ -697,7 +948,7 @@ impl DedupState {
                 &old_keepers,
                 suggested,
                 suggested_reason,
-                &self.protected_paths,
+                &self.protected,
             ));
         }
 
@@ -821,11 +1072,22 @@ impl DedupState {
     }
 }
 
+#[cfg(test)]
 fn build_exact_groups(
     assets: &[Asset],
     reviews: &HashMap<String, DuplicateReview>,
     old_groups: &[DuplicateGroup],
     protected: &[PathBuf],
+) -> Vec<DuplicateGroup> {
+    let matcher = ProtectedMatcher::new(protected, &[]);
+    build_exact_groups_matched(assets, reviews, old_groups, &matcher)
+}
+
+fn build_exact_groups_matched(
+    assets: &[Asset],
+    reviews: &HashMap<String, DuplicateReview>,
+    old_groups: &[DuplicateGroup],
+    protected: &ProtectedMatcher,
 ) -> Vec<DuplicateGroup> {
     let mut by_hash: HashMap<&str, Vec<Asset>> = HashMap::new();
     for asset in assets {
@@ -864,6 +1126,18 @@ pub fn compute_similar_groups(
     reviews: &HashMap<String, DuplicateReview>,
     old_groups: &[DuplicateGroup],
     protected: &[PathBuf],
+) -> Vec<DuplicateGroup> {
+    let matcher = ProtectedMatcher::new(protected, &[]);
+    compute_similar_groups_matched(assets, threshold, reviews, old_groups, &matcher)
+}
+
+/// 与 [`compute_similar_groups`] 相同，但使用统一保护判定（含只读来源）。
+pub fn compute_similar_groups_matched(
+    assets: &[Asset],
+    threshold: u8,
+    reviews: &HashMap<String, DuplicateReview>,
+    old_groups: &[DuplicateGroup],
+    protected: &ProtectedMatcher,
 ) -> Vec<DuplicateGroup> {
     let items = assets
         .iter()
@@ -913,7 +1187,7 @@ fn make_group(
     old_keepers: &HashMap<String, PathBuf>,
     suggested: PathBuf,
     suggested_reason: String,
-    protected: &[PathBuf],
+    protected: &ProtectedMatcher,
 ) -> DuplicateGroup {
     let signature = group_signature(kind, &members);
     let member_count = members.len();
@@ -933,10 +1207,10 @@ fn make_group(
         .filter(|path| members.iter().any(|asset| &asset.path == path));
     let has_protected = members
         .iter()
-        .any(|asset| is_protected(&asset.path, protected));
+        .any(|asset| protected.is_protected(&asset.path));
     let keeper = if has_protected {
         old_keeper
-            .filter(|path| is_protected(path, protected))
+            .filter(|path| protected.is_protected(path))
             .unwrap_or_else(|| suggested.clone())
     } else {
         old_keeper.unwrap_or_else(|| suggested.clone())
@@ -1004,7 +1278,7 @@ fn group_signature(kind: GroupKind, assets: &[Asset]) -> String {
     }
 }
 
-fn suggest_exact_keeper(assets: &[Asset], protected: &[PathBuf]) -> (PathBuf, String) {
+fn suggest_exact_keeper(assets: &[Asset], protected: &ProtectedMatcher) -> (PathBuf, String) {
     if let Some(path) = pick_protected_keeper(assets, protected) {
         return (path, "保护路径".to_string());
     }
@@ -1027,7 +1301,7 @@ fn suggest_exact_keeper(assets: &[Asset], protected: &[PathBuf]) -> (PathBuf, St
     fallback_keeper(assets)
 }
 
-fn suggest_similar_keeper(assets: &[Asset], protected: &[PathBuf]) -> (PathBuf, String) {
+fn suggest_similar_keeper(assets: &[Asset], protected: &ProtectedMatcher) -> (PathBuf, String) {
     if let Some(path) = pick_protected_keeper(assets, protected) {
         return (path, "保护路径".to_string());
     }
@@ -1662,6 +1936,89 @@ mod tests {
             &protected
         ));
         assert!(!is_protected(Path::new("C:/other/b.png"), &protected));
+    }
+
+    #[test]
+    fn protected_globs_match_separators_case_and_directories() {
+        let matcher = ProtectedMatcher::new(
+            &[PathBuf::from("C:/lib/**/cache/**"), PathBuf::from("D:/原图/*.psd")],
+            &[],
+        );
+        assert!(matcher.matches_entry(Path::new("C:/lib/2024/cache/a.png")));
+        assert!(matcher.matches_entry(Path::new("C:/lib/cache/a.png")));
+        assert!(matcher.matches_entry(Path::new("D:/原图/海报.psd")));
+        assert!(!matcher.matches_entry(Path::new("E:/lib/2024/cache/a.png")));
+        assert!(!matcher.matches_entry(Path::new("D:/原图/海报.png")));
+        #[cfg(windows)]
+        {
+            // Windows 下大小写与 `/`、`\` 等价。
+            assert!(matcher.matches_entry(Path::new(r"C:\LIB\2024\CACHE\A.PNG")));
+            assert!(matcher.matches_entry(Path::new("d:/原图/海报.PSD")));
+        }
+
+        // glob 命中目录时，其下资产也受保护。
+        let directory = ProtectedMatcher::new(&[PathBuf::from("C:/lib/2024*")], &[]);
+        assert!(directory.matches_entry(Path::new("C:/lib/2024-01/a.png")));
+        assert!(!directory.matches_entry(Path::new("C:/lib/2025-01/a.png")));
+    }
+
+    #[test]
+    fn relative_protected_glob_matches_any_depth() {
+        let matcher = ProtectedMatcher::new(&[PathBuf::from("*.psd")], &[]);
+        assert!(matcher.matches_entry(Path::new("C:/lib/a.psd")));
+        assert!(matcher.matches_entry(Path::new("C:/lib/sub/deep/a.psd")));
+        assert!(!matcher.matches_entry(Path::new("C:/lib/a.png")));
+    }
+
+    #[test]
+    fn invalid_protected_glob_is_rejected_or_degrades_to_literal() {
+        let invalid = PathBuf::from("C:/lib/[");
+        assert!(validate_protected_entry(&invalid).is_err());
+        // 启动加载时非法 glob 不应让状态构建失败，而是退化为普通路径。
+        let matcher = ProtectedMatcher::new(&[invalid], &[]);
+        assert!(matcher.matches_entry(Path::new("C:/lib/[/a.png")));
+    }
+
+    #[test]
+    fn read_only_sources_are_protected_and_win_keeper_selection() {
+        #[cfg(windows)]
+        assert!(protected_entries_equal(
+            Path::new("C:/Archive"),
+            Path::new("c:/archive/")
+        ));
+        #[cfg(not(windows))]
+        assert!(!protected_entries_equal(
+            Path::new("C:/Archive"),
+            Path::new("c:/archive/")
+        ));
+
+        let read_only = ProtectedMatcher::new(&[], &[PathBuf::from("C:/archive")]);
+        assert!(read_only.is_protected(Path::new("C:/archive/a.png")));
+        assert_eq!(
+            read_only.read_only_kind(Path::new("C:/archive/a.png")),
+            Some(SourceKind::Local)
+        );
+        assert_eq!(
+            read_only.read_only_kind(Path::new("immich://asset-1")),
+            Some(SourceKind::Immich)
+        );
+        assert_eq!(
+            read_only.read_only_kind(Path::new("webdav://3/a.png")),
+            Some(SourceKind::WebDav)
+        );
+        assert!(!read_only.is_protected(Path::new("C:/lib/a.png")));
+
+        let assets = vec![
+            asset_with("C:/lib/a.png", "same", 1, 500, 20, 400, 400, 5),
+            asset_with("C:/archive/b.png", "same", 1, 100, 10, 100, 100, 0),
+        ];
+        let groups = build_exact_groups_matched(&assets, &HashMap::new(), &[], &read_only);
+        assert_eq!(
+            groups[0].keeper.as_deref(),
+            Some(Path::new("C:/archive/b.png")),
+            "只读来源应优先保留"
+        );
+        assert_eq!(groups[0].suggested_reason, "保护路径");
     }
 
     #[test]
