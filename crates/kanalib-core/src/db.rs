@@ -21,6 +21,7 @@ use crate::model::{
     TagSummary, TagThresholds, candidate_limit, day_number, default_category_thresholds,
     media_kind, normalize_tag_name,
 };
+use crate::undo::{TagOrigin, TagSnapshot};
 
 /// v10：`assets.media_kind`（F-040 视频）。v9 及更早的库没有该列，必须在
 /// `migrate` 里用 `ALTER TABLE ... DEFAULT 'image'` 补齐，否则任何读取
@@ -1673,6 +1674,28 @@ impl Db {
         Ok(totals)
     }
 
+    /// 撤销前抓取收藏/星级旧值；不存在的路径不会出现在结果里。
+    pub fn asset_marks(&self, paths: &[PathBuf]) -> Result<HashMap<PathBuf, (bool, u8)>> {
+        let mut statement = self
+            .conn
+            .prepare("SELECT favorite, star FROM assets WHERE path = ?1")?;
+        let mut marks = HashMap::new();
+        for path in paths {
+            let found = statement
+                .query_row([path.to_string_lossy().to_string()], |row| {
+                    Ok((
+                        row.get::<_, i64>(0)? != 0,
+                        row.get::<_, i64>(1)?.clamp(0, 5) as u8,
+                    ))
+                })
+                .optional()?;
+            if let Some(mark) = found {
+                marks.insert(path.clone(), mark);
+            }
+        }
+        Ok(marks)
+    }
+
     pub fn set_favorite(&self, paths: &[PathBuf], favorite: bool) -> Result<usize> {
         let tx = self.conn.unchecked_transaction()?;
         let mut statement = tx.prepare("UPDATE assets SET favorite = ?1 WHERE path = ?2")?;
@@ -1681,6 +1704,20 @@ impl Db {
             updated += statement.execute(params![favorite as i64, path.to_string_lossy()])?;
         }
         drop(statement);
+        tx.commit()?;
+        Ok(updated)
+    }
+
+    /// 撤销恢复：每个路径写回各自的旧值，一条事务内完成。
+    pub fn set_favorite_values(&self, values: &[(PathBuf, bool)]) -> Result<usize> {
+        let tx = self.conn.unchecked_transaction()?;
+        let mut updated = 0;
+        {
+            let mut statement = tx.prepare("UPDATE assets SET favorite = ?1 WHERE path = ?2")?;
+            for (path, favorite) in values {
+                updated += statement.execute(params![*favorite as i64, path.to_string_lossy()])?;
+            }
+        }
         tx.commit()?;
         Ok(updated)
     }
@@ -1698,7 +1735,33 @@ impl Db {
         Ok(updated)
     }
 
+    /// 撤销恢复：每个路径写回各自的旧星级，一条事务内完成。
+    pub fn set_star_values(&self, values: &[(PathBuf, u8)]) -> Result<usize> {
+        let tx = self.conn.unchecked_transaction()?;
+        let mut updated = 0;
+        {
+            let mut statement = tx.prepare("UPDATE assets SET star = ?1 WHERE path = ?2")?;
+            for (path, star) in values {
+                updated +=
+                    statement.execute(params![(*star).min(5) as i64, path.to_string_lossy()])?;
+            }
+        }
+        tx.commit()?;
+        Ok(updated)
+    }
+
     pub fn add_manual_tags(&self, paths: &[PathBuf], name: &str, category: &str) -> Result<usize> {
+        Ok(self.add_manual_tags_tracked(paths, name, category)?.len())
+    }
+
+    /// 与 [`Db::add_manual_tags`] 相同，但返回真正插入了 manual 行的路径，
+    /// 供撤销栈只记录实际变化。
+    pub(crate) fn add_manual_tags_tracked(
+        &self,
+        paths: &[PathBuf],
+        name: &str,
+        category: &str,
+    ) -> Result<Vec<PathBuf>> {
         let name = normalize_tag_name(name);
         if name.is_empty() {
             bail!("标签名不能为空");
@@ -1709,7 +1772,7 @@ impl Db {
             category.trim()
         };
         let tx = self.conn.unchecked_transaction()?;
-        let mut updated = 0;
+        let mut inserted_paths = Vec::new();
         for path in paths {
             let asset_id: Option<i64> = tx
                 .query_row(
@@ -1738,11 +1801,11 @@ impl Db {
             )?;
             if inserted > 0 {
                 refresh_tags_text(&tx, asset_id)?;
-                updated += 1;
+                inserted_paths.push(path.clone());
             }
         }
         tx.commit()?;
-        Ok(updated)
+        Ok(inserted_paths)
     }
 
     pub fn remove_tags(&self, paths: &[PathBuf], name: &str) -> Result<usize> {
@@ -1785,6 +1848,155 @@ impl Db {
         }
         tx.commit()?;
         Ok(updated)
+    }
+
+    /// 移除前抓取该标签的 auto/manual 行（类别、分数、词表索引与 origin），
+    /// 供撤销精确恢复；别名会先解析到规范标签。
+    pub fn tag_snapshots(&self, paths: &[PathBuf], name: &str) -> Result<Vec<TagSnapshot>> {
+        let name = normalize_tag_name(name);
+        if name.is_empty() {
+            return Ok(Vec::new());
+        }
+        let tag_id: Option<i64> = self
+            .conn
+            .query_row(
+                "SELECT COALESCE(alias_of, id) FROM tags WHERE name = ?1",
+                [name.as_str()],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let Some(tag_id) = tag_id else {
+            return Ok(Vec::new());
+        };
+        let mut asset_statement = self.conn.prepare("SELECT id FROM assets WHERE path = ?1")?;
+        let mut row_statement = self.conn.prepare(
+            "SELECT t.name, t.category, at.confidence, t.vocab_index, at.origin
+             FROM asset_tags at JOIN tags t ON t.id = at.tag_id
+             WHERE at.asset_id = ?1 AND at.tag_id = ?2
+             ORDER BY at.origin, t.name",
+        )?;
+        let mut snapshots = Vec::new();
+        for path in paths {
+            let asset_id: Option<i64> = asset_statement
+                .query_row([path.to_string_lossy().to_string()], |row| row.get(0))
+                .optional()?;
+            let Some(asset_id) = asset_id else {
+                continue;
+            };
+            let rows = row_statement.query_map(params![asset_id, tag_id], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, f64>(2)? as f32,
+                    row.get::<_, Option<i64>>(3)?.map(|value| value as u32),
+                    row.get::<_, String>(4)?,
+                ))
+            })?;
+            for row in rows {
+                let (tag, category, score, vocab_index, origin) = row?;
+                let Some(origin) = TagOrigin::from_db(&origin) else {
+                    log::warn!("skip unknown asset_tags origin: {origin}");
+                    continue;
+                };
+                snapshots.push(TagSnapshot {
+                    path: path.clone(),
+                    tag,
+                    category,
+                    score,
+                    vocab_index,
+                    origin,
+                });
+            }
+        }
+        Ok(snapshots)
+    }
+
+    /// 撤销“手工添加标签”：只删除 `origin = 'manual'` 的同名行，
+    /// 同名自动标签必须原样保留。
+    pub fn remove_manual_tags(&self, paths: &[PathBuf], name: &str) -> Result<usize> {
+        let name = normalize_tag_name(name);
+        if name.is_empty() {
+            return Ok(0);
+        }
+        let tx = self.conn.unchecked_transaction()?;
+        let tag_id: Option<i64> = tx
+            .query_row(
+                "SELECT COALESCE(alias_of, id) FROM tags WHERE name = ?1",
+                [name.as_str()],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let Some(tag_id) = tag_id else {
+            return Ok(0);
+        };
+        let mut updated = 0;
+        for path in paths {
+            let asset_id: Option<i64> = tx
+                .query_row(
+                    "SELECT id FROM assets WHERE path = ?1",
+                    [path.to_string_lossy().to_string()],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            let Some(asset_id) = asset_id else {
+                continue;
+            };
+            let removed = tx.execute(
+                "DELETE FROM asset_tags
+                 WHERE asset_id = ?1 AND tag_id = ?2 AND origin = 'manual'",
+                params![asset_id, tag_id],
+            )?;
+            if removed > 0 {
+                refresh_tags_text(&tx, asset_id)?;
+                updated += 1;
+            }
+        }
+        tx.commit()?;
+        Ok(updated)
+    }
+
+    /// 撤销“移除标签”：按快照把 auto/manual 行插回或覆盖，然后刷新 FTS
+    /// 与自动标签 JSON；一条事务内完成，失败不会留下半套标签。
+    pub fn restore_tag_rows(&self, rows: &[TagSnapshot]) -> Result<usize> {
+        if rows.is_empty() {
+            return Ok(0);
+        }
+        let tx = self.conn.unchecked_transaction()?;
+        let mut restored = 0;
+        let mut assets = HashSet::new();
+        for row in rows {
+            let asset_id: Option<i64> = tx
+                .query_row(
+                    "SELECT id FROM assets WHERE path = ?1",
+                    [row.path.to_string_lossy().to_string()],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            let Some(asset_id) = asset_id else {
+                continue;
+            };
+            let hit = TagHit {
+                tag: row.tag.clone(),
+                category: row.category.clone(),
+                score: row.score,
+                vocab_index: row.vocab_index,
+            };
+            let tag_id = upsert_tag(&tx, &hit)?;
+            restored += tx.execute(
+                "INSERT INTO asset_tags(asset_id, tag_id, confidence, origin)
+                 VALUES(?1, ?2, ?3, ?4)
+                 ON CONFLICT(asset_id, tag_id, origin) DO UPDATE SET
+                    confidence = excluded.confidence",
+                params![asset_id, tag_id, row.score as f64, row.origin.as_str()],
+            )?;
+            assets.insert(asset_id);
+        }
+        for asset_id in assets {
+            refresh_auto_tags_json(&tx, asset_id)?;
+            refresh_tags_text(&tx, asset_id)?;
+        }
+        tx.commit()?;
+        Ok(restored)
     }
 
     pub fn list_tags(&self, folder: &str) -> Result<Vec<TagSummary>> {

@@ -13,6 +13,7 @@ pub mod sidecar;
 pub mod sources;
 pub mod state;
 pub mod trash;
+pub mod undo;
 pub mod watch;
 
 #[cfg(feature = "frame-profiler")]

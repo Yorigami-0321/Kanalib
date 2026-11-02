@@ -33,6 +33,7 @@ use crate::sources::{
     SourceStatus, SourceSyncContext, SourceSyncReport, WebDavConfig, WebDavSource, is_remote_path,
     read_only_local_roots, source_infos,
 };
+use crate::undo::{UndoAction, UndoEntry, UndoOutcome, UndoStack};
 use crate::watch;
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -71,6 +72,8 @@ pub struct AppState {
     backup_scheduler: Mutex<Option<Arc<AtomicBool>>>,
     /// 备份运行时快照；UI 通过 [`AppState::backup_status`] 只读。
     backup_runtime: Mutex<BackupStatus>,
+    /// 会话内撤销栈；只在内存，不跨重启持久化。
+    undo: Mutex<UndoStack>,
     /// 来源凭据（API key 只在 Windows Credential Manager / 注入后端）。
     credentials: Credentials,
     db_path: PathBuf,
@@ -333,6 +336,7 @@ impl AppState {
                 last_error: restore_error,
                 ..BackupStatus::default()
             }),
+            undo: Mutex::new(UndoStack::default()),
             credentials,
             db_path,
             cache_dir,
@@ -1288,34 +1292,29 @@ impl AppState {
         if paths.is_empty() {
             return Ok(0);
         }
-        let updated = Db::open(&self.db_path)?.set_favorite(paths, favorite)?;
-        let targets = paths.iter().map(PathBuf::as_path).collect::<HashSet<_>>();
-        let mut shared = self.shared.lock().unwrap();
-        let Shared {
-            assets,
-            counts,
-            revision,
-            status,
-            error,
-            ..
-        } = &mut *shared;
-        {
-            let mut assets = assets.write().unwrap();
-            for asset in assets.iter_mut() {
-                if targets.contains(asset.path.as_path()) && asset.favorite != favorite {
-                    counts.remove(asset);
-                    asset.favorite = favorite;
-                    counts.add(asset);
-                }
+        let before = Db::open(&self.db_path)?.asset_marks(paths)?;
+        let targets = before
+            .keys()
+            .map(|path| (path.clone(), favorite))
+            .collect::<Vec<_>>();
+        let changes = before
+            .iter()
+            .filter(|(_, (current, _))| *current != favorite)
+            .map(|(path, (current, _))| (path.clone(), *current))
+            .collect::<Vec<_>>();
+        let updated = self.apply_favorite_values(&targets, |updated| {
+            if favorite {
+                format!("已收藏 {updated} 张")
+            } else {
+                format!("已取消收藏 {updated} 张")
             }
+        })?;
+        if !changes.is_empty() {
+            self.record_undo(
+                if favorite { "收藏" } else { "取消收藏" },
+                UndoAction::Favorite { changes },
+            );
         }
-        *revision = revision.wrapping_add(1);
-        *status = if favorite {
-            format!("已收藏 {updated} 张")
-        } else {
-            format!("已取消收藏 {updated} 张")
-        };
-        *error = None;
         Ok(updated)
     }
 
@@ -1324,31 +1323,33 @@ impl AppState {
             return Ok(0);
         }
         let star = star.min(5);
-        let updated = Db::open(&self.db_path)?.set_star(paths, star)?;
-        let targets = paths.iter().map(PathBuf::as_path).collect::<HashSet<_>>();
-        let mut shared = self.shared.lock().unwrap();
-        let Shared {
-            assets,
-            revision,
-            status,
-            error,
-            ..
-        } = &mut *shared;
-        {
-            let mut assets = assets.write().unwrap();
-            for asset in assets.iter_mut() {
-                if targets.contains(asset.path.as_path()) {
-                    asset.star = star;
-                }
+        let before = Db::open(&self.db_path)?.asset_marks(paths)?;
+        let targets = before
+            .keys()
+            .map(|path| (path.clone(), star))
+            .collect::<Vec<_>>();
+        let changes = before
+            .iter()
+            .filter(|(_, (_, current))| *current != star)
+            .map(|(path, (_, current))| (path.clone(), *current))
+            .collect::<Vec<_>>();
+        let updated = self.apply_star_values(&targets, |updated| {
+            if star == 0 {
+                format!("已清除 {updated} 张的星级")
+            } else {
+                format!("已设置 {updated} 张为 {star} 星")
             }
+        })?;
+        if !changes.is_empty() {
+            self.record_undo(
+                if star == 0 {
+                    "清除星级".to_string()
+                } else {
+                    format!("设置 {star} 星")
+                },
+                UndoAction::Star { changes },
+            );
         }
-        *revision = revision.wrapping_add(1);
-        *status = if star == 0 {
-            format!("已清除 {updated} 张的星级")
-        } else {
-            format!("已设置 {updated} 张为 {star} 星")
-        };
-        *error = None;
         Ok(updated)
     }
 
@@ -1378,39 +1379,55 @@ impl AppState {
         if to_add.is_empty() {
             return Ok(0);
         }
-        let updated = Db::open(&self.db_path)?.add_manual_tags(&to_add, &name, "manual")?;
-        let added = to_add.iter().map(PathBuf::as_path).collect::<HashSet<_>>();
-        let mut shared = self.shared.lock().unwrap();
-        let Shared {
-            assets,
-            counts,
-            revision,
-            status,
-            error,
-            ..
-        } = &mut *shared;
+        let inserted =
+            Db::open(&self.db_path)?.add_manual_tags_tracked(&to_add, &name, "manual")?;
+        let updated = inserted.len();
+        let added = inserted
+            .iter()
+            .map(PathBuf::as_path)
+            .collect::<HashSet<_>>();
         {
-            let mut assets = assets.write().unwrap();
-            for asset in assets.iter_mut() {
-                if added.contains(asset.path.as_path())
-                    && !asset
-                        .all_tags()
-                        .any(|tag| tag.tag.eq_ignore_ascii_case(&name))
-                {
-                    counts.remove(asset);
-                    asset.manual_tags.push(TagHit {
-                        tag: name.clone(),
-                        category: "manual".into(),
-                        score: 1.0,
-                        vocab_index: None,
-                    });
-                    counts.add(asset);
+            let mut shared = self.shared.lock().unwrap();
+            let Shared {
+                assets,
+                counts,
+                revision,
+                status,
+                error,
+                ..
+            } = &mut *shared;
+            {
+                let mut assets = assets.write().unwrap();
+                for asset in assets.iter_mut() {
+                    if added.contains(asset.path.as_path())
+                        && !asset
+                            .all_tags()
+                            .any(|tag| tag.tag.eq_ignore_ascii_case(&name))
+                    {
+                        counts.remove(asset);
+                        asset.manual_tags.push(TagHit {
+                            tag: name.clone(),
+                            category: "manual".into(),
+                            score: 1.0,
+                            vocab_index: None,
+                        });
+                        counts.add(asset);
+                    }
                 }
             }
+            *revision = revision.wrapping_add(1);
+            *status = format!("已为 {updated} 张添加标签 #{name}");
+            *error = None;
         }
-        *revision = revision.wrapping_add(1);
-        *status = format!("已为 {updated} 张添加标签 #{name}");
-        *error = None;
+        if !inserted.is_empty() {
+            self.record_undo(
+                format!("添加标签 #{name}"),
+                UndoAction::ManualTagsAdded {
+                    paths: inserted,
+                    name,
+                },
+            );
+        }
         Ok(updated)
     }
 
@@ -1419,43 +1436,177 @@ impl AppState {
         if name.is_empty() || paths.is_empty() {
             return Ok(0);
         }
-        let updated = Db::open(&self.db_path)?.remove_tags(paths, &name)?;
-        let targets = paths.iter().map(PathBuf::as_path).collect::<HashSet<_>>();
+        let db = Db::open(&self.db_path)?;
+        let rows = db.tag_snapshots(paths, &name)?;
+        let updated = db.remove_tags(paths, &name)?;
+        drop(db);
+        {
+            let targets = paths.iter().map(PathBuf::as_path).collect::<HashSet<_>>();
+            let mut shared = self.shared.lock().unwrap();
+            let Shared {
+                assets,
+                counts,
+                revision,
+                status,
+                error,
+                ..
+            } = &mut *shared;
+            {
+                let mut assets = assets.write().unwrap();
+                for asset in assets.iter_mut() {
+                    if !targets.contains(asset.path.as_path()) {
+                        continue;
+                    }
+                    let has_tag = asset
+                        .all_tags()
+                        .any(|tag| tag.tag.eq_ignore_ascii_case(&name));
+                    if !has_tag {
+                        continue;
+                    }
+                    counts.remove(asset);
+                    asset
+                        .tags
+                        .retain(|tag| !tag.tag.eq_ignore_ascii_case(&name));
+                    asset
+                        .manual_tags
+                        .retain(|tag| !tag.tag.eq_ignore_ascii_case(&name));
+                    counts.add(asset);
+                }
+            }
+            *revision = revision.wrapping_add(1);
+            *status = format!("已从 {updated} 张移除标签 #{name}");
+            *error = None;
+        }
+        if updated > 0 && !rows.is_empty() {
+            self.record_undo(
+                format!("移除标签 #{name}"),
+                UndoAction::TagsRemoved { name, rows },
+            );
+        }
+        Ok(updated)
+    }
+
+    /// 收藏 mutation 的内部 apply；撤销复用它但不再记录新条目。
+    fn apply_favorite_values<F>(&self, values: &[(PathBuf, bool)], status: F) -> Result<usize>
+    where
+        F: FnOnce(usize) -> String,
+    {
+        let updated = Db::open(&self.db_path)?.set_favorite_values(values)?;
+        let targets = values
+            .iter()
+            .map(|(path, value)| (path.as_path(), *value))
+            .collect::<HashMap<_, _>>();
         let mut shared = self.shared.lock().unwrap();
         let Shared {
             assets,
             counts,
             revision,
-            status,
+            status: shared_status,
             error,
             ..
         } = &mut *shared;
         {
             let mut assets = assets.write().unwrap();
             for asset in assets.iter_mut() {
-                if !targets.contains(asset.path.as_path()) {
-                    continue;
+                if let Some(&value) = targets.get(asset.path.as_path())
+                    && asset.favorite != value
+                {
+                    counts.remove(asset);
+                    asset.favorite = value;
+                    counts.add(asset);
                 }
-                let has_tag = asset
-                    .all_tags()
-                    .any(|tag| tag.tag.eq_ignore_ascii_case(&name));
-                if !has_tag {
-                    continue;
-                }
-                counts.remove(asset);
-                asset
-                    .tags
-                    .retain(|tag| !tag.tag.eq_ignore_ascii_case(&name));
-                asset
-                    .manual_tags
-                    .retain(|tag| !tag.tag.eq_ignore_ascii_case(&name));
-                counts.add(asset);
             }
         }
         *revision = revision.wrapping_add(1);
-        *status = format!("已从 {updated} 张移除标签 #{name}");
+        *shared_status = status(updated);
         *error = None;
         Ok(updated)
+    }
+
+    /// 星级 mutation 的内部 apply；撤销复用它但不再记录新条目。
+    fn apply_star_values<F>(&self, values: &[(PathBuf, u8)], status: F) -> Result<usize>
+    where
+        F: FnOnce(usize) -> String,
+    {
+        let updated = Db::open(&self.db_path)?.set_star_values(values)?;
+        let targets = values
+            .iter()
+            .map(|(path, value)| (path.as_path(), (*value).min(5)))
+            .collect::<HashMap<_, _>>();
+        let mut shared = self.shared.lock().unwrap();
+        let Shared {
+            assets,
+            revision,
+            status: shared_status,
+            error,
+            ..
+        } = &mut *shared;
+        {
+            let mut assets = assets.write().unwrap();
+            for asset in assets.iter_mut() {
+                if let Some(&value) = targets.get(asset.path.as_path()) {
+                    asset.star = value;
+                }
+            }
+        }
+        *revision = revision.wrapping_add(1);
+        *shared_status = status(updated);
+        *error = None;
+        Ok(updated)
+    }
+
+    fn record_undo(&self, label: impl Into<String>, action: UndoAction) {
+        self.undo.lock().unwrap().record(label, action);
+    }
+
+    pub fn can_undo(&self) -> bool {
+        self.undo.lock().unwrap().can_undo()
+    }
+
+    pub fn undo_depth(&self) -> usize {
+        self.undo.lock().unwrap().depth()
+    }
+
+    pub fn peek_undo_label(&self) -> Option<String> {
+        self.undo.lock().unwrap().peek_label().map(str::to_string)
+    }
+
+    /// 撤销上一条可逆编辑；失败时条目保留，本次改动已由 DB 事务保证不半写。
+    pub fn undo_last(&self) -> Result<UndoOutcome> {
+        let mut undo = self.undo.lock().unwrap();
+        undo.undo_last(|entry| self.apply_undo(entry))
+    }
+
+    fn apply_undo(&self, entry: &UndoEntry) -> Result<usize> {
+        match &entry.action {
+            UndoAction::Favorite { changes } => self.apply_favorite_values(changes, |updated| {
+                format!("已撤销「{}」· 恢复 {updated} 张收藏", entry.label)
+            }),
+            UndoAction::Star { changes } => self.apply_star_values(changes, |updated| {
+                format!("已撤销「{}」· 恢复 {updated} 张星级", entry.label)
+            }),
+            UndoAction::ManualTagsAdded { paths, name } => {
+                let affected = Db::open(&self.db_path)?.remove_manual_tags(paths, name)?;
+                self.reload_after_tag_change(format!(
+                    "已撤销「{}」· 移除手工标签 #{name} · {affected} 张",
+                    entry.label
+                ))?;
+                Ok(affected)
+            }
+            UndoAction::TagsRemoved { rows, .. } => {
+                Db::open(&self.db_path)?.restore_tag_rows(rows)?;
+                let affected = rows
+                    .iter()
+                    .map(|row| row.path.as_path())
+                    .collect::<HashSet<_>>()
+                    .len();
+                self.reload_after_tag_change(format!(
+                    "已撤销「{}」· 恢复 {affected} 张的标签",
+                    entry.label
+                ))?;
+                Ok(affected)
+            }
+        }
     }
 
     pub fn setting(&self, key: &str) -> Option<String> {
@@ -7916,5 +8067,391 @@ mod tests {
             }
         }
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn undo_state(tag: &str, names: &[&str]) -> (PathBuf, PathBuf, Arc<AppState>) {
+        let (base, lib, state) = test_state(tag);
+        for (index, name) in names.iter().enumerate() {
+            write_test_image(&lib.join(name), [index as u8 + 1, 2, 3]);
+        }
+        state.scan_blocking(true).unwrap();
+        (base, lib, state)
+    }
+
+    fn db_asset(state: &Arc<AppState>, path: &Path) -> Asset {
+        Db::open(&state.db_path())
+            .unwrap()
+            .load_asset(path)
+            .unwrap()
+    }
+
+    fn memory_asset(state: &Arc<AppState>, path: &Path) -> Asset {
+        let shared = state.shared.lock().unwrap();
+        let assets = shared.assets.read().unwrap();
+        assets
+            .iter()
+            .find(|asset| asset.path == path)
+            .cloned()
+            .unwrap()
+    }
+
+    fn set_auto_tags(state: &Arc<AppState>, path: &Path, tags: &[TagHit]) {
+        let db = Db::open(&state.db_path()).unwrap();
+        let mut asset = db.load_asset(path).unwrap();
+        asset.tagged = true;
+        asset.tags = tags.to_vec();
+        if asset.group.is_empty() {
+            asset.group = "测试".into();
+        }
+        if asset.rating.is_empty() {
+            asset.rating = "S".into();
+        }
+        db.update_tags(&asset).unwrap();
+        state.reload_after_tag_change("测试初始化".into()).unwrap();
+    }
+
+    fn favorite_count(state: &Arc<AppState>) -> usize {
+        state.shared.lock().unwrap().counts.view().favorites
+    }
+
+    #[test]
+    fn undo_favorite_batch_restores_mixed_before_values_and_counts() {
+        let (base, lib, state) = undo_state("undo-favorite", &["a.png", "b.png"]);
+        let a = lib.join("a.png");
+        let b = lib.join("b.png");
+        Db::open(&state.db_path())
+            .unwrap()
+            .set_favorite(std::slice::from_ref(&a), true)
+            .unwrap();
+        state.reload_after_tag_change("测试初始化".into()).unwrap();
+        assert_eq!(favorite_count(&state), 1);
+        let revision = state.shared.lock().unwrap().revision;
+
+        assert_eq!(
+            state.set_favorite(&[a.clone(), b.clone()], false).unwrap(),
+            2
+        );
+        assert_eq!(state.undo_depth(), 1);
+        assert_eq!(state.peek_undo_label().as_deref(), Some("取消收藏"));
+        assert!(!db_asset(&state, &a).favorite);
+        assert!(!db_asset(&state, &b).favorite);
+        assert_eq!(favorite_count(&state), 0);
+
+        let outcome = state.undo_last().unwrap();
+        assert_eq!(outcome.label, "取消收藏");
+        assert_eq!(outcome.affected, 1, "只有 a 实际变化");
+        assert!(db_asset(&state, &a).favorite);
+        assert!(!db_asset(&state, &b).favorite);
+        assert!(memory_asset(&state, &a).favorite);
+        assert!(!memory_asset(&state, &b).favorite);
+        assert_eq!(favorite_count(&state), 1);
+        assert!(state.shared.lock().unwrap().revision > revision);
+        assert!(!state.can_undo());
+        assert_eq!(state.undo_depth(), 0);
+        cleanup_dir(&base);
+    }
+
+    #[test]
+    fn undo_star_batch_restores_mixed_before_values() {
+        let (base, lib, state) = undo_state("undo-star", &["a.png", "b.png"]);
+        let a = lib.join("a.png");
+        let b = lib.join("b.png");
+        {
+            let db = Db::open(&state.db_path()).unwrap();
+            db.set_star(std::slice::from_ref(&a), 2).unwrap();
+            db.set_star(std::slice::from_ref(&b), 5).unwrap();
+        }
+        state.reload_after_tag_change("测试初始化".into()).unwrap();
+
+        assert_eq!(state.set_star(&[a.clone(), b.clone()], 4).unwrap(), 2);
+        assert_eq!(state.undo_depth(), 1);
+        assert_eq!(state.peek_undo_label().as_deref(), Some("设置 4 星"));
+        assert_eq!(db_asset(&state, &a).star, 4);
+        assert_eq!(db_asset(&state, &b).star, 4);
+
+        let outcome = state.undo_last().unwrap();
+        assert_eq!(outcome.label, "设置 4 星");
+        assert_eq!(outcome.affected, 2);
+        assert_eq!(db_asset(&state, &a).star, 2);
+        assert_eq!(db_asset(&state, &b).star, 5);
+        assert_eq!(memory_asset(&state, &a).star, 2);
+        assert_eq!(memory_asset(&state, &b).star, 5);
+        assert_eq!(state.undo_depth(), 0);
+        cleanup_dir(&base);
+    }
+
+    #[test]
+    fn undo_manual_tag_add_never_removes_same_name_auto_tag() {
+        let (base, lib, state) = undo_state("undo-add-tag", &["a.png", "b.png"]);
+        let a = lib.join("a.png");
+        let b = lib.join("b.png");
+
+        assert_eq!(state.add_tags(std::slice::from_ref(&b), "moon").unwrap(), 1);
+        assert_eq!(
+            state.add_tags(std::slice::from_ref(&a), "sunset").unwrap(),
+            1
+        );
+        assert_eq!(state.undo_depth(), 2);
+        assert_eq!(state.peek_undo_label().as_deref(), Some("添加标签 #sunset"));
+
+        // 手工添加后，同一张图又有同名自动标签；撤销只能删 manual 行。
+        set_auto_tags(
+            &state,
+            &a,
+            &[TagHit {
+                tag: "sunset".into(),
+                category: "general".into(),
+                score: 0.91,
+                vocab_index: Some(3),
+            }],
+        );
+        let outcome = state.undo_last().unwrap();
+        assert_eq!(outcome.affected, 1);
+        let asset = db_asset(&state, &a);
+        assert!(asset.manual_tags.is_empty());
+        let auto = asset
+            .tags
+            .iter()
+            .find(|tag| tag.tag == "sunset")
+            .expect("同名自动标签必须保留");
+        assert_eq!(auto.category, "general");
+        assert!((auto.score - 0.91).abs() < 1e-6);
+        assert_eq!(auto.vocab_index, Some(3));
+        assert!(state.search_paths("sunset").unwrap().contains(&a));
+        let summary = state
+            .list_tags()
+            .unwrap()
+            .into_iter()
+            .find(|tag| tag.name == "sunset")
+            .unwrap();
+        assert_eq!((summary.count, summary.manual_count), (1, 0));
+
+        assert_eq!(state.undo_last().unwrap().affected, 1);
+        assert!(db_asset(&state, &b).manual_tags.is_empty());
+        assert!(!state.search_paths("moon").unwrap().contains(&b));
+        assert_eq!(state.undo_depth(), 0);
+        cleanup_dir(&base);
+    }
+
+    #[test]
+    fn undo_tag_removal_restores_auto_and_manual_rows_exactly() {
+        let (base, lib, state) = undo_state("undo-remove-tag", &["a.png"]);
+        let a = lib.join("a.png");
+        set_auto_tags(
+            &state,
+            &a,
+            &[
+                TagHit {
+                    tag: "long_hair".into(),
+                    category: "general".into(),
+                    score: 0.87,
+                    vocab_index: Some(9),
+                },
+                TagHit {
+                    tag: "dual".into(),
+                    category: "general".into(),
+                    score: 0.66,
+                    vocab_index: None,
+                },
+            ],
+        );
+        {
+            let db = Db::open(&state.db_path()).unwrap();
+            db.add_manual_tags(std::slice::from_ref(&a), "dual", "manual")
+                .unwrap();
+            db.add_manual_tags(std::slice::from_ref(&a), "solo_manual", "manual")
+                .unwrap();
+        }
+        state.reload_after_tag_change("测试初始化".into()).unwrap();
+
+        // 自动标签单独移除：category/score/vocab_index 精确恢复。
+        assert_eq!(
+            state
+                .remove_tags(std::slice::from_ref(&a), "long_hair")
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            state.peek_undo_label().as_deref(),
+            Some("移除标签 #long_hair")
+        );
+        assert!(!state.search_paths("long_hair").unwrap().contains(&a));
+        assert_eq!(state.undo_last().unwrap().affected, 1);
+        let restored = db_asset(&state, &a)
+            .tags
+            .into_iter()
+            .find(|tag| tag.tag == "long_hair")
+            .expect("long_hair 必须恢复");
+        assert_eq!(restored.category, "general");
+        assert!((restored.score - 0.87).abs() < 1e-6);
+        assert_eq!(restored.vocab_index, Some(9));
+        assert!(state.search_paths("long_hair").unwrap().contains(&a));
+        let summary = state
+            .list_tags()
+            .unwrap()
+            .into_iter()
+            .find(|tag| tag.name == "long_hair")
+            .unwrap();
+        assert_eq!(summary.count, 1);
+
+        // auto + manual 同名：两条 asset_tags 行都要按原 origin 恢复。
+        assert_eq!(
+            state.remove_tags(std::slice::from_ref(&a), "dual").unwrap(),
+            1
+        );
+        assert!(
+            !db_asset(&state, &a)
+                .manual_tags
+                .iter()
+                .any(|tag| tag.tag == "dual")
+        );
+        assert!(
+            !db_asset(&state, &a)
+                .tags
+                .iter()
+                .any(|tag| tag.tag == "dual")
+        );
+        assert_eq!(state.undo_last().unwrap().affected, 1);
+        let asset = db_asset(&state, &a);
+        let auto = asset
+            .tags
+            .iter()
+            .find(|tag| tag.tag == "dual")
+            .expect("auto dual 必须恢复");
+        assert!((auto.score - 0.66).abs() < 1e-6);
+        let manual = asset
+            .manual_tags
+            .iter()
+            .find(|tag| tag.tag == "dual")
+            .expect("manual dual 必须恢复");
+        assert!((manual.score - 1.0).abs() < 1e-6);
+        let conn = rusqlite::Connection::open(state.db_path()).unwrap();
+        let origins = conn
+            .prepare(
+                "SELECT at.origin, at.confidence FROM asset_tags at
+                 JOIN assets a ON a.id = at.asset_id
+                 JOIN tags t ON t.id = at.tag_id
+                 WHERE a.path = ?1 AND t.name = 'dual'
+                 ORDER BY at.origin",
+            )
+            .unwrap()
+            .query_map([a.to_string_lossy().to_string()], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, f64>(1)?))
+            })
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap();
+        assert_eq!(origins.len(), 2);
+        assert_eq!(origins[0].0, "auto");
+        assert!((origins[0].1 - 0.66).abs() < 1e-6);
+        assert_eq!(origins[1].0, "manual");
+        assert!((origins[1].1 - 1.0).abs() < 1e-6);
+        assert!(state.search_paths("dual").unwrap().contains(&a));
+
+        // 仅 manual 的标签移除后也能恢复，且类别保持 manual。
+        assert_eq!(
+            state
+                .remove_tags(std::slice::from_ref(&a), "solo_manual")
+                .unwrap(),
+            1
+        );
+        assert!(!state.search_paths("solo_manual").unwrap().contains(&a));
+        assert_eq!(state.undo_last().unwrap().affected, 1);
+        let manual = db_asset(&state, &a)
+            .manual_tags
+            .into_iter()
+            .find(|tag| tag.tag == "solo_manual")
+            .expect("solo_manual 必须恢复");
+        assert_eq!(manual.category, "manual");
+        assert!((manual.score - 1.0).abs() < 1e-6);
+        assert!(state.search_paths("solo_manual").unwrap().contains(&a));
+        assert_eq!(state.undo_depth(), 0);
+        cleanup_dir(&base);
+    }
+
+    #[test]
+    fn batch_mutations_each_record_one_undo_entry_and_unwind_lifo() {
+        let (base, lib, state) = undo_state("undo-batch", &["a.png", "b.png"]);
+        let a = lib.join("a.png");
+        let b = lib.join("b.png");
+        let paths = [a.clone(), b.clone()];
+
+        assert_eq!(state.set_favorite(&paths, true).unwrap(), 2);
+        assert_eq!(state.undo_depth(), 1);
+        assert_eq!(state.set_star(&paths, 3).unwrap(), 2);
+        assert_eq!(state.undo_depth(), 2);
+        assert_eq!(state.add_tags(&paths, "batch").unwrap(), 2);
+        assert_eq!(state.undo_depth(), 3);
+        assert_eq!(state.remove_tags(&paths, "batch").unwrap(), 2);
+        assert_eq!(state.undo_depth(), 4);
+
+        assert_eq!(state.undo_last().unwrap().affected, 2);
+        assert!(
+            db_asset(&state, &a)
+                .manual_tags
+                .iter()
+                .any(|tag| tag.tag == "batch")
+        );
+        assert_eq!(state.undo_depth(), 3);
+        assert_eq!(state.undo_last().unwrap().affected, 2);
+        assert!(db_asset(&state, &a).manual_tags.is_empty());
+        assert_eq!(state.undo_depth(), 2);
+        assert_eq!(state.undo_last().unwrap().affected, 2);
+        assert_eq!(db_asset(&state, &a).star, 0);
+        assert_eq!(db_asset(&state, &b).star, 0);
+        assert_eq!(state.undo_depth(), 1);
+        assert_eq!(state.undo_last().unwrap().affected, 2);
+        assert!(!db_asset(&state, &a).favorite);
+        assert!(!db_asset(&state, &b).favorite);
+        assert_eq!(state.undo_depth(), 0);
+        cleanup_dir(&base);
+    }
+
+    #[test]
+    fn failed_or_noop_mutations_do_not_record_and_empty_undo_errors() {
+        let (base, lib, state) = undo_state("undo-errors", &["a.png"]);
+        let a = lib.join("a.png");
+        let missing = lib.join("missing.png");
+
+        let error = state.undo_last().unwrap_err();
+        assert!(error.to_string().contains("没有可撤销的操作"));
+
+        assert_eq!(
+            state
+                .set_favorite(std::slice::from_ref(&missing), true)
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            state.set_star(std::slice::from_ref(&missing), 2).unwrap(),
+            0
+        );
+        assert_eq!(
+            state
+                .add_tags(std::slice::from_ref(&a), "  ")
+                .unwrap_err()
+                .to_string(),
+            "标签名不能为空"
+        );
+        assert_eq!(
+            state.remove_tags(std::slice::from_ref(&a), "nope").unwrap(),
+            0
+        );
+        assert_eq!(state.undo_depth(), 0);
+
+        // 已是目标值 / 重复添加：返回行数但不算一次可撤销变化。
+        assert_eq!(
+            state.set_favorite(std::slice::from_ref(&a), false).unwrap(),
+            1
+        );
+        assert_eq!(state.set_star(std::slice::from_ref(&a), 0).unwrap(), 1);
+        assert_eq!(state.undo_depth(), 0);
+
+        assert_eq!(state.add_tags(std::slice::from_ref(&a), "once").unwrap(), 1);
+        assert_eq!(state.add_tags(std::slice::from_ref(&a), "once").unwrap(), 0);
+        assert_eq!(state.undo_depth(), 1);
+        assert_eq!(state.undo_last().unwrap().affected, 1);
+        assert_eq!(state.undo_depth(), 0);
+        cleanup_dir(&base);
     }
 }
