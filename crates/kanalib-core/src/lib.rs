@@ -1,4 +1,5 @@
 pub mod backup;
+pub mod color;
 pub mod db;
 pub mod dedup;
 pub mod diagnostics;
