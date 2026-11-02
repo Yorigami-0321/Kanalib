@@ -261,6 +261,193 @@ pub(crate) fn reveal_path(path: &PathBuf) {
     }
 }
 
+// ---- F-047：Windows 回收站入口 ----
+
+/// 单独抽出命令，便于单测确认入口而不真正启动资源管理器。
+pub(crate) fn recycle_bin_invocation() -> (&'static str, &'static str) {
+    ("explorer", "shell:RecycleBinFolder")
+}
+
+pub(crate) fn open_recycle_bin() -> Result<(), String> {
+    #[cfg(target_os = "windows")]
+    {
+        let (program, argument) = recycle_bin_invocation();
+        std::process::Command::new(program)
+            .arg(argument)
+            .spawn()
+            .map(|_| ())
+            .map_err(|error| format!("启动资源管理器失败：{error}"))
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        Err("当前平台没有 Windows 回收站".to_string())
+    }
+}
+
+// ---- F-068：复制图片到 Windows 剪贴板（CF_DIB + PNG） ----
+
+/// 复制图片失败时回退为复制路径的提示文案。
+pub(crate) fn image_copy_fallback_message(path: &Path, error: &str) -> String {
+    format!(
+        "复制图片失败（{error}），已改为复制路径：{}",
+        path.display()
+    )
+}
+
+/// 把自上而下的 RGBA 像素转换成 CF_DIB：40 字节 BITMAPINFOHEADER +
+/// 自下而上的 32 位 BGRA 行。纯函数，便于在任意平台单测。
+pub(crate) fn dib_from_rgba(width: u32, height: u32, rgba: &[u8]) -> Result<Vec<u8>, String> {
+    if width == 0 || height == 0 {
+        return Err("图片尺寸为空".to_string());
+    }
+    let expected = (width as usize)
+        .checked_mul(height as usize)
+        .and_then(|pixels| pixels.checked_mul(4))
+        .ok_or_else(|| "图片尺寸过大".to_string())?;
+    if rgba.len() < expected {
+        return Err(format!(
+            "RGBA 数据不足：需要 {expected} 字节，实际 {}",
+            rgba.len()
+        ));
+    }
+    let header_size = 40usize;
+    let mut out = vec![0u8; header_size + expected];
+    out[0..4].copy_from_slice(&40u32.to_le_bytes());
+    out[4..8].copy_from_slice(&(width as i32).to_le_bytes());
+    out[8..12].copy_from_slice(&(height as i32).to_le_bytes());
+    out[12..14].copy_from_slice(&1u16.to_le_bytes());
+    out[14..16].copy_from_slice(&32u16.to_le_bytes());
+    out[16..20].copy_from_slice(&0u32.to_le_bytes()); // BI_RGB
+    out[20..24].copy_from_slice(&(expected as u32).to_le_bytes());
+    let row_bytes = width as usize * 4;
+    for row in 0..height as usize {
+        let src_row = (height as usize - 1 - row) * row_bytes;
+        let dst_row = header_size + row * row_bytes;
+        for column in 0..width as usize {
+            let src = src_row + column * 4;
+            let dst = dst_row + column * 4;
+            out[dst] = rgba[src + 2];
+            out[dst + 1] = rgba[src + 1];
+            out[dst + 2] = rgba[src];
+            out[dst + 3] = rgba[src + 3];
+        }
+    }
+    Ok(out)
+}
+
+/// 解码图片并写入剪贴板；解码失败由调用方回退为复制路径。
+pub(crate) fn copy_image_to_clipboard(path: &Path) -> Result<(), String> {
+    if crate::format::is_remote_asset(path) {
+        return Err(crate::format::REMOTE_READONLY_NOTE.to_string());
+    }
+    let image = image::open(path).map_err(|error| format!("无法解码图片：{error}"))?;
+    let rgba = image.to_rgba8();
+    let (width, height) = rgba.dimensions();
+    let dib = dib_from_rgba(width, height, rgba.as_raw())?;
+    let mut png = Vec::new();
+    image
+        .write_to(
+            &mut std::io::Cursor::new(&mut png),
+            image::ImageFormat::Png,
+        )
+        .map_err(|error| format!("PNG 编码失败：{error}"))?;
+    #[cfg(target_os = "windows")]
+    {
+        windows_clipboard::write_image(&dib, &png)
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = (dib, png);
+        Err("当前平台不支持写入图片剪贴板".to_string())
+    }
+}
+
+#[cfg(target_os = "windows")]
+mod windows_clipboard {
+    use std::ffi::c_void;
+    use std::ptr::null_mut;
+    use std::time::Duration;
+
+    type Handle = *mut c_void;
+    const CF_DIB: u32 = 8;
+    const GMEM_MOVEABLE: u32 = 0x0002;
+
+    #[link(name = "user32")]
+    unsafe extern "system" {
+        fn OpenClipboard(hwnd: *mut c_void) -> i32;
+        fn EmptyClipboard() -> i32;
+        fn CloseClipboard() -> i32;
+        fn SetClipboardData(format: u32, data: Handle) -> Handle;
+        fn RegisterClipboardFormatW(name: *const u16) -> u32;
+    }
+
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn GlobalAlloc(flags: u32, bytes: usize) -> Handle;
+        fn GlobalLock(handle: Handle) -> *mut c_void;
+        fn GlobalUnlock(handle: Handle) -> i32;
+        fn GlobalFree(handle: Handle) -> Handle;
+    }
+
+    fn wide(value: &str) -> Vec<u16> {
+        value.encode_utf16().chain(std::iter::once(0)).collect()
+    }
+
+    fn alloc(bytes: &[u8]) -> Result<Handle, String> {
+        if bytes.is_empty() {
+            return Err("剪贴板数据为空".to_string());
+        }
+        let handle = unsafe { GlobalAlloc(GMEM_MOVEABLE, bytes.len()) };
+        if handle.is_null() {
+            return Err("分配剪贴板内存失败".to_string());
+        }
+        let pointer = unsafe { GlobalLock(handle) };
+        if pointer.is_null() {
+            unsafe { GlobalFree(handle) };
+            return Err("锁定剪贴板内存失败".to_string());
+        }
+        unsafe {
+            std::ptr::copy_nonoverlapping(bytes.as_ptr(), pointer as *mut u8, bytes.len());
+            GlobalUnlock(handle);
+        }
+        Ok(handle)
+    }
+
+    pub(crate) fn write_image(dib: &[u8], png: &[u8]) -> Result<(), String> {
+        let png_format = unsafe { RegisterClipboardFormatW(wide("PNG").as_ptr()) };
+        if png_format == 0 {
+            return Err("注册 PNG 剪贴板格式失败".to_string());
+        }
+        // 剪贴板可能被其它程序短暂占用；最多重试 5 次（约 75ms）。
+        let mut opened = false;
+        for _ in 0..5 {
+            if unsafe { OpenClipboard(null_mut()) } != 0 {
+                opened = true;
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(15));
+        }
+        if !opened {
+            return Err("剪贴板被其他程序占用".to_string());
+        }
+        let result = (|| {
+            if unsafe { EmptyClipboard() } == 0 {
+                return Err("清空剪贴板失败".to_string());
+            }
+            for (format, bytes) in [(CF_DIB, dib), (png_format, png)] {
+                let handle = alloc(bytes)?;
+                if unsafe { SetClipboardData(format, handle) }.is_null() {
+                    unsafe { GlobalFree(handle) };
+                    return Err("写入剪贴板失败".to_string());
+                }
+            }
+            Ok(())
+        })();
+        unsafe { CloseClipboard() };
+        result
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -415,5 +602,43 @@ mod tests {
     #[test]
     fn resolve_without_displays_is_none() {
         assert_eq!(state(0., 0., 1280., 820.).resolve(&[]), None);
+    }
+
+    #[test]
+    fn recycle_bin_invocation_targets_shell_folder() {
+        assert_eq!(recycle_bin_invocation(), ("explorer", "shell:RecycleBinFolder"));
+    }
+
+    #[test]
+    fn dib_from_rgba_writes_header_and_bottom_up_bgra() {
+        // 2x2：顶行红、绿；底行蓝、白。
+        let rgba = [
+            255, 0, 0, 255, // 红
+            0, 255, 0, 255, // 绿
+            0, 0, 255, 255, // 蓝
+            255, 255, 255, 255, // 白
+        ];
+        let dib = dib_from_rgba(2, 2, &rgba).expect("dib");
+        assert_eq!(dib.len(), 40 + 16);
+        assert_eq!(u32::from_le_bytes(dib[0..4].try_into().unwrap()), 40);
+        assert_eq!(i32::from_le_bytes(dib[4..8].try_into().unwrap()), 2);
+        assert_eq!(i32::from_le_bytes(dib[8..12].try_into().unwrap()), 2);
+        assert_eq!(u16::from_le_bytes(dib[14..16].try_into().unwrap()), 32);
+        // 第一行是原图最后一行：蓝 (BGR 255,0,0)、白。
+        assert_eq!(&dib[40..44], &[255, 0, 0, 255]);
+        assert_eq!(&dib[44..48], &[255, 255, 255, 255]);
+        // 第二行是原图第一行：红 (BGR 0,0,255)、绿 (BGR 0,255,0)。
+        assert_eq!(&dib[48..52], &[0, 0, 255, 255]);
+        assert_eq!(&dib[52..56], &[0, 255, 0, 255]);
+        assert!(dib_from_rgba(0, 1, &[]).is_err());
+        assert!(dib_from_rgba(2, 2, &[0, 0, 0, 255]).is_err());
+    }
+
+    #[test]
+    fn image_copy_fallback_message_includes_path_and_error() {
+        let message = image_copy_fallback_message(Path::new(r"C:\pics\a.png"), "解码失败");
+        assert!(message.contains("解码失败"), "{message}");
+        assert!(message.contains(r"C:\pics\a.png"), "{message}");
+        assert!(message.contains("复制路径"), "{message}");
     }
 }

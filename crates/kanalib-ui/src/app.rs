@@ -15,6 +15,7 @@ use crate::theme::*;
 use crate::viewer::VIEWER_CONTEXT;
 use crate::views::{GRID_CONTEXT, grid_columns};
 use gpui::ExternalPaths;
+use ely_gpui_component::forms::InputEvent;
 use kanalib_core::model::{ExcludedAssetAction, SavedSearchView, ScanFilterImpact, is_image};
 
 pub(crate) fn rating_rank(rating: &str) -> u64 {
@@ -265,6 +266,20 @@ pub struct KanalibApp {
     pub(crate) demo_select_first: Option<usize>,
     // ---- F-035（第五轮 D1）：网络来源设置 UI；凭据永不进入这里。 ----
     pub(crate) remote_sources: RemoteSourcesState,
+    // ---- F-015（第六轮 A1）：最近查询与搜索框事件订阅；只写 settings JSON。 ----
+    pub(crate) search_history: Vec<String>,
+    pub(crate) search_history_subscription: Option<gpui::Subscription>,
+    // ---- F-025（第六轮 A2）：标签管理筛选/排序；只影响展示。 ----
+    pub(crate) tag_manager_filter: crate::tags::TagManagerFilter,
+    pub(crate) tag_manager_sort: crate::tags::TagManagerSort,
+    // ---- F-046/F-047（第六轮 A3/A4）：去重组筛选排序、键盘导航与回收站审计。 ----
+    pub(crate) dedup_query: String,
+    pub(crate) dedup_query_input: Option<Entity<TextInput>>,
+    pub(crate) dedup_sort: crate::dedup::DedupSort,
+    pub(crate) dedup_sort_descending: bool,
+    pub(crate) dedup_focus: FocusHandle,
+    pub(crate) dedup_focus_pending: bool,
+    pub(crate) last_trash_audit: Option<crate::dedup::TrashAudit>,
 }
 
 impl Render for KanalibApp {
@@ -278,6 +293,14 @@ impl Render for KanalibApp {
         });
         if self.search_input.is_none() {
             self.search_input = Some(search.clone());
+        }
+        if self.search_history_subscription.is_none() {
+            self.search_history_subscription =
+                Some(cx.subscribe(&search, |app, _, event, cx| {
+                    if matches!(event, InputEvent::Submit | InputEvent::Blur) {
+                        app.commit_search_history(cx);
+                    }
+                }));
         }
         let input_text = search.read(cx).text().to_string();
         if input_text != self.search_pending {
@@ -867,6 +890,8 @@ impl Render for KanalibApp {
             let dedup_width = (window_width - sidebar_width).max(px(640.));
             self.render_dedup(
                 &this,
+                window,
+                cx,
                 dedup_exact_groups,
                 dedup_exact_summary,
                 dedup_similar_groups,
@@ -1774,6 +1799,7 @@ impl Render for KanalibApp {
             &search,
             colors,
         );
+        let search_chips = self.render_search_chips(&this, colors);
         let status_bar = self.render_status_bar(
             &this,
             &status,
@@ -1798,6 +1824,7 @@ impl Render for KanalibApp {
             .text_color(colors.fg)
             .font_family(cx.theme().font_family.clone())
             .child(titlebar)
+            .children(search_chips)
             .child(
                 div()
                     .flex_1()
@@ -2387,6 +2414,13 @@ impl KanalibApp {
             .setting("ui.theme")
             .map(|value| value == "dark")
             .unwrap_or_else(|| cx.theme().is_dark());
+        let search_history = state
+            .setting("search.history")
+            .map(|raw| crate::search::parse_search_history(&raw))
+            .unwrap_or_default();
+        let last_trash_audit = state
+            .setting("dedup.last_trash")
+            .and_then(|raw| crate::dedup::TrashAudit::from_json(&raw));
         if theme_dark != cx.theme().is_dark() {
             Theme::set_mode_now(
                 if theme_dark { Mode::Dark } else { Mode::Light },
@@ -2556,6 +2590,17 @@ impl KanalibApp {
                 .and_then(|value| value.parse::<usize>().ok())
                 .filter(|count| *count > 0),
             remote_sources: RemoteSourcesState::default(),
+            search_history,
+            search_history_subscription: None,
+            tag_manager_filter: crate::tags::TagManagerFilter::default(),
+            tag_manager_sort: crate::tags::TagManagerSort::default(),
+            dedup_query: String::new(),
+            dedup_query_input: None,
+            dedup_sort: crate::dedup::DedupSort::default(),
+            dedup_sort_descending: false,
+            dedup_focus: cx.focus_handle(),
+            dedup_focus_pending: screen == Screen::Duplicates,
+            last_trash_audit,
             window_state_root: kanalib_core::sidecar::project_root(),
             window_state_pending: None,
             window_state_task: None,
@@ -2937,6 +2982,7 @@ impl KanalibApp {
                 self.dedup_selected = None;
                 self.dedup_confirm = None;
                 self.dedup_notice = None;
+                self.dedup_focus_pending = true;
             }
         }
         cx.notify();
@@ -3446,6 +3492,25 @@ impl KanalibApp {
         );
     }
 
+    /// F-068：把单张图片写入剪贴板（PNG + CF_DIB）；失败回退复制路径。
+    pub(crate) fn copy_image_path(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+        match crate::platform::copy_image_to_clipboard(&path) {
+            Ok(()) => push_toast(
+                &self.toaster,
+                cx,
+                "已复制图片到剪贴板（PNG / DIB）",
+                Severity::Success,
+            ),
+            Err(error) => {
+                let message = crate::platform::image_copy_fallback_message(&path, &error);
+                cx.write_to_clipboard(ClipboardItem::new_string(
+                    path.display().to_string(),
+                ));
+                push_toast(&self.toaster, cx, message, Severity::Warning);
+            }
+        }
+    }
+
     pub(crate) fn focus_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(search) = &self.search_input {
             let handle = search.read(cx).focus_handle(cx);
@@ -3862,17 +3927,71 @@ impl KanalibApp {
                 .icon(IconName::Download)
                 .variant(ButtonVariant::Ghost)
         });
+        // F-015：最近查询下拉与语法帮助浮层都挂在搜索框右侧，只影响标题栏布局。
+        let history_menu = {
+            let mut menu = Menu::new();
+            if self.search_history.is_empty() {
+                menu = menu.item(MenuItem::new("还没有最近查询").disabled(true));
+            }
+            for query in &self.search_history {
+                let this = this.clone();
+                let value = query.clone();
+                menu = menu.item(
+                    MenuItem::new(SharedString::from(query.clone()))
+                        .icon(IconName::History)
+                        .on_click(move |_, cx| {
+                            let _ = this.update(cx, |app, cx| {
+                                app.apply_search_text(value.clone(), cx);
+                            });
+                        }),
+                );
+            }
+            if !self.search_history.is_empty() {
+                let this = this.clone();
+                menu = menu.separator().item(
+                    MenuItem::new("清空最近查询")
+                        .icon(IconName::X)
+                        .on_click(move |_, cx| {
+                            let _ = this.update(cx, |app, cx| app.clear_search_history(cx));
+                        }),
+                );
+            }
+            menu
+        };
+        let history = OverflowMenu::new("search-history", history_menu)
+            .icon(IconName::History)
+            .tooltip(format!("最近查询 {}", self.search_history.len()));
+        let syntax_menu = Menu::new()
+            .item(MenuItem::new("自由文本：空格分隔，全部满足").disabled(true))
+            .item(MenuItem::new("tag:风景 / #风景 · character: · copyright:").disabled(true))
+            .item(MenuItem::new("style: · meta: · rating:").disabled(true))
+            .item(MenuItem::new("name:cover · path:草图 · group:崩坏").disabled(true))
+            .item(MenuItem::new("size:>10mb · width:>=4000 · height: · ratio:").disabled(true))
+            .item(MenuItem::new("date:2026-10 · date:>=2026-10-01").disabled(true))
+            .item(MenuItem::new("star:>=3 · is:fav · is:failed · is:damaged").disabled(true))
+            .item(MenuItem::new("is:tagged / is:untagged · dup:true").disabled(true))
+            .item(MenuItem::new("-tag:草图 排除 · 回车记录最近查询").disabled(true));
+        let syntax_help = OverflowMenu::new("search-syntax-help", syntax_menu)
+            .icon(IconName::CircleHelp)
+            .tooltip("搜索语法帮助");
         let search_field = library.then(|| {
             div()
                 .w(search_width)
+                .flex()
+                .items_center()
+                .gap(px(2.))
                 .on_mouse_down(MouseButton::Left, |_, window, _| {
                     window.prevent_default()
                 })
                 .child(
-                    Input::new(search)
-                        .clearable()
-                        .least("搜索 / tag: / character: / size:>10mb"),
+                    div().flex_1().min_w(px(0.)).child(
+                        Input::new(search)
+                            .clearable()
+                            .least("搜索 / tag: / character: / size:>10mb"),
+                    ),
                 )
+                .child(history)
+                .child(syntax_help)
         });
 
         let show_brand = !library || !compact;

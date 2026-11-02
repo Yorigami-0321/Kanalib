@@ -1,8 +1,60 @@
 use crate::*;
 use crate::app::{KanalibApp, push_toast};
+use crate::theme::*;
 
 /// 搜索输入停止多久后才真正查询（毫秒）。
 pub(crate) const SEARCH_DEBOUNCE_MS: u64 = 220;
+
+/// 最近查询最多保留的条数；只写 settings JSON，不加 schema。
+pub(crate) const SEARCH_HISTORY_LIMIT: usize = 10;
+
+/// F-015：解析 `search.history`。JSON 数组之外的格式一律视为空历史，
+/// 过滤空白项、按大小写不敏感去重并截断到上限。
+pub(crate) fn parse_search_history(raw: &str) -> Vec<String> {
+    let entries = serde_json::from_str::<Vec<String>>(raw).unwrap_or_default();
+    let mut history = Vec::new();
+    for entry in entries {
+        push_history_entry(&mut history, &entry);
+    }
+    history
+}
+
+fn push_history_entry(history: &mut Vec<String>, query: &str) -> bool {
+    let query = query.trim();
+    if query.is_empty() {
+        return false;
+    }
+    let folded = query.to_lowercase();
+    let mut next = history.clone();
+    next.retain(|existing| existing.to_lowercase() != folded);
+    next.insert(0, query.to_string());
+    next.truncate(SEARCH_HISTORY_LIMIT);
+    if *history == next {
+        false
+    } else {
+        *history = next;
+        true
+    }
+}
+
+/// F-015：记录一次最近查询；空查询不记，重复项移到最前。返回是否变化。
+pub(crate) fn record_search_history(history: &mut Vec<String>, query: &str) -> bool {
+    push_history_entry(history, query)
+}
+
+/// 把查询按空白切成 chip；只做展示/删除，不改变解析语义。
+pub(crate) fn search_tokens(query: &str) -> Vec<String> {
+    query.split_whitespace().map(str::to_string).collect()
+}
+
+/// 删除第 `index` 个查询 chip，保留其余 token 的相对顺序。
+pub(crate) fn remove_search_token(query: &str, index: usize) -> String {
+    let mut tokens = search_tokens(query);
+    if index < tokens.len() {
+        tokens.remove(index);
+    }
+    tokens.join(" ")
+}
 
 /// UI 单次 SQL 探测上限。超过此数直接回退内存过滤，避免把 core 的
 /// `MAX_SEARCH_PAGE`（10000）当成探测窗口：全命中时 extent 会扫到 8 万条，
@@ -68,6 +120,8 @@ impl SearchBundle {
 #[cfg(test)]
 mod tests {
 
+    use super::*;
+
     #[test]
     fn query_wants_duplicates_only_for_dup_true() {
         assert!(super::query_wants_duplicates("dup:true"));
@@ -77,6 +131,45 @@ mod tests {
         assert!(!super::query_wants_duplicates("-dup:true"));
         assert!(!super::query_wants_duplicates("sky"));
         assert!(!super::query_wants_duplicates(""));
+    }
+
+    #[test]
+    fn search_history_parses_filters_and_truncates() {
+        assert_eq!(parse_search_history("not json"), Vec::<String>::new());
+        assert_eq!(parse_search_history("[]"), Vec::<String>::new());
+        let raw = r#"["  sky  ","","Sky","tag:clara","sky","a","b","c","d","e","f","g","h"]"#;
+        let history = parse_search_history(raw);
+        assert_eq!(history.len(), SEARCH_HISTORY_LIMIT);
+        // 大小写不敏感去重，保留最后一次写法；空项被丢弃。
+        assert_eq!(history.iter().filter(|entry| entry.eq_ignore_ascii_case("sky")).count(), 1);
+        assert!(history.contains(&"tag:clara".to_string()));
+    }
+
+    #[test]
+    fn search_history_records_move_to_front_and_ignore_empty() {
+        let mut history = vec!["b".to_string(), "a".to_string()];
+        assert!(record_search_history(&mut history, " a "));
+        assert_eq!(history, vec!["a".to_string(), "b".to_string()]);
+        assert!(!record_search_history(&mut history, "  "));
+        assert!(!record_search_history(&mut history, "a"));
+        assert_eq!(history, vec!["a".to_string(), "b".to_string()]);
+        for index in 0..20 {
+            record_search_history(&mut history, &format!("q{index}"));
+        }
+        assert_eq!(history.len(), SEARCH_HISTORY_LIMIT);
+        assert_eq!(history.first().map(String::as_str), Some("q19"));
+    }
+
+    #[test]
+    fn search_chips_split_and_remove_tokens() {
+        assert_eq!(search_tokens("  tag:sky  size:>1mb "), vec![
+            "tag:sky".to_string(),
+            "size:>1mb".to_string()
+        ]);
+        assert_eq!(remove_search_token("tag:sky size:>1mb", 0), "size:>1mb");
+        assert_eq!(remove_search_token("tag:sky size:>1mb", 1), "tag:sky");
+        assert_eq!(remove_search_token("tag:sky", 9), "tag:sky");
+        assert_eq!(remove_search_token("", 0), "");
     }
 
 }
@@ -261,4 +354,127 @@ impl KanalibApp {
         self.confirm_save_search_with_view(name, cx);
     }
 
+    // ---- F-015：搜索历史 / 语法帮助 / 查询 chips ----
+
+    /// 把查询写回搜索框并立即重跑；用于最近查询与 chip 删除。
+    pub(crate) fn apply_search_text(&mut self, text: String, cx: &mut Context<Self>) {
+        if let Some(search) = &self.search_input {
+            search.update(cx, |input, cx| input.set_text(text.clone(), cx));
+        }
+        self.screen = Screen::Library;
+        self.search_pending = text.clone();
+        if self.remember_search(&text) {
+            cx.notify();
+        }
+        self.schedule_search(cx);
+    }
+
+    /// 记录一次最近查询（空文本忽略），写入 `search.history`。
+    pub(crate) fn remember_search(&mut self, query: &str) -> bool {
+        if !record_search_history(&mut self.search_history, query) {
+            return false;
+        }
+        let json = serde_json::to_string(&self.search_history).unwrap_or_else(|_| "[]".into());
+        self.persist_setting("search.history", json);
+        true
+    }
+
+    /// 搜索框回车/失焦时提交当前文本；不改变查询本身。
+    pub(crate) fn commit_search_history(&mut self, cx: &mut Context<Self>) {
+        let Some(search) = &self.search_input else {
+            return;
+        };
+        let text = search.read(cx).text().trim().to_string();
+        if self.remember_search(&text) {
+            cx.notify();
+        }
+    }
+
+    pub(crate) fn clear_search_history(&mut self, cx: &mut Context<Self>) {
+        if self.search_history.is_empty() {
+            return;
+        }
+        self.search_history.clear();
+        self.persist_setting("search.history", "[]");
+        cx.notify();
+    }
+
+    /// 查询 chips：紧贴标题栏下方展示当前生效的查询 token，点击 × 移除。
+    pub(crate) fn render_search_chips(
+        &self,
+        this: &Entity<Self>,
+        colors: UiColors,
+    ) -> Option<AnyElement> {
+        if self.screen != Screen::Library {
+            return None;
+        }
+        let tokens = search_tokens(&self.last_search);
+        if tokens.is_empty() {
+            return None;
+        }
+        let mut row = div()
+            .id("search-chips")
+            .flex_none()
+            .w_full()
+            .px(px(16.))
+            .py(px(4.))
+            .flex()
+            .items_center()
+            .gap(px(4.))
+            .border_b_1()
+            .border_color(colors.border)
+            .bg(colors.surface)
+            .child(
+                div()
+                    .flex_none()
+                    .text_xs()
+                    .text_color(colors.subtle)
+                    .child("查询"),
+            );
+        for (index, token) in tokens.into_iter().enumerate() {
+            let this = this.clone();
+            let label = token.clone();
+            row = row.child(
+                div()
+                    .id(SharedString::from(format!("search-chip-{index}")))
+                    .flex()
+                    .items_center()
+                    .gap(px(2.))
+                    .px(px(6.))
+                    .py(px(1.))
+                    .rounded(px(4.))
+                    .bg(colors.sunken)
+                    .text_xs()
+                    .text_color(colors.fg)
+                    .child(label)
+                    .child(
+                        div()
+                            .id(SharedString::from(format!("search-chip-x-{index}")))
+                            .cursor_pointer()
+                            .px(px(2.))
+                            .text_color(colors.subtle)
+                            .hover(move |style| style.text_color(colors.danger))
+                            .on_click(move |_, _, cx| {
+                                let _ = this.update(cx, |app, cx| {
+                                    app.remove_search_token(index, cx);
+                                });
+                            })
+                            .child("×"),
+                    ),
+            );
+        }
+        row = row.child(div().flex_1()).child(
+            div()
+                .flex_none()
+                .text_xs()
+                .text_color(colors.subtle)
+                .child("回车记录到最近查询 · 语法见搜索框右侧 ?"),
+        );
+        Some(row.into_any_element())
+    }
+
+    pub(crate) fn remove_search_token(&mut self, index: usize, cx: &mut Context<Self>) {
+        let next = remove_search_token(&self.last_search, index);
+        self.apply_search_text(next, cx);
+    }
 }

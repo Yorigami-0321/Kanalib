@@ -10,6 +10,274 @@ pub(crate) const DEDUP_GROUP_ROW_HEIGHT: f32 = 78.;
 pub(crate) const DEDUP_CARD_WIDTH: f32 = 214.;
 pub(crate) const DEDUP_MAX_VISIBLE: usize = 4;
 
+/// F-046：去重组排序维度；默认保持核心分组顺序。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub(crate) enum DedupSort {
+    #[default]
+    Default,
+    Path,
+    Name,
+    Size,
+    Reclaimable,
+}
+
+impl DedupSort {
+    pub(crate) const ALL: [Self; 5] = [
+        Self::Default,
+        Self::Path,
+        Self::Name,
+        Self::Size,
+        Self::Reclaimable,
+    ];
+
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Self::Default => "默认顺序",
+            Self::Path => "路径",
+            Self::Name => "名称",
+            Self::Size => "组大小",
+            Self::Reclaimable => "可释放空间",
+        }
+    }
+
+    /// 大小/可释放默认从大到小；路径/名称默认升序。
+    pub(crate) fn default_descending(self) -> bool {
+        matches!(self, Self::Size | Self::Reclaimable)
+    }
+}
+
+/// F-047：最近一次移入回收站的审计摘要；只写 settings JSON，不做应用内撤销。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct TrashAudit {
+    pub at: u64,
+    pub groups: usize,
+    pub assets: usize,
+    pub failed: usize,
+    pub protected_skipped: usize,
+    pub bytes: u64,
+    pub scope: String,
+}
+
+impl TrashAudit {
+    pub(crate) fn to_json(&self) -> String {
+        serde_json::json!({
+            "at": self.at,
+            "groups": self.groups,
+            "assets": self.assets,
+            "failed": self.failed,
+            "protected_skipped": self.protected_skipped,
+            "bytes": self.bytes,
+            "scope": self.scope,
+        })
+        .to_string()
+    }
+
+    pub(crate) fn from_json(raw: &str) -> Option<Self> {
+        let value: serde_json::Value = serde_json::from_str(raw).ok()?;
+        Some(Self {
+            at: value.get("at")?.as_u64()?,
+            groups: value.get("groups")?.as_u64()? as usize,
+            assets: value.get("assets")?.as_u64()? as usize,
+            failed: value.get("failed").and_then(serde_json::Value::as_u64).unwrap_or(0)
+                as usize,
+            protected_skipped: value
+                .get("protected_skipped")
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or(0) as usize,
+            bytes: value.get("bytes").and_then(serde_json::Value::as_u64).unwrap_or(0),
+            scope: value
+                .get("scope")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("group")
+                .to_string(),
+        })
+    }
+
+    pub(crate) fn describe(&self) -> String {
+        let mut text = format!(
+            "{} · 移入 {} 张 · 释放约 {}",
+            if self.scope == "batch" {
+                format!("批量 {} 组", self.groups)
+            } else {
+                "单组".to_string()
+            },
+            self.assets,
+            format_bytes(self.bytes)
+        );
+        if self.failed > 0 {
+            text.push_str(&format!(" · {} 张失败", self.failed));
+        }
+        if self.protected_skipped > 0 {
+            text.push_str(&format!(" · 跳过 {} 个受保护组", self.protected_skipped));
+        }
+        text
+    }
+}
+
+pub(crate) fn now_unix_secs() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .unwrap_or(0)
+}
+
+/// F-047：预估可释放字节：单组用组内可释放量，批量汇总所有未审组的可释放量。
+pub(crate) fn planned_reclaim_bytes(groups: &[DuplicateGroup], key: Option<&str>) -> u64 {
+    match key {
+        Some(key) => groups
+            .iter()
+            .find(|group| group.key == key)
+            .map(DuplicateGroup::reclaimable)
+            .unwrap_or(0),
+        None => groups
+            .iter()
+            .filter(|group| group.state == ReviewState::Pending)
+            .map(DuplicateGroup::reclaimable)
+            .sum(),
+    }
+}
+
+fn dedup_group_path_key(group: &DuplicateGroup) -> String {
+    group
+        .keeper_asset()
+        .or_else(|| group.suggested_asset())
+        .or_else(|| group.assets.first())
+        .map(|asset| asset.path.to_string_lossy().to_lowercase())
+        .unwrap_or_else(|| group.key.to_lowercase())
+}
+
+fn dedup_group_name_key(group: &DuplicateGroup) -> String {
+    group.title().to_lowercase()
+}
+
+fn parse_human_bytes(raw: &str) -> Option<u64> {
+    let raw = raw.trim().to_lowercase();
+    let (number, scale) = if let Some(value) = raw.strip_suffix("gb") {
+        (value, 1024.0 * 1024.0 * 1024.0)
+    } else if let Some(value) = raw.strip_suffix("mb") {
+        (value, 1024.0 * 1024.0)
+    } else if let Some(value) = raw.strip_suffix("kb") {
+        (value, 1024.0)
+    } else if let Some(value) = raw.strip_suffix('b') {
+        (value, 1.0)
+    } else {
+        (raw.as_str(), 1.0)
+    };
+    let number = number.trim().parse::<f64>().ok()?;
+    (number.is_finite() && number >= 0.0).then_some((number * scale) as u64)
+}
+
+fn parse_size_comparison(raw: &str) -> Option<(&'static str, u64)> {
+    let raw = raw.trim();
+    let (op, value) = if let Some(value) = raw.strip_prefix(">=") {
+        (">=", value)
+    } else if let Some(value) = raw.strip_prefix("<=") {
+        ("<=", value)
+    } else if let Some(value) = raw.strip_prefix('>') {
+        (">", value)
+    } else if let Some(value) = raw.strip_prefix('<') {
+        ("<", value)
+    } else if let Some(value) = raw.strip_prefix('=') {
+        ("=", value)
+    } else {
+        ("=", raw)
+    };
+    Some((op, parse_human_bytes(value)?))
+}
+
+fn compare_bytes(value: u64, op: &str, threshold: u64) -> bool {
+    match op {
+        ">=" => value >= threshold,
+        "<=" => value <= threshold,
+        ">" => value > threshold,
+        "<" => value < threshold,
+        _ => value == threshold,
+    }
+}
+
+/// F-046：组筛选。普通词匹配名称或任一资产路径；支持 `size:`/`reclaim:`
+/// 以及 `name:`/`path:` 前缀，多个词为 AND，和搜索框语义一致。
+pub(crate) fn dedup_group_matches_query(group: &DuplicateGroup, query: &str) -> bool {
+    for term in query.split_whitespace() {
+        let lower = term.to_lowercase();
+        let matched = if let Some(raw) = lower.strip_prefix("size:") {
+            parse_size_comparison(raw)
+                .is_some_and(|(op, threshold)| compare_bytes(group.total_bytes, op, threshold))
+        } else if let Some(raw) = lower.strip_prefix("reclaim:") {
+            parse_size_comparison(raw).is_some_and(|(op, threshold)| {
+                compare_bytes(group.reclaimable(), op, threshold)
+            })
+        } else if let Some(raw) = lower.strip_prefix("name:") {
+            dedup_group_name_key(group).contains(raw)
+        } else if let Some(raw) = lower.strip_prefix("path:") {
+            group
+                .assets
+                .iter()
+                .any(|asset| asset.path.to_string_lossy().to_lowercase().contains(raw))
+        } else {
+            dedup_group_name_key(group).contains(&lower)
+                || group
+                    .assets
+                    .iter()
+                    .any(|asset| asset.path.to_string_lossy().to_lowercase().contains(&lower))
+        };
+        if !matched {
+            return false;
+        }
+    }
+    true
+}
+
+/// F-046：同时应用状态筛选、文本筛选与排序，返回核心组下标。
+pub(crate) fn dedup_visible_indices(
+    groups: &[DuplicateGroup],
+    filter: DedupFilter,
+    query: &str,
+    sort: DedupSort,
+    descending: bool,
+) -> Vec<usize> {
+    let mut indices = groups
+        .iter()
+        .enumerate()
+        .filter(|(_, group)| dedup_group_matches_query(group, query) && filter.matches(group.state))
+        .map(|(index, _)| index)
+        .collect::<Vec<_>>();
+    match sort {
+        DedupSort::Default => {}
+        DedupSort::Path => {
+            indices.sort_by_cached_key(|&index| {
+                (dedup_group_path_key(&groups[index]), groups[index].key.clone())
+            });
+            if descending {
+                indices.reverse();
+            }
+        }
+        DedupSort::Name => {
+            indices.sort_by_cached_key(|&index| {
+                (dedup_group_name_key(&groups[index]), groups[index].key.clone())
+            });
+            if descending {
+                indices.reverse();
+            }
+        }
+        DedupSort::Size => {
+            indices.sort_by_cached_key(|&index| (groups[index].total_bytes, groups[index].key.clone()));
+            if descending {
+                indices.reverse();
+            }
+        }
+        DedupSort::Reclaimable => {
+            indices.sort_by_cached_key(|&index| {
+                (groups[index].reclaimable(), groups[index].key.clone())
+            });
+            if descending {
+                indices.reverse();
+            }
+        }
+    }
+    indices
+}
+
 /// 单次锚点查询保留的结果上限；结果视图只保存这一份，不写库、不新开缓存。
 pub(crate) const SIMILAR_RESULT_LIMIT: usize = 500;
 const SIMILAR_ROW_HEIGHT: f32 = 64.;
@@ -798,36 +1066,49 @@ impl KanalibApp {
         self.dedup_show_all = false;
         self.dedup_notice = None;
         self.dedup_threshold_draft = None;
+        self.dedup_focus_pending = true;
         self.dedup_scroll.scroll_to_item(0, ScrollStrategy::Top);
         cx.notify();
     }
 
+    pub(crate) fn visible_dedup_groups(&self, groups: &[DuplicateGroup]) -> Vec<usize> {
+        dedup_visible_indices(
+            groups,
+            self.dedup_filter,
+            &self.dedup_query,
+            self.dedup_sort,
+            self.dedup_sort_descending,
+        )
+    }
+
     pub(crate) fn advance_dedup(&mut self, groups: &[DuplicateGroup], forward: bool) {
-        let visible = groups
-            .iter()
-            .filter(|group| self.dedup_filter.matches(group.state))
-            .map(|group| group.key.clone())
-            .collect::<Vec<_>>();
+        let visible = self.visible_dedup_groups(groups);
         if visible.is_empty() {
             self.dedup_selected = None;
             return;
         }
-        let index = self
-            .dedup_selected
-            .as_ref()
-            .and_then(|selected| visible.iter().position(|key| key == selected));
+        let index = self.dedup_selected.as_ref().and_then(|selected| {
+            visible
+                .iter()
+                .position(|&group_index| &groups[group_index].key == selected)
+        });
         let next = match (index, forward) {
             (Some(index), true) => (index + 1) % visible.len(),
             (Some(index), false) => (index + visible.len() - 1) % visible.len(),
             (None, _) => 0,
         };
-        self.dedup_selected = Some(visible[next].clone());
+        self.dedup_selected = Some(groups[visible[next]].key.clone());
         self.dedup_show_all = false;
+        // 键盘/按钮切换后把当前组滚到可见区域中间。
+        self.dedup_scroll
+            .scroll_to_item(next, ScrollStrategy::Center);
     }
 
     pub(crate) fn render_dedup(
         &mut self,
         this: &Entity<Self>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
         exact_groups: Arc<Vec<DuplicateGroup>>,
         exact_summary: DedupSummary,
         similar_groups: Arc<Vec<DuplicateGroup>>,
@@ -842,6 +1123,22 @@ impl KanalibApp {
         width: Pixels,
         colors: UiColors,
     ) -> impl IntoElement {
+        // F-046：结果视图内的筛选输入；只影响本页可见组，不触发图库查询。
+        let filter_input = window.use_keyed_state("dedup-group-filter", cx, |window, cx| {
+            TextInput::new(window, cx).placeholder("筛选组（名称 / 路径 / size:>10mb）")
+        });
+        if self.dedup_query_input.is_none() {
+            self.dedup_query_input = Some(filter_input.clone());
+        }
+        let query_text = filter_input.read(cx).text().to_string();
+        if query_text != self.dedup_query {
+            self.dedup_query = query_text;
+            self.dedup_selected = None;
+        }
+        if self.dedup_focus_pending && self.dedup_confirm.is_none() {
+            window.focus(&self.dedup_focus, cx);
+            self.dedup_focus_pending = false;
+        }
         let similar_mode = self.dedup_mode == GroupKind::Similar;
         let groups = if similar_mode {
             similar_groups
@@ -859,12 +1156,13 @@ impl KanalibApp {
                 && any_remote_asset(group.assets.iter().map(|asset| asset.path.as_path()))
         });
 
-        let visible_indices = groups
-            .iter()
-            .enumerate()
-            .filter(|(_, group)| self.dedup_filter.matches(group.state))
-            .map(|(index, _)| index)
-            .collect::<Vec<_>>();
+        let visible_indices = dedup_visible_indices(
+            &groups,
+            self.dedup_filter,
+            &self.dedup_query,
+            self.dedup_sort,
+            self.dedup_sort_descending,
+        );
         if self.dedup_selected.as_ref().is_none_or(|key| {
             !visible_indices
                 .iter()
@@ -1121,6 +1419,111 @@ impl KanalibApp {
                 "先预选，再逐组确认"
             }));
 
+        // F-046：组筛选与排序；键盘 n/j/↓ 下一组，p/k/↑ 上一组。
+        let sort_menu = {
+            let mut menu = Menu::new();
+            for sort in DedupSort::ALL {
+                let this = this.clone();
+                menu = menu.item(
+                    MenuItem::radio(sort.label(), self.dedup_sort == sort).on_click(
+                        move |_, cx| {
+                            let _ = this.update(cx, |app, cx| {
+                                app.dedup_sort = sort;
+                                app.dedup_sort_descending = sort.default_descending();
+                                app.dedup_selected = None;
+                                cx.notify();
+                            });
+                        },
+                    ),
+                );
+            }
+            menu
+        };
+        let this_direction = this.clone();
+        let direction = IconButton::new(
+            "dedup-sort-direction",
+            if self.dedup_sort_descending {
+                IconName::ArrowDown
+            } else {
+                IconName::ArrowUp
+            },
+        )
+        .size(ControlSize::Sm)
+        .tooltip(if self.dedup_sort_descending {
+            "当前降序，点击改为升序"
+        } else {
+            "当前升序，点击改为降序"
+        })
+        .disabled(self.dedup_sort == DedupSort::Default)
+        .on_click(move |_, _, cx| {
+            let _ = this_direction.update(cx, |app, cx| {
+                app.dedup_sort_descending = !app.dedup_sort_descending;
+                app.dedup_selected = None;
+                cx.notify();
+            });
+        });
+        let this_recycle = this.clone();
+        let open_recycle_bin = Button::new("dedup-recycle-bin", "回收站")
+            .size(ControlSize::Sm)
+            .icon(IconName::FolderOpen)
+            .on_click(move |_, _, cx| {
+                if let Err(error) = crate::platform::open_recycle_bin() {
+                    let _ = this_recycle.update(cx, |app, cx| {
+                        push_toast(
+                            &app.toaster,
+                            cx,
+                            format!("打开回收站失败：{error}"),
+                            Severity::Danger,
+                        );
+                    });
+                }
+            });
+        let sort_bar = div()
+            .px(px(16.))
+            .py(px(6.))
+            .flex()
+            .items_center()
+            .gap(px(6.))
+            .border_b_1()
+            .border_color(colors.border)
+            .child(
+                div()
+                    .w(px(260.))
+                    .child(Input::new(&filter_input).clearable().least("筛选组")),
+            )
+            .child(
+                DropdownMenu::new("dedup-sort", "排序", sort_menu)
+                    .icon(IconName::ArrowDownUp)
+                    .variant(ButtonVariant::Ghost),
+            )
+            .child(direction)
+            .child(div().flex_1())
+            .child(
+                div()
+                    .flex_none()
+                    .text_xs()
+                    .text_color(colors.subtle)
+                    .child("下一组 n / ↓ · 上一组 p / ↑"),
+            )
+            .child(open_recycle_bin);
+
+        let audit_bar = self.last_trash_audit.as_ref().map(|audit| {
+            div()
+                .px(px(16.))
+                .py(px(5.))
+                .border_b_1()
+                .border_color(colors.border)
+                .bg(colors.sunken)
+                .text_xs()
+                .text_color(colors.muted)
+                .child(format!(
+                    "最近移入回收站：{} · {}",
+                    relative_time(audit.at),
+                    audit.describe()
+                ))
+                .into_any_element()
+        });
+
         let rail_header = div()
             .px(px(12.))
             .py(px(9.))
@@ -1269,7 +1672,42 @@ impl KanalibApp {
             self.render_dedup_confirm(this, &confirm, &groups, summary, colors)
         });
 
+        let this_keys = this.clone();
+        let groups_keys = groups.clone();
+        let filter_input_keys = self.dedup_query_input.clone();
+
         div()
+            .id("dedup-root")
+            .track_focus(&self.dedup_focus)
+            .key_context("KanalibDedup")
+            .on_key_down(move |event, window, cx| {
+                let forward = match event.keystroke.key.as_str() {
+                    "j" | "n" | "down" | "pagedown" => true,
+                    "k" | "p" | "up" | "pageup" => false,
+                    _ => return,
+                };
+                if event.keystroke.modifiers.control
+                    || event.keystroke.modifiers.alt
+                    || event.keystroke.modifiers.platform
+                {
+                    return;
+                }
+                // 筛选输入框获得焦点时不拦截字母键，避免无法输入组名。
+                if let Some(input) = &filter_input_keys {
+                    if window.focused(cx) == Some(input.read(cx).focus_handle(cx)) {
+                        return;
+                    }
+                }
+                cx.stop_propagation();
+                let groups = groups_keys.clone();
+                let _ = this_keys.update(cx, |app, cx| {
+                    if app.dedup_confirm.is_some() {
+                        return;
+                    }
+                    app.advance_dedup(&groups, forward);
+                    cx.notify();
+                });
+            })
             .relative()
             .w(width)
             .h_full()
@@ -1280,6 +1718,8 @@ impl KanalibApp {
             .child(header)
             .child(filter_bar)
             .children(threshold_bar)
+            .child(sort_bar)
+            .children(audit_bar)
             .children(banner)
             .child(
                 div()
@@ -1859,6 +2299,9 @@ impl KanalibApp {
         } else {
             detail
         };
+        // F-047：移入前先记录预计释放量；成功后连同结果写入 settings JSON。
+        let planned_bytes = planned_reclaim_bytes(groups, key.as_deref());
+        let audit_scope = if key.is_some() { "group" } else { "batch" };
 
         let this_cancel = this.clone();
         let this_confirm = this.clone();
@@ -1945,6 +2388,21 @@ impl KanalibApp {
                                             };
                                             match result {
                                                 Ok(done) => {
+                                                    let audit = TrashAudit {
+                                                        at: now_unix_secs(),
+                                                        groups: done.groups,
+                                                        assets: done.assets,
+                                                        failed: done.failed,
+                                                        protected_skipped: done
+                                                            .protected_skipped,
+                                                        bytes: planned_bytes,
+                                                        scope: audit_scope.to_string(),
+                                                    };
+                                                    app.persist_setting(
+                                                        "dedup.last_trash",
+                                                        audit.to_json(),
+                                                    );
+                                                    app.last_trash_audit = Some(audit);
                                                     app.dedup_notice = Some(format!(
                                                         "已处理 {} 组 · 移入回收站 {} 张{}{}",
                                                         done.groups,
@@ -2996,5 +3454,126 @@ mod similar_ui_tests {
         assert!(similar_filter_matches(&asset, "long_hair"));
         assert!(similar_filter_matches(&asset, r"c:\pics"));
         assert!(!similar_filter_matches(&asset, "kagamine"));
+    }
+}
+
+#[cfg(test)]
+mod dedup_sort_tests {
+    use super::*;
+
+    fn asset(path: &str, bytes: u64) -> Asset {
+        Asset {
+            path: PathBuf::from(path),
+            library_root: PathBuf::from(r"C:\pics"),
+            thumb: None,
+            tile_thumb: None,
+            width: 1,
+            height: 1,
+            group: String::new(),
+            rating: String::new(),
+            favorite: false,
+            star: 0,
+            tags: Vec::new(),
+            manual_tags: Vec::new(),
+            tagged: false,
+            tag_attempts: 0,
+            error: None,
+            damage: None,
+            sha1: None,
+            blake3: None,
+            phash: None,
+            bytes,
+            mtime: 0,
+            captured_at: None,
+            metadata_json: String::new(),
+        }
+    }
+
+    fn group(key: &str, keeper: &str, copies: &[(&str, u64)], state: ReviewState) -> DuplicateGroup {
+        let keeper_asset = asset(keeper, 100);
+        let mut assets = vec![keeper_asset];
+        assets.extend(copies.iter().map(|(path, bytes)| asset(path, *bytes)));
+        let total_bytes = assets.iter().map(|asset| asset.bytes).sum();
+        DuplicateGroup {
+            key: key.to_string(),
+            kind: GroupKind::Exact,
+            assets,
+            state,
+            keeper: Some(PathBuf::from(keeper)),
+            suggested: PathBuf::from(keeper),
+            suggested_reason: "测试".into(),
+            member_count: copies.len() + 1,
+            signature: key.to_string(),
+            total_bytes,
+        }
+    }
+
+    #[test]
+    fn dedup_query_matches_name_path_and_size_filters() {
+        let one = group("a", r"C:\pics\Alpha.png", &[(r"C:\pics\Alpha-copy.png", 40)], ReviewState::Pending);
+        let two = group("b", r"C:\pics\Beta.png", &[(r"C:\pics\Beta-copy.png", 400)], ReviewState::Pending);
+        assert!(dedup_group_matches_query(&one, ""));
+        assert!(dedup_group_matches_query(&one, "alpha"));
+        assert!(dedup_group_matches_query(&one, "path:copy"));
+        assert!(!dedup_group_matches_query(&one, "beta"));
+        assert!(dedup_group_matches_query(&two, "size:>300b"));
+        assert!(!dedup_group_matches_query(&one, "size:>300b"));
+        assert!(dedup_group_matches_query(&one, "reclaim:<50b"));
+        assert!(dedup_group_matches_query(&one, "pics"));
+        assert!(!dedup_group_matches_query(&one, "no-such-group"));
+    }
+
+    #[test]
+    fn dedup_sorting_covers_path_name_size_and_reclaim() {
+        let groups = vec![
+            group("b", r"C:\pics\zulu.png", &[(r"C:\pics\zulu-copy.png", 50)], ReviewState::Pending),
+            group("a", r"C:\pics\alpha.png", &[(r"C:\pics\alpha-copy.png", 500)], ReviewState::Pending),
+            group("c", r"C:\pics\mike.png", &[(r"C:\pics\mike-copy.png", 5)], ReviewState::Pending),
+        ];
+        let by_path = dedup_visible_indices(&groups, DedupFilter::All, "", DedupSort::Path, false);
+        assert_eq!(by_path, vec![1, 2, 0]);
+        let by_name_desc = dedup_visible_indices(&groups, DedupFilter::All, "", DedupSort::Name, true);
+        assert_eq!(by_name_desc, vec![0, 2, 1]);
+        let by_size = dedup_visible_indices(&groups, DedupFilter::All, "", DedupSort::Size, true);
+        assert_eq!(by_size, vec![1, 0, 2]);
+        let by_reclaim_asc = dedup_visible_indices(
+            &groups,
+            DedupFilter::All,
+            "",
+            DedupSort::Reclaimable,
+            false,
+        );
+        assert_eq!(by_reclaim_asc, vec![2, 0, 1]);
+        let filtered = dedup_visible_indices(&groups, DedupFilter::All, "alpha", DedupSort::Default, false);
+        assert_eq!(filtered, vec![1]);
+    }
+
+    #[test]
+    fn planned_bytes_and_audit_round_trip() {
+        let groups = vec![
+            group("a", r"C:\pics\a.png", &[(r"C:\pics\a-copy.png", 40)], ReviewState::Pending),
+            group("b", r"C:\pics\b.png", &[(r"C:\pics\b-copy.png", 60)], ReviewState::Pending),
+            group("c", r"C:\pics\c.png", &[(r"C:\pics\c-copy.png", 90)], ReviewState::Done),
+        ];
+        assert_eq!(planned_reclaim_bytes(&groups, Some("")), 0);
+        assert_eq!(planned_reclaim_bytes(&groups, Some("a")), 40);
+        assert_eq!(planned_reclaim_bytes(&groups, None), 100);
+        let audit = TrashAudit {
+            at: 1_761_000_000,
+            groups: 2,
+            assets: 3,
+            failed: 1,
+            protected_skipped: 1,
+            bytes: 1024 * 1024,
+            scope: "batch".into(),
+        };
+        let parsed = TrashAudit::from_json(&audit.to_json()).expect("round trip");
+        assert_eq!(parsed, audit);
+        assert!(audit.describe().contains("批量 2 组"));
+        assert!(audit.describe().contains("1 张失败"));
+        assert!(audit.describe().contains("跳过 1 个受保护组"));
+        assert_eq!(parse_human_bytes("10mb"), Some(10 * 1024 * 1024));
+        assert_eq!(parse_human_bytes("1.5kb"), Some(1536));
+        assert_eq!(parse_human_bytes("bad"), None);
     }
 }
