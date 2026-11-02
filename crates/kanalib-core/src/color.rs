@@ -23,6 +23,8 @@ use lcms2::{
     CIExyY, CIExyYTRIPLE, ColorSpaceSignature, Intent, PixelFormat, Profile, ToneCurve, Transform,
 };
 
+use crate::path_key;
+
 /// Prefix used by the on-demand viewer preview cache. Previews live in
 /// `thumbs/previews/` and are removed when the viewer switches image or exits;
 /// they are deliberately outside the 10 GiB thumbnail budget/cleanup scan.
@@ -516,7 +518,7 @@ pub fn convert_file_to_srgb(target: &Path, profile: &ColorProfile) -> Result<boo
 pub fn preview_target(source: &Path, cache_dir: &Path, mtime: u64, bytes: u64) -> PathBuf {
     let key = format!(
         "{PREVIEW_CACHE_VERSION}-{}-{mtime}-{bytes}",
-        source.to_string_lossy()
+        path_key::encode(source)
     );
     let hash = blake3::hash(key.as_bytes()).to_hex();
     cache_dir

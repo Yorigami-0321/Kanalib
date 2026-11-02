@@ -315,19 +315,19 @@ impl KanalibApp {
         }
         self.screen = Screen::Library;
         self.search_pending = text.clone();
-        if self.remember_search(&text) {
+        if self.remember_search(&text, cx) {
             cx.notify();
         }
         self.schedule_search(cx);
     }
 
     /// 记录一次最近查询（空文本忽略），写入 `search.history`。
-    pub(crate) fn remember_search(&mut self, query: &str) -> bool {
+    pub(crate) fn remember_search(&mut self, query: &str, cx: &mut Context<Self>) -> bool {
         if !record_search_history(&mut self.search_history, query) {
             return false;
         }
         let json = serde_json::to_string(&self.search_history).unwrap_or_else(|_| "[]".into());
-        self.persist_setting("search.history", json);
+        self.persist_setting("search.history", json, cx);
         true
     }
 
@@ -337,7 +337,7 @@ impl KanalibApp {
             return;
         };
         let text = search.read(cx).text().trim().to_string();
-        if self.remember_search(&text) {
+        if self.remember_search(&text, cx) {
             cx.notify();
         }
     }
@@ -347,7 +347,7 @@ impl KanalibApp {
             return;
         }
         self.search_history.clear();
-        self.persist_setting("search.history", "[]");
+        self.persist_setting("search.history", "[]", cx);
         cx.notify();
     }
 

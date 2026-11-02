@@ -302,7 +302,7 @@ GPL 构建仍禁止随包；运行时只把 ffmpeg/ffprobe 当外部进程，不
   - 损坏/伪造 mp4：哈希照算（SHA1 40 位、BLAKE3 64 位），不标 `damage`。
 - 无 ffmpeg 环境（PATH/runtime 都没有）：视频仍入库，`thumb` 为空、无时长/尺寸，扫描不中断；图片测试全绿。
 - 测试数量：`cargo test -p kanalib-core` **165 passed / 16 ignored**（无 ffmpeg 与有 ffmpeg 环境都是该数量；基线 150/15 未减少）。新增单测覆盖 `MediaKind`/扩展名、格式门、`metadata_json` 兼容、ffprobe JSON 解析（含封面图跳过）、v9→v10 迁移、视频哈希/入库/打标队列/监听事件、系统播放命令构造。
-- 10k 图片冷导入（`KANALIB_FFMPEG=runtime/ffmpeg/bin/ffmpeg.exe cargo test -p kanalib-core state::tests::ten_thousand_cold_import -- --ignored --nocapture`，本机 debug）：**213.7s**，10,000 导入、0 失败；缩略图阶段约 77.5s（0.05s→77.5s），与第四轮同机基线 284.5s / 78.5s 同量级或更快，没有回退。100k 未重跑（同上轮原因，缺可访问大库）；图片路径只多一次扩展名比较（`is_media` 先判 `is_image`，命中即返回）与 `media_kind` 列读写，批处理参数、worker、`v3` 缓存键、`image` 回退顺序均未改，`enqueue_tag_jobs` 只多一个对全 `image` 列等值谓词，仍走原有 `folder` 索引。
+- 10k 图片冷导入（该手工基准已在 2026-11-02 代码复审中移除；以下为当时实测记录）：**213.7s**，10,000 导入、0 失败；缩略图阶段约 77.5s（0.05s→77.5s），与第四轮同机基线 284.5s / 78.5s 同量级或更快，没有回退。100k 未重跑（同上轮原因，缺可访问大库）；图片路径只多一次扩展名比较（`is_media` 先判 `is_image`，命中即返回）与 `media_kind` 列读写，批处理参数、worker、`v3` 缓存键、`image` 回退顺序均未改，`enqueue_tag_jobs` 只多一个对全 `image` 列等值谓词，仍走原有 `folder` 索引。
 
 ## 范围与后续
 

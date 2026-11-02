@@ -523,8 +523,8 @@ impl KanalibApp {
             cx.background_executor()
                 .timer(Duration::from_millis(250))
                 .await;
-            let _ = weak.update(cx, |app, _| {
-                app.persist_setting("ui.sidebar_width", format!("{:.0}", app.sidebar_width));
+            let _ = weak.update(cx, |app, cx| {
+                app.persist_setting("ui.sidebar_width", format!("{:.0}", app.sidebar_width), cx);
             });
         }));
         cx.notify();
@@ -540,7 +540,7 @@ impl KanalibApp {
         }
         let mut keys = self.sidebar_collapsed.iter().cloned().collect::<Vec<_>>();
         keys.sort();
-        self.persist_setting("ui.sidebar_collapsed", keys.join(","));
+        self.persist_setting("ui.sidebar_collapsed", keys.join(","), cx);
         cx.notify();
     }
 
@@ -548,14 +548,14 @@ impl KanalibApp {
         self.sidebar_collapsed = SIDEBAR_SECTIONS.iter().map(|key| key.to_string()).collect();
         let mut keys = self.sidebar_collapsed.iter().cloned().collect::<Vec<_>>();
         keys.sort();
-        self.persist_setting("ui.sidebar_collapsed", keys.join(","));
+        self.persist_setting("ui.sidebar_collapsed", keys.join(","), cx);
         cx.notify();
     }
 
     pub(crate) fn set_show_sidebar(&mut self, show: bool, cx: &mut Context<Self>) {
         self.anchor_scroll();
         self.show_sidebar = show;
-        self.persist_setting("ui.show_sidebar", show.to_string());
+        self.persist_setting("ui.show_sidebar", show.to_string(), cx);
         self.focus_grid_pending = true;
         cx.notify();
     }
@@ -1248,6 +1248,7 @@ impl KanalibApp {
                                     app.persist_setting(
                                         "ui.sidebar_width",
                                         format!("{:.0}", app.sidebar_width),
+                                        cx,
                                     );
                                     cx.notify();
                                 }

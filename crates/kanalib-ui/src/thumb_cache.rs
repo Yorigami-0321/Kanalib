@@ -78,6 +78,7 @@ pub struct CacheCleanup {
     pub removed_groups: usize,
     pub protected_groups: usize,
     pub failed_files: usize,
+    pub removed_paths: Vec<PathBuf>,
 }
 
 impl ThumbCache {
@@ -159,21 +160,42 @@ impl ThumbCache {
         (self.hits, self.misses)
     }
 
-    /// 按磁盘预算淘汰最少使用的缩略图组；当前解码/可见图与最近访问的组不动。
-    pub(crate) fn cleanup_to_budget(
-        &mut self,
+    pub(crate) fn cleanup_snapshot(&self) -> (PathBuf, HashMap<PathBuf, u64>, HashSet<PathBuf>) {
+        let protected = self
+            .entries
+            .keys()
+            .filter_map(|resource| match resource {
+                Resource::Path(path) => Some(PathBuf::from(path.as_ref())),
+                _ => None,
+            })
+            .collect();
+        (self.cache_dir.clone(), self.access.clone(), protected)
+    }
+
+    pub(crate) fn apply_cleanup(&mut self, report: &CacheCleanup, cx: &mut Context<Self>) {
+        for path in &report.removed_paths {
+            self.access.remove(path);
+        }
+        self.access_dirty += report.removed_paths.len();
+        self.flush_access(cx);
+    }
+
+    /// 磁盘扫描与删除在后台线程执行；这里只接收只读快照，不碰 UI 实体。
+    pub(crate) fn cleanup_budget(
+        cache_dir: &Path,
+        access: &HashMap<PathBuf, u64>,
+        protected: &HashSet<PathBuf>,
         budget_bytes: u64,
-        cx: &mut Context<Self>,
     ) -> CacheCleanup {
         let mut report = CacheCleanup {
             budget_bytes,
             ..Default::default()
         };
-        let entries = match std::fs::read_dir(&self.cache_dir) {
+        let entries = match std::fs::read_dir(cache_dir) {
             Ok(entries) => entries,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return report,
             Err(error) => {
-                log::warn!("read thumb cache {}: {error}", self.cache_dir.display());
+                log::warn!("read thumb cache {}: {error}", cache_dir.display());
                 return report;
             }
         };
@@ -183,7 +205,6 @@ impl ThumbCache {
             last_used: u64,
         }
         let mut groups: HashMap<String, Group> = HashMap::new();
-        let now = wall_millis();
         for entry in entries {
             let Ok(entry) = entry else {
                 continue;
@@ -197,10 +218,9 @@ impl ThumbCache {
                 .file_name()
                 .map(|name| name.to_string_lossy().to_string())
                 .unwrap_or_default();
-            let key = name
-                .strip_suffix("-t256.jpg")
-                .unwrap_or(name.as_str())
-                .to_string();
+            // 512 档与 `-t256` 派生档必须归入同一组，否则保护主图时会删掉小档。
+            let base = name.strip_suffix(".jpg").unwrap_or(name.as_str());
+            let key = base.strip_suffix("-t256").unwrap_or(base).to_string();
             let modified = entry
                 .metadata()
                 .ok()
@@ -208,7 +228,7 @@ impl ThumbCache {
                 .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
                 .map(|duration| duration.as_millis() as u64)
                 .unwrap_or(0);
-            let last_used = modified.max(self.access.get(&path).copied().unwrap_or(0));
+            let last_used = modified.max(access.get(&path).copied().unwrap_or(0));
             let group = groups.entry(key).or_insert(Group {
                 files: Vec::new(),
                 bytes: 0,
@@ -223,15 +243,7 @@ impl ThumbCache {
         if report.before_bytes <= budget_bytes {
             return report;
         }
-        let protected = self
-            .entries
-            .keys()
-            .filter_map(|resource| match resource {
-                Resource::Path(path) => Some(PathBuf::from(path.as_ref())),
-                _ => None,
-            })
-            .collect::<HashSet<_>>();
-        let recently_used = now.saturating_sub(5 * 60 * 1000);
+        let recently_used = wall_millis().saturating_sub(5 * 60 * 1000);
         let target = budget_bytes - budget_bytes / 20;
         let mut ordered = groups.into_iter().collect::<Vec<_>>();
         ordered.sort_by_key(|(_, group)| group.last_used);
@@ -239,11 +251,10 @@ impl ThumbCache {
             if report.after_bytes <= target {
                 break;
             }
-            let recently_accessed = group.files.iter().any(|(path, _)| {
-                self.access
-                    .get(path)
-                    .is_some_and(|used| *used >= recently_used)
-            });
+            let recently_accessed = group
+                .files
+                .iter()
+                .any(|(path, _)| access.get(path).is_some_and(|used| *used >= recently_used));
             let is_protected =
                 recently_accessed || group.files.iter().any(|(path, _)| protected.contains(path));
             if is_protected {
@@ -254,17 +265,17 @@ impl ThumbCache {
             for (path, size) in &group.files {
                 match std::fs::remove_file(path) {
                     Ok(()) => {
-                        self.access.remove(path);
                         report.after_bytes = report.after_bytes.saturating_sub(*size);
                         report.removed_bytes += size;
                         report.removed_files += 1;
+                        report.removed_paths.push(path.clone());
                         group_removed += 1;
                     }
                     Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                        self.access.remove(path);
                         report.after_bytes = report.after_bytes.saturating_sub(*size);
                         report.removed_bytes += size;
                         report.removed_files += 1;
+                        report.removed_paths.push(path.clone());
                         group_removed += 1;
                     }
                     Err(error) => {
@@ -275,10 +286,8 @@ impl ThumbCache {
             }
             if group_removed > 0 {
                 report.removed_groups += 1;
-                self.access_dirty += group_removed;
             }
         }
-        self.flush_access(cx);
         report
     }
 
@@ -469,7 +478,7 @@ impl ImageCache for ThumbCache {
 
 #[cfg(test)]
 mod tests {
-    use super::{cache_victims, clamp_cache_limit};
+    use super::{ThumbCache, cache_victims, clamp_cache_limit};
     use gpui::Resource;
     use std::collections::HashMap;
     use std::path::Path;
@@ -498,5 +507,30 @@ mod tests {
     fn image_cache_limit_is_at_least_one() {
         assert_eq!(clamp_cache_limit(0), 1);
         assert_eq!(clamp_cache_limit(128), 128);
+    }
+
+    #[test]
+    fn budget_cleanup_removes_unprotected_groups_only() {
+        let dir = std::env::temp_dir().join(format!(
+            "kanalib-cleanup-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let a = dir.join("a.jpg");
+        let a_tile = dir.join("a-t256.jpg");
+        let b = dir.join("b.jpg");
+        for path in [&a, &a_tile, &b] {
+            std::fs::write(path, vec![0u8; 100]).unwrap();
+        }
+        let protected = std::collections::HashSet::from([a.clone()]);
+        let report = ThumbCache::cleanup_budget(&dir, &HashMap::new(), &protected, 0);
+        assert!(a.exists(), "protected group must survive");
+        assert!(a_tile.exists());
+        assert!(!b.exists());
+        assert_eq!(report.removed_files, 1);
+        assert_eq!(report.removed_paths, vec![b]);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

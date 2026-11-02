@@ -5,7 +5,6 @@ use crate::sidebar::source_label;
 use crate::status_bar::{format_scan_summary, scan_phase_label, scan_progress_counts};
 use crate::tags::group_reviews_by_asset;
 use crate::theme::*;
-use crate::thumb_cache::CacheCleanup;
 use crate::*;
 use kanalib_core::sources::{SourceInfo, SourceKind};
 
@@ -1052,15 +1051,15 @@ impl KanalibApp {
 
     pub(crate) fn set_thumb_budget(&mut self, gb: u64, cx: &mut Context<Self>) {
         self.thumb_budget_gb = gb.clamp(1, 1000);
-        self.persist_setting("cache.thumb_budget_gb", self.thumb_budget_gb.to_string());
+        self.persist_setting(
+            "cache.thumb_budget_gb",
+            self.thumb_budget_gb.to_string(),
+            cx,
+        );
         cx.notify();
     }
 
-    pub(crate) fn run_cache_budget_cleanup(
-        &mut self,
-        manual: bool,
-        cx: &mut Context<Self>,
-    ) -> Option<CacheCleanup> {
+    pub(crate) fn run_cache_budget_cleanup(&mut self, manual: bool, cx: &mut Context<Self>) {
         if self.state.shared.lock().unwrap().scanning {
             if manual {
                 push_toast(
@@ -1070,46 +1069,68 @@ impl KanalibApp {
                     Severity::Warning,
                 );
             }
-            return None;
+            return;
         }
+        if self.cache_cleanup_running {
+            return;
+        }
+        self.cache_cleanup_running = true;
         let budget = self.thumb_budget_gb.saturating_mul(1024 * 1024 * 1024);
-        let report = self
+        let (cache_dir, access, protected) = self
             .thumb_cache
-            .update(cx, |cache, cx| cache.cleanup_to_budget(budget, cx));
-        self.cache_last_cleanup = Some(format!(
-            "最近清理 {} 个文件 · {} · 剩余 {} / 预算 {}",
-            report.removed_files,
-            format_bytes(report.removed_bytes),
-            format_bytes(report.after_bytes),
-            format_bytes(report.budget_bytes)
-        ));
-        if report.removed_files > 0
-            && let Ok(stats) = self.state.cache_stats()
-        {
-            self.cache_stats = Some(stats);
-        }
-        if manual {
-            push_toast(
-                &self.toaster,
-                cx,
-                if report.removed_files == 0 {
-                    format!(
-                        "缓存未超预算 · {} / {}",
-                        format_bytes(report.after_bytes),
-                        format_bytes(report.budget_bytes)
-                    )
-                } else {
-                    format!(
-                        "已淘汰 {} 个缩略图 · {}",
-                        report.removed_files,
-                        format_bytes(report.removed_bytes)
-                    )
-                },
-                Severity::Success,
+            .update(cx, |cache, _| cache.cleanup_snapshot());
+        let state = self.state.clone();
+        let task = cx.background_executor().spawn(async move {
+            let report = crate::thumb_cache::ThumbCache::cleanup_budget(
+                &cache_dir, &access, &protected, budget,
             );
-            cx.notify();
-        }
-        Some(report)
+            let stats = (report.removed_files > 0)
+                .then(|| state.cache_stats().ok())
+                .flatten();
+            (report, stats)
+        });
+        let weak = cx.entity().downgrade();
+        let toaster = self.toaster.clone();
+        cx.spawn(async move |_, cx| {
+            let (report, stats) = task.await;
+            let _ = weak.update(cx, |app, cx| {
+                app.cache_cleanup_running = false;
+                app.thumb_cache
+                    .update(cx, |cache, cx| cache.apply_cleanup(&report, cx));
+                app.cache_last_cleanup = Some(format!(
+                    "最近清理 {} 个文件 · {} · 剩余 {} / 预算 {}",
+                    report.removed_files,
+                    format_bytes(report.removed_bytes),
+                    format_bytes(report.after_bytes),
+                    format_bytes(report.budget_bytes)
+                ));
+                if let Some(stats) = stats {
+                    app.cache_stats = Some(stats);
+                }
+                if manual {
+                    push_toast(
+                        &toaster,
+                        cx,
+                        if report.removed_files == 0 {
+                            format!(
+                                "缓存未超预算 · {} / {}",
+                                format_bytes(report.after_bytes),
+                                format_bytes(report.budget_bytes)
+                            )
+                        } else {
+                            format!(
+                                "已淘汰 {} 个缩略图 · {}",
+                                report.removed_files,
+                                format_bytes(report.removed_bytes)
+                            )
+                        },
+                        Severity::Success,
+                    );
+                }
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     pub(crate) fn render_settings(

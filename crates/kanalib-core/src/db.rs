@@ -21,12 +21,13 @@ use crate::model::{
     TagSummary, TagThresholds, candidate_limit, day_number, default_category_thresholds,
     media_kind, normalize_tag_name,
 };
+use crate::path_key;
 use crate::undo::{TagOrigin, TagSnapshot};
 
 /// v10：`assets.media_kind`（F-040 视频）。v9 及更早的库没有该列，必须在
 /// `migrate` 里用 `ALTER TABLE ... DEFAULT 'image'` 补齐，否则任何读取
 /// `media_kind` 的查询都会在旧库上报 "no such column"。
-const SCHEMA_VERSION: i64 = 10;
+const SCHEMA_VERSION: i64 = 11;
 const TAG_THRESHOLDS_KEY: &str = "tags.category_thresholds";
 /// 库内是否存在内置 lower() 与 Rust Unicode 小写不同的名称；避免每次打开全表探测。
 const NAME_FOLD_KEY: &str = "search.name_fold_unicode";
@@ -403,6 +404,8 @@ CREATE TABLE IF NOT EXISTS assets (
     height INTEGER NOT NULL DEFAULT 0,
     bytes INTEGER NOT NULL DEFAULT 0,
     mtime INTEGER NOT NULL DEFAULT 0,
+    -- v11：同一秒内同字节数的覆盖写入需要亚秒精度才能识别；旧库为 NULL（未知）。
+    mtime_ns INTEGER,
     captured_at INTEGER,
     sha1 TEXT,
     blake3 TEXT,
@@ -593,6 +596,8 @@ pub struct SourceRecord {
 #[derive(Clone, Debug)]
 pub struct StoredMeta {
     pub mtime: u64,
+    /// 亚秒部分；旧库/远端来源为 None（只按秒+字节数比较）。
+    pub mtime_ns: Option<u32>,
     pub bytes: u64,
     pub sha1: Option<String>,
     pub blake3: Option<String>,
@@ -609,7 +614,15 @@ pub struct StoredMeta {
 
 impl StoredMeta {
     pub fn is_unchanged(&self, mtime: u64, bytes: u64) -> bool {
+        self.is_unchanged_at(mtime, 0, bytes)
+    }
+
+    /// 带亚秒精度的变化判定；`mtime_ns == 0` 表示调用方没有更高精度。
+    pub fn is_unchanged_at(&self, mtime: u64, mtime_ns: u32, bytes: u64) -> bool {
         if self.mtime != mtime || self.bytes != bytes {
+            return false;
+        }
+        if mtime_ns != 0 && self.mtime_ns.is_some_and(|stored| stored != mtime_ns) {
             return false;
         }
         if self.width == 0 || self.height == 0 || self.thumb.is_empty() {
@@ -628,7 +641,19 @@ impl StoredMeta {
     }
 
     pub fn content_if_current(&self, mtime: u64, bytes: u64) -> Option<ContentHashes> {
+        self.content_if_current_at(mtime, 0, bytes)
+    }
+
+    pub fn content_if_current_at(
+        &self,
+        mtime: u64,
+        mtime_ns: u32,
+        bytes: u64,
+    ) -> Option<ContentHashes> {
         if self.mtime != mtime || self.bytes != bytes {
+            return None;
+        }
+        if mtime_ns != 0 && self.mtime_ns.is_some_and(|stored| stored != mtime_ns) {
             return None;
         }
         let sha1 = self.sha1.clone().filter(|value| !value.is_empty())?;
@@ -957,7 +982,7 @@ impl Db {
         Ok(rows
             .collect::<rusqlite::Result<Vec<_>>>()?
             .into_iter()
-            .map(PathBuf::from)
+            .map(|path| path_key::decode(&path))
             .collect())
     }
 
@@ -969,7 +994,7 @@ impl Db {
         Ok(rows
             .collect::<rusqlite::Result<Vec<_>>>()?
             .into_iter()
-            .map(PathBuf::from)
+            .map(|path| path_key::decode(&path))
             .collect())
     }
 
@@ -981,7 +1006,7 @@ impl Db {
         Ok(rows
             .collect::<rusqlite::Result<Vec<_>>>()?
             .into_iter()
-            .map(PathBuf::from)
+            .map(|path| path_key::decode(&path))
             .collect())
     }
 
@@ -1010,17 +1035,20 @@ impl Db {
     }
 
     pub fn stored_meta(&self, path: &Path) -> Result<Option<StoredMeta>> {
-        let path = path.to_string_lossy().to_string();
+        let path = path_key::encode(path);
         self.conn
             .query_row(
                 "SELECT mtime, bytes, sha1, blake3, phash, width, height, thumb,
-                        captured_at, metadata_json, exif_state, media_kind
+                        captured_at, metadata_json, exif_state, media_kind, mtime_ns
                  FROM assets WHERE path = ?1",
                 [&path],
                 |row| {
                     let phash: Option<i64> = row.get(4)?;
                     Ok(StoredMeta {
                         mtime: row.get::<_, i64>(0)?.max(0) as u64,
+                        mtime_ns: row
+                            .get::<_, Option<i64>>(12)?
+                            .map(|value| value.clamp(0, 999_999_999) as u32),
                         bytes: row.get::<_, i64>(1)?.max(0) as u64,
                         sha1: row.get(2)?,
                         blake3: row.get(3)?,
@@ -1041,6 +1069,14 @@ impl Db {
             .map_err(Into::into)
     }
 
+    pub fn set_mtime_ns(&self, path: &Path, mtime_ns: u32) -> Result<()> {
+        self.conn.execute(
+            "UPDATE assets SET mtime_ns = ?1 WHERE path = ?2",
+            params![mtime_ns as i64, path_key::encode(path)],
+        )?;
+        Ok(())
+    }
+
     pub fn upsert_meta(
         &self,
         folder: &str,
@@ -1053,12 +1089,41 @@ impl Db {
         hashes: &ContentHashes,
         reset_tag_attempts: bool,
     ) -> Result<Asset> {
+        self.upsert_meta_precise(
+            folder,
+            path,
+            thumb,
+            width,
+            height,
+            bytes,
+            mtime,
+            0,
+            hashes,
+            reset_tag_attempts,
+        )
+    }
+
+    /// 与 [`Db::upsert_meta`] 相同，但落库文件亚秒 mtime；本地扫描走这里。
+    #[allow(clippy::too_many_arguments)]
+    pub fn upsert_meta_precise(
+        &self,
+        folder: &str,
+        path: &Path,
+        thumb: Option<&Path>,
+        width: u32,
+        height: u32,
+        bytes: u64,
+        mtime: u64,
+        mtime_ns: u32,
+        hashes: &ContentHashes,
+        reset_tag_attempts: bool,
+    ) -> Result<Asset> {
         self.invalidate_name_fold();
-        let path_string = path.to_string_lossy().to_string();
+        let path_string = path_key::encode(path);
         let name = path
             .file_name()
             .map(|value| value.to_string_lossy().to_string())
-            .unwrap_or_else(|| path_string.clone());
+            .unwrap_or_else(|| path.to_string_lossy().to_string());
         self.remember_name_fold(&name);
         let thumb_string = thumb
             .map(|value| value.to_string_lossy().to_string())
@@ -1069,8 +1134,8 @@ impl Db {
         self.conn.execute(
             "INSERT INTO assets(
                 source_id, path, folder, name, media_kind, mime, width, height, bytes, mtime,
-                thumb, sha1, blake3, phash, damage
-             ) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)
+                thumb, sha1, blake3, phash, damage, mtime_ns
+             ) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)
              ON CONFLICT(source_id, path) DO UPDATE SET
                 folder = excluded.folder,
                 name = excluded.name,
@@ -1080,12 +1145,13 @@ impl Db {
                 height = excluded.height,
                 bytes = excluded.bytes,
                 mtime = excluded.mtime,
+                mtime_ns = excluded.mtime_ns,
                 thumb = excluded.thumb,
                 sha1 = excluded.sha1,
                 blake3 = excluded.blake3,
                 phash = excluded.phash,
                 damage = excluded.damage,
-                tag_attempts = CASE WHEN ?16 THEN 0 ELSE tag_attempts END",
+                tag_attempts = CASE WHEN ?17 THEN 0 ELSE tag_attempts END",
             params![
                 source_id,
                 path_string,
@@ -1102,6 +1168,7 @@ impl Db {
                 valid_hashes.then_some(hashes.blake3.as_str()),
                 (valid_hashes && hashes.decode_ok).then_some(hashes.phash as i64),
                 hashes.decode_error.as_deref(),
+                mtime_ns as i64,
                 reset_tag_attempts,
             ],
         )?;
@@ -1111,7 +1178,7 @@ impl Db {
     /// 路径对应的文件内容被替换：清除派生的自动标签/候选/评级/分组，保留
     /// 人工标签与收藏/星级，并重置打标状态，让后续 `enqueue_tag_jobs` 重新排队。
     pub fn reset_asset_analysis(&self, path: &Path) -> Result<bool> {
-        let path_string = path.to_string_lossy().to_string();
+        let path_string = path_key::encode(path);
         let tx = self.conn.unchecked_transaction()?;
         let asset_id: Option<i64> = tx
             .query_row(
@@ -1142,7 +1209,7 @@ impl Db {
     }
 
     pub fn update_tags(&self, asset: &Asset) -> Result<()> {
-        let path = asset.path.to_string_lossy().to_string();
+        let path = path_key::encode(&asset.path);
         let tags_json = serde_json::to_string(&asset.tags)?;
         let tx = self.conn.unchecked_transaction()?;
         let asset_id: Option<i64> = tx
@@ -1181,14 +1248,14 @@ impl Db {
     pub fn store_tag_result(&self, asset: &Asset, candidates: Option<&[TagHit]>) -> Result<Asset> {
         let Some(candidates) = candidates else {
             self.update_tags(asset)?;
-            let path = asset.path.to_string_lossy().to_string();
+            let path = path_key::encode(&asset.path);
             self.conn.execute(
                 "DELETE FROM asset_scores WHERE asset_id = (SELECT id FROM assets WHERE path = ?1)",
                 [&path],
             )?;
             return self.load_asset(&asset.path);
         };
-        let path = asset.path.to_string_lossy().to_string();
+        let path = path_key::encode(&asset.path);
         let thresholds = self.tag_thresholds()?;
         let tx = self.conn.unchecked_transaction()?;
         let asset_id: Option<i64> = tx
@@ -1357,7 +1424,7 @@ impl Db {
         let mut summary = TagRecomputeSummary::default();
         let mut seen = HashSet::new();
         for path in paths {
-            let path_string = path.to_string_lossy().to_string();
+            let path_string = path_key::encode(path);
             if !seen.insert(path_string.clone()) {
                 continue;
             }
@@ -1484,7 +1551,7 @@ impl Db {
              WHERE a.path = ?1
              ORDER BY s.score DESC, s.tag",
         )?;
-        let rows = statement.query_map([path.to_string_lossy().to_string()], |row| {
+        let rows = statement.query_map([path_key::encode(path)], |row| {
             Ok((
                 row.get::<_, String>(0)?,
                 row.get::<_, String>(1)?,
@@ -1525,7 +1592,7 @@ impl Db {
         let asset_id: Option<i64> = tx
             .query_row(
                 "SELECT id FROM assets WHERE path = ?1",
-                [path.to_string_lossy().to_string()],
+                [path_key::encode(path)],
                 |row| row.get(0),
             )
             .optional()?;
@@ -1553,7 +1620,7 @@ impl Db {
         let asset_id: Option<i64> = tx
             .query_row(
                 "SELECT id FROM assets WHERE path = ?1",
-                [path.to_string_lossy().to_string()],
+                [path_key::encode(path)],
                 |row| row.get(0),
             )
             .optional()?;
@@ -1578,7 +1645,7 @@ impl Db {
         let mut summary = RetagSummary::default();
         let mut seen = HashSet::new();
         for path in paths {
-            let path_string = path.to_string_lossy().to_string();
+            let path_string = path_key::encode(path);
             if !seen.insert(path_string.clone()) {
                 continue;
             }
@@ -1631,7 +1698,7 @@ impl Db {
                  SET priority = MAX(priority, ?1)
                  WHERE kind = 'tag' AND state IN ('pending', 'error')
                    AND asset_id = (SELECT id FROM assets WHERE path = ?2)",
-                params![priority, path.to_string_lossy().to_string()],
+                params![priority, path_key::encode(path)],
             )?;
         }
         tx.commit()?;
@@ -1658,7 +1725,7 @@ impl Db {
         let rows = statement.query_map(rusqlite::params_from_iter(values), |row| {
             Ok(TagJobError {
                 job_id: row.get(0)?,
-                path: PathBuf::from(row.get::<_, String>(1)?),
+                path: path_key::decode(&row.get::<_, String>(1)?),
                 attempts: row.get::<_, i64>(2)?.max(0) as u32,
                 last_error: row.get(3)?,
                 priority: row.get(4)?,
@@ -1709,7 +1776,7 @@ impl Db {
         let mut marks = HashMap::new();
         for path in paths {
             let found = statement
-                .query_row([path.to_string_lossy().to_string()], |row| {
+                .query_row([path_key::encode(path)], |row| {
                     Ok((
                         row.get::<_, i64>(0)? != 0,
                         row.get::<_, i64>(1)?.clamp(0, 5) as u8,
@@ -1728,7 +1795,7 @@ impl Db {
         let mut statement = tx.prepare("UPDATE assets SET favorite = ?1 WHERE path = ?2")?;
         let mut updated = 0;
         for path in paths {
-            updated += statement.execute(params![favorite as i64, path.to_string_lossy()])?;
+            updated += statement.execute(params![favorite as i64, path_key::encode(path)])?;
         }
         drop(statement);
         tx.commit()?;
@@ -1742,7 +1809,7 @@ impl Db {
         {
             let mut statement = tx.prepare("UPDATE assets SET favorite = ?1 WHERE path = ?2")?;
             for (path, favorite) in values {
-                updated += statement.execute(params![*favorite as i64, path.to_string_lossy()])?;
+                updated += statement.execute(params![*favorite as i64, path_key::encode(path)])?;
             }
         }
         tx.commit()?;
@@ -1755,7 +1822,7 @@ impl Db {
         let mut statement = tx.prepare("UPDATE assets SET star = ?1 WHERE path = ?2")?;
         let mut updated = 0;
         for path in paths {
-            updated += statement.execute(params![star, path.to_string_lossy()])?;
+            updated += statement.execute(params![star, path_key::encode(path)])?;
         }
         drop(statement);
         tx.commit()?;
@@ -1770,7 +1837,7 @@ impl Db {
             let mut statement = tx.prepare("UPDATE assets SET star = ?1 WHERE path = ?2")?;
             for (path, star) in values {
                 updated +=
-                    statement.execute(params![(*star).min(5) as i64, path.to_string_lossy()])?;
+                    statement.execute(params![(*star).min(5) as i64, path_key::encode(path)])?;
             }
         }
         tx.commit()?;
@@ -1804,7 +1871,7 @@ impl Db {
             let asset_id: Option<i64> = tx
                 .query_row(
                     "SELECT id FROM assets WHERE path = ?1",
-                    [path.to_string_lossy().to_string()],
+                    [path_key::encode(path)],
                     |row| row.get(0),
                 )
                 .optional()?;
@@ -1846,7 +1913,7 @@ impl Db {
             let asset_id: Option<i64> = tx
                 .query_row(
                     "SELECT id FROM assets WHERE path = ?1",
-                    [path.to_string_lossy().to_string()],
+                    [path_key::encode(path)],
                     |row| row.get(0),
                 )
                 .optional()?;
@@ -1905,7 +1972,7 @@ impl Db {
         let mut snapshots = Vec::new();
         for path in paths {
             let asset_id: Option<i64> = asset_statement
-                .query_row([path.to_string_lossy().to_string()], |row| row.get(0))
+                .query_row([path_key::encode(path)], |row| row.get(0))
                 .optional()?;
             let Some(asset_id) = asset_id else {
                 continue;
@@ -1961,7 +2028,7 @@ impl Db {
             let asset_id: Option<i64> = tx
                 .query_row(
                     "SELECT id FROM assets WHERE path = ?1",
-                    [path.to_string_lossy().to_string()],
+                    [path_key::encode(path)],
                     |row| row.get(0),
                 )
                 .optional()?;
@@ -1995,7 +2062,7 @@ impl Db {
             let asset_id: Option<i64> = tx
                 .query_row(
                     "SELECT id FROM assets WHERE path = ?1",
-                    [row.path.to_string_lossy().to_string()],
+                    [path_key::encode(&row.path)],
                     |row| row.get(0),
                 )
                 .optional()?;
@@ -2531,7 +2598,7 @@ impl Db {
             added += tx.execute(
                 "INSERT OR IGNORE INTO collection_assets(collection_id, asset_id)
                  SELECT ?1, id FROM assets WHERE path = ?2",
-                params![id, path.to_string_lossy().to_string()],
+                params![id, path_key::encode(path)],
             )?;
         }
         tx.commit()?;
@@ -2551,7 +2618,7 @@ impl Db {
                 "DELETE FROM collection_assets
                  WHERE collection_id = ?1
                    AND asset_id IN (SELECT id FROM assets WHERE path = ?2)",
-                params![id, path.to_string_lossy().to_string()],
+                params![id, path_key::encode(path)],
             )?;
         }
         tx.commit()?;
@@ -2577,7 +2644,7 @@ impl Db {
         Ok(rows
             .collect::<rusqlite::Result<Vec<_>>>()?
             .into_iter()
-            .map(PathBuf::from)
+            .map(|path| path_key::decode(&path))
             .collect())
     }
 
@@ -2623,7 +2690,7 @@ impl Db {
              WHERE a.path = ?1
              ORDER BY c.name COLLATE NOCASE, c.id",
         )?;
-        let rows = statement.query_map([path.to_string_lossy().to_string()], |row| {
+        let rows = statement.query_map([path_key::encode(path)], |row| {
             let count: i64 = row.get(3)?;
             Ok(Collection {
                 id: row.get(0)?,
@@ -2753,7 +2820,7 @@ impl Db {
             let rows = statement.query_map(params![folder, limit as i64], |row| {
                 Ok(TagJob {
                     id: row.get(0)?,
-                    path: PathBuf::from(row.get::<_, String>(1)?),
+                    path: path_key::decode(&row.get::<_, String>(1)?),
                 })
             })?;
             rows.collect::<rusqlite::Result<Vec<_>>>()?
@@ -2863,7 +2930,7 @@ impl Db {
                 review
                     .keeper_path
                     .as_ref()
-                    .map(|path| path.to_string_lossy().to_string()),
+                    .map(|path| path_key::encode(path)),
                 review.member_count as i64,
                 review.signature,
             ],
@@ -2878,7 +2945,7 @@ impl Db {
         let tx = self.conn.unchecked_transaction()?;
         let mut deleted = 0;
         for path in paths {
-            let path = path.to_string_lossy().to_string();
+            let path = path_key::encode(path);
             // 外键已有 ON DELETE CASCADE；这里再显式清一遍关系行，
             // 保证即使 pragma foreign_keys 被关闭也不会留下孤儿相册关系。
             tx.execute(
@@ -2920,7 +2987,7 @@ impl Db {
                      tag_attempts = tag_attempts + 1
                  WHERE path = ?3
                  RETURNING tag_attempts",
-                params![error, damage, path.to_string_lossy().to_string()],
+                params![error, damage, path_key::encode(path)],
                 |row| row.get(0),
             )
             .optional()?;
@@ -2943,13 +3010,7 @@ impl Db {
              SET thumb = ?1, width = ?2, height = ?3, damage = ?4,
                  thumb_state = 'done'
              WHERE path = ?5",
-            params![
-                thumb,
-                width,
-                height,
-                damage,
-                path.to_string_lossy().to_string()
-            ],
+            params![thumb, width, height, damage, path_key::encode(path)],
         )?;
         self.load_asset(path)
     }
@@ -2966,7 +3027,7 @@ impl Db {
             params![
                 captured_at.map(|value| value as i64),
                 metadata_json,
-                path.to_string_lossy().to_string()
+                path_key::encode(path)
             ],
         )?;
         Ok(())
@@ -2993,7 +3054,7 @@ impl Db {
                 orientation = excluded.orientation",
             params![
                 thumb.to_string_lossy().to_string(),
-                source.to_string_lossy().to_string(),
+                path_key::encode(source),
                 mtime as i64,
                 bytes as i64,
                 orientation as i64
@@ -3009,7 +3070,7 @@ impl Db {
                 [thumb.to_string_lossy().to_string()],
                 |row| {
                     Ok(ThumbSource {
-                        path: PathBuf::from(row.get::<_, String>(0)?),
+                        path: path_key::decode(&row.get::<_, String>(0)?),
                         mtime: row.get::<_, i64>(1)?.max(0) as u64,
                         bytes: row.get::<_, i64>(2)?.max(0) as u64,
                         orientation: row.get::<_, i64>(3)?.clamp(1, 8) as u8,
@@ -3034,8 +3095,8 @@ impl Db {
         hashes: &ContentHashes,
     ) -> Result<Asset> {
         self.invalidate_name_fold();
-        let old_string = old_path.to_string_lossy().to_string();
-        let new_string = new_path.to_string_lossy().to_string();
+        let old_string = path_key::encode(old_path);
+        let new_string = path_key::encode(new_path);
         if let Some(name) = new_path.file_name() {
             self.remember_name_fold(&name.to_string_lossy());
         }
@@ -3138,7 +3199,7 @@ impl Db {
         Ok(rows
             .collect::<rusqlite::Result<Vec<_>>>()?
             .into_iter()
-            .map(PathBuf::from)
+            .map(|path| path_key::decode(&path))
             .collect())
     }
 
@@ -3262,7 +3323,7 @@ impl Db {
         Ok(SearchPage {
             paths: rows
                 .into_iter()
-                .map(|row| PathBuf::from(row.path))
+                .map(|row| path_key::decode(&row.path))
                 .collect(),
             next,
             total,
@@ -3759,7 +3820,7 @@ impl Db {
             }
             let mut chunks = Vec::new();
             let mut values = Vec::new();
-            let paths = paths.iter().map(|path| path.to_string_lossy().to_string());
+            let paths = paths.iter().map(|path| path_key::encode(path));
             let paths = paths.collect::<Vec<_>>();
             for chunk in paths.chunks(500) {
                 chunks.push(format!(
@@ -3800,7 +3861,7 @@ impl Db {
     }
 
     pub fn load_asset(&self, path: &Path) -> Result<Asset> {
-        let path_string = path.to_string_lossy().to_string();
+        let path_string = path_key::encode(path);
         let mut asset = self.conn.query_row(
             "SELECT path, thumb, width, height, group_name, rating, tags_json, tagged, error,
                     sha1, blake3, phash, tag_attempts, bytes, mtime, favorite, star, folder,
@@ -3846,7 +3907,7 @@ impl Db {
              WHERE a.path = ?1 AND at.origin = 'manual'
              ORDER BY t.name",
         )?;
-        let rows = statement.query_map([path.to_string_lossy().to_string()], manual_tag_row)?;
+        let rows = statement.query_map([path_key::encode(path)], manual_tag_row)?;
         let mut tags = Vec::new();
         for row in rows {
             tags.push(row?.1);
@@ -4396,7 +4457,7 @@ fn row_to_asset(row: &rusqlite::Row<'_>) -> rusqlite::Result<Asset> {
     let tagged: i64 = row.get(7)?;
     let phash: Option<i64> = row.get(11)?;
     Ok(Asset {
-        path: PathBuf::from(path),
+        path: path_key::decode(&path),
         library_root: PathBuf::from(row.get::<_, String>(17)?),
         thumb: (!thumb.is_empty()).then(|| PathBuf::from(thumb)),
         tile_thumb: None,
@@ -4426,7 +4487,7 @@ fn row_to_asset(row: &rusqlite::Row<'_>) -> rusqlite::Result<Asset> {
 
 fn manual_tag_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<(PathBuf, TagHit)> {
     Ok((
-        PathBuf::from(row.get::<_, String>(0)?),
+        path_key::decode(&row.get::<_, String>(0)?),
         TagHit {
             tag: row.get(1)?,
             category: row.get(2)?,
@@ -4963,6 +5024,10 @@ fn ensure_asset_columns(conn: &Connection) -> Result<()> {
             "ALTER TABLE assets ADD COLUMN metadata_json TEXT NOT NULL DEFAULT '{}';",
         )?;
     }
+    if !columns.iter().any(|column| column == "mtime_ns") {
+        conn.execute_batch("ALTER TABLE assets ADD COLUMN mtime_ns INTEGER;")?;
+        log::info!("v11: added assets.mtime_ns (existing rows unknown)");
+    }
     // v10：`migrate` 已加列，这里再按列名守卫一次，覆盖「user_version 已写、
     // ALTER 前进程被杀」的窗口，以及跳过 migrate 的只读/手工打开。
     ensure_media_kind_column(conn)?;
@@ -5162,6 +5227,7 @@ fn migrate(conn: &Connection) -> Result<()> {
     // v10（F-040）：视频作为新的 media_kind 需要 assets.media_kind；v9 库在此补列，
     // 既有行保持 'image'（读取语义不变），新库的表在 SCHEMA_V2 里已带该列。
     ensure_media_kind_column(conn)?;
+    ensure_asset_columns(conn)?;
     conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
     Ok(())
 }
@@ -5278,6 +5344,7 @@ mod tests {
     use crate::dedup::{DuplicateReview, ReviewState};
     use crate::media::ContentHashes;
     use crate::model::{Asset, Filter, MediaKind, SearchQuery, TagHit, TagReviewState};
+    use crate::path_key;
     use rusqlite::Connection;
     use rusqlite::types::Value;
     use std::collections::HashSet;
@@ -5827,8 +5894,19 @@ mod tests {
             let version: i64 = conn
                 .query_row("PRAGMA user_version", [], |row| row.get(0))
                 .unwrap();
-            assert_eq!(version, 10, "v9 must upgrade to v10");
-            assert_eq!(version, super::SCHEMA_VERSION);
+            assert_eq!(
+                version,
+                super::SCHEMA_VERSION,
+                "v9 must upgrade to the current schema"
+            );
+            let has_mtime_ns: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM pragma_table_info('assets') WHERE name = 'mtime_ns'",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(has_mtime_ns, 1);
             let kind: String = conn
                 .query_row(
                     "SELECT media_kind FROM assets WHERE path = ?1",
@@ -6625,7 +6703,7 @@ mod tests {
                 db.conn
                     .execute(
                         "UPDATE assets SET damage = 'bad' WHERE path = ?1",
-                        [path.to_string_lossy().to_string()],
+                        [path_key::encode(&path)],
                     )
                     .unwrap();
             }
@@ -7769,6 +7847,103 @@ mod tests {
         assert_eq!(db.load_collections().unwrap().len(), 1);
         assert_eq!(db.load_collections().unwrap()[0].name, "精选");
         assert_eq!(db.load_collections().unwrap()[0].asset_count, 0);
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn migrates_v10_to_v11_adds_mtime_ns_without_touching_rows() {
+        let root = temp_root("v10-v11");
+        let db_path = root.join("kanalib.db");
+        let path = PathBuf::from("C:\\lib\\a.png");
+        {
+            let db = Db::open(&db_path).unwrap();
+            db.upsert_meta("C:\\lib", &path, None, 10, 20, 100, 10, &hash('a'), false)
+                .unwrap();
+        }
+        {
+            let conn = Connection::open(&db_path).unwrap();
+            conn.execute_batch("ALTER TABLE assets DROP COLUMN mtime_ns;")
+                .unwrap();
+            conn.pragma_update(None, "user_version", 10).unwrap();
+        }
+        let db = Db::open(&db_path).unwrap();
+        {
+            let conn = Connection::open(&db_path).unwrap();
+            let version: i64 = conn
+                .query_row("PRAGMA user_version", [], |row| row.get(0))
+                .unwrap();
+            assert_eq!(version, super::SCHEMA_VERSION);
+            let has_mtime_ns: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM pragma_table_info('assets') WHERE name = 'mtime_ns'",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(has_mtime_ns, 1);
+        }
+        assert_eq!(db.stored_meta(&path).unwrap().unwrap().mtime_ns, None);
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn subsecond_mtime_is_stored_and_guards_same_second_rewrites() {
+        let root = temp_root("mtime-ns");
+        let db = Db::open(&root.join("kanalib.db")).unwrap();
+        let path = PathBuf::from("C:\\lib\\a.png");
+        db.upsert_meta_precise(
+            "C:\\lib",
+            &path,
+            None,
+            10,
+            20,
+            100,
+            10,
+            123_456_789,
+            &hash('a'),
+            false,
+        )
+        .unwrap();
+        let meta = db.stored_meta(&path).unwrap().unwrap();
+        assert_eq!(meta.mtime_ns, Some(123_456_789));
+        assert!(meta.content_if_current_at(10, 123_456_789, 100).is_some());
+        assert!(
+            meta.content_if_current_at(10, 123_456_790, 100).is_none(),
+            "a same-second change must not reuse the old hashes"
+        );
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn lossy_path_collisions_stay_distinct_in_database() {
+        use std::ffi::OsString;
+        use std::os::windows::ffi::OsStringExt;
+
+        let root = temp_root("path-key-surrogate");
+        let db = Db::open(&root.join("kanalib.db")).unwrap();
+        let make_path = |unit: u16| {
+            PathBuf::from(OsString::from_wide(&[
+                'C' as u16,
+                ':' as u16,
+                '\\' as u16,
+                unit,
+                '.' as u16,
+                'p' as u16,
+                'n' as u16,
+                'g' as u16,
+            ]))
+        };
+        let first = make_path(0xD800);
+        let second = make_path(0xD801);
+        for path in [&first, &second] {
+            db.upsert_meta("C:\\", path, None, 10, 20, 100, 10, &hash('a'), false)
+                .unwrap();
+        }
+        let assets = db.load_library(&["C:\\".to_string()]).unwrap();
+        assert_eq!(assets.len(), 2);
+        assert!(assets.iter().any(|asset| asset.path == first));
+        assert!(assets.iter().any(|asset| asset.path == second));
         let _ = fs::remove_dir_all(&root);
     }
 

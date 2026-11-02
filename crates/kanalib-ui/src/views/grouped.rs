@@ -476,7 +476,7 @@ impl KanalibApp {
             return;
         }
         self.group_by = mode;
-        self.persist_setting("ui.group_by", mode.key());
+        self.persist_setting("ui.group_by", mode.key(), cx);
         self.collapsed_groups.clear();
         self.group_cache.reset();
         self.pending_reveal_group = None;

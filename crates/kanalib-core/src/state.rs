@@ -224,7 +224,7 @@ impl AppState {
                     .and_then(|value| serde_json::from_str::<Vec<String>>(&value).ok())
                     .unwrap_or_default()
                     .into_iter()
-                    .map(PathBuf::from)
+                    .map(|value| crate::path_key::decode(&value))
                     .collect::<Vec<_>>();
                 if let Err(error) = db.recover_tag_jobs() {
                     log::warn!("recover tag jobs: {error:#}");
@@ -2690,7 +2690,14 @@ impl AppState {
     fn save_protected_paths(&self, paths: &[PathBuf]) -> Result<()> {
         let values = paths
             .iter()
-            .map(|path| path.to_string_lossy().to_string())
+            .map(|path| {
+                let text = path.to_string_lossy();
+                if is_glob_pattern(&text) {
+                    text.into_owned()
+                } else {
+                    crate::path_key::encode(path)
+                }
+            })
             .collect::<Vec<_>>();
         let json = serde_json::to_string(&values)?;
         Db::open(&self.db_path)?.set_setting("dedup.protected_paths", &json)
@@ -4147,11 +4154,24 @@ fn thumb_cache_current(
     path: &Path,
     cache_dir: &Path,
     mtime: u64,
+    mtime_ns: u32,
     bytes: u64,
 ) -> bool {
+    if mtime_ns != 0 && meta.mtime_ns.is_some_and(|stored| stored != mtime_ns) {
+        return false;
+    }
     let expected = thumb_target(path, cache_dir, mtime, bytes, stored_orientation(meta));
     let stored = Path::new(&meta.thumb);
     stored == expected && stored.exists()
+}
+
+/// 内容/精度变化后旧缩略图与 256 派生档都必须删除，否则 `ensure_thumb` 会直接复用。
+fn invalidate_thumb_cache(thumb: &Path) {
+    if thumb.as_os_str().is_empty() {
+        return;
+    }
+    let _ = std::fs::remove_file(thumb);
+    let _ = std::fs::remove_file(tile_thumb_path(thumb));
 }
 
 /// F-064：ffmpeg 只缩放、不解释 ICC。生成 512 后再按源文件的 ICC/EXIF 做一次
@@ -4262,17 +4282,12 @@ fn prefetch_thumbnails(
             continue;
         };
         let bytes = metadata.len();
-        let mtime = metadata
-            .modified()
-            .ok()
-            .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
-            .map(|duration| duration.as_secs())
-            .unwrap_or(0);
+        let (mtime, mtime_ns) = file_mtime(&metadata);
         let stored = db.stored_meta(path).ok().flatten();
         if stored.as_ref().is_some_and(|meta| {
-            meta.is_unchanged(mtime, bytes)
+            meta.is_unchanged_at(mtime, mtime_ns, bytes)
                 && meta.exif_state == "done"
-                && thumb_cache_current(meta, path, &state.cache_dir, mtime, bytes)
+                && thumb_cache_current(meta, path, &state.cache_dir, mtime, mtime_ns, bytes)
         }) {
             continue;
         }
@@ -4287,6 +4302,12 @@ fn prefetch_thumbnails(
             media::read_exif_with_color(path)
         };
         let target = thumb_target(path, &state.cache_dir, mtime, bytes, exif.orientation);
+        let cache_current = stored.as_ref().is_some_and(|meta| {
+            thumb_cache_current(meta, path, &state.cache_dir, mtime, mtime_ns, bytes)
+        });
+        if !cache_current {
+            invalidate_thumb_cache(&target);
+        }
         if !target.exists() {
             jobs.push(ThumbJob {
                 source: path.clone(),
@@ -4722,45 +4743,51 @@ fn index_file(
     let metadata =
         std::fs::metadata(path).with_context(|| format!("读取文件信息 {}", path.display()))?;
     let bytes = metadata.len();
-    let mtime = metadata
-        .modified()
-        .ok()
-        .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
-        .map(|duration| duration.as_secs())
-        .unwrap_or(0);
+    let (mtime, mtime_ns) = file_mtime(&metadata);
     let stored = db.stored_meta(path)?;
     let existed_before = stored.is_some();
     let stored_media = stored
         .as_ref()
-        .filter(|meta| meta.mtime == mtime && meta.bytes == bytes)
+        .filter(|meta| {
+            meta.mtime == mtime
+                && meta.bytes == bytes
+                && meta.mtime_ns.is_none_or(|stored| stored == mtime_ns)
+        })
         .and_then(|meta| {
             let thumb = (!meta.thumb.is_empty())
                 .then(|| PathBuf::from(&meta.thumb))
                 .filter(|thumb| thumb.exists())?;
             Some((meta.width, meta.height, thumb))
         });
-    let reset_tag_attempts = stored
-        .as_ref()
-        .is_none_or(|meta| meta.mtime != mtime || meta.bytes != bytes);
+    let reset_tag_attempts = stored.as_ref().is_none_or(|meta| {
+        meta.mtime != mtime
+            || meta.bytes != bytes
+            || meta.mtime_ns.is_some_and(|stored| stored != mtime_ns)
+    });
     let exif_done = stored
         .as_ref()
         .is_some_and(|meta| meta.exif_state == "done");
-    let cache_current = stored
-        .as_ref()
-        .is_some_and(|meta| thumb_cache_current(meta, path, &state.cache_dir, mtime, bytes));
+    let cache_current = stored.as_ref().is_some_and(|meta| {
+        thumb_cache_current(meta, path, &state.cache_dir, mtime, mtime_ns, bytes)
+    });
     if stored
         .as_ref()
-        .is_some_and(|meta| meta.is_unchanged(mtime, bytes))
+        .is_some_and(|meta| meta.is_unchanged_at(mtime, mtime_ns, bytes))
         && exif_done
         && cache_current
     {
+        if let Some(meta) = stored.as_ref()
+            && meta.mtime_ns.is_none()
+        {
+            let _ = db.set_mtime_ns(path, mtime_ns);
+        }
         return Ok(FileIndexOutcome::default());
     }
 
     let mut outcome = FileIndexOutcome::default();
     let hashes = stored
         .as_ref()
-        .and_then(|meta| meta.content_if_current(mtime, bytes));
+        .and_then(|meta| meta.content_if_current_at(mtime, mtime_ns, bytes));
     let hashes = match hashes {
         Some(hashes) => {
             outcome.hash_reused = true;
@@ -4796,7 +4823,12 @@ fn index_file(
     // 文件未变化且已落库过时长/编码时直接复用，避免每次扫描都为同一批视频启动 ffprobe。
     let cached_video = stored
         .as_ref()
-        .filter(|meta| video_kind && meta.mtime == mtime && meta.bytes == bytes)
+        .filter(|meta| {
+            video_kind
+                && meta.mtime == mtime
+                && meta.bytes == bytes
+                && meta.mtime_ns.is_none_or(|stored| stored == mtime_ns)
+        })
         .and_then(|meta| serde_json::from_str::<media::ExifData>(&meta.metadata_json).ok())
         .filter(|exif| exif.duration_secs.is_some() || !exif.codec.is_empty());
     let probe = if video_kind && cached_video.is_none() {
@@ -4822,6 +4854,14 @@ fn index_file(
         exif.codec = probe.codec.clone();
     }
     let metadata_json = serde_json::to_string(&exif).unwrap_or_else(|_| "{}".to_string());
+    if !cache_current {
+        // 同一秒同字节数的覆盖写入不会改变缓存键；先删旧 512/256 档强制重建。
+        let expected = thumb_target(path, &state.cache_dir, mtime, bytes, exif.orientation);
+        invalidate_thumb_cache(&expected);
+        if let Some(meta) = stored.as_ref() {
+            invalidate_thumb_cache(Path::new(&meta.thumb));
+        }
+    }
     let thumb_started = Instant::now();
     let thumbnail = ensure_thumb_with_hint(
         path,
@@ -4945,7 +4985,7 @@ fn index_file(
     if content_changed {
         db.reset_asset_analysis(path)?;
     }
-    let mut asset = db.upsert_meta(
+    let mut asset = db.upsert_meta_precise(
         folder_string,
         path,
         thumb.as_deref(),
@@ -4953,6 +4993,7 @@ fn index_file(
         height,
         bytes,
         mtime,
+        mtime_ns,
         &hashes,
         reset_tag_attempts,
     )?;
@@ -5375,6 +5416,16 @@ fn absolute(path: PathBuf) -> PathBuf {
     std::path::absolute(&path).unwrap_or(path)
 }
 
+/// 文件修改时间：秒 + 亚秒纳秒。旧库/远端没有纳秒时按 0 处理。
+fn file_mtime(metadata: &std::fs::Metadata) -> (u64, u32) {
+    metadata
+        .modified()
+        .ok()
+        .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
+        .map(|duration| (duration.as_secs(), duration.subsec_nanos()))
+        .unwrap_or((0, 0))
+}
+
 /// 保护项输入归一化：glob 保留原样（相对 glob 由匹配器补 `**/`），
 /// 普通路径必须是已存在的文件夹并转成绝对路径。
 fn normalize_protected_entry(entry: &str) -> Result<PathBuf> {
@@ -5604,7 +5655,7 @@ pub(crate) fn thumb_target(
     let mut key = format!(
         "{}-{}-{}-{}-{}",
         THUMB_CACHE_VERSION,
-        path.to_string_lossy(),
+        crate::path_key::encode(path),
         mtime,
         bytes,
         path.extension()
@@ -7900,6 +7951,7 @@ mod tests {
         std::fs::write(&v3, b"old").unwrap();
         let meta = StoredMeta {
             mtime: 1,
+            mtime_ns: None,
             bytes: 2,
             sha1: Some("a".repeat(40)),
             blake3: Some("b".repeat(64)),
@@ -7914,7 +7966,7 @@ mod tests {
         };
         assert_ne!(v3, v4, "v4 key must differ from v3");
         assert!(
-            !thumb_cache_current(&meta, &source, &cache, 1, 2),
+            !thumb_cache_current(&meta, &source, &cache, 1, 0, 2),
             "an existing v3 file must never satisfy the v4 cache check"
         );
         std::fs::write(&v4, b"new").unwrap();
@@ -7922,7 +7974,7 @@ mod tests {
             thumb: v4.to_string_lossy().to_string(),
             ..meta
         };
-        assert!(thumb_cache_current(&meta, &source, &cache, 1, 2));
+        assert!(thumb_cache_current(&meta, &source, &cache, 1, 0, 2));
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

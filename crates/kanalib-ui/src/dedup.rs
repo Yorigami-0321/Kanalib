@@ -2422,6 +2422,7 @@ impl KanalibApp {
                                                     app.persist_setting(
                                                         "dedup.last_trash",
                                                         audit.to_json(),
+                                                        cx,
                                                     );
                                                     app.last_trash_audit = Some(audit);
                                                     app.dedup_notice = Some(format!(

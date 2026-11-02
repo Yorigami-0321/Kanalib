@@ -8,6 +8,7 @@ pub mod ffmpeg;
 pub mod media;
 pub mod model;
 pub mod open;
+pub mod path_key;
 pub mod scan_filter;
 pub mod sidecar;
 pub mod sources;

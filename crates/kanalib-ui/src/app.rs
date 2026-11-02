@@ -106,6 +106,7 @@ pub struct KanalibApp {
     pub(crate) thumb_budget_gb: u64,
     pub(crate) cache_last_cleanup: Option<String>,
     pub(crate) cache_budget_checked: bool,
+    pub(crate) cache_cleanup_running: bool,
     pub(crate) last_search: String,
     /// 搜索框当前文本；与 `last_search` 不同说明还在防抖窗口内。
     pub(crate) search_pending: String,
@@ -2025,23 +2026,23 @@ impl KanalibApp {
         self.state.set_filter(saved.filter.clone());
         if let Some(mode) = SortMode::from_key(&saved.view.sort_key) {
             self.sort = mode;
-            self.persist_setting("ui.sort", mode.key());
+            self.persist_setting("ui.sort", mode.key(), cx);
         }
         self.sort_ascending = saved.view.sort_ascending;
-        self.persist_setting("ui.sort_ascending", self.sort_ascending.to_string());
+        self.persist_setting("ui.sort_ascending", self.sort_ascending.to_string(), cx);
         if let Some(mode) = ViewMode::from_key(&saved.view.view_mode) {
             self.view_mode = mode;
-            self.persist_setting("ui.view_mode", mode.key());
+            self.persist_setting("ui.view_mode", mode.key(), cx);
         }
         if !saved.view.pane_mode.is_empty() {
             let mode = PaneMode::from_key(&saved.view.pane_mode);
             self.pane_mode = mode;
-            self.persist_setting("ui.pane_mode", mode.key());
+            self.persist_setting("ui.pane_mode", mode.key(), cx);
         }
         self.show_sidebar = saved.view.show_sidebar;
-        self.persist_setting("ui.show_sidebar", self.show_sidebar.to_string());
+        self.persist_setting("ui.show_sidebar", self.show_sidebar.to_string(), cx);
         self.show_extensions = saved.view.show_extensions;
-        self.persist_setting("ui.show_extensions", self.show_extensions.to_string());
+        self.persist_setting("ui.show_extensions", self.show_extensions.to_string(), cx);
         self.screen = Screen::Library;
         self.dedup_confirm = None;
         self.clear_multi_selection();
@@ -2440,6 +2441,7 @@ impl KanalibApp {
             thumb_budget_gb,
             cache_last_cleanup: None,
             cache_budget_checked: false,
+            cache_cleanup_running: false,
             last_search: String::new(),
             search_pending: String::new(),
             search_bundle: None,
@@ -3576,17 +3578,28 @@ impl KanalibApp {
         }
     }
 
-    pub(crate) fn persist_setting(&self, key: &str, value: impl AsRef<str>) {
+    pub(crate) fn persist_setting(
+        &mut self,
+        key: &str,
+        value: impl AsRef<str>,
+        cx: &mut Context<Self>,
+    ) {
         if let Err(error) = self.state.set_setting(key, value.as_ref()) {
             log::warn!("save setting {key}: {error:#}");
+            push_toast(
+                &self.toaster,
+                cx,
+                format!("设置保存失败：{error:#}"),
+                Severity::Danger,
+            );
         }
     }
 
     pub(crate) fn choose_sort_mode(&mut self, mode: SortMode, cx: &mut Context<Self>) {
         self.sort = mode;
         self.sort_ascending = mode.default_ascending();
-        self.persist_setting("ui.sort", mode.key());
-        self.persist_setting("ui.sort_ascending", self.sort_ascending.to_string());
+        self.persist_setting("ui.sort", mode.key(), cx);
+        self.persist_setting("ui.sort_ascending", self.sort_ascending.to_string(), cx);
         self.focus_grid_pending = true;
         // 排序是查询的一部分，分页结果要按新排序重跑。
         self.schedule_search(cx);
@@ -3595,7 +3608,7 @@ impl KanalibApp {
 
     pub(crate) fn set_sort_ascending(&mut self, ascending: bool, cx: &mut Context<Self>) {
         self.sort_ascending = ascending;
-        self.persist_setting("ui.sort_ascending", ascending.to_string());
+        self.persist_setting("ui.sort_ascending", ascending.to_string(), cx);
         self.focus_grid_pending = true;
         self.schedule_search(cx);
         cx.notify();
@@ -3626,7 +3639,7 @@ impl KanalibApp {
         }
         self.anchor_scroll();
         self.view_mode = mode;
-        self.persist_setting("ui.view_mode", mode.key());
+        self.persist_setting("ui.view_mode", mode.key(), cx);
         self.focus_grid_pending = true;
         cx.notify();
     }
@@ -3637,7 +3650,7 @@ impl KanalibApp {
         }
         self.anchor_scroll();
         self.pane_mode = mode;
-        self.persist_setting("ui.pane_mode", mode.key());
+        self.persist_setting("ui.pane_mode", mode.key(), cx);
         self.focus_grid_pending = true;
         cx.notify();
     }
@@ -3653,7 +3666,7 @@ impl KanalibApp {
 
     pub(crate) fn set_show_extensions(&mut self, show: bool, cx: &mut Context<Self>) {
         self.show_extensions = show;
-        self.persist_setting("ui.show_extensions", show.to_string());
+        self.persist_setting("ui.show_extensions", show.to_string(), cx);
         cx.notify();
     }
 
@@ -3667,7 +3680,11 @@ impl KanalibApp {
             },
             cx,
         );
-        self.persist_setting("ui.theme", if self.theme_dark { "dark" } else { "light" });
+        self.persist_setting(
+            "ui.theme",
+            if self.theme_dark { "dark" } else { "light" },
+            cx,
+        );
         cx.notify();
     }
 
