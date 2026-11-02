@@ -82,6 +82,7 @@ gpui::actions!(
         CloseSimilar,
         OpenQuickView,
         ToggleFavorite,
+        Undo,
         Rate0,
         Rate1,
         Rate2,
@@ -539,5 +540,13 @@ mod tests {
         assert_eq!(GroupMode::from_key("unknown"), None);
         assert_eq!(GroupMode::default(), GroupMode::None);
         assert_eq!(GroupMode::None.label(), "不分组");
+    }
+
+    #[test]
+    fn undo_binding_parses_text_input_exclusion() {
+        // F-067：Ctrl+Z 的上下文排除必须能被解析，否则启动时 `KeyBinding::new` 会 panic。
+        let binding = gpui::KeyBinding::new("ctrl-z", super::Undo, Some("!ElyInput"));
+        assert_eq!(binding.keystrokes().len(), 1);
+        assert!(binding.predicate().is_some());
     }
 }

@@ -1056,6 +1056,9 @@ impl Render for KanalibApp {
                     Command::new("similar:find", "查找相似").icon(IconName::Search),
                     Command::new("compare:selected", "图片对比（选中 2–4 张）")
                         .icon(IconName::Columns2),
+                    Command::new("act:undo", "撤销上一步")
+                        .icon(IconName::Undo2)
+                        .keys("ctrl-z"),
                 ],
             )
             .group(
@@ -1800,6 +1803,9 @@ impl Render for KanalibApp {
             colors,
         );
         let search_chips = self.render_search_chips(&this, colors);
+        // F-067：底栏只读撤销栈快照；条目上限与内容由核心维护。
+        let undo_depth = self.state.undo_depth();
+        let undo_label = self.state.peek_undo_label();
         let status_bar = self.render_status_bar(
             &this,
             &status,
@@ -1811,6 +1817,8 @@ impl Render for KanalibApp {
             queue_error,
             &counts,
             &filter,
+            undo_depth,
+            undo_label.as_deref(),
             window_width,
             colors,
         );
@@ -1893,6 +1901,7 @@ impl Render for KanalibApp {
             }))
             .on_action(cx.listener(|this, _: &OpenQuickView, _, cx| this.open_quick_view(cx)))
             .on_action(cx.listener(|this, _: &ToggleFavorite, _, cx| this.toggle_favorite(cx)))
+            .on_action(cx.listener(|this, _: &Undo, _, cx| this.undo_last(cx)))
             .on_action(cx.listener(|this, _: &Rate0, _, cx| this.apply_star(0, cx)))
             .on_action(cx.listener(|this, _: &Rate1, _, cx| this.apply_star(1, cx)))
             .on_action(cx.listener(|this, _: &Rate2, _, cx| this.apply_star(2, cx)))
@@ -2299,6 +2308,8 @@ impl KanalibApp {
             KeyBinding::new("ctrl-shift-p", OpenPalette, None),
             KeyBinding::new("ctrl-b", ToggleSidebar, None),
             KeyBinding::new("ctrl-f", FocusSearch, None),
+            // F-067：Ctrl+Z 撤销上一条可逆编辑；文本输入聚焦时让位给输入框自己的撤销。
+            KeyBinding::new("ctrl-z", Undo, Some("!ElyInput")),
             KeyBinding::new("up", SelectPrevRow, Some(GRID_CONTEXT)),
             KeyBinding::new("down", SelectNextRow, Some(GRID_CONTEXT)),
             KeyBinding::new("left", SelectPrev, Some(GRID_CONTEXT)),
@@ -3343,6 +3354,35 @@ impl KanalibApp {
         cx.notify();
     }
 
+    /// F-067：撤销上一条可逆编辑（收藏/星级/手工标签）。
+    /// 核心已负责刷新计数、搜索索引与 revision；这里只负责提示与重绘。
+    pub(crate) fn undo_last(&mut self, cx: &mut Context<Self>) {
+        if !self.state.can_undo() {
+            push_toast(&self.toaster, cx, "没有可撤销的操作", Severity::Warning);
+            return;
+        }
+        match self.state.undo_last() {
+            Ok(outcome) => {
+                push_toast(
+                    &self.toaster,
+                    cx,
+                    format!("已撤销 · {}", outcome.label),
+                    Severity::Success,
+                );
+                cx.notify();
+            }
+            Err(error) => {
+                log::warn!("undo failed: {error:#}");
+                push_toast(
+                    &self.toaster,
+                    cx,
+                    format!("撤销失败：{error:#}"),
+                    Severity::Danger,
+                );
+            }
+        }
+    }
+
     pub(crate) fn export_assets(
         &mut self,
         target: ExportTarget,
@@ -3661,6 +3701,8 @@ impl KanalibApp {
             "act:star5" => self.apply_star(5, cx),
             "act:copy-prompt" => self.copy_selected_prompt(cx),
             "act:copy-paths" => self.copy_selected_paths(cx),
+            // F-067：命令面板与 Ctrl+Z 共用同一个撤销入口。
+            "act:undo" => self.undo_last(cx),
             "tag:add" => self.open_tag_dialog(TagDialogMode::Add, cx),
             "tag:remove" => self.open_tag_dialog(TagDialogMode::Remove, cx),
             "export:selected-csv" => {

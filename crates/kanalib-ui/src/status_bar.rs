@@ -81,6 +81,20 @@ pub(crate) fn status_bar_item(
         .into_any_element()
 }
 
+/// 可撤销条目的轻量文案；深度为 0 时不显示（返回 `None`）。
+pub(crate) fn undo_status_label(depth: usize) -> Option<String> {
+    (depth > 0).then(|| format!("可撤销 {depth}"))
+}
+
+/// 撤销条目的无障碍名称：带上栈顶操作名，读屏能听出将会撤销什么。
+pub(crate) fn undo_status_aria(depth: usize, label: Option<&str>) -> String {
+    let base = undo_status_label(depth).unwrap_or_else(|| "没有可撤销的操作".to_string());
+    match label {
+        Some(label) => format!("撤销「{label}」· {base} · Ctrl+Z"),
+        None => format!("{base} · Ctrl+Z"),
+    }
+}
+
 impl KanalibApp {
     pub(crate) fn render_status_bar(
         &self,
@@ -94,6 +108,8 @@ impl KanalibApp {
         queue_error: usize,
         counts: &Counts,
         filter: &Filter,
+        undo_depth: usize,
+        undo_label: Option<&str>,
         width: Pixels,
         colors: UiColors,
     ) -> AnyElement {
@@ -256,6 +272,43 @@ impl KanalibApp {
                     .text_xs()
                     .text_color(colors.accent)
                     .child("搜索中…"),
+            );
+        }
+        // F-067：有可撤销项时显示条数并可点击撤销；空栈不占位。
+        if let Some(label) = undo_status_label(undo_depth) {
+            let this_undo = this.clone();
+            let aria = undo_status_aria(undo_depth, undo_label);
+            left = left.child(
+                div()
+                    .id("status-undo")
+                    .role(Role::Button)
+                    .aria_label(SharedString::from(aria))
+                    .h_full()
+                    .min_w(px(0.))
+                    .overflow_hidden()
+                    .px(px(6.))
+                    .flex()
+                    .items_center()
+                    .gap(px(4.))
+                    .rounded(px(4.))
+                    .cursor_pointer()
+                    .hover(move |item| item.bg(colors.hover))
+                    .on_click(move |_, _, cx| {
+                        let _ = this_undo.update(cx, |app, cx| app.undo_last(cx));
+                    })
+                    .child(
+                        Icon::new(IconName::Undo2)
+                            .size(IconSize::Xs)
+                            .color(colors.muted),
+                    )
+                    .child(
+                        div()
+                            .truncate()
+                            .whitespace_nowrap()
+                            .text_xs()
+                            .text_color(colors.muted)
+                            .child(SharedString::from(label)),
+                    ),
             );
         }
         let this_all = this.clone();
@@ -439,5 +492,25 @@ impl KanalibApp {
             .child(right)
             .into_any_element()
     }
+}
 
+#[cfg(test)]
+mod tests {
+    use super::{undo_status_aria, undo_status_label};
+
+    #[test]
+    fn undo_label_hidden_when_stack_empty() {
+        assert_eq!(undo_status_label(0), None);
+        assert_eq!(undo_status_label(1).as_deref(), Some("可撤销 1"));
+        assert_eq!(undo_status_label(12).as_deref(), Some("可撤销 12"));
+    }
+
+    #[test]
+    fn undo_aria_mentions_top_label() {
+        assert_eq!(
+            undo_status_aria(2, Some("设置 4 星")),
+            "撤销「设置 4 星」· 可撤销 2 · Ctrl+Z"
+        );
+        assert_eq!(undo_status_aria(0, None), "没有可撤销的操作 · Ctrl+Z");
+    }
 }
