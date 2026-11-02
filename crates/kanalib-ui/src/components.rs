@@ -1,9 +1,30 @@
+use ely_gpui_component::buttons::{Button, ButtonVariant};
 use ely_gpui_component::primitives::{Icon, IconName};
-use ely_gpui_component::theme::IconSize;
+use ely_gpui_component::theme::{ControlSize, IconSize};
 use gpui::prelude::*;
-use gpui::{AnyElement, FontWeight, IntoElement, SharedString, div, px};
+use gpui::{
+    AnyElement, App, ClickEvent, ElementId, FontWeight, IntoElement, SharedString, Window, div, px,
+};
 
 use crate::theme::{RADIUS_LG, SPACE_2, SPACE_6, UiColors};
+
+/// F-073：筛选 chip 统一用 Button，保证键盘焦点、禁用与悬停状态一致。
+pub(crate) fn filter_chip(
+    id: impl Into<ElementId>,
+    label: impl Into<SharedString>,
+    active: bool,
+    on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+) -> AnyElement {
+    Button::new(id, label)
+        .size(ControlSize::Sm)
+        .variant(if active {
+            ButtonVariant::Secondary
+        } else {
+            ButtonVariant::Ghost
+        })
+        .on_click(on_click)
+        .into_any_element()
+}
 
 /// F-073：空/失败/未开始状态共用同一结构：图标、标题、说明、一个下一步。
 pub(crate) fn empty_state(

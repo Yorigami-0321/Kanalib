@@ -529,11 +529,11 @@ impl KanalibApp {
         let this_refresh = this.clone();
         let filter_bar = {
             let mut bar = div()
-                .px(px(16.))
-                .py(px(6.))
+                .px(px(SPACE_4))
+                .py(px(SPACE_1_5))
                 .flex()
                 .items_center()
-                .gap(px(4.))
+                .gap(px(SPACE_1))
                 .border_b_1()
                 .border_color(colors.border);
             for filter in TagManagerFilter::ALL {
@@ -545,30 +545,18 @@ impl KanalibApp {
                 };
                 let this = this.clone();
                 let active = self.tag_manager_filter == filter;
-                bar = bar.child(
-                    div()
-                        .id(SharedString::from(format!("tag-filter-{}", filter.slug())))
-                        .px(px(9.))
-                        .py(px(4.))
-                        .rounded(px(5.))
-                        .cursor_pointer()
-                        .bg(if active {
-                            colors.selection
-                        } else {
-                            colors.sunken
-                        })
-                        .text_xs()
-                        .text_color(if active { colors.fg } else { colors.muted })
-                        .hover(move |style| style.bg(colors.hover))
-                        .on_click(move |_, _, cx| {
-                            let _ = this.update(cx, |app, cx| {
-                                app.tag_manager_filter = filter;
-                                app.tag_scroll.scroll_to_item(0, ScrollStrategy::Top);
-                                cx.notify();
-                            });
-                        })
-                        .child(format!("{} {}", filter.label(), count)),
-                );
+                bar = bar.child(filter_chip(
+                    SharedString::from(format!("tag-filter-{}", filter.slug())),
+                    format!("{} {}", filter.label(), count),
+                    active,
+                    move |_, _, cx| {
+                        let _ = this.update(cx, |app, cx| {
+                            app.tag_manager_filter = filter;
+                            app.tag_scroll.scroll_to_item(0, ScrollStrategy::Top);
+                            cx.notify();
+                        });
+                    },
+                ));
             }
             let mut sort_menu = Menu::new();
             for sort in TagManagerSort::ALL {

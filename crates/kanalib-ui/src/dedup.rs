@@ -314,26 +314,12 @@ pub(crate) fn dedup_filter_chip(
     count: usize,
     active: bool,
     this: Entity<KanalibApp>,
-    colors: UiColors,
 ) -> AnyElement {
-    div()
-        .id(SharedString::from(format!(
-            "dedup-filter-{}",
-            filter.label()
-        )))
-        .px(px(9.))
-        .py(px(4.))
-        .rounded(px(5.))
-        .cursor_pointer()
-        .bg(if active {
-            colors.selection
-        } else {
-            colors.sunken
-        })
-        .text_xs()
-        .text_color(if active { colors.fg } else { colors.muted })
-        .hover(move |style| style.bg(colors.hover))
-        .on_click(move |_, _, cx| {
+    filter_chip(
+        SharedString::from(format!("dedup-filter-{}", filter.label())),
+        format!("{} {}", filter.label(), count),
+        active,
+        move |_, _, cx| {
             let _ = this.update(cx, |app, cx| {
                 app.dedup_filter = filter;
                 app.dedup_selected = None;
@@ -341,9 +327,8 @@ pub(crate) fn dedup_filter_chip(
                 app.dedup_scroll.scroll_to_item(0, ScrollStrategy::Top);
                 cx.notify();
             });
-        })
-        .child(format!("{} {}", filter.label(), count))
-        .into_any_element()
+        },
+    )
 }
 
 pub(crate) fn dedup_tab(
@@ -1390,11 +1375,11 @@ impl KanalibApp {
         });
 
         let filter_bar = div()
-            .px(px(16.))
-            .py(px(7.))
+            .px(px(SPACE_4))
+            .py(px(SPACE_2))
             .flex()
             .items_center()
-            .gap(px(5.))
+            .gap(px(SPACE_1_5))
             .border_b_1()
             .border_color(colors.border)
             .child(dedup_filter_chip(
@@ -1402,14 +1387,12 @@ impl KanalibApp {
                 summary.pending,
                 self.dedup_filter == DedupFilter::Pending,
                 this.clone(),
-                colors,
             ))
             .child(dedup_filter_chip(
                 DedupFilter::Ignored,
                 summary.ignored,
                 self.dedup_filter == DedupFilter::Ignored,
                 this.clone(),
-                colors,
             ))
             .children(similar_mode.then(|| {
                 dedup_filter_chip(
@@ -1417,7 +1400,6 @@ impl KanalibApp {
                     summary.related,
                     self.dedup_filter == DedupFilter::Related,
                     this.clone(),
-                    colors,
                 )
             }))
             .child(dedup_filter_chip(
@@ -1425,14 +1407,12 @@ impl KanalibApp {
                 summary.done,
                 self.dedup_filter == DedupFilter::Done,
                 this.clone(),
-                colors,
             ))
             .child(dedup_filter_chip(
                 DedupFilter::All,
                 summary.total,
                 self.dedup_filter == DedupFilter::All,
                 this.clone(),
-                colors,
             ))
             .child(div().flex_1())
             .child(div().text_xs().text_color(colors.subtle).child(if busy {
