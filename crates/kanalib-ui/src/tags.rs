@@ -6,6 +6,149 @@ use crate::theme::*;
 /// 低置信度审核最多加载的候选条数。
 pub(crate) const TAG_REVIEW_LIMIT: usize = 80;
 
+/// F-025：低频标签阈值（含）；0 使用单独统计，绝不自动删除。
+pub(crate) const TAG_LOW_FREQ_MAX: usize = 2;
+
+/// 标签管理的筛选口径；全部只影响展示，不修改标签数据。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub(crate) enum TagManagerFilter {
+    #[default]
+    All,
+    Unused,
+    LowFrequency,
+    AutoOnly,
+}
+
+impl TagManagerFilter {
+    pub(crate) const ALL: [Self; 4] = [
+        Self::All,
+        Self::Unused,
+        Self::LowFrequency,
+        Self::AutoOnly,
+    ];
+
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Self::All => "全部",
+            Self::Unused => "0 使用",
+            Self::LowFrequency => "低频",
+            Self::AutoOnly => "仅自动",
+        }
+    }
+
+    pub(crate) fn slug(self) -> &'static str {
+        match self {
+            Self::All => "all",
+            Self::Unused => "unused",
+            Self::LowFrequency => "low",
+            Self::AutoOnly => "auto",
+        }
+    }
+
+    pub(crate) fn matches(self, tag: &TagSummary) -> bool {
+        match self {
+            Self::All => true,
+            Self::Unused => tag.count == 0,
+            Self::LowFrequency => tag.count > 0 && tag.count <= TAG_LOW_FREQ_MAX,
+            // “仅自动”= 有使用但一次手工添加都没有；手工标签不算。
+            Self::AutoOnly => tag.count > 0 && tag.manual_count == 0,
+        }
+    }
+}
+
+/// 标签管理排序；默认保持词表的用量降序。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub(crate) enum TagManagerSort {
+    #[default]
+    Default,
+    Name,
+    UsageAsc,
+    UsageDesc,
+    ManualDesc,
+}
+
+impl TagManagerSort {
+    pub(crate) const ALL: [Self; 5] = [
+        Self::Default,
+        Self::Name,
+        Self::UsageAsc,
+        Self::UsageDesc,
+        Self::ManualDesc,
+    ];
+
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Self::Default => "默认顺序",
+            Self::Name => "名称",
+            Self::UsageAsc => "使用次数（少→多）",
+            Self::UsageDesc => "使用次数（多→少）",
+            Self::ManualDesc => "手工次数（多→少）",
+        }
+    }
+}
+
+/// F-025：按筛选口径 + 名称搜索过滤，再按排序规则排列；不删除任何标签。
+pub(crate) fn filter_tag_summaries(
+    tags: &[TagSummary],
+    query: &str,
+    filter: TagManagerFilter,
+) -> Vec<TagSummary> {
+    let needle = query.trim().to_lowercase();
+    tags.iter()
+        .filter(|tag| {
+            filter.matches(tag)
+                && (needle.is_empty()
+                    || tag.name.to_lowercase().contains(&needle)
+                    || tag.category.to_lowercase().contains(&needle))
+        })
+        .cloned()
+        .collect()
+}
+
+pub(crate) fn sort_tag_summaries(tags: &mut [TagSummary], sort: TagManagerSort) {
+    match sort {
+        TagManagerSort::Default => {}
+        TagManagerSort::Name => {
+            tags.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()).then_with(|| a.name.cmp(&b.name)))
+        }
+        TagManagerSort::UsageAsc => tags.sort_by(|a, b| {
+            a.count
+                .cmp(&b.count)
+                .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
+        }),
+        TagManagerSort::UsageDesc => tags.sort_by(|a, b| {
+            b.count
+                .cmp(&a.count)
+                .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
+        }),
+        TagManagerSort::ManualDesc => tags.sort_by(|a, b| {
+            b.manual_count
+                .cmp(&a.manual_count)
+                .then_with(|| b.count.cmp(&a.count))
+                .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
+        }),
+    }
+}
+
+/// 0 使用 / 低频 / 仅自动的计数，只用于标签管理页标题。
+pub(crate) fn tag_manager_counts(tags: &[TagSummary]) -> (usize, usize, usize) {
+    let mut unused = 0;
+    let mut low = 0;
+    let mut auto_only = 0;
+    for tag in tags {
+        if TagManagerFilter::Unused.matches(tag) {
+            unused += 1;
+        }
+        if TagManagerFilter::LowFrequency.matches(tag) {
+            low += 1;
+        }
+        if TagManagerFilter::AutoOnly.matches(tag) {
+            auto_only += 1;
+        }
+    }
+    (unused, low, auto_only)
+}
+
 /// 待审候选按资产分组；core 已按路径、分数排序，这里保持同样的顺序。
 pub(crate) fn group_reviews_by_asset(
     reviews: &[TagCandidateReview],
@@ -123,7 +266,8 @@ impl KanalibApp {
     }
 
     pub(crate) fn open_tag_manager(&mut self, cx: &mut Context<Self>) {
-        match self.state.list_tags() {
+        // F-025：使用全词表（含 0 使用标签），否则「0 使用」筛选永远为空。
+        match self.state.tag_vocabulary() {
             Ok(tags) => self.tag_list = tags,
             Err(error) => {
                 log::warn!("list tags: {error:#}");
@@ -144,7 +288,7 @@ impl KanalibApp {
     }
 
     pub(crate) fn refresh_tag_manager(&mut self, cx: &mut Context<Self>) {
-        match self.state.list_tags() {
+        match self.state.tag_vocabulary() {
             Ok(tags) => self.tag_list = tags,
             Err(error) => push_toast(
                 &self.toaster,
@@ -343,17 +487,18 @@ impl KanalibApp {
             TextInput::new(window, cx).placeholder("筛选标签名 / 类别")
         });
         let query = search.read(cx).text().trim().to_lowercase();
-        let filtered = self
-            .tag_list
-            .iter()
-            .filter(|tag| {
-                query.is_empty()
-                    || tag.name.to_lowercase().contains(&query)
-                    || tag.category.to_lowercase().contains(&query)
-            })
-            .cloned()
-            .collect::<Vec<_>>();
+        let tags = filter_tag_summaries(
+            &self.tag_list,
+            &query,
+            self.tag_manager_filter,
+        );
+        let filtered = {
+            let mut tags = tags;
+            sort_tag_summaries(&mut tags, self.tag_manager_sort);
+            tags
+        };
         let total = self.tag_list.len();
+        let (unused, low_frequency, auto_only) = tag_manager_counts(&self.tag_list);
         let blocked_count = self
             .tag_list
             .iter()
@@ -361,6 +506,81 @@ impl KanalibApp {
             .count();
         let this_back = this.clone();
         let this_refresh = this.clone();
+        let filter_bar = {
+            let mut bar = div()
+                .px(px(16.))
+                .py(px(6.))
+                .flex()
+                .items_center()
+                .gap(px(4.))
+                .border_b_1()
+                .border_color(colors.border);
+            for filter in TagManagerFilter::ALL {
+                let count = match filter {
+                    TagManagerFilter::All => total,
+                    TagManagerFilter::Unused => unused,
+                    TagManagerFilter::LowFrequency => low_frequency,
+                    TagManagerFilter::AutoOnly => auto_only,
+                };
+                let this = this.clone();
+                let active = self.tag_manager_filter == filter;
+                bar = bar.child(
+                    div()
+                        .id(SharedString::from(format!(
+                            "tag-filter-{}",
+                            filter.slug()
+                        )))
+                        .px(px(9.))
+                        .py(px(4.))
+                        .rounded(px(5.))
+                        .cursor_pointer()
+                        .bg(if active {
+                            colors.selection
+                        } else {
+                            colors.sunken
+                        })
+                        .text_xs()
+                        .text_color(if active { colors.fg } else { colors.muted })
+                        .hover(move |style| style.bg(colors.hover))
+                        .on_click(move |_, _, cx| {
+                            let _ = this.update(cx, |app, cx| {
+                                app.tag_manager_filter = filter;
+                                app.tag_scroll.scroll_to_item(0, ScrollStrategy::Top);
+                                cx.notify();
+                            });
+                        })
+                        .child(format!("{} {}", filter.label(), count)),
+                );
+            }
+            let mut sort_menu = Menu::new();
+            for sort in TagManagerSort::ALL {
+                let this = this.clone();
+                sort_menu = sort_menu.item(
+                    MenuItem::radio(sort.label(), self.tag_manager_sort == sort).on_click(
+                        move |_, cx| {
+                            let _ = this.update(cx, |app, cx| {
+                                app.tag_manager_sort = sort;
+                                app.tag_scroll.scroll_to_item(0, ScrollStrategy::Top);
+                                cx.notify();
+                            });
+                        },
+                    ),
+                );
+            }
+            bar.child(div().flex_1())
+                .child(
+                    div()
+                        .flex_none()
+                        .text_xs()
+                        .text_color(colors.subtle)
+                        .child("只排序/筛选展示，不会自动删除标签"),
+                )
+                .child(
+                    DropdownMenu::new("tag-manager-sort", "排序", sort_menu)
+                        .icon(IconName::ArrowDownUp)
+                        .variant(ButtonVariant::Ghost),
+                )
+        };
         let body: AnyElement = if filtered.is_empty() {
             div()
                 .flex_1()
@@ -535,7 +755,7 @@ impl KanalibApp {
                                     .text_xs()
                                     .text_color(colors.muted)
                                     .child(format!(
-                                        "共 {total} 个标签 · 已屏蔽 {blocked_count} 个 · 屏蔽只影响侧栏标签面"
+                                        "共 {total} 个标签 · 0 使用 {unused} · 低频 {low_frequency} · 仅自动 {auto_only} · 已屏蔽 {blocked_count}"
                                     )),
                             ),
                     )
@@ -572,7 +792,78 @@ impl KanalibApp {
                             ),
                     ),
             )
+            .child(filter_bar)
             .child(body)
     }
 
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn tag(name: &str, count: usize, manual_count: usize) -> TagSummary {
+        TagSummary {
+            name: name.to_string(),
+            category: "style".to_string(),
+            count,
+            manual_count,
+        }
+    }
+
+    #[test]
+    fn tag_filters_separate_unused_low_and_auto_only() {
+        let tags = vec![
+            tag("unused", 0, 0),
+            tag("rare", 1, 0),
+            tag("low", 2, 1),
+            tag("popular", 8, 3),
+            tag("auto", 9, 0),
+        ];
+        assert!(TagManagerFilter::All.matches(&tags[0]));        assert!(TagManagerFilter::Unused.matches(&tags[0]));
+        assert!(!TagManagerFilter::Unused.matches(&tags[1]));
+        assert!(TagManagerFilter::LowFrequency.matches(&tags[1]));
+        assert!(TagManagerFilter::LowFrequency.matches(&tags[2]));
+        assert!(!TagManagerFilter::LowFrequency.matches(&tags[3]));
+        assert!(TagManagerFilter::AutoOnly.matches(&tags[1]));
+        assert!(TagManagerFilter::AutoOnly.matches(&tags[4]));
+        assert!(!TagManagerFilter::AutoOnly.matches(&tags[2]));
+        assert!(!TagManagerFilter::AutoOnly.matches(&tags[0]));
+        assert_eq!(tag_manager_counts(&tags), (1, 2, 2));
+    }
+
+    #[test]
+    fn tag_filter_respects_search_and_sorting_is_stable() {
+        let tags = vec![
+            tag("Beta", 3, 0),
+            tag("alpha", 3, 2),
+            tag("gamma", 1, 0),
+            tag("unused", 0, 0),
+        ];
+        let filtered = filter_tag_summaries(&tags, "a", TagManagerFilter::All);
+        assert_eq!(filtered.len(), 3);
+
+        let mut sorted = filtered;
+        sort_tag_summaries(&mut sorted, TagManagerSort::UsageAsc);
+        assert_eq!(
+            sorted.iter().map(|tag| tag.name.as_str()).collect::<Vec<_>>(),
+            vec!["gamma", "alpha", "Beta"]
+        );
+        sort_tag_summaries(&mut sorted, TagManagerSort::UsageDesc);
+        assert_eq!(
+            sorted.iter().map(|tag| tag.name.as_str()).collect::<Vec<_>>(),
+            vec!["alpha", "Beta", "gamma"]
+        );
+        sort_tag_summaries(&mut sorted, TagManagerSort::ManualDesc);
+        assert_eq!(sorted.first().map(|tag| tag.name.as_str()), Some("alpha"));
+    }
+
+    #[test]
+    fn tag_filters_never_drop_data() {
+        // 筛选只返回副本；原词表保持完整（不自动删除）。
+        let tags = vec![tag("unused", 0, 0), tag("used", 4, 1)];
+        let filtered = filter_tag_summaries(&tags, "", TagManagerFilter::Unused);
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(tags.len(), 2);
+    }
 }

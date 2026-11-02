@@ -198,6 +198,8 @@ pub(crate) fn asset_context_menu(asset: &Asset, this: &Entity<KanalibApp>) -> Me
     let prompt_path = path.clone();
     let paths_this = this.clone();
     let paths_path = path.clone();
+    let image_this = this.clone();
+    let image_path = path.clone();
     let open_file = path.clone();
     let reveal_file = path.clone();
     let open_this = this.clone();
@@ -273,6 +275,15 @@ pub(crate) fn asset_context_menu(asset: &Asset, this: &Entity<KanalibApp>) -> Me
                     let _ = paths_this.update(cx, |app, cx| {
                         app.select_single_path(paths_path.clone(), cx);
                         app.copy_selected_paths(cx);
+                    });
+                }),
+        )
+        .item(
+            MenuItem::new("复制图片")
+                .icon(IconName::Image)
+                .on_click(move |_, cx| {
+                    let _ = image_this.update(cx, |app, cx| {
+                        app.copy_image_path(image_path.clone(), cx);
                     });
                 }),
         )

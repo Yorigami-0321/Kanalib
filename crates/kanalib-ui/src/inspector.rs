@@ -876,6 +876,16 @@ impl KanalibApp {
                     cx.write_to_clipboard(ClipboardItem::new_string(copy_path_text.clone()));
                     push_toast(&copy_path_toaster, cx, "已复制文件路径", Severity::Success);
                 });
+            let copy_image_this = this.clone();
+            let copy_image_path = path.clone();
+            let copy_image = Button::new("copy-image", "复制图片")
+                .size(ControlSize::Sm)
+                .icon(IconName::Image)
+                .on_click(move |_, _, cx| {
+                    let _ = copy_image_this.update(cx, |app, cx| {
+                        app.copy_image_path(copy_image_path.clone(), cx);
+                    });
+                });
 
             let has_issue = asset.error.is_some() || asset.damage.is_some();
             let issue = has_issue.then(|| {
@@ -1197,7 +1207,8 @@ impl KanalibApp {
                         .items_center()
                         .gap(px(6.))
                         .child(copy_prompt)
-                        .child(copy_path),
+                        .child(copy_path)
+                        .child(copy_image),
                 )
                 .child(
                     div()
