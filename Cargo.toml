@@ -1,13 +1,93 @@
 [workspace]
-members = [".", "crates/kanalib-core", "crates/kanalib-ui"]
-exclude = ["vendor/ely-gpui-components", "vendor/gpui-pre-windows"]
+members = [
+    ".",
+    "crates/kanalib-core",
+    "crates/kanalib-ui",
+    "vendor/ely-gpui-components",
+    "vendor/ely-gpui-components/crates/*",
+]
+default-members = [".", "crates/kanalib-core", "crates/kanalib-ui"]
+exclude = ["vendor/gpui-pre-windows"]
 resolver = "3"
+
+[workspace.package]
+edition = "2024"
+rust-version = "1.98"
+license = "MIT"
+repository = "https://github.com/ELY-Open-Source/Ely-GPUI-Components"
+homepage = "https://elygpui.com"
+readme = "README.md"
+keywords = ["gpui", "ui", "components", "widgets", "gui"]
+categories = ["gui"]
+
+
+[workspace.dependencies]
+ely-desktop = { path = "vendor/ely-gpui-components/crates/ely-desktop", version = "0.1.1" }
+ely-rendering = { path = "vendor/ely-gpui-components/crates/ely-rendering", version = "0.1.1" }
+ely-tooling = { path = "vendor/ely-gpui-components/crates/ely-tooling", version = "0.1.1" }
+ely-misc = { path = "vendor/ely-gpui-components/crates/ely-misc", version = "0.1.1" }
+ely-maps = { path = "vendor/ely-gpui-components/crates/ely-maps", version = "0.1.1" }
+ely-interaction = { path = "vendor/ely-gpui-components/crates/ely-interaction", version = "0.1.1" }
+ely-onboarding = { path = "vendor/ely-gpui-components/crates/ely-onboarding", version = "0.1.1" }
+ely-account = { path = "vendor/ely-gpui-components/crates/ely-account", version = "0.1.1" }
+ely-settings = { path = "vendor/ely-gpui-components/crates/ely-settings", version = "0.1.1" }
+ely-dashboard = { path = "vendor/ely-gpui-components/crates/ely-dashboard", version = "0.1.1" }
+ely-devtools = { path = "vendor/ely-gpui-components/crates/ely-devtools", version = "0.1.1" }
+ely-canvas = { path = "vendor/ely-gpui-components/crates/ely-canvas", version = "0.1.1" }
+ely-project = { path = "vendor/ely-gpui-components/crates/ely-project", version = "0.1.1" }
+ely-calendar = { path = "vendor/ely-gpui-components/crates/ely-calendar", version = "0.1.1" }
+ely-mail = { path = "vendor/ely-gpui-components/crates/ely-mail", version = "0.1.1" }
+ely-messaging = { path = "vendor/ely-gpui-components/crates/ely-messaging", version = "0.1.1" }
+ely-files = { path = "vendor/ely-gpui-components/crates/ely-files", version = "0.1.1" }
+ely-media = { path = "vendor/ely-gpui-components/crates/ely-media", version = "0.1.1" }
+ely-generative = { path = "vendor/ely-gpui-components/crates/ely-generative", version = "0.1.1" }
+ely-agent = { path = "vendor/ely-gpui-components/crates/ely-agent", version = "0.1.1" }
+ely-chat = { path = "vendor/ely-gpui-components/crates/ely-chat", version = "0.1.1" }
+ely-collab = { path = "vendor/ely-gpui-components/crates/ely-collab", version = "0.1.1" }
+ely-documents = { path = "vendor/ely-gpui-components/crates/ely-documents", version = "0.1.1" }
+ely-debug = { path = "vendor/ely-gpui-components/crates/ely-debug", version = "0.1.1" }
+ely-git = { path = "vendor/ely-gpui-components/crates/ely-git", version = "0.1.1" }
+ely-terminal = { path = "vendor/ely-gpui-components/crates/ely-terminal", version = "0.1.1" }
+ely-editor = { path = "vendor/ely-gpui-components/crates/ely-editor", version = "0.1.1" }
+ely-finance = { path = "vendor/ely-gpui-components/crates/ely-finance", version = "0.1.1" }
+ely-charts = { path = "vendor/ely-gpui-components/crates/ely-charts", version = "0.1.1" }
+ely-core = { path = "vendor/ely-gpui-components/crates/ely-core", version = "0.2.0", default-features = false }
+anyhow = "1"
+emojis = "0.9"
+futures = "0.3"
+gpui = { package = "gpui-pre", version = "=0.3.10", default-features = false }
+gpui_platform = { package = "gpui-pre-platform", version = "=0.3.10" }
+gpui_web = { package = "gpui-pre-web", version = "=0.3.10" }
+image = { version = "0.25", default-features = false }
+iso_currency = "0.7"
+isocountry = "0.3"
+jiff = "0.2"
+log = "0.4"
+qrcode = { version = "0.14", default-features = false }
+raw-window-handle = "0.6"
+regex = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["preserve_order"] }
+smallvec = "1"
+unicode-segmentation = "1"
+web-time = "1.1"
+
+
+[workspace.lints.rust]
+unreachable_pub = "warn"
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(feature, values("cargo-clippy"))'] }
+
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+undocumented_unsafe_blocks = "warn"
+
 
 [package]
 name = "kanalib"
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.95"
+rust-version = "1.98"
 license = "MIT"
 
 [[bin]]

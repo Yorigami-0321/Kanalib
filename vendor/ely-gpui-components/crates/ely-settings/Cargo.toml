@@ -1,0 +1,26 @@
+[package]
+name = "ely-settings"
+version = "0.1.1"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Ely's settings components for GPUI: pages, appearance, shortcuts, importers and Omarchy's theme."
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[features]
+test-support = ["ely-core/test-support", "gpui/test-support", "gpui/leak-detection"]
+
+[dependencies]
+ely-core.workspace = true
+ely-canvas.workspace = true
+anyhow.workspace = true
+gpui.workspace = true
+log.workspace = true
+serde_json.workspace = true
+
+[lints]
+workspace = true

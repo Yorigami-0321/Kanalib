@@ -1,0 +1,439 @@
+use std::{cell::Cell, rc::Rc};
+
+use gpui::{
+    AnyElement, App, Axis, Bounds, Canvas, Div, ElementId, EmptyView, Entity, EntityId,
+    FocusHandle, HoverListenerMode, InteractiveElement, IntoElement, ParentElement, Pixels,
+    RenderOnce, ScrollHandle, StatefulInteractiveElement, StyleRefinement, Styled, Window, canvas,
+    div, point, prelude::*,
+};
+use smallvec::SmallVec;
+
+mod shown;
+mod source;
+#[cfg(test)]
+mod tests;
+
+use shown::{Activity, still, track_activity};
+pub use source::{ScrollModel, ScrollPlace, ScrollSource};
+use source::{follow, seen};
+
+use super::ScrollShadow;
+use crate::theme::ActiveTheme;
+
+/// Scrolls `item` into view along `axis`; true when moved.
+#[doc(hidden)]
+pub fn bring_into_view(scroll: &ScrollHandle, item: Bounds<Pixels>, axis: Axis) -> bool {
+    let (frame, offset) = (scroll.bounds(), scroll.offset());
+    let ((start, end), (first, last)) = match axis {
+        Axis::Horizontal => ((item.left(), item.right()), (frame.left(), frame.right())),
+        Axis::Vertical => ((item.top(), item.bottom()), (frame.top(), frame.bottom())),
+    };
+    let shift = if start < first {
+        first - start
+    } else if end > last {
+        (last - end).max(first - start)
+    } else {
+        Pixels::ZERO
+    };
+    if shift != Pixels::ZERO {
+        scroll.set_offset(match axis {
+            Axis::Horizontal => point(offset.x + shift, offset.y),
+            Axis::Vertical => point(offset.x, offset.y + shift),
+        });
+    }
+    shift != Pixels::ZERO
+}
+
+/// Brings a Tab stop into view once each time it focuses.
+#[doc(hidden)]
+pub fn reveal_when_focused(
+    id: impl Into<ElementId>,
+    scroll: &ScrollHandle,
+    focus: &FocusHandle,
+    axis: Axis,
+    window: &mut Window,
+    cx: &mut App,
+) -> Canvas<()> {
+    let shown = window.use_keyed_state(id, cx, |_, _| false);
+    let (scroll, focus) = (scroll.clone(), focus.clone());
+    canvas(
+        move |bounds, window, cx| {
+            let (focused, held) = (focus.is_focused(window), *shown.read(cx));
+            if focused && !held {
+                shown.update(cx, |shown, _| *shown = true);
+                if bring_into_view(&scroll, bounds, axis) {
+                    log::info!("scroll: a focused stop came into view");
+                    window.request_animation_frame();
+                }
+            } else if !focused && held {
+                shown.update(cx, |shown, _| *shown = false);
+            }
+        },
+        |_, _, _, _| {},
+    )
+    .absolute()
+    .top_0()
+    .left_0()
+    .size_full()
+}
+
+/// Keeps a scroll box's wheel to the axes it scrolls.
+pub fn on_axis<E: Styled>(mut element: E) -> E {
+    element.style().restrict_scroll_to_axis = Some(true);
+    element
+}
+
+fn slot(axis: Axis) -> usize {
+    match axis {
+        Axis::Horizontal => 0,
+        Axis::Vertical => 1,
+    }
+}
+
+/// Thumb start at press, the pointer's first position, the end.
+struct ThumbDrag {
+    owner: EntityId,
+    start: Pixels,
+    end: Option<f32>,
+    anchor: Rc<Cell<Option<Pixels>>>,
+}
+
+/// How visible a scrollbar is.
+#[derive(Clone, Copy)]
+enum Shown {
+    Given(f32),
+    /// While scrolling or hovered, then fading.
+    Auto,
+}
+
+/// Overlay thumb over a box or list; drag to scroll.
+///
+/// ```
+/// use ely_core::layout::Scrollbar;
+/// use gpui::{Axis, ScrollHandle};
+///
+/// let handle = ScrollHandle::new();
+/// let bar = Scrollbar::new("list-bar", &handle, Axis::Vertical).auto();
+/// ```
+#[derive(IntoElement)]
+pub struct Scrollbar {
+    id: ElementId,
+    handle: ScrollSource,
+    axis: Axis,
+    shown: Shown,
+    /// The area whose hover its track holds.
+    area: Option<Entity<Activity>>,
+}
+
+impl Scrollbar {
+    /// A thumb along `axis` for `source`.
+    pub fn new(id: impl Into<ElementId>, source: impl Into<ScrollSource>, axis: Axis) -> Self {
+        Self {
+            id: id.into(),
+            handle: source.into(),
+            axis,
+            shown: Shown::Given(1.0),
+            area: None,
+        }
+    }
+
+    /// Keeps `area` shown while the pointer is on the track.
+    fn within(mut self, area: &Entity<Activity>) -> Self {
+        self.area = Some(area.clone());
+        self
+    }
+
+    /// An undrawn track gets no leave, so it lets go.
+    fn let_go(&self, cx: &mut App) {
+        let Some(area) = &self.area else {
+            return;
+        };
+        let at = slot(self.axis);
+        if area.read(cx).on_bar[at] {
+            area.update(cx, |activity, cx| {
+                activity.on_bar[at] = false;
+                cx.notify();
+            });
+        }
+    }
+
+    /// Fades the thumb; 0 hides it.
+    pub fn presence(mut self, presence: f32) -> Self {
+        self.shown = Shown::Given(presence.clamp(0.0, 1.0));
+        self
+    }
+
+    /// Shows while scrolling or under the pointer, then fades.
+    pub fn auto(mut self) -> Self {
+        self.shown = Shown::Auto;
+        self
+    }
+}
+
+impl RenderOnce for Scrollbar {
+    fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
+        let follows = follow(
+            self.handle.clone(),
+            self.axis,
+            seen(&self.handle, self.axis, cx),
+        );
+        let grip = window.use_keyed_state(self.id.clone(), cx, |_, _| false);
+        let owner = grip.entity_id();
+        // Its own drag keeps it whole; gpui drops hover then.
+        let held = *grip.read(cx) && cx.has_active_drag();
+        if *grip.read(cx) && !held {
+            grip.update(cx, |grip, _| *grip = false);
+        }
+        let theme = cx.theme();
+        let rem = window.rem_size();
+        let thickness = theme.scrollbar_thickness().to_pixels(rem);
+        let min_thumb = theme.scrollbar_min_thumb().to_pixels(rem);
+        let stays = theme.scrollbars_shown;
+        let activity = matches!(self.shown, Shown::Auto).then(|| {
+            window.use_keyed_state((self.id.clone(), "activity"), cx, |_, _| Activity::new())
+        });
+        let given = match self.shown {
+            Shown::Given(presence) => presence,
+            Shown::Auto => 0.0,
+        };
+        let presence = activity.as_ref().map_or(given, |state| match stays {
+            true => still(state, cx),
+            false => track_activity(state, self.handle.offset(cx), window, cx),
+        });
+        let presence = if held { 1.0 } else { presence };
+        let hidden = activity.is_none() && presence <= 0.0;
+        let Some(place) = self.handle.place(self.axis, cx).filter(|_| !hidden) else {
+            self.let_go(cx);
+            return div().child(follows).into_any_element();
+        };
+        let span = place.span;
+        let length = (span * place.shown).max(min_thumb).min(span);
+        let travel = span - length;
+        if travel <= Pixels::ZERO {
+            self.let_go(cx);
+            return div().child(follows).into_any_element();
+        }
+        let theme = cx.theme();
+        let start = travel * place.passed;
+        let axis = self.axis;
+        let handle = self.handle.clone();
+        let (idle, busy) = (theme.colors.fg.opacity(0.22), theme.colors.fg.opacity(0.42));
+        let thumb = div()
+            .id("thumb")
+            .debug_selector(|| "scrollbar-thumb".into())
+            .absolute()
+            .rounded_full()
+            .bg(idle)
+            .hover(|style| style.bg(busy))
+            .on_drag(
+                ThumbDrag {
+                    owner,
+                    start,
+                    end: self.handle.end(),
+                    anchor: Rc::new(Cell::new(None)),
+                },
+                move |_, _, _, cx| {
+                    grip.update(cx, |grip, _| *grip = true);
+                    cx.new(|_| EmptyView)
+                },
+            )
+            .map(|thumb| match axis {
+                Axis::Vertical => thumb.top(start).left_0().w(thickness).h(length),
+                Axis::Horizontal => thumb.left(start).top_0().h(thickness).w(length),
+            });
+        let track = div()
+            .id(self.id)
+            .hover_listener_mode(HoverListenerMode::InputModalityIndependent)
+            .absolute()
+            .opacity(presence)
+            // Nothing beneath sees its presses.
+            .block_mouse_except_scroll()
+            .on_drag_move(move |event: &gpui::DragMoveEvent<ThumbDrag>, window, cx| {
+                let drag = event.drag(cx);
+                if drag.owner != owner {
+                    return;
+                }
+                let local = event.event.position - event.bounds.origin;
+                let along = match axis {
+                    Axis::Vertical => local.y,
+                    Axis::Horizontal => local.x,
+                };
+                let anchor = match drag.anchor.get() {
+                    Some(anchor) => anchor,
+                    None => {
+                        drag.anchor.set(Some(along));
+                        along
+                    }
+                };
+                let ratio = ((drag.start + along - anchor) / travel).clamp(0.0, 1.0);
+                handle.set(axis, ratio, drag.end, cx);
+                window.refresh();
+            })
+            .when_some(activity, |track, state| {
+                track.on_hover(move |hovered, _, cx| {
+                    state.update(cx, |activity, cx| {
+                        activity.hovered = *hovered;
+                        cx.notify();
+                    })
+                })
+            })
+            .when_some(self.area, |track, area| {
+                track.on_hover(move |on, _, cx| {
+                    area.update(cx, |activity, cx| {
+                        activity.on_bar[slot(axis)] = *on;
+                        cx.notify();
+                    })
+                })
+            });
+        match axis {
+            Axis::Vertical => track
+                .top_0()
+                .bottom_0()
+                .right_0()
+                .w(thickness * 2.0)
+                .pl(thickness * 0.5),
+            Axis::Horizontal => track
+                .left_0()
+                .right_0()
+                .bottom_0()
+                .h(thickness * 2.0)
+                .pt(thickness * 0.5),
+        }
+        .child(thumb)
+        .child(follows)
+        .into_any_element()
+    }
+}
+
+/// Scroll region with overlay scrollbars that show while in use.
+///
+/// ```
+/// use ely_core::layout::ScrollArea;
+/// use gpui::{ParentElement, div};
+///
+/// let log = ScrollArea::new("log").vertical().shadows().child(div());
+/// ```
+#[derive(IntoElement)]
+pub struct ScrollArea {
+    id: ElementId,
+    base: Div,
+    shadows: bool,
+    vertical: bool,
+    handle: Option<ScrollHandle>,
+    body: SmallVec<[AnyElement; 2]>,
+}
+
+impl ScrollArea {
+    /// A region under `id` that scrolls both ways.
+    pub fn new(id: impl Into<ElementId>) -> Self {
+        Self {
+            id: id.into(),
+            base: div(),
+            shadows: false,
+            vertical: false,
+            handle: None,
+            body: SmallVec::new(),
+        }
+    }
+
+    /// Scrolls through the owner's handle, which it can move.
+    pub fn track_scroll(mut self, handle: &ScrollHandle) -> Self {
+        self.handle = Some(handle.clone());
+        self
+    }
+
+    /// Soft edges where content continues.
+    pub fn shadows(mut self) -> Self {
+        self.shadows = true;
+        self
+    }
+
+    /// Scrolls down only; content keeps the area's width.
+    pub fn vertical(mut self) -> Self {
+        self.vertical = true;
+        self
+    }
+}
+
+impl Styled for ScrollArea {
+    fn style(&mut self) -> &mut StyleRefinement {
+        self.base.style()
+    }
+}
+
+impl ParentElement for ScrollArea {
+    fn extend(&mut self, elements: impl IntoIterator<Item = AnyElement>) {
+        self.body.extend(elements);
+    }
+}
+
+impl RenderOnce for ScrollArea {
+    fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
+        let state = window.use_keyed_state(self.id.clone(), cx, |_, _| Activity::new());
+        let handle = match self.handle {
+            Some(handle) => handle,
+            None => state.read(cx).handle.clone(),
+        };
+        let presence = match cx.theme().scrollbars_shown {
+            true => still(&state, cx),
+            false => track_activity(&state, handle.offset(), window, cx),
+        };
+        self.base
+            .id(self.id)
+            .relative()
+            .overflow_hidden()
+            .hover_listener_mode(HoverListenerMode::InputModalityIndependent)
+            .on_hover({
+                let state = state.clone();
+                move |hovered, _, cx| {
+                    state.update(cx, |activity, cx| {
+                        activity.hovered = *hovered;
+                        cx.notify();
+                    })
+                }
+            })
+            .child(
+                div()
+                    .id("scroll-body")
+                    .size_full()
+                    .when(self.vertical, |body| {
+                        body.overflow_y_scroll().overflow_x_hidden()
+                    })
+                    .when(!self.vertical, |body| body.overflow_scroll())
+                    .track_scroll(&handle)
+                    .on_scroll({
+                        let handle = handle.clone();
+                        move |event, window, cx| {
+                            let delta = event.delta.pixel_delta(window.line_height());
+                            let reach = handle.max_offset();
+                            let vertical = delta.y != Pixels::ZERO && reach.y > Pixels::ZERO;
+                            if vertical || (delta.x != Pixels::ZERO && reach.x > Pixels::ZERO) {
+                                cx.stop_propagation();
+                            }
+                        }
+                    })
+                    .map(|body| match self.vertical {
+                        // Children fill and never widen, so rows wrap.
+                        true => body.flex().flex_col().children(
+                            self.body
+                                .into_iter()
+                                .map(|child| div().w_full().min_w_0().child(child)),
+                        ),
+                        false => body.children(self.body),
+                    }),
+            )
+            .when(self.shadows, |area| area.child(ScrollShadow::new(&handle)))
+            .child(
+                Scrollbar::new("scrollbar-y", &handle, Axis::Vertical)
+                    .presence(presence)
+                    .within(&state),
+            )
+            .when(!self.vertical, |area| {
+                area.child(
+                    Scrollbar::new("scrollbar-x", &handle, Axis::Horizontal)
+                        .presence(presence)
+                        .within(&state),
+                )
+            })
+    }
+}

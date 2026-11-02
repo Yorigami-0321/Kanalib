@@ -1,0 +1,77 @@
+[package]
+name = "ely-core"
+version = "0.2.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Ely's core for GPUI: theme, motion, primitives, typography, layout, shell, controls, overlays, lists and tables."
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[features]
+default = ["fonts"]
+fonts = []
+platform = ["dep:gpui_platform"]
+runtime_shaders = ["platform", "gpui_platform/runtime_shaders"]
+test-support = ["gpui/test-support", "gpui/leak-detection"]
+
+[dependencies]
+anyhow.workspace = true
+barcoders = { version = "2", default-features = false, features = ["std"] }
+emojis.workspace = true
+futures.workspace = true
+gpui = { workspace = true, features = ["stacker"] }
+gpui_platform = { workspace = true, features = ["font-kit", "wayland", "x11"], optional = true }
+image.workspace = true
+iso_currency.workspace = true
+isocountry.workspace = true
+jiff.workspace = true
+log.workspace = true
+qrcode.workspace = true
+regex.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+smallvec.workspace = true
+unicode-segmentation.workspace = true
+web-time.workspace = true
+
+[target.'cfg(target_family = "wasm")'.dependencies]
+jiff = { workspace = true, features = ["js"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+block2 = "0.6"
+objc2 = "0.6"
+objc2-app-kit = { version = "0.3", default-features = false, features = [
+    "std",
+    "block2",
+    "objc2-core-foundation",
+    "NSButton",
+    "NSColor",
+    "NSColorSampler",
+    "NSColorSpace",
+    "NSControl",
+    "NSResponder",
+    "NSSharingService",
+    "NSView",
+    "NSWindow",
+] }
+objc2-foundation = { version = "0.3", default-features = false, features = [
+    "std",
+    "objc2-core-foundation",
+    "NSArray",
+    "NSGeometry",
+    "NSObject",
+    "NSString",
+    "NSURL",
+] }
+raw-window-handle.workspace = true
+
+[[example]]
+name = "five_icons"
+required-features = ["platform"]
+
+[lints]
+workspace = true

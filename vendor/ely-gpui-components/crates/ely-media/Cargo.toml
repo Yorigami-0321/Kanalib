@@ -1,0 +1,27 @@
+[package]
+name = "ely-media"
+version = "0.1.1"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Ely's media components for GPUI: pictures, video, audio and the controls around them."
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[features]
+test-support = ["ely-core/test-support", "gpui/test-support", "gpui/leak-detection"]
+
+[dependencies]
+ely-core.workspace = true
+ely-generative.workspace = true
+ely-documents.workspace = true
+gpui.workspace = true
+image.workspace = true
+log.workspace = true
+web-time.workspace = true
+
+[lints]
+workspace = true

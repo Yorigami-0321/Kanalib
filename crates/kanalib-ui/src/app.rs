@@ -1013,7 +1013,7 @@ impl Render for KanalibApp {
                         .icon(IconName::LayoutGrid)
                         .keys("ctrl-shift-3"),
                     Command::new("view:small", "查看 · 小图标")
-                        .icon(IconName::Grid3x3)
+                        .icon(IconName::Columns3)
                         .keys("ctrl-shift-4"),
                     Command::new("view:list", "查看 · 列表")
                         .icon(IconName::List)

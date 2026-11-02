@@ -6,35 +6,173 @@ on:
   pull_request:
 
 jobs:
-  crate:
-    # The Mac mini: its system fonts set the CJK and math tests, and it times the linear-format test steadily.
-    runs-on: [self-hosted, macos-arm64]
-    steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: "1.95"
-          components: clippy, rustfmt
-          targets: wasm32-unknown-unknown
-      - uses: Swatinem/rust-cache@v2
-      - run: scripts/check.sh
-
-  platforms:
+  gate:
+    # The whole gate on each hosted OS: house rules, tests, docs, the panic list, the Kit compat crate, the wasm32 lint.
     strategy:
       fail-fast: false
       matrix:
-        # GitHub-hosted runners; macOS arm64 is the crate job above.
-        os: [ubuntu-24.04, windows-latest]
+        os: [ubuntu-24.04, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      # The checkout keeps the repo's LF line ends, as the house's own Windows checkouts do; check.sh greps whole lines.
+      - if: runner.os == 'Windows'
+        run: git config --global core.autocrlf false
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.98"
+          components: clippy, rustfmt
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+      # gpui's Wayland and X11 backends link xkbcommon and fontconfig.
+      - if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libxkbcommon-x11-dev libfontconfig-dev
+      # Hosted runners test as a plain user, so the file permissions the tests check hold; each host counts its own panic sites.
+      - run: sh scripts/check.sh
+        shell: bash
+        env:
+          PANICS_BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
+      - run: cargo build -p ely-gallery
+      # Tabs every page under a UI Automation client; each stop needs a role and a name.
+      - if: runner.os == 'Windows'
+        shell: bash
+        run: ./target/debug/gallery.exe --audit audit.tsv || { grep -v $'\tok\t' audit.tsv; exit 1; }
+
+  api:
+    # Each library's public API matches its snapshot in api/, taken on Linux.
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - id: pins
+        run: |
+          echo "nightly=$(python3 scripts/api.py --toolchain)" >> "$GITHUB_OUTPUT"
+          echo "tool=$(python3 scripts/api.py --tool)" >> "$GITHUB_OUTPUT"
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ steps.pins.outputs.nightly }}
+      - uses: Swatinem/rust-cache@v2
+      - run: sudo apt-get update && sudo apt-get install -y libxkbcommon-x11-dev libfontconfig-dev
+      - run: cargo install --locked cargo-public-api --version ${{ steps.pins.outputs.tool }}
+      - run: python3 scripts/api.py
+
+  semver:
+    # A breaking change since a crate's last release needs its version raised; the base commit picks which crates to check.
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.98"
+      - uses: Swatinem/rust-cache@v2
+      - run: sudo apt-get update && sudo apt-get install -y libxkbcommon-x11-dev libfontconfig-dev
+      - run: cargo install --locked cargo-semver-checks --version "$(python3 scripts/semver.py --tool)"
+      - run: python3 scripts/semver.py "$BASE"
+        env:
+          BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
+
+  deny:
+    # Licenses each dependency carries, RustSec advisories, registries and git sources (deny.toml).
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          # The root is a package too, so the gallery and its dependencies need --workspace.
+          arguments: --workspace --all-features
+          command: check
+
+  msrv:
+    # The workspace builds on the Rust its manifest declares, on each OS, since gpui's platform crates differ.
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, windows-latest, macos-latest]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v7
+      - id: msrv
+        shell: bash
+        run: echo "rust=$(sed -n 's/^rust-version = \"\(.*\)\"$/\1/p' Cargo.toml)" >> "$GITHUB_OUTPUT"
       - uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: "1.95"
+          toolchain: ${{ steps.msrv.outputs.rust }}
       - uses: Swatinem/rust-cache@v2
-      # Hosted runners test as a plain user, so the file permissions the tests check hold.
-      - run: cargo test --lib --features test-support --quiet
-      - run: cargo build --example gallery
+      - if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libxkbcommon-x11-dev libfontconfig-dev
+      - run: cargo check --workspace --all-targets --all-features --locked
+
+  pixels:
+    # Each OS shoots the gallery at the base and here on one runner and compares; a `Pixels-accepted:` commit line lets a meant change through.
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - if: runner.os == 'Windows'
+        run: git config --global core.autocrlf false
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.98"
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.13"
+      - run: python -m pip install pillow
+      # No GPU and no display: Mesa's software Vulkan draws into Xvfb.
+      - if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libxkbcommon-x11-dev libfontconfig-dev xvfb mesa-vulkan-drivers
+      - if: runner.os == 'Linux'
+        run: xvfb-run -a -s "-screen 0 1600x1200x24" sh scripts/pixels.sh "$BASE"
+        env:
+          BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
+          VK_ICD_FILENAMES: /usr/share/vulkan/icd.d/lvp_icd.json
+      - if: runner.os != 'Linux'
+        shell: bash
+        run: sh scripts/pixels.sh "$BASE"
+        env:
+          BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
+      - if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: pixels-${{ matrix.os }}
+          path: target/pixels/report
+          if-no-files-found: ignore
+
+  bench:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      # The base benches on this same runner; numbers from two machines do not compare.
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.pull_request.base.sha || github.event.before }}
+          path: base
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.98"
+      - uses: Swatinem/rust-cache@v2
+      - run: sudo apt-get update && sudo apt-get install -y libxkbcommon-x11-dev libfontconfig-dev
+      - shell: bash
+        run: |
+          rm -rf target/criterion
+          bench="cargo bench -p ely-gpui-component --features test-support --bench budget --"
+          if [ -f base/benches/budget.rs ]; then
+            (cd base && CARGO_TARGET_DIR=../target $bench --save-baseline base)
+            $bench --baseline base
+            python3 scripts/bench.py --against base
+          else
+            echo "bench: the base has no benches; budgets only"
+            $bench
+            python3 scripts/bench.py
+          fi
 
   site:
     runs-on: ubuntu-latest

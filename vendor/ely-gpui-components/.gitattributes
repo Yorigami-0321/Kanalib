@@ -1,0 +1,2 @@
+# Omarchy writes LF; the fixtures are its bytes.
+crates/ely-desktop/src/omarchy/themes/** eol=lf

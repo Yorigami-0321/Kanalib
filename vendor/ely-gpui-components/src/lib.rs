@@ -1,120 +1,64 @@
-pub mod account;
-pub mod agent;
-mod assets;
+//! Ely GPUI Component: every Ely crate under its chapter's name, and `init`, which binds every crate's keys.
+#![deny(missing_docs)]
 
-pub mod buttons;
-pub mod calendar;
-pub mod canvas;
-pub mod charts;
-pub mod chat;
-pub mod collab;
-pub mod dashboard;
-pub mod data_display;
-pub mod debug;
-pub mod devtools;
-pub mod documents;
-pub mod editor;
-pub mod feedback;
-pub mod files;
-pub mod finance;
-pub mod forms;
-pub mod generative;
-pub mod git;
-pub mod i18n;
-pub mod interaction;
-pub mod layout;
-pub mod lists;
-pub mod mail;
-pub mod maps;
-pub mod media;
-pub mod menus;
-pub mod messaging;
-pub mod misc;
-pub mod motion;
-pub mod navigation;
-pub mod onboarding;
-pub mod overlays;
-pub mod primitives;
-pub mod project;
-pub mod rendering;
-pub mod settings;
-pub mod shell;
-pub mod tables;
-pub mod terminal;
-pub mod theme;
-pub mod tooling;
-pub mod typography;
+#[cfg(test)]
+mod containers;
+#[cfg(test)]
+mod shipped;
 
-pub use assets::{Assets, Before};
+pub use ely_account as account;
+pub use ely_agent as agent;
+pub use ely_calendar as calendar;
+pub use ely_canvas as canvas;
+pub use ely_charts as charts;
+pub use ely_chat as chat;
+pub use ely_collab as collab;
+pub use ely_core::{
+    Assets, Before, buttons, data_display, feedback, forms, i18n, layout, lists, menus, motion,
+    navigation, overlays, primitives, secondary, shell, tables, theme, typography,
+};
+pub use ely_dashboard as dashboard;
+pub use ely_debug as debug;
+pub use ely_desktop as desktop;
+pub use ely_devtools as devtools;
+pub use ely_documents as documents;
+pub use ely_editor as editor;
+pub use ely_files as files;
+pub use ely_finance as finance;
+pub use ely_generative as generative;
+pub use ely_git as git;
+pub use ely_interaction as interaction;
+pub use ely_mail as mail;
+pub use ely_maps as maps;
+pub use ely_media as media;
+pub use ely_messaging as messaging;
+pub use ely_misc as misc;
+pub use ely_onboarding as onboarding;
+pub use ely_project as project;
+pub use ely_rendering as rendering;
+pub use ely_settings as settings;
+pub use ely_terminal as terminal;
+pub use ely_tooling as tooling;
 
-use anyhow::Context as _;
-use gpui::{App, KeyBinding};
+use gpui::App;
 
-use crate::primitives::{FOCUS_CONTEXT, FocusNext, FocusPrev};
-
-/// gpui 0.3.10 的 `KeyBinding::new` 只接受静态键位并在 `secondary-` 上 panic；
-/// 这里按宿主平台展开 `secondary`，让 vendored 组件继续用同一套键位表。
-pub(crate) fn key_binding<A: gpui::Action>(
-    source: &str,
-    action: A,
-    context: Option<&'static str>,
-) -> KeyBinding {
-    let source = source.replace(
-        "secondary",
-        if cfg!(target_os = "macos") {
-            "cmd"
-        } else {
-            "ctrl"
-        },
-    );
-    KeyBinding::new(Box::leak(source.into_boxed_str()), action, context)
-}
-
-/// Loads fonts and the theme, binds Tab and text keys. Call once, first.
+/// Ely's core, then the verticals' keys. Call once, first.
 pub fn init(cx: &mut App) -> anyhow::Result<()> {
-    let missing = assets::missing(cx.asset_source().as_ref());
-    if let Some(first) = missing.first() {
-        anyhow::bail!(
-            "ely: the asset source lacks {} of Ely's files, first {first}; pass `ely_gpui_component::Assets`, or `Assets::before` your own, to `Application::with_assets`",
-            missing.len()
-        );
-    }
-    log::info!("assets: the app's source loads all of Ely's files");
-    assets::load_fonts(cx).context("ely: embedded fonts failed to register")?;
-    setup(cx);
+    ely_core::init(cx)?;
+    bind_keys(cx);
     Ok(())
 }
 
 /// `init` without assets or fonts, for app tests that render.
 #[cfg(any(test, feature = "test-support"))]
 pub fn init_for_tests(cx: &mut App) {
-    setup(cx);
+    ely_core::init_for_tests(cx);
+    bind_keys(cx);
 }
 
-/// The theme and key bindings.
-fn setup(cx: &mut App) {
-    theme::Theme::init(cx);
-    cx.bind_keys([
-        crate::key_binding("tab", FocusNext, Some(FOCUS_CONTEXT)),
-        crate::key_binding("shift-tab", FocusPrev, Some(FOCUS_CONTEXT)),
-        // Out of a field that keeps Tab, such as a document.
-        crate::key_binding("f6", FocusNext, Some(FOCUS_CONTEXT)),
-        crate::key_binding("shift-f6", FocusPrev, Some(FOCUS_CONTEXT)),
-    ]);
-    forms::bind_keys(cx);
+fn bind_keys(cx: &mut App) {
     editor::bind_keys(cx);
     #[cfg(not(target_family = "wasm"))]
     terminal::bind_keys(cx);
     documents::bind_keys(cx);
-}
-
-#[cfg(all(test, feature = "test-support"))]
-mod tests {
-    use gpui::{AppContext, TestAppContext};
-
-    #[gpui::test]
-    #[should_panic(expected = "leaked handles")]
-    fn a_leaked_entity_fails_its_test(cx: &mut TestAppContext) {
-        std::mem::forget(cx.new(|_| ()));
-    }
 }

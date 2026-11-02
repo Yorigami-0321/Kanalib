@@ -229,7 +229,7 @@ impl ViewMode {
         match self {
             Self::IconsLarge => IconName::Image,
             Self::IconsMedium => IconName::LayoutGrid,
-            Self::IconsSmall => IconName::Grid3x3,
+            Self::IconsSmall => IconName::Columns3,
             Self::List => IconName::List,
             Self::Details => IconName::Table,
             Self::Content => IconName::AlignJustify,
@@ -529,7 +529,7 @@ mod tests {
         assert_eq!(ViewMode::from_key("tiles"), Some(ViewMode::IconsMedium));
         assert_eq!(ViewMode::from_key("icons-lg"), Some(ViewMode::IconsLarge));
         assert_eq!(ViewMode::from_key("icons-xl"), Some(ViewMode::IconsLarge));
-        assert_eq!(ViewMode::IconsSmall.icon().name(), "grid-3x3");
+        assert_eq!(ViewMode::IconsSmall.icon().name(), "columns-3");
         assert_eq!(ViewMode::IconsMedium.icon().name(), "layout-grid");
     }
 

@@ -13,7 +13,7 @@ from PIL import Image, ImageDraw
 
 TILE, GRAIN, ZOOMS = 256, 4, range(4)
 LAND, BORDER = (128, 72), (128, 150)
-OUT = Path(__file__).resolve().parent.parent / "examples/gallery/assets/tiles"
+OUT = Path(__file__).resolve().parent.parent / "crates/ely-gallery/assets/tiles"
 
 
 def project(lon, lat):
@@ -30,7 +30,7 @@ def rings(geometry):
 
 
 def main(source):
-    shapes = [rings(feature["geometry"]) for feature in json.load(open(source))["features"]]
+    shapes = [rings(feature["geometry"]) for feature in json.load(open(source, encoding="utf-8"))["features"]]
     for z in ZOOMS:
         count = 2**z
         side = TILE * GRAIN

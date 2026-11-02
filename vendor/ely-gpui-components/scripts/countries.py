@@ -1,4 +1,4 @@
-"""Writes assets/maps/countries.geojson, Ely's world, from Natural Earth's 110m countries.
+"""Writes crates/ely-maps/assets/countries.geojson, Ely's world, from Natural Earth's 110m countries.
 
 Usage: python3 scripts/countries.py <ne_110m_admin_0_countries.geojson>
 Keeps each country's ISO 3166 alpha-2 code and name; positions round to 0.01 degrees.
@@ -8,7 +8,7 @@ import json
 import sys
 from pathlib import Path
 
-OUT = Path(__file__).resolve().parent.parent / "assets/maps/countries.geojson"
+OUT = Path(__file__).resolve().parent.parent / "crates/ely-maps/assets/countries.geojson"
 
 
 def ring(points):
@@ -31,7 +31,7 @@ def polygon(rings):
 
 def main(source):
     features = []
-    for feature in json.load(open(source))["features"]:
+    for feature in json.load(open(source, encoding="utf-8"))["features"]:
         props, shape = feature["properties"], feature["geometry"]
         polygons = [shape["coordinates"]] if shape["type"] == "Polygon" else shape["coordinates"]
         kept = [each for each in (polygon(rings) for rings in polygons) if each]
@@ -43,7 +43,7 @@ def main(source):
             "geometry": {"type": "MultiPolygon", "coordinates": kept},
         })
     OUT.parent.mkdir(parents=True, exist_ok=True)
-    OUT.write_text(json.dumps({"type": "FeatureCollection", "features": features}, separators=(",", ":")))
+    OUT.write_text(json.dumps({"type": "FeatureCollection", "features": features}, separators=(",", ":")), encoding="utf-8")
     print(f"wrote {len(features)} countries, {OUT.stat().st_size} bytes, to {OUT}")
 
 

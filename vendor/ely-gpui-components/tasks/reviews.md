@@ -387,3 +387,109 @@
 | G7 | 2 | FAIL | Edit and Share beside the Windows buttons still pushed the close button to 322px |
 | G7 | 3 | FAIL | the host's items shrank to 0px, out of reach; fixed after the cap (one control's width at least, a wheel test), not reviewed again |
 | G8 | 1 | PASS | the story ran live from the wasm build under Playwright; desktop e2e 43 passed |
+| O0 | 1 | FAIL | the Kit guide still installed gpui-kit "0.7" |
+| O0 | 2 | PASS | codex gpt-6.1-sol xhigh fast |
+| O1 | 1 | PASS | |
+| O2 | 1 | FAIL | one extreme for the whole palette refused a repairable hue; an unended last line read; a light.mode folder read as light |
+| O2 | 2 | PASS | |
+| O3 | 1 | FAIL | the settle ran from the first event, so a slow swap showed Ely's palette between; an owner's palette outlived follow and stop |
+| O3 | 2 | PASS | 22 tests on Windows and Linux (WSL) |
+| O4 | 1 | FAIL | the guide promised status colors 4.5:1 on every surface; the audit checks the page and their tint |
+| O4 | 2 | PASS | |
+| O5 | 1 | FAIL | the scan claim missed the lift ends and the light export; the table left out the gate, the shared audit and the missing hues |
+| O5 | 2 | PASS | |
+| O6 | 1 | PASS | the CRLF checkout reproduced locally; a fresh autocrlf clone keeps LF with the rule |
+| O7 | 1 | FAIL | the install guide still named macOS alone |
+| O7 | 2 | PASS | a WSLg window repainted from Tokyo Night to Catppuccin Latte |
+| O7 | 3 | PASS | after ef5736e CI's Linux leg failed on fontconfig; CI installs libfontconfig-dev too |
+| T56 A1 | 1 | FAIL | Mermaid's text measurer still read host fonts in the diagram tests |
+| T56 A1 | 2 | PASS | codex gpt-6-astra max fast; Mermaid's reads move only geometry, which no test asserts; 2216/2216 as root in rust:1.95 |
+| T56 A2 | 1 | PASS | '=' left on the three gpui-pre crates; ratex resolves to 0.1.15; root 2216/2216, wasm32 clean |
+| T56 A3 | 1 | FAIL | panic on unclosed math before CJK; fence rewrite reparsed per rejected fence; quadratic paren trim and link offsets; list spans dropped item definitions; extra cells out of context; BOM front matter |
+| T56 A3 | 2 | FAIL | stacked BOMs overflowed the stack; extra cells reparsed every definition, lost table inline rules and split pipes by parity; refused www. domains rescanned |
+| T56 A3 | 3 | FAIL | an unchanged cell holding a\|b gained a backslash on commit |
+| T56 A3 | 4 | PASS | 1222 of 1324 spec examples match markdown-rs; 128 KiB one-letter case 20 ms; root 2232/2232 |
+| T56 A4 | 1 | PASS | strum 0.27 gone; bit-set, digest and phf seconds come from RaTeX, isolang and rust-embed at their newest; left open, partial |
+| T56 A5 | 1 | PASS | unsafe in src/platform alone, on objc2; HEAD hung on macOS 27 (AppKit off the main thread in tests) and failed Mac clippy; Mac, Linux root and Windows clean |
+| T56 B1 | 1 | PASS | workspace root keeps the library; gallery and docs examples in crates/ely-gallery; Windows check, Linux root, Mac capture and the web build pass |
+| T56 B2 | 1 | PASS | ely-core holds chapters 1-14, theme, motion, i18n; Latex to documents, WCAG math to theme; privacy opened by the compiler's errors; timing tests read thread CPU time |
+| T56 B3 | 1 | PASS | charts, finance, editor, terminal, git, debug in their own crates; CodeEditor readers replace documents' field reads; 2231/2233 tests on Windows, Linux root, Mac |
+| T56 B4 | 1 | PASS | documents, collab, chat, agent, generative, media, files in their own crates; the root's dependencies trimmed to what src/ imports; 2233 on Linux root and Mac |
+| T56 B5 | 1 | PASS | messaging, mail, calendar, project, canvas, devtools, dashboard in their own crates; canvas reads core's typography by full path; 2233 on Linux root and Mac |
+| T56 B6 | 1 | PASS | settings, account, onboarding, interaction, maps, misc, tooling, rendering in their own crates; the root holds no chapter; the world file moves to maps; 2233 on Linux root and Mac |
+| T56 B7 | 1 | FAIL | the staged Cargo.lock lacked serde under ely-desktop; --locked failed |
+| T56 B7 | 2 | PASS | tray, Dock badge and Omarchy in ely-desktop; notify leaves core's tree, zbus stays through gpui's Linux backend; left open, partial |
+| T56 B8 | 1 | PASS | ely-core holds none of six heavy crates, isolang behind `languages`, check.sh guards them; zbus left open with B7 |
+| T56 B9 | 1 | PASS | icons as consts over their own statics, drawn by svg().data; a five-icon release binary holds five SVGs; fonts behind `fonts`, Plex always |
+| T56 B10 | 1 | PASS | ely-core rechecks in 1.3 s after one edited line, 3.5-4.0 s non-incremental, 2 or 32 CPUs; the old crate 3.4-3.7 s and 11-13 s |
+| T56 B11 | 1 | FAIL | the Copy test folded the clipboard's CRLF but not a CRLF checkout's file |
+| T56 B11 | 2 | PASS | fixtures path, CI comment, docs e2e (GPUI Kit in the rail, CRLF folded); web gallery 23.1 MB; site e2e 45 passed |
+| T56 C1 | 1 | PASS | core's sibling-only items (135 and the text actions) hidden from the API; four unreachable methods pub(crate); unreachable_pub on core |
+| T56 C2 | 1 | PASS | 59 sibling-only items hidden in the verticals; 38 unreachable items pub(crate) across native, wasm32 and Linux; unreachable_pub in the workspace lints |
+| T56 C3 | 1 | PASS | Sizable, Disableable, Selectable, Changeable in primitives; 30, 19, 5 and 80 impls by each component's own method; a generic test |
+| T56 C4 | 1 | PASS | 87 containers listed in src/containers.rs, a test holds the list to every impl and macro; seven adders gain ParentElement; MapPopup and DashboardCard take children |
+| T56 C5 | 1 | FAIL | CONTRIBUTING.md still said 500 lines |
+| T56 C5 | 2 | PASS | check.sh warns past 800 and never fails on size; 54 files under 40 lines down to 34 (theme measures, editor readers and writing view, presets, find, changes, five test files merged into their owners) |
+| T56 C6 | 1 | FAIL | TabOverflowMenu::new described a strip it does not draw; check.sh's comment rule let `////` run on |
+| T56 C6 | 2 | PASS | 1,077 core items documented, deny(missing_docs) on core; an example per public component (325 by scan, 11 macro-made), 331 doctests in check.sh and CI; px and English scans skip comment lines |
+| T56 C7 | 1 | FAIL | CodeEditor::language said it set syntax colors; it only stores a name |
+| T56 C7 | 2 | PASS | 1,448 items in 13 crates (charts to files) documented, deny(missing_docs) on each; 332 examples, one per public component; CodeEditor and CodeBlock language docs name what the code does |
+| T56 C8 | 1 | FAIL | MapPopup, drawn by MapView, had no example; a render census missed it |
+| T56 C8 | 2 | PASS | 1,098 items in 17 crates documented, deny(missing_docs) on each and the root; 215 examples plus MapPopup, AccordionItem and ShellColumn; docs.rs build in check.sh and CI's Linux leg |
+| T56 D1 | 1 | PASS | three apps in tests/ on the public API and init_for_tests: a form, folders beside a table, a workspace with a dialog and toasts; check.sh and CI run them |
+| T56 D2 | 1 | FAIL | chained expects shared a key; Ely's macros, #[allow], wasm-only code and commented-out sites escaped; Locale::date's reason false |
+| T56 D2 | 2 | FAIL | the text scanner misread macro delimiters, strings, nested comments, test modules and two sites on a line |
+| T56 D2 | 3 | FAIL | containment dropped a macro-body panic inside an expect; include!'s absolute paths were skipped |
+| T56 D2 | 4 | FAIL | an expect ident passed into a macro, inside an outer expect, counted once |
+| T56 D2 | 5 | PASS | scripts/panics.py force-warns expect_used, panic and unreachable, with disallowed_macros and disallowed_methods for macro bodies, natively and for wasm32; 402 sites with reasons and hosts in scripts/panics.tsv; fails on new, gone, no reason and a rise at PANICS_BASE; check.sh and CI on three hosts |
+| T56 D3 | 1 | FAIL | the virtualized table had no height of its own, so the wheel scrolled nothing; a forced frame after each input drew twice |
+| T56 D3 | 2 | PASS | benches/budget.rs: table, editor, terminal and Markdown on gpui's test platform, each input held to one draw at setup; scripts/bench.py budgets and a 10% rise; CI's bench job compares base and head on one runner; Terminal::handle no longer redraws on alacritty's cursor note, so a scroll draws once |
+| T56 D4 | 1 | FAIL | a block's label sliced live text with a stale range and panicked; the audit stopped at editors that keep Tab; an open InlineEdit lost its name; a submenu announced its parent row |
+| T56 D4 | 2 | FAIL | SearchableMenu's rows go unheard while its filter field holds focus |
+| T56 D4 | 3 | PASS | every focus stop has a role and a name: gallery --audit walks 2,272 stops on 44 pages with none failing and runs in CI's Windows leg; a list a typed filter drives announces its field, a gpui 0.3.9 limit recorded at the owner's word; D4 stays unticked while the VoiceOver walk is open |
+| T56 D5 | 1 | FAIL | a block field kept the label and placeholder of the locale it was built in |
+| T56 D5 | 2 | PASS | seven locale tables, 581 keys, no English fallback, a test walks every locale; the listed English moved into the catalog, words used as values split into keys; a field built once reads its catalog keys at each render and BlockEditor relabels on a locale change |
+| T56 E1 | 1 | FAIL | a re-export showed its name, not what it named; snapshots of all features alone missed an item moved behind a feature |
+| T56 E1 | 2 | FAIL | no feature set read the defaults; a module reached through a re-export was not walked |
+| T56 E1 | 3 | FAIL | a named re-export cycle grew the walked path for ever and crashed the script |
+| T56 E1 | 4 | PASS | scripts/api.py holds 31 library crates to snapshots in api/ through cargo-public-api on a pinned nightly: re-exports name their targets, modules reached through them are walked, cycles stop, and each item not in every feature set (defaults, none, each alone, all) names the sets that have it; CI runs it on Linux |
+| T56 E2 | 1 | FAIL | the semver check read all features alone, failed on a new crate and on a first push; member crates shipped without the MIT notice |
+| T56 E2 | 2 | FAIL | a moved crate read as new, so its break passed; with no crate shared the tool ran without -p |
+| T56 E2 | 3 | PASS | 31 library crates publishable with the workspace metadata and each its MIT notice; CHANGELOG.md; the workspace dry run packages and builds all 31 in dependency order; scripts/semver.py checks each crate the base declares by name, default, none and all features, in CI's semver job; publishing waits for the owner |
+| T56 E3 | 1 | FAIL | unsound advisories checked only for direct dependencies; the deny job left out --workspace, so the gallery and its dependencies went unchecked |
+| T56 E3 | 2 | PASS | deny.toml and CI's deny job check the whole workspace: licenses from an allow list, vulnerabilities, unsound and yanked crates at any depth, unmaintained ones Ely names, crates.io alone; the msrv job checks the workspace on its declared Rust; making the four O-25 jobs required waits for the owner |
+| T56 E4 | 1 | FAIL | the semver selection read src/ and build.rs alone, dropped proc-macro crates from the graph, and took default = [] for no defaults |
+| T56 E4 | 2 | FAIL | a #[path] module beside the crate root, outside the root file's folder, selected no crate |
+| T56 E4 | 3 | FAIL | the hand-made include filter dropped member manifests, missed ** matching no folder, and read include.workspace as a pattern |
+| T56 E4 | 4 | FAIL | a deleted or moved-away input was in no listing, so a break it caused selected no crate |
+| T56 E4 | 5 | PASS | check.sh gates on GitHub-hosted Linux, Windows and macOS, the gallery build and Windows audit after it, no self-hosted runner; scripts read UTF-8 and the Windows checkout keeps LF; the semver job shares one target and checks the crates whose packaged files, or a dependency's, changed, deletions and renames included |
+| T56 E5 | 1 | FAIL | the moving mask kept pixels that had settled, and a fully masked shot passed; an accepted change hid an empty side, and a gallery that failed to launch exited 0; added, removed and resized shots had no picture in the report |
+| T56 E5 | 2 | FAIL | a resized or one-sided shot skipped the movement limit, so --accept let a fully moving one through |
+| T56 E5 | 3 | PASS | CI's pixels job shoots the base and head galleries on hosted Linux, Windows and macOS with time frozen and live demos held, each view until it holds still, and fails a shot past 0.05% changed; Pixels-accepted lets a meant change through but never an empty side or a mostly moving shot; the base rebuilds from its own tree; blocking the merge waits on E3's branch protection |
+| T56 F1 | 1 | FAIL | the root's test rule banned what core's rules allow; the length check missed wrapped and non-dash bullets; ADR 0001 lacked two clauses of the decision it replaced; the frontend was not sent to the gallery's host rules; partial supersessions were unmarked |
+| T56 F1 | 2 | FAIL | the length check still passed an indented dash, a 1) item, a dash and a tab, and a continuation after a blank line |
+| T56 F1 | 3 | PASS | the root AGENTS.md is 5 KB of what every change needs, each rule one line of at most 300 characters, held by check.sh; every other bullet moved verbatim to the AGENTS.md of its crate or folder, core's holding the component rules; the 53 decisions are docs/adr/ records with an index and their supersessions |
+| T56 F2 | 1 | FAIL | a sign-off could name a commit without the crate's API snapshot, and a bare https:// or a placeholder passed for outside feedback |
+| T56 F2 | 2 | FAIL | a tree hash passed as the signed commit, and a feedback address with user information but no real host passed |
+| T56 F2 | 3 | PASS | tasks/stability.md lists every published crate unstable; a stable one needs the owner's signed record naming a commit by hash that holds its api snapshot, and a vertical crate a real outside feedback address; scripts/stability.py, run by check.sh, holds it |
+| T56 F3 | 1 | FAIL | the section said every item passes, though some end on a FAIL row after the cap; it said every panic site is listed, though only expect, panic! and unreachable! are; reference-style and HTML links escaped the link check |
+| T56 F3 | 2 | FAIL | HTML link attributes in single quotes, unquoted, spaced or upper case escaped the link check |
+| T56 F3 | 3 | FAIL | links split over lines escaped the line-based check, and the unquoted shell loop globbed tasks/*.md into files that exist |
+| T56 F3 | 4 | PASS | README's How it is built says agents write and models review, up to five rounds, some items ending on a FAIL row, no crate signed; it links the review log, stability ledger, check.sh, panic list and its record, AGENTS.md and the ADRs; scripts/links.py, run by check.sh, holds every relative README link to the tree and refuses HTML links |
+| T56 D6 | 1 | FAIL | IframeEmbed, a WebView in a frame, had no line; the checker read cfgs by line: a runtime item could name the unsupported side, stacked and module cfgs did not join, cfg_attr gated by its condition, and cfgs in doc examples and test modules counted |
+| T56 D6 | 2 | FAIL | inner #![cfg] was ignored; a glob export skipped re-exports and child modules; a private use alias hid a gated pub use; same-name conditional re-exports and modules kept only the first; a gated impl let a public method through |
+| T56 D6 | 3 | FAIL | a named import through a glob resolved nothing; only the last of several conditional definitions had its line checked; test-only code fed the wrapper and loose-cfg scans; a route whose gates do not meet asked for an impossible empty line |
+| T56 D6 | 4 | FAIL | a named import that exists on one platform shadowed a glob on all; items gated to no platform kept no inactive span, so their constructors and Platforms lines, and those in an inner cfg(test) module, still counted |
+| T56 D6 | 5 | FAIL | a directly declared item gated to Windows shadowed a glob on every platform; fixed after the cap by counting each definition gate in the shadow, held by 38 probes, unreviewed |
+| T56 B7 B8 | 1 | FAIL | the no-text-system error named only font-kit, though gpui on Linux falls back to the same no-op text system without wayland and x11; the install table repeated it |
+| T56 B7 B8 | 2 | PASS | ely-core takes gpui_platform behind an off-by-default platform feature (0.2.0); zbus and the six others stay out of it; init names font-kit, wayland and x11 when no text system draws |
+| T56 A4 | 1 | FAIL | the languages table carried isolang's notice but not the Apache-2.0 text its section 4(a) asks a redistribution to supply |
+| T56 A4 | 2 | PASS | rust-embed leaves for an include_bytes! table and isolang for Ely's own ISO 639-1 table with isolang's notice and the full Apache-2.0 text; every remaining duplicate group comes from RaTeX 0.1.15 |
+| T56 F4 | 1 | FAIL | O-02 marked met though a Linux Button app still pulls zbus through gpui-pre-linux; O-03's command as written still printed ely-core's gpui_platform dev-dependency to zbus |
+| T56 F4 | 2 | FAIL | O-04's recorded build command lacked --features platform, which the five_icons example now requires |
+| T56 F4 | 3 | PASS | tasks/acceptance.md rows every O-item: 23 met, O-02 and O-13 in part, O-07, O-19 and O-27 open; ely-core drops its last dev-dependency, so O-03's commands find neither crate, and check.sh's heavy-crate guard reads the whole graph and fails on any other cargo error |
+| T56 O-19 | 1 | FAIL | msrv step ran bash under PowerShell on Windows; the msrv matrix renamed a required check; a cached view inside a FormField lost its name (the scope was popped before prepaint); a stopless dialog retried autofocus every frame; an untitled ActionSheet focused a scope with no node; O-14 still claimed a run under Rust 1.95, which the manifest now rejects |
+| T56 O-19 | 2 | PASS | msrv step runs bash on Windows; the naming scope holds through prepaint, so a cached view keeps its name; a dialog tries its first-control move once per opening; an untitled ActionSheet and a captionless lightbox name their scope from the catalog; O-14 adds 2,261 root passes on rust:1.98; protection rename follows the push |
+| T56 park | 1 | FAIL | --story renders no sidebar, so the title probe never existed and story captures (scripts/shots.py) exited 1 |
+| T56 park | 2 | PASS | a capture parks on shell::REST, the sidebar title in a page and a 32px band above the scroll box in a story; the story probe exits 0 with both shots |
+| T56 park | 3 | PASS | on Windows parking also moves the system cursor (capture::point_cursor), so a real cursor mid-screen no longer hovers rows; macOS VideoPlayer top-row change traced to gpui atlas padding: 0, recorded as upstream |
