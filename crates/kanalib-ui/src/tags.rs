@@ -778,13 +778,13 @@ impl KanalibApp {
             .flex_col()
             .child(
                 div()
-                    .h(px(58.))
-                    .px(px(16.))
+                    .h(px(PAGE_HEADER_HEIGHT))
+                    .px(px(SPACE_4))
                     .flex()
                     .items_center()
                     .justify_between()
-                    .gap(px(8.))
-                    .border_1()
+                    .gap(px(SPACE_2))
+                    .border_b_1()
                     .border_color(colors.border)
                     .child(
                         div()
@@ -810,7 +810,7 @@ impl KanalibApp {
                         div()
                             .flex()
                             .items_center()
-                            .gap(px(6.))
+                            .gap(px(SPACE_1_5))
                             .child(
                                 div()
                                     .w(px(260.))
@@ -822,7 +822,6 @@ impl KanalibApp {
                             )
                             .child(
                                 Button::new("tags-refresh", "刷新")
-                                    .size(ControlSize::Sm)
                                     .icon(IconName::RefreshCw)
                                     .on_click(move |_, _, cx| {
                                         let _ = this_refresh.update(cx, |app, cx| {
@@ -832,7 +831,6 @@ impl KanalibApp {
                             )
                             .child(
                                 Button::new("tags-back", "返回图库")
-                                    .size(ControlSize::Sm)
                                     .on_click(move |_, _, cx| {
                                         let _ = this_back.update(cx, |app, cx| {
                                             app.screen = Screen::Library;

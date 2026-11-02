@@ -370,9 +370,10 @@
 
 - token：`theme.rs` 增加间距、圆角、行高与活动栏项高度；壳层、侧栏、搜索 chips 已改用 token。
 - 空状态：新增共享 `components::empty_state`（图标/标题/说明/一个下一步），应用到主图库、标签页、去重页；主图库无结果时提供「清除筛选」动作。
+- 页头：新增 `PAGE_HEADER_HEIGHT` token；标签页/设置页/去重页统一 58px 高、底部边框、标题/副标题层级与页面级按钮尺寸。
 - 侧栏顺序：来源 → 筛选 → 评级 → 自动归类 → 标签 → 智能集合 → 相册 → 整理（F-070 记录）。
-- 证据：`.kanalib/r8_f073_no_results.png`、`r8_f073_empty_reset.png`、`r8_f073_tags_empty.png`、`r8_f073_dedup_empty.png`、`r8_f070_sidebar_order.png`。
-- 剩余：按钮/输入/菜单/页签/对话框/toast 状态矩阵、设置页与命令面板、可访问性、亮暗主题截图基线、100k 性能回归。
+- 证据：`.kanalib/r8_f073_no_results.png`、`r8_f073_empty_reset.png`、`r8_f073_tags_empty.png`、`r8_f073_dedup_empty.png`、`r8_f073_header_tags.png`、`r8_f073_header_dedup.png`、`r8_f073_header_settings.png`、`r8_f070_sidebar_order.png`。
+- 剩余：按钮/输入/菜单/页签/对话框/toast 状态矩阵、设置页内容区与命令面板、可访问性、亮暗主题截图基线、100k 性能回归。
 
 ## F-074 查看器默认加载原图
 

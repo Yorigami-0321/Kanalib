@@ -4,6 +4,7 @@ pub(crate) const TITLEBAR_HEIGHT: f32 = 48.;
 pub(crate) const STATUS_BAR_HEIGHT: f32 = 26.;
 pub(crate) const ACTIVITY_BAR_WIDTH: f32 = 48.;
 pub(crate) const ACTIVITY_ITEM_HEIGHT: f32 = 40.;
+pub(crate) const PAGE_HEADER_HEIGHT: f32 = 58.;
 
 // F-073：Kanalib 壳层 token。Ely 的 Theme 已覆盖颜色、控件/图标/文本尺寸；
 // 这里只补间距、行高与圆角，组件不再各写一套字面量。

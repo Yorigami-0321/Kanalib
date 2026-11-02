@@ -1152,7 +1152,7 @@ impl KanalibApp {
         width: Pixels,
         colors: UiColors,
     ) -> AnyElement {
-        let page_padding = px(24.);
+        let page_padding = px(SPACE_6);
         let tag_override_name =
             window.use_keyed_state("kanalib-tag-override-name", cx, |window, cx| {
                 TextInput::new(window, cx).placeholder("标签名，如 long_hair")
@@ -4038,7 +4038,7 @@ impl KanalibApp {
             .bg(colors.bg)
             .child(
                 div()
-                    .h(px(58.))
+                    .h(px(PAGE_HEADER_HEIGHT))
                     .px(page_padding)
                     .flex()
                     .items_center()
@@ -4080,13 +4080,13 @@ impl KanalibApp {
                     .min_h(px(0.))
                     .overflow_y_scroll()
                     .px(page_padding)
-                    .py(px(24.))
+                    .py(px(SPACE_6))
                     .child(
                         div()
                             .w(column_width)
                             .flex()
                             .flex_col()
-                            .gap(px(12.))
+                            .gap(px(SPACE_3))
                             .child(tag_section)
                             .child(review_section)
                             .child(sources_section)

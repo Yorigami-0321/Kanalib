@@ -1255,12 +1255,12 @@ impl KanalibApp {
             },
         ));
         let header = div()
-            .px(px(16.))
-            .py(px(11.))
+            .h(px(PAGE_HEADER_HEIGHT))
+            .px(px(SPACE_4))
             .flex()
             .items_center()
             .justify_between()
-            .gap(px(12.))
+            .gap(px(SPACE_3))
             .border_b_1()
             .border_color(colors.border)
             .child(
@@ -1274,7 +1274,7 @@ impl KanalibApp {
                         div()
                             .flex()
                             .items_center()
-                            .gap(px(8.))
+                            .gap(px(SPACE_2))
                             .min_w(px(0.))
                             .child(
                                 div()
@@ -1310,7 +1310,7 @@ impl KanalibApp {
                     .flex_none()
                     .flex()
                     .items_center()
-                    .gap(px(6.))
+                    .gap(px(SPACE_1_5))
                     .children(similar_mode.then(|| {
                         Button::new(
                             "dedup-similar-scan",
