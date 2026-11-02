@@ -88,7 +88,7 @@
 
 - F-035 由「远期」改为「实现中」（第五轮任务 B）；范围限定为 Source 抽象、Immich 只读、WebDAV 只读、跨源 SHA1 精确去重与只读边界，详见 [pending/library-sources-formats.md](pending/library-sources-formats.md)。
 - F-038/F-039 由「候选」改为「实现中」（第五轮任务 A）；F-038 只做窗口位置/大小/最大化/屏幕恢复，F-039 只做单实例置前，托盘/开机启动仍不做，详见 [pending/ops.md](pending/ops.md)。
-- F-046/F-047/F-015/F-025/F-068 保持「候选」，仅标记为「待任务 D」；未实现前不得写成已实现。
+- F-046/F-047/F-015/F-025/F-068 保持「候选」，仅标记为「待任务 D」；未实现前不得写成已实现。（第六轮任务 A 已实现，见 [round-6.md](round-6.md) 与 [implemented.md](implemented.md)。）
 - `implemented.md` 的 F-040 阶段 1 行改为“部分实现条目”说明，避免与 registry「实现中」及脚本的状态互斥检查冲突。
 - 文档自检 `bash scripts/check_backlog_docs.sh` 通过：registry 50 条无重复/丢失（已实现 30、候选 8、实现中 7、远期 5）；「已实现但无归档行」「implemented 有行但状态非已实现」「overview 缺口」「详情文件未覆盖」四项均为空。
 

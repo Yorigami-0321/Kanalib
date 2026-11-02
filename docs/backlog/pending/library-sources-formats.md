@@ -76,9 +76,9 @@
 
 ## F-040 缩略图/文件处理改用 ffmpeg（阶段 2，第五轮 C+D 已收口）
 
-> 阶段 1 已实现：512 缩略图走 ffmpeg 多输入批处理池；默认 LGPL，GPL 不随包；缓存键 `v3`；扫描前预生成、失败二分重试、`image` 回退。详细许可/进程模型/基准见 [`docs/FFMPEG.md`](../../FFMPEG.md)。本节只保留剩余阶段与不可回退约束。
+> 阶段 1 已实现：512 缩略图走 ffmpeg 多输入批处理池；默认 LGPL，GPL 不随包；缓存键 `v4`（F-064 起，v3 文件不命中并由预算淘汰）；扫描前预生成、失败二分重试、`image` 回退。详细许可/进程模型/基准见 [`docs/FFMPEG.md`](../../FFMPEG.md)。本节只保留剩余阶段与不可回退约束。
 
-- **已完成**：路径解析 env → PATH → `runtime/ffmpeg` → exe 同级（debug 另含 `tools/ffmpeg`）；`--enable-gpl` 探测；每批 ≤32、120s 超时、`-protocol_whitelist file`、`max_pixels`、无窗口；alpha 合成白底 JPEG；t256 从 512 派生；缓存键 `v3`；10k 缩略图 52.2s、100k 738.7s、总 42.3min；`runtime/ffmpeg` 为 LGPL shared，`tools/ffmpeg` GPL 仅本地开发。第二轮阶段 2：AVIF 走 ffmpeg-only 路径（`image` 0.25 无 AVIF 解码器，哈希照算、尺寸从 ispe box 读、缺 ffmpeg 时给“需要 FFmpeg 解码”提示而不误判损坏）；动画 GIF/WebP 取首帧；含 alpha 的新格式先写临时 PNG 再白底合成；批次内损坏输入被隔离。pHash 仍走自研 DCT（不换 `image_hasher`），损坏修复仍走 Python。第四轮（2026-10-29）：PSD 以 ffmpeg-only 接入（详见 F-033）；复核 pHash/修复结论不变；核对 ffprobe 与 LGPLv3 构建参数，ffprobe 默认随包；视频首帧/时长仅评估，未接视频功能。
+- **已完成**：路径解析 env → PATH → `runtime/ffmpeg` → exe 同级（debug 另含 `tools/ffmpeg`）；`--enable-gpl` 探测；每批 ≤32、120s 超时、`-protocol_whitelist file`、`max_pixels`、无窗口；alpha 合成白底 JPEG；t256 从 512 派生；缓存键 `v4`（F-064，v3 文件不命中并由预算淘汰）；10k 缩略图 52.2s、100k 738.7s、总 42.3min；`runtime/ffmpeg` 为 LGPL shared，`tools/ffmpeg` GPL 仅本地开发。第二轮阶段 2：AVIF 走 ffmpeg-only 路径（`image` 0.25 无 AVIF 解码器，哈希照算、尺寸从 ispe box 读、缺 ffmpeg 时给“需要 FFmpeg 解码”提示而不误判损坏）；动画 GIF/WebP 取首帧；含 alpha 的新格式先写临时 PNG 再白底合成；批次内损坏输入被隔离。pHash 仍走自研 DCT（不换 `image_hasher`），损坏修复仍走 Python。第四轮（2026-10-29）：PSD 以 ffmpeg-only 接入（详见 F-033）；复核 pHash/修复结论不变；核对 ffprobe 与 LGPLv3 构建参数，ffprobe 默认随包；视频首帧/时长仅评估，未接视频功能。
 - **第五轮已完成（2026-10-30，任务 C + D；`40baa4f`/`582d9e2`，合并 `d1df29a`/`3025605`）**：视频作为新 `media_kind`；首帧走既有批处理池（512、120s、`-frames:v 1`）；ffprobe 取时长/宽高/编码（20s 超时、可关）；系统默认播放器入口只 `spawn`；视频不进 pHash/打标队列/不标损坏；schema v9→v10 幂等补列并先备份；网格视频瓦片首帧+时长角标，查看器固定首帧并提供系统播放；远端虚拟路径在 UI 全面只读拦截。core 合并后 177/16、UI 52；10k 冷导入 213.7s / 0 失败；视频样本 2.0s/320×240、首帧 512×384（`.kanalib/r5c/`、`.kanalib/r5d/grid2.png`）。
 - **剩余阶段**：HEIC/RAW 仅在真实样本与许可审查后承诺（F-033 继续 pending）；PSD 的图层/Alpha/pHash/PSB 边界；动画 GIF/WebP 不做应用内逐帧播放（仅系统应用出口）；不做内置视频播放器/转码/批量视频打标；100k 未重跑、系统播放入口未实点打开。
 - **约束**：批处理参数不得经过 shell；Unicode/长路径用 `Command` 参数；临时文件必须清理；GPL 构建不得随包；ffmpeg 缺失/损坏时回退 `image` 并记日志；100k 指标不得劣于 738.7s/42.3min；ffprobe 与 ffmpeg 同 configuration、同 LGPL 许可，不单独引入 GPL 工具。
