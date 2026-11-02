@@ -1,5 +1,5 @@
 param(
-    [string]$OutDir = "dist/Kanalib-portable",
+    [string]$OutDir = "dist/Kanalib",
     [switch]$SkipBuild,
     [switch]$Force,
     [switch]$Zip,
@@ -214,11 +214,18 @@ if (Test-Path -LiteralPath $out) {
     if (-not $Force) {
         throw "output already exists: $out (pass -Force to replace it)"
     }
-    Remove-Item -LiteralPath $out -Recurse -Force
+    # 只替换便携包自己的条目；`.kanalib` 与目录中的其他用户文件必须保留。
+    foreach ($name in @("kanalib.exe", "README.txt", "fetch-ffmpeg-lgpl.ps1", "PACKAGE-MANIFEST.txt", "runtime", "sidecar", "dist")) {
+        $path = Join-Path $out $name
+        if (Test-Path -LiteralPath $path) {
+            Remove-Item -LiteralPath $path -Recurse -Force
+        }
+    }
+    Write-Output "preserving user data: $(Join-Path $out '.kanalib')"
 }
 
-New-Item -ItemType Directory -Path $out | Out-Null
-New-Item -ItemType Directory -Path (Join-Path $out "dist") | Out-Null
+New-Item -ItemType Directory -Path $out -Force | Out-Null
+New-Item -ItemType Directory -Path (Join-Path $out "dist") -Force | Out-Null
 
 Copy-Item -LiteralPath $exe -Destination (Join-Path $out "kanalib.exe")
 Copy-Item -LiteralPath $readme -Destination (Join-Path $out "README.txt")
@@ -250,7 +257,7 @@ Copy-Tree $sidecar (Join-Path $out "sidecar") $dataExcludes
 Copy-Tree $models (Join-Path $out "dist/models") $dataExcludes
 
 if (Test-Path -LiteralPath (Join-Path $out ".kanalib")) {
-    Stop-Packaging "refusing to package a .kanalib data directory: $(Join-Path $out '.kanalib')"
+    Write-Output "user data preserved: $(Join-Path $out '.kanalib')"
 }
 
 if ($ffmpegState -eq "bundled") {
@@ -283,7 +290,10 @@ if ($ffmpegState -eq "bundled") {
     Write-Output "ffmpeg: not bundled; package will use the image crate fallback"
 }
 
-$packageFiles = @(Get-ChildItem -LiteralPath $out -Recurse -File)
+$dataPrefix = ([System.IO.Path]::GetFullPath((Join-Path $out ".kanalib"))).TrimEnd("\") + "\"
+$packageFiles = @(Get-ChildItem -LiteralPath $out -Recurse -File | Where-Object {
+    -not $_.FullName.StartsWith($dataPrefix, [System.StringComparison]::OrdinalIgnoreCase)
+})
 $totalBytes = ($packageFiles | Measure-Object -Property Length -Sum).Sum
 if ($null -eq $totalBytes) {
     $totalBytes = 0
@@ -331,7 +341,7 @@ $null = $manifestLines.Add("file_count=$($packageFiles.Count)")
 $null = $manifestLines.Add("total_bytes=$totalBytes")
 $null = $manifestLines.Add("total_size_mib=$([math]::Round($totalBytes / 1MB, 2))")
 $null = $manifestLines.Add("hash_algorithm=SHA256")
-$null = $manifestLines.Add("file_count_scope=package excluding PACKAGE-MANIFEST.txt")
+$null = $manifestLines.Add("file_count_scope=package excluding PACKAGE-MANIFEST.txt and .kanalib user data")
 $null = $manifestLines.Add("")
 $null = $manifestLines.Add("[files]")
 $null = $manifestLines.Add("sha256  bytes  category  path")
@@ -343,7 +353,9 @@ $manifestPath = Join-Path $out "PACKAGE-MANIFEST.txt"
 $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
 [System.IO.File]::WriteAllLines($manifestPath, [string[]]$manifestLines.ToArray(), $utf8NoBom)
 
-$files = @(Get-ChildItem -LiteralPath $out -Recurse -File)
+$files = @(Get-ChildItem -LiteralPath $out -Recurse -File | Where-Object {
+    -not $_.FullName.StartsWith($dataPrefix, [System.StringComparison]::OrdinalIgnoreCase)
+})
 $bytes = ($files | Measure-Object -Property Length -Sum).Sum
 $size = if ($null -eq $bytes) { 0 } else { [math]::Round($bytes / 1GB, 2) }
 Write-Output "portable package: $out"
@@ -360,7 +372,7 @@ if ($Zip) {
     if (-not (Test-Path -LiteralPath $tarExe -PathType Leaf)) {
         $tarExe = "tar.exe"
     }
-    & $tarExe -a -c -f $zipPath -C $out .
+    & $tarExe -a -c -f $zipPath -C $out --exclude=.kanalib .
     if ($LASTEXITCODE -ne 0) {
         throw "tar zip failed with exit code $LASTEXITCODE (tar: $tarExe)"
     }
