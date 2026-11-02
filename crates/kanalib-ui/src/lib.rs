@@ -4,7 +4,7 @@ use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use ely_gpui_component::{
-    buttons::{Button, ButtonVariant, IconButton},
+    buttons::{Button, ButtonVariant, IconButton, SegmentedControl},
     feedback::{Toast, ToastViewport, Toaster},
     forms::{Choice, Input, Rating, Slider, TagInput, TextInput},
     media::ImageViewer,

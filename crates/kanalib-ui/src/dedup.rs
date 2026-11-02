@@ -331,39 +331,6 @@ pub(crate) fn dedup_filter_chip(
     )
 }
 
-pub(crate) fn dedup_tab(
-    label: String,
-    active: bool,
-    mode: GroupKind,
-    this: Entity<KanalibApp>,
-    colors: UiColors,
-) -> AnyElement {
-    div()
-        .id(SharedString::from(format!("dedup-tab-{label}")))
-        .px(px(9.))
-        .py(px(4.))
-        .rounded(px(5.))
-        .cursor_pointer()
-        .bg(if active {
-            colors.surface
-        } else {
-            colors.sunken
-        })
-        .text_xs()
-        .font_weight(if active {
-            FontWeight::SEMIBOLD
-        } else {
-            FontWeight::NORMAL
-        })
-        .text_color(if active { colors.fg } else { colors.subtle })
-        .hover(move |style| style.bg(colors.hover))
-        .on_click(move |_, _, cx| {
-            let _ = this.update(cx, |app, cx| app.open_dedup_mode(mode, cx));
-        })
-        .child(label)
-        .into_any_element()
-}
-
 pub(crate) fn small_badge(label: String, fg: Hsla, bg: Hsla) -> AnyElement {
     div()
         .px(px(5.))
@@ -1210,27 +1177,22 @@ impl KanalibApp {
         } else {
             "相似图片 · 未扫描".to_string()
         };
-        let tabs = div()
-            .flex()
-            .items_center()
-            .gap(px(2.))
-            .p(px(2.))
-            .rounded(px(7.))
-            .bg(colors.sunken)
-            .child(dedup_tab(
-                format!("完全重复 {}", exact_summary.total),
-                !similar_mode,
-                GroupKind::Exact,
-                this.clone(),
-                colors,
-            ))
-            .child(dedup_tab(
-                similar_tab_label,
-                similar_mode,
-                GroupKind::Similar,
-                this.clone(),
-                colors,
-            ));
+        let tabs =
+            SegmentedControl::new("dedup-mode", if similar_mode { "similar" } else { "exact" })
+                .size(ControlSize::Sm)
+                .segment("exact", format!("完全重复 {}", exact_summary.total), None)
+                .segment("similar", similar_tab_label, None)
+                .on_change({
+                    let this = this.clone();
+                    move |value, _, cx| {
+                        let mode = if value.as_ref() == "similar" {
+                            GroupKind::Similar
+                        } else {
+                            GroupKind::Exact
+                        };
+                        let _ = this.update(cx, |app, cx| app.open_dedup_mode(mode, cx));
+                    }
+                });
 
         let more_menu = Menu::new().item(MenuItem::new("重新扫描图库").disabled(busy).on_click(
             move |_, cx| {
