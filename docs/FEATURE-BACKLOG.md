@@ -18,6 +18,7 @@
 | [backlog/round-4.md](backlog/round-4.md) | 第四轮任务包（备份/媒体/搜索/监听） |
 | [backlog/round-5.md](backlog/round-5.md) | 第五轮任务包（桌面基础/网络源/视频） |
 | [backlog/round-6.md](backlog/round-6.md) | 第六轮任务包（UI 小项/保护路径/ICC） |
+| [backlog/round-7.md](backlog/round-7.md) | 第七轮任务包（F-067 撤销/历史） |
 | [backlog/component-research.md](backlog/component-research.md) | 非 UI 现成组件调研 |
 | [backlog/candidate-pool.md](backlog/candidate-pool.md) | 候选池 |
 | [backlog/references.md](backlog/references.md) | 参考与本地依据 |
