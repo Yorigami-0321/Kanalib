@@ -131,6 +131,15 @@
 - 证据：`.kanalib/r8_f069_fit_label.png`（适应）、`r8_f069_cropstep.png`（75%）、`r8_f069_croprefit.png`（回到适应）、`r8_f069_crop_b2.png`（窗口缩小后仍适应）、`r8_f069_crop_c_prev.png`（切图后仍适应）。
 - 剩余：填充模式、小图 clamp 时的标签口径（上面那条）、100MP 超大图、`0`/`1` 与双击切换的人工验收。
 
+#### 工具条文案改走 i18n（2026-11-03 续，F-073 一致性）
+
+- 同一工具条上剩下的 5 个 tooltip 与失败提示原本是硬编码英文（`Zoom out`/`Zoom in`/`Fit`/`Turn left`/`Turn right`/`This picture can't be opened`），中文界面里混英文。改为 `button(tip: SharedString)` + `i18n::text`：复用已有键 `zoom.out`/`zoom.in`，新增 `media.viewer.turn_left`/`turn_right`/`failed`，六张 builtin 表同步补齐（顺带把上一轮在 de/fr 里留成英文的 `media.viewer.fit` 改成 `Einpassen`/`Ajuster`）。
+- `IconButton::tooltip` 同时写 `aria_label`，所以 UIA 名称跟着变中文：副屏实测 `缩小 / 放大 / 适应 / 向左旋转 / 向右旋转`。
+- 键表 parity 用脚本核对（vendor 的 `every_table_holds_every_key…` 测试在当前 gpui-pre 下编译不过，跑不了）：六张表各 572 键，与 en 无差集。
+- ely-media 里仍有硬编码英文 tooltip 的是视频控制与字幕（`Shuffle`/`Repeat`/`Play from here`/`Remove`），本项目未接入这些界面，暂不动。
+- 验证窗口的坐标坑（记录以免重复踩）：DPI 无关的 PowerShell 调 `SetWindowPos` 会把宽高按主屏缩放虚拟化（1240×820 实际 1488×984），窗口越出副屏。副屏真实物理边界 `-1920,-623..0,657`（1920×1280 @150%），主屏 `0,0..2560,1440` @125%；脚本先 `SetThreadDpiAwarenessContext(PER_MONITOR_AWARE_V2)` 再定位，实测 `-1900,-610 1840x1240` 完整落在副屏内。
+- 证据：`.kanalib/r8_f069_viewer_i18n.png`、`r8_f069_viewer_i18n_crop.png`（工具条中文标签与「适应」）。
+
 ## F-070 侧栏与标签工作区重构
 
 > 2026-11-02 用户截图与口述登记；状态「实现中」：方案 C 最小收敛与侧栏浏览筛选分组重排已落地（去重复入口、标签页隐藏侧栏标签搜索、统一计数、查看图片/返回路径）；方案 A 工作区待定。目标不是新增标签能力，而是把现有的「浏览筛选 / 标签分配 / 标签管理」三层职责拆清：同一能力只保留一个入口，同一列表只保留一套搜索与计数口径。本次不改标签数据模型、别名/合并语义与 schema；也不重排主图库网格与查看器布局。
@@ -395,8 +404,9 @@
 - 去重模式切换改用 Ely `SegmentedControl`，获得键盘焦点、aria 与滑动选中态。
 - 设置页 15 个分区卡片统一为 `components::card`（16px 内边距、8px 圆角、surface/边框）；卡片内 10px 间距改为 token 8。
 - 侧栏顺序：来源 → 筛选 → 评级 → 自动归类 → 标签 → 智能集合 → 相册 → 整理（F-070 记录）。
-- 证据：`.kanalib/r8_f073_no_results.png`、`r8_f073_empty_reset.png`、`r8_f073_tags_empty.png`、`r8_f073_dedup_empty.png`、`r8_f073_header_tags.png`、`r8_f073_header_dedup.png`、`r8_f073_header_settings.png`、`r8_f073_chips_tags.png`、`r8_f073_chips_dedup.png`、`r8_f073_dedup_segments.png`、`r8_f073_settings_cards.png`、`r8_f070_sidebar_order.png`。
-- 剩余：按钮/输入/菜单/对话框/toast 状态矩阵、设置页字段/对话框与命令面板、可访问性、亮暗主题截图基线、100k 性能回归。
+- 查看器工具条文案统一（2026-11-03）：vendor `ImageViewer` 的 5 个 tooltip 与失败提示从硬编码英文改走 `i18n::text`，UIA 名称随之变中文；细节见 F-069「工具条文案改走 i18n」。
+- 证据：`.kanalib/r8_f073_no_results.png`、`r8_f073_empty_reset.png`、`r8_f073_tags_empty.png`、`r8_f073_dedup_empty.png`、`r8_f073_header_tags.png`、`r8_f073_header_dedup.png`、`r8_f073_header_settings.png`、`r8_f073_chips_tags.png`、`r8_f073_chips_dedup.png`、`r8_f073_dedup_segments.png`、`r8_f073_settings_cards.png`、`r8_f070_sidebar_order.png`、`r8_f069_viewer_i18n_crop.png`。
+- 剩余：按钮/输入/菜单/对话框/toast 状态矩阵、设置页字段/对话框与命令面板、可访问性、亮暗主题截图基线、100k 性能回归；vendor 侧仍有硬编码英文的组件（视频控制/字幕等）待接入对应界面时再收。
 
 ## F-074 查看器默认加载原图
 

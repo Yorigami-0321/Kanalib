@@ -165,7 +165,7 @@ impl RenderOnce for ImageViewer {
             let fitted = zoom.is_some() && view.zoom.is_none();
             (zoom, view.offset, stage, fitted)
         };
-        let button = |key: &'static str, icon: IconName, tip: &'static str, act: Act| {
+        let button = |key: &'static str, icon: IconName, tip: SharedString, act: Act| {
             let (acted, pixels) = (view.clone(), pixels);
             IconButton::new((self.id.clone(), key), icon)
                 .size(ControlSize::Sm)
@@ -210,7 +210,7 @@ impl RenderOnce for ImageViewer {
                     .child(button(
                         "out",
                         IconName::ZoomOut,
-                        "Zoom out",
+                        i18n::text(cx, "zoom.out", &[]),
                         Box::new(step(false)),
                     ))
                     .child(
@@ -232,13 +232,13 @@ impl RenderOnce for ImageViewer {
                     .child(button(
                         "in",
                         IconName::ZoomIn,
-                        "Zoom in",
+                        i18n::text(cx, "zoom.in", &[]),
                         Box::new(step(true)),
                     ))
                     .child(button(
                         "fit",
                         IconName::Maximize2,
-                        "Fit",
+                        i18n::text(cx, "media.viewer.fit", &[]),
                         Box::new(|view, pixels| view.zoom_to(None, (0.0, 0.0), pixels)),
                     )),
             )
@@ -250,13 +250,13 @@ impl RenderOnce for ImageViewer {
                     .child(button(
                         "left",
                         IconName::RotateCcw,
-                        "Turn left",
+                        i18n::text(cx, "media.viewer.turn_left", &[]),
                         Box::new(turn(3)),
                     ))
                     .child(button(
                         "right",
                         IconName::RotateCw,
-                        "Turn right",
+                        i18n::text(cx, "media.viewer.turn_right", &[]),
                         Box::new(turn(1)),
                     )),
             );
@@ -293,7 +293,7 @@ impl RenderOnce for ImageViewer {
                         .size(IconSize::Lg)
                         .color(colors.fg_subtle),
                 )
-                .child("This picture can't be opened")
+                .child(i18n::text(cx, "media.viewer.failed", &[]))
                 .into_any_element(),
             _ => div()
                 .size_full()
