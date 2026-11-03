@@ -297,6 +297,7 @@ pub(super) const TABLE: &[(&str, &str)] = &[
     ("media.player", "视频播放器"),
     ("media.trim", "剪辑范围"),
     ("media.image", "图片"),
+    ("media.viewer.fit", "适应"),
     ("messaging.huddle", "加入语音会议"),
     ("messaging.emoji", "表情"),
     ("misc.calculator", "计算器"),

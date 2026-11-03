@@ -315,6 +315,7 @@ pub(super) const TABLE: &[(&str, &str)] = &[
     ("media.player", "Videoplayer"),
     ("media.trim", "Kürzen"),
     ("media.image", "Bild"),
+    ("media.viewer.fit", "Fit"),
     ("messaging.huddle", "Dem Huddle beitreten"),
     ("messaging.emoji", "Emoji"),
     ("misc.calculator", "Rechner"),

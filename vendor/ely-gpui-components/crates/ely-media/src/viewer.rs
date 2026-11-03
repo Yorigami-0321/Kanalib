@@ -3,8 +3,8 @@ use std::sync::Arc;
 use gpui::{
     App, Bounds, DragMoveEvent, ElementId, EmptyView, EntityId, ImageAssetLoader, ImageSource,
     InteractiveElement, IntoElement, MouseButton, ParentElement, Pixels, Point, RenderImage,
-    RenderOnce, Resource, Role, StatefulInteractiveElement, Styled, Window, canvas, div, img,
-    prelude::*, transparent_black,
+    RenderOnce, Resource, Role, SharedString, StatefulInteractiveElement, Styled, Window, canvas,
+    div, img, prelude::*, transparent_black,
 };
 
 use super::turn::{Turn, Turned};
@@ -158,11 +158,12 @@ impl RenderOnce for ImageViewer {
         );
         let theme = cx.theme();
         let colors = theme.colors.clone();
-        let (zoom, offset, stage) = {
+        let (zoom, offset, stage, fitted) = {
             let view = view.read(cx);
             let stage = view.size();
             let zoom = pixels.map(|pixels| view.zoom.unwrap_or_else(|| fit(pixels, stage)));
-            (zoom, view.offset, stage)
+            let fitted = zoom.is_some() && view.zoom.is_none();
+            (zoom, view.offset, stage, fitted)
         };
         let button = |key: &'static str, icon: IconName, tip: &'static str, act: Act| {
             let (acted, pixels) = (view.clone(), pixels);
@@ -219,10 +220,14 @@ impl RenderOnce for ImageViewer {
                             .text_color(colors.fg_muted)
                             .flex()
                             .justify_center()
-                            .child(
-                                zoom.map(|zoom| format!("{:.0}%", zoom * 100.0))
-                                    .unwrap_or_default(),
-                            ),
+                            .child(if fitted {
+                                i18n::text(cx, "media.viewer.fit", &[])
+                            } else {
+                                SharedString::from(
+                                    zoom.map(|zoom| format!("{:.0}%", zoom * 100.0))
+                                        .unwrap_or_default(),
+                                )
+                            }),
                     )
                     .child(button(
                         "in",

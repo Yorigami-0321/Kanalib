@@ -303,6 +303,7 @@ pub(super) const TABLE: &[(&str, &str)] = &[
     ("media.player", "נגן וידאו"),
     ("media.trim", "קיצוץ"),
     ("media.image", "תמונה"),
+    ("media.viewer.fit", "התאם"),
     ("messaging.huddle", "הצטרפות לשיחה"),
     ("messaging.emoji", "אימוג׳י"),
     ("misc.calculator", "מחשבון"),

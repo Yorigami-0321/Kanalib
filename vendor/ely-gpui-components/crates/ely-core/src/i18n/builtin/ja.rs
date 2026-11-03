@@ -321,6 +321,7 @@ pub(super) const TABLE: &[(&str, &str)] = &[
     ("media.player", "ビデオプレーヤー"),
     ("media.trim", "トリミング"),
     ("media.image", "画像"),
+    ("media.viewer.fit", "フィット"),
     ("messaging.huddle", "ハドルに参加"),
     ("messaging.emoji", "絵文字"),
     ("misc.calculator", "計算機"),
