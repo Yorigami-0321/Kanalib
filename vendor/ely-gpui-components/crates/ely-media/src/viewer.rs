@@ -162,7 +162,7 @@ impl RenderOnce for ImageViewer {
             let view = view.read(cx);
             let stage = view.size();
             let zoom = pixels.map(|pixels| view.zoom.unwrap_or_else(|| fit(pixels, stage)));
-            let fitted = zoom.is_some() && view.zoom.is_none();
+            let fitted = view.zoom.is_none() && zoom.is_some_and(|zoom| zoom < 1.0);
             (zoom, view.offset, stage, fitted)
         };
         let button = |key: &'static str, icon: IconName, tip: SharedString, act: Act| {
