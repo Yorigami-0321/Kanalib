@@ -4,6 +4,7 @@ use crate::format::*;
 use crate::theme::*;
 use crate::views::GRID_CONTEXT;
 use crate::*;
+use ely_gpui_component::overlays::Dialog;
 use kanalib_core::model::{SimilarHit, SimilarThresholdPreview};
 
 pub(crate) const DEDUP_RAIL_WIDTH: f32 = 272.;
@@ -2280,139 +2281,103 @@ impl KanalibApp {
         let planned_bytes = planned_reclaim_bytes(groups, key.as_deref());
         let audit_scope = if key.is_some() { "group" } else { "batch" };
 
-        let this_cancel = this.clone();
+        let close_app = this.clone();
         let this_confirm = this.clone();
-        let overlay = div()
-            .absolute()
-            .top(px(0.))
-            .left(px(0.))
-            .size_full()
-            .occlude()
-            .bg(colors.backdrop)
-            .flex()
-            .items_center()
-            .justify_center()
-            .child(
-                div()
-                    .w(px(480.))
-                    .p(px(18.))
-                    .rounded(px(12.))
-                    .border_1()
-                    .border_color(colors.border)
-                    .bg(colors.surface)
-                    .flex()
-                    .flex_col()
-                    .gap(px(10.))
-                    .child(div().text_sm().font_weight(FontWeight::BOLD).child(title))
-                    .child(div().text_xs().text_color(colors.muted).child(detail))
-                    .child(
-                        div()
-                            .rounded(px(7.))
-                            .border_1()
-                            .border_color(colors.border)
-                            .overflow_hidden()
-                            .children(rows.iter().enumerate().map(|(index, (name, size))| {
-                                div()
-                                    .px(px(8.))
-                                    .py(px(5.))
-                                    .flex()
-                                    .items_center()
-                                    .justify_between()
-                                    .gap(px(8.))
-                                    .bg(if index % 2 == 0 {
-                                        colors.surface
+        let overlay = Dialog::new("dedup-confirm-dialog", title, move |_, cx| {
+            let _ = close_app.update(cx, |app, cx| {
+                app.dedup_confirm = None;
+                cx.notify();
+            });
+        })
+        .detail(detail)
+        .child(
+            div()
+                .rounded(px(RADIUS_LG))
+                .border_1()
+                .border_color(colors.border)
+                .overflow_hidden()
+                .children(rows.iter().enumerate().map(|(index, (name, size))| {
+                    div()
+                        .px(px(8.))
+                        .py(px(5.))
+                        .flex()
+                        .items_center()
+                        .justify_between()
+                        .gap(px(8.))
+                        .bg(if index % 2 == 0 {
+                            colors.surface
+                        } else {
+                            colors.sunken
+                        })
+                        .child(
+                            div()
+                                .truncate()
+                                .text_xs()
+                                .text_color(colors.fg)
+                                .child(name.clone()),
+                        )
+                        .child(
+                            div()
+                                .flex_none()
+                                .text_xs()
+                                .text_color(colors.subtle)
+                                .child(size.clone()),
+                        )
+                })),
+        )
+        .action(|close| {
+            Button::new("dedup-cancel", "取消").on_click(move |_, window, cx| close(window, cx))
+        })
+        .action(move |_| {
+            Button::new("dedup-confirm", "确认移入回收站")
+                .variant(ButtonVariant::Danger)
+                .disabled(remote)
+                .on_click(move |_, _, cx| {
+                    let _ = this_confirm.update(cx, |app, cx| {
+                        let result = match &key {
+                            Some(key) => app.state.trash_dedup_group(key),
+                            None => app.state.trash_preselected(),
+                        };
+                        match result {
+                            Ok(done) => {
+                                let audit = TrashAudit {
+                                    at: now_unix_secs(),
+                                    groups: done.groups,
+                                    assets: done.assets,
+                                    failed: done.failed,
+                                    protected_skipped: done.protected_skipped,
+                                    bytes: planned_bytes,
+                                    scope: audit_scope.to_string(),
+                                };
+                                app.persist_setting("dedup.last_trash", audit.to_json(), cx);
+                                app.last_trash_audit = Some(audit);
+                                app.dedup_notice = Some(format!(
+                                    "已处理 {} 组 · 移入回收站 {} 张{}{}",
+                                    done.groups,
+                                    done.assets,
+                                    if done.failed > 0 {
+                                        format!("；{} 张未移动", done.failed)
                                     } else {
-                                        colors.sunken
-                                    })
-                                    .child(
-                                        div()
-                                            .truncate()
-                                            .text_xs()
-                                            .text_color(colors.fg)
-                                            .child(name.clone()),
-                                    )
-                                    .child(
-                                        div()
-                                            .flex_none()
-                                            .text_xs()
-                                            .text_color(colors.subtle)
-                                            .child(size.clone()),
-                                    )
-                            })),
-                    )
-                    .child(
-                        div()
-                            .flex()
-                            .justify_end()
-                            .gap(px(6.))
-                            .child(
-                                Button::new("dedup-cancel", "取消").on_click(move |_, _, cx| {
-                                    let _ = this_cancel.update(cx, |app, cx| {
-                                        app.dedup_confirm = None;
-                                        cx.notify();
-                                    });
-                                }),
-                            )
-                            .child(
-                                Button::new("dedup-confirm", "确认移入回收站")
-                                    .variant(ButtonVariant::Danger)
-                                    .disabled(remote)
-                                    .on_click(move |_, _, cx| {
-                                        let _ = this_confirm.update(cx, |app, cx| {
-                                            let result = match &key {
-                                                Some(key) => app.state.trash_dedup_group(key),
-                                                None => app.state.trash_preselected(),
-                                            };
-                                            match result {
-                                                Ok(done) => {
-                                                    let audit = TrashAudit {
-                                                        at: now_unix_secs(),
-                                                        groups: done.groups,
-                                                        assets: done.assets,
-                                                        failed: done.failed,
-                                                        protected_skipped: done.protected_skipped,
-                                                        bytes: planned_bytes,
-                                                        scope: audit_scope.to_string(),
-                                                    };
-                                                    app.persist_setting(
-                                                        "dedup.last_trash",
-                                                        audit.to_json(),
-                                                        cx,
-                                                    );
-                                                    app.last_trash_audit = Some(audit);
-                                                    app.dedup_notice = Some(format!(
-                                                        "已处理 {} 组 · 移入回收站 {} 张{}{}",
-                                                        done.groups,
-                                                        done.assets,
-                                                        if done.failed > 0 {
-                                                            format!("；{} 张未移动", done.failed)
-                                                        } else {
-                                                            String::new()
-                                                        },
-                                                        if done.protected_skipped > 0 {
-                                                            format!(
-                                                                "；跳过 {} 个受保护组",
-                                                                done.protected_skipped
-                                                            )
-                                                        } else {
-                                                            String::new()
-                                                        }
-                                                    ));
-                                                }
-                                                Err(error) => {
-                                                    app.dedup_notice =
-                                                        Some(format!("移入回收站失败: {error:#}"));
-                                                }
-                                            }
-                                            app.dedup_confirm = None;
-                                            app.dedup_selected = None;
-                                            cx.notify();
-                                        });
-                                    }),
-                            ),
-                    ),
-            )
-            .into_any_element();
+                                        String::new()
+                                    },
+                                    if done.protected_skipped > 0 {
+                                        format!("；跳过 {} 个受保护组", done.protected_skipped)
+                                    } else {
+                                        String::new()
+                                    }
+                                ));
+                            }
+                            Err(error) => {
+                                app.dedup_notice = Some(format!("移入回收站失败: {error:#}"));
+                            }
+                        }
+                        app.dedup_confirm = None;
+                        app.dedup_selected = None;
+                        cx.notify();
+                    });
+                })
+        })
+        .into_any_element();
         Some(overlay)
     }
 }

@@ -51,8 +51,14 @@ pub(crate) fn push_toast(
     message: impl Into<SharedString>,
     severity: Severity,
 ) {
+    // Ely 对所有级别都给 5 秒；失败信息往往比一句成功提示长，读不完就消失了。
+    let stay = match severity {
+        Severity::Danger => Duration::from_secs(12),
+        Severity::Warning => Duration::from_secs(8),
+        Severity::Info | Severity::Success => Duration::from_secs(5),
+    };
     toaster.update(cx, |toaster, cx| {
-        toaster.push(Toast::new(message).severity(severity), cx);
+        toaster.push(Toast::new(message).severity(severity).stay(Some(stay)), cx);
     });
 }
 
