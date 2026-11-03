@@ -778,6 +778,7 @@ impl KanalibApp {
                         div()
                             .flex()
                             .flex_col()
+                            .min_w(px(0.))
                             .gap(px(2.))
                             .child(
                                 div()
@@ -789,6 +790,7 @@ impl KanalibApp {
                                 div()
                                     .text_xs()
                                     .text_color(colors.muted)
+                                    .truncate()
                                     .child(format!(
                                         "共 {total} 个标签 · 0 使用 {unused} · 低频 {low_frequency} · 仅自动 {auto_only} · 已屏蔽 {blocked_count}"
                                     )),
@@ -797,6 +799,7 @@ impl KanalibApp {
                     .child(
                         div()
                             .flex()
+                            .flex_none()
                             .items_center()
                             .gap(px(SPACE_1_5))
                             .child(

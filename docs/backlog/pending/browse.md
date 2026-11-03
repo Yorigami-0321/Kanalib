@@ -406,8 +406,15 @@
 - 设置页 15 个分区卡片统一为 `components::card`（16px 内边距、8px 圆角、surface/边框）；卡片内 10px 间距改为 token 8。
 - 侧栏顺序：来源 → 筛选 → 评级 → 自动归类 → 标签 → 智能集合 → 相册 → 整理（F-070 记录）。
 - 查看器工具条文案统一（2026-11-03）：vendor `ImageViewer` 的 5 个 tooltip 与失败提示从硬编码英文改走 `i18n::text`，UIA 名称随之变中文；细节见 F-069「工具条文案改走 i18n」。
+- 阶段 0 截图基线（2026-11-03 补）：新增 `scripts/ui_baseline.ps1`，在副屏边界内按「尺寸 × 页面 × 亮暗」矩阵采集，并做 UIA 水平越界审计。
+  - 用法：`KANALIB_ROOT=<数据根> KANALIB_FOLDER=<图库根> target/debug/kanalib.exe`，再 `powershell -File scripts/ui_baseline.ps1 -Hwnd <hwnd> -Sizes 1536x1000`（物理像素；副屏 1920×1280 @150%，`1536x1000`=1024×667 逻辑、`1800x1200`=1200×800 逻辑）。页面与主题切换按活动栏子元素**索引**点击，脚本不含中文字面量——PowerShell 5.1 会按 GBK 读无 BOM 的 .ps1，中文默认值会解析失败。
+  - 已采：图库/重复项/标签/设置 × 亮暗 × 1024 与 1200 逻辑宽，共 16 张，归档 `.kanalib/ui_baseline/`（该目录被 gitignore，重跑即可再生；图库根是 `sample_library` 的 15 张副本，含 1 个故意失败的 avif 以覆盖损坏态）。
+  - 审计口径踩坑：初版拿窗口矩形比较所有子元素，把滚动区外的内容（设置页 36–44 个、图库滚出的瓦片）误报成越界；又拿 `GetClientRect`/`ClientToScreen` 换算客户区，贴边控件被误报 2px。最终只在 UIA 自己的坐标系里比水平方向（根矩形 vs 子元素，容差 1px），并跳过视口上/下外的元素。
+  - 审出的真缺陷：标签页在 1024 逻辑宽下页头右侧「返回图库」右边缘超出窗口 18px 被裁。修复：`tags.rs` 页头标题块加 `min_w(0)`、副标题 `truncate()`、右侧按钮组 `flex_none()`（按钮不参与压缩，压缩让给副标题）。修复后 16 组全部 `h-overflow=0`。
+  - 未覆盖：1440/1920 逻辑宽（副屏物理只有 1920 宽，放不下 1440 逻辑=2160 物理；要么用主屏，要么把目标宽降到副屏能容纳的范围）、查看器/对话框/命令面板/toast 基线、空库与 10k/100k 库（合成库已不在，需重跑 `scripts/generate_stress_library.py`）。
+  - 顺带记录：设置页仍显示资源管理器侧栏（页头标题却写着「设置」），属 F-070 方案 A「上下文侧栏」未落地的既有缺口，不在本条修复。
 - 证据：`.kanalib/r8_f073_no_results.png`、`r8_f073_empty_reset.png`、`r8_f073_tags_empty.png`、`r8_f073_dedup_empty.png`、`r8_f073_header_tags.png`、`r8_f073_header_dedup.png`、`r8_f073_header_settings.png`、`r8_f073_chips_tags.png`、`r8_f073_chips_dedup.png`、`r8_f073_dedup_segments.png`、`r8_f073_settings_cards.png`、`r8_f070_sidebar_order.png`、`r8_f069_viewer_i18n_crop.png`。
-- 剩余：按钮/输入/菜单/对话框/toast 状态矩阵、设置页字段/对话框与命令面板、可访问性、亮暗主题截图基线、100k 性能回归；vendor 侧仍有硬编码英文的组件（视频控制/字幕等）待接入对应界面时再收。
+- 剩余：按钮/输入/菜单/对话框/toast 状态矩阵、设置页字段/对话框与命令面板、可访问性、1440/1920 宽度与浮层/查看器截图基线（1024/1200 逻辑宽 × 4 页 × 亮暗的首版已建，见上一条）、100k 性能回归；vendor 侧仍有硬编码英文的组件（视频控制/字幕等）待接入对应界面时再收。
 
 ## F-074 查看器默认加载原图
 
