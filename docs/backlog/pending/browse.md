@@ -373,9 +373,10 @@
 - 页头：新增 `PAGE_HEADER_HEIGHT` token；标签页/设置页/去重页统一 58px 高、底部边框、标题/副标题层级与页面级按钮尺寸。
 - 筛选 chip：标签页与去重页统一改用 Button（Sm），带键盘焦点与 aria，间距/高度改用 token。
 - 去重模式切换改用 Ely `SegmentedControl`，获得键盘焦点、aria 与滑动选中态。
+- 设置页 15 个分区卡片统一为 `components::card`（16px 内边距、8px 圆角、surface/边框）；卡片内 10px 间距改为 token 8。
 - 侧栏顺序：来源 → 筛选 → 评级 → 自动归类 → 标签 → 智能集合 → 相册 → 整理（F-070 记录）。
-- 证据：`.kanalib/r8_f073_no_results.png`、`r8_f073_empty_reset.png`、`r8_f073_tags_empty.png`、`r8_f073_dedup_empty.png`、`r8_f073_header_tags.png`、`r8_f073_header_dedup.png`、`r8_f073_header_settings.png`、`r8_f073_chips_tags.png`、`r8_f073_chips_dedup.png`、`r8_f073_dedup_segments.png`、`r8_f070_sidebar_order.png`。
-- 剩余：按钮/输入/菜单/对话框/toast 状态矩阵、设置页内容区与命令面板、可访问性、亮暗主题截图基线、100k 性能回归。
+- 证据：`.kanalib/r8_f073_no_results.png`、`r8_f073_empty_reset.png`、`r8_f073_tags_empty.png`、`r8_f073_dedup_empty.png`、`r8_f073_header_tags.png`、`r8_f073_header_dedup.png`、`r8_f073_header_settings.png`、`r8_f073_chips_tags.png`、`r8_f073_chips_dedup.png`、`r8_f073_dedup_segments.png`、`r8_f073_settings_cards.png`、`r8_f070_sidebar_order.png`。
+- 剩余：按钮/输入/菜单/对话框/toast 状态矩阵、设置页字段/对话框与命令面板、可访问性、亮暗主题截图基线、100k 性能回归。
 
 ## F-074 查看器默认加载原图
 

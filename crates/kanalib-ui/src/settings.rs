@@ -1,4 +1,5 @@
 use crate::app::{KanalibApp, push_toast};
+use crate::components::*;
 use crate::format::*;
 use crate::platform::*;
 use crate::sidebar::source_label;
@@ -1274,7 +1275,7 @@ impl KanalibApp {
                         .flex()
                         .items_center()
                         .justify_between()
-                        .gap(px(10.))
+                        .gap(px(SPACE_2))
                         .px(px(10.))
                         .py(px(7.))
                         .rounded(px(6.))
@@ -1376,15 +1377,10 @@ impl KanalibApp {
         let entry_for_add = protected_entry_input.clone();
         let entry_for_preview = protected_entry_input.clone();
         let entry_for_clear = protected_entry_input.clone();
-        let protected_section = div()
-            .p(px(16.))
-            .rounded(px(10.))
-            .border_1()
-            .border_color(colors.border)
-            .bg(colors.surface)
+        let protected_section = card(colors)
             .flex()
             .flex_col()
-            .gap(px(10.))
+            .gap(px(SPACE_2))
             .child(
                 div()
                     .text_sm()
@@ -1501,15 +1497,10 @@ impl KanalibApp {
             colors,
         );
         let similar_section =
-            div()
-                .p(px(16.))
-                .rounded(px(10.))
-                .border_1()
-                .border_color(colors.border)
-                .bg(colors.surface)
+            card(colors)
                 .flex()
                 .flex_col()
-                .gap(px(10.))
+                .gap(px(SPACE_2))
                 .child(
                     div()
                         .text_sm()
@@ -1526,7 +1517,7 @@ impl KanalibApp {
                 .flex()
                 .items_center()
                 .justify_between()
-                .gap(px(10.))
+                .gap(px(SPACE_2))
                 .px(px(10.))
                 .py(px(6.))
                 .rounded(px(6.))
@@ -1551,7 +1542,7 @@ impl KanalibApp {
                 .flex()
                 .items_center()
                 .justify_between()
-                .gap(px(10.))
+                .gap(px(SPACE_2))
                 .px(px(10.))
                 .py(px(6.))
                 .rounded(px(6.))
@@ -1780,15 +1771,10 @@ impl KanalibApp {
                 );
             }
         }
-        let sources_section = div()
-            .p(px(16.))
-            .rounded(px(10.))
-            .border_1()
-            .border_color(colors.border)
-            .bg(colors.surface)
+        let sources_section = card(colors)
             .flex()
             .flex_col()
-            .gap(px(10.))
+            .gap(px(SPACE_2))
             .child(
                 div()
                     .text_sm()
@@ -2215,12 +2201,7 @@ impl KanalibApp {
                 rows.into_any_element()
             };
 
-        let tag_section = div()
-            .p(px(16.))
-            .rounded(px(10.))
-            .border_1()
-            .border_color(colors.border)
-            .bg(colors.surface)
+        let tag_section = card(colors)
             .flex()
             .flex_col()
             .gap(px(8.))
@@ -2525,12 +2506,7 @@ impl KanalibApp {
             rows.into_any_element()
         };
         let review_section =
-            div()
-                .p(px(16.))
-                .rounded(px(10.))
-                .border_1()
-                .border_color(colors.border)
-                .bg(colors.surface)
+            card(colors)
                 .flex()
                 .flex_col()
                 .gap(px(8.))
@@ -2551,15 +2527,10 @@ impl KanalibApp {
                 .child(review_actions)
                 .child(review_rows);
 
-        let data_section = div()
-            .p(px(16.))
-            .rounded(px(10.))
-            .border_1()
-            .border_color(colors.border)
-            .bg(colors.surface)
+        let data_section = card(colors)
             .flex()
             .flex_col()
-            .gap(px(10.))
+            .gap(px(SPACE_2))
             .child(
                 div()
                     .text_sm()
@@ -2737,15 +2708,10 @@ impl KanalibApp {
             });
         });
 
-        let mut backup_section = div()
-            .p(px(16.))
-            .rounded(px(10.))
-            .border_1()
-            .border_color(colors.border)
-            .bg(colors.surface)
+        let mut backup_section = card(colors)
             .flex()
             .flex_col()
-            .gap(px(10.))
+            .gap(px(SPACE_2))
             .child(
                 div()
                     .text_sm()
@@ -3128,12 +3094,7 @@ impl KanalibApp {
                 .child("诊断信息尚未采集；重新打开设置页或点击“复制诊断信息”会刷新。")
                 .into_any_element()
         };
-        let diagnostics_section = div()
-            .p(px(16.))
-            .rounded(px(10.))
-            .border_1()
-            .border_color(colors.border)
-            .bg(colors.surface)
+        let diagnostics_section = card(colors)
             .flex()
             .flex_col()
             .gap(px(8.))
@@ -3177,12 +3138,7 @@ impl KanalibApp {
                 "诊断信息不包含凭据或完整环境变量；日志路径受 KANALIB_LOG_FILE 影响时以快照为准。",
             ));
 
-        let safety_section = div()
-            .p(px(16.))
-            .rounded(px(10.))
-            .border_1()
-            .border_color(colors.border)
-            .bg(colors.surface)
+        let safety_section = card(colors)
             .flex()
             .flex_col()
             .gap(px(6.))
@@ -3222,12 +3178,7 @@ impl KanalibApp {
                     .child(div().text_xs().text_color(colors.subtle).child(keys)),
             );
         }
-        let shortcut_section = div()
-            .p(px(16.))
-            .rounded(px(10.))
-            .border_1()
-            .border_color(colors.border)
-            .bg(colors.surface)
+        let shortcut_section = card(colors)
             .flex()
             .flex_col()
             .gap(px(6.))
@@ -3245,12 +3196,7 @@ impl KanalibApp {
                     .child("快捷键已绑定；方向键与快捷操作以网格获得焦点时生效。"),
             );
 
-        let rules_section = div()
-            .p(px(16.))
-            .rounded(px(10.))
-            .border_1()
-            .border_color(colors.border)
-            .bg(colors.surface)
+        let rules_section = card(colors)
             .flex()
             .flex_col()
             .gap(px(6.))
@@ -3385,12 +3331,7 @@ impl KanalibApp {
                     .child("尚未完成扫描；结束后这里会显示新增/更新/跳过/移除/失败与耗时。"),
             );
         }
-        let scan_section = div()
-            .p(px(16.))
-            .rounded(px(10.))
-            .border_1()
-            .border_color(colors.border)
-            .bg(colors.surface)
+        let scan_section = card(colors)
             .flex()
             .flex_col()
             .gap(px(6.))
@@ -3775,12 +3716,7 @@ impl KanalibApp {
                     ),
             );
         }
-        let filter_section = div()
-            .p(px(16.))
-            .rounded(px(10.))
-            .border_1()
-            .border_color(colors.border)
-            .bg(colors.surface)
+        let filter_section = card(colors)
             .flex()
             .flex_col()
             .gap(px(8.))
@@ -4005,12 +3941,7 @@ impl KanalibApp {
                     ),
             );
         }
-        let ignore_section = div()
-            .p(px(16.))
-            .rounded(px(10.))
-            .border_1()
-            .border_color(colors.border)
-            .bg(colors.surface)
+        let ignore_section = card(colors)
             .flex()
             .flex_col()
             .gap(px(4.))
@@ -4320,15 +4251,10 @@ impl KanalibApp {
                 );
             }
         }
-        div()
-            .p(px(16.))
-            .rounded(px(10.))
-            .border_1()
-            .border_color(colors.border)
-            .bg(colors.surface)
+        card(colors)
             .flex()
             .flex_col()
-            .gap(px(10.))
+            .gap(px(SPACE_2))
             .child(
                 div()
                     .flex()

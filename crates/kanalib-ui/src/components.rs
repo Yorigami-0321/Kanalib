@@ -3,10 +3,21 @@ use ely_gpui_component::primitives::{Icon, IconName};
 use ely_gpui_component::theme::{ControlSize, IconSize};
 use gpui::prelude::*;
 use gpui::{
-    AnyElement, App, ClickEvent, ElementId, FontWeight, IntoElement, SharedString, Window, div, px,
+    AnyElement, App, ClickEvent, Div, ElementId, FontWeight, IntoElement, SharedString, Window,
+    div, px,
 };
 
-use crate::theme::{RADIUS_LG, SPACE_2, SPACE_6, UiColors};
+use crate::theme::{RADIUS_LG, SPACE_2, SPACE_4, SPACE_6, UiColors};
+
+/// F-073：设置页等外围页面的分区卡片使用同一表面、边框与内边距。
+pub(crate) fn card(colors: UiColors) -> Div {
+    div()
+        .p(px(SPACE_4))
+        .rounded(px(RADIUS_LG))
+        .border_1()
+        .border_color(colors.border)
+        .bg(colors.surface)
+}
 
 /// F-073：筛选 chip 统一用 Button，保证键盘焦点、禁用与悬停状态一致。
 pub(crate) fn filter_chip(
