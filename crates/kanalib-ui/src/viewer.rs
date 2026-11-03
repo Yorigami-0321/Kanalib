@@ -453,8 +453,9 @@ impl KanalibApp {
         };
         let mut hint_parts = vec![
             "← → 切图",
+            "0 适应 / 1 100%",
             "+/- 缩放",
-            "Ctrl+滚轮缩放",
+            "Ctrl+滚轮",
             "拖拽平移",
             "R 旋转",
             "F 全屏",
@@ -547,12 +548,12 @@ impl KanalibApp {
             root.child(
                 div()
                     .flex_none()
-                    .h(px(48.))
-                    .px(px(12.))
+                    .h(px(VIEWER_HEADER_HEIGHT))
+                    .px(px(SPACE_3))
                     .flex()
                     .items_center()
                     .justify_between()
-                    .gap(px(8.))
+                    .gap(px(SPACE_2))
                     .border_b_1()
                     .border_color(colors.border)
                     .child(
@@ -560,7 +561,7 @@ impl KanalibApp {
                             .min_w(px(0.))
                             .flex()
                             .items_center()
-                            .gap(px(8.))
+                            .gap(px(SPACE_2))
                             .child(
                                 Button::new(
                                     "viewer-back",
@@ -591,7 +592,7 @@ impl KanalibApp {
                             .flex_none()
                             .flex()
                             .items_center()
-                            .gap(px(8.))
+                            .gap(px(SPACE_2))
                             .child(
                                 div()
                                     .text_xs()
@@ -662,18 +663,18 @@ impl KanalibApp {
                     .flex_1()
                     .min_h(px(0.))
                     .w_full()
-                    .p(px(12.))
+                    .p(px(SPACE_3))
                     .child(preview),
             )
             .child(
                 div()
                     .flex_none()
-                    .px(px(12.))
-                    .py(px(8.))
+                    .px(px(SPACE_3))
+                    .py(px(SPACE_2))
                     .flex()
                     .items_center()
                     .justify_between()
-                    .gap(px(10.))
+                    .gap(px(SPACE_2))
                     .border_t_1()
                     .border_color(colors.border)
                     .child(
@@ -681,7 +682,7 @@ impl KanalibApp {
                             .min_w(px(0.))
                             .flex()
                             .items_center()
-                            .gap(px(6.))
+                            .gap(px(SPACE_1_5))
                             .child(
                                 IconButton::new("viewer-prev", IconName::ChevronLeft)
                                     .size(ControlSize::Sm)
@@ -712,8 +713,11 @@ impl KanalibApp {
                     )
                     .child(
                         div()
-                            .flex_none()
+                            .flex_1()
+                            .min_w(px(0.))
+                            .truncate()
                             .text_xs()
+                            .text_right()
                             .text_color(colors.subtle)
                             .child(hint),
                     ),
