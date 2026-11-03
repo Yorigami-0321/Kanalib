@@ -1,15 +1,20 @@
 param(
     [string]$ProcessName = "kanalib",
     [string]$Filter = "",
-    [int]$Max = 200
+    [int]$Max = 200,
+    [long]$Hwnd = 0
 )
 
 Add-Type -AssemblyName UIAutomationClient
 Add-Type -AssemblyName UIAutomationTypes
 
-$proc = Get-Process -Name $ProcessName -ErrorAction SilentlyContinue | Where-Object { $_.MainWindowHandle -ne 0 } | Select-Object -First 1
-if (-not $proc) { Write-Output "no window"; exit 1 }
-$root = [System.Windows.Automation.AutomationElement]::FromHandle($proc.MainWindowHandle)
+if ($Hwnd -ne 0) {
+    $root = [System.Windows.Automation.AutomationElement]::FromHandle([IntPtr]$Hwnd)
+} else {
+    $proc = Get-Process -Name $ProcessName -ErrorAction SilentlyContinue | Where-Object { $_.MainWindowHandle -ne 0 } | Select-Object -First 1
+    if (-not $proc) { Write-Output "no window"; exit 1 }
+    $root = [System.Windows.Automation.AutomationElement]::FromHandle($proc.MainWindowHandle)
+}
 $all = $root.FindAll([System.Windows.Automation.TreeScope]::Descendants, [System.Windows.Automation.Condition]::TrueCondition)
 Write-Output ("elements=" + $all.Count)
 $i = 0

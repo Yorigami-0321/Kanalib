@@ -8,6 +8,14 @@ use kanalib_core::color::{self, PreviewOutcome};
 
 pub(crate) const VIEWER_CONTEXT: &str = "KanalibViewer";
 
+/// F-074：查看器源模式。默认原图直读；快速预览用缩略图；色彩管理显式生成 sRGB 预览。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ViewerSourceMode {
+    Original,
+    QuickPreview,
+    ColorManaged,
+}
+
 /// On-demand sRGB preview for the viewer's "original" mode. Previews are
 /// per-image, outside the thumbnail budget, and released when the viewer
 /// switches image or leaves original mode.
@@ -134,7 +142,7 @@ impl KanalibApp {
             self.viewer_slides = slides;
             self.viewer_at = Some(at);
             self.focus_viewer_pending = true;
-            self.viewer_original = false;
+            self.viewer_source_mode = ViewerSourceMode::Original;
             self.viewer_origin_filter = Some(self.state.shared.lock().unwrap().filter.clone());
             self.viewer_origin_search = self.last_search.clone();
         }
@@ -216,7 +224,7 @@ impl KanalibApp {
                 }
             }
         };
-        let wanted = self.viewer_original
+        let wanted = self.viewer_source_mode == ViewerSourceMode::ColorManaged
             && self
                 .viewer_at
                 .and_then(|at| self.viewer_slides.get(at))
@@ -301,11 +309,13 @@ impl KanalibApp {
         {
             self.remove_viewer_asset(&previous, cx);
         }
-        if self.viewer_original
+        if self.viewer_source_mode == ViewerSourceMode::ColorManaged
             && let Some((path, _)) = self.viewer_slides.get(at)
         {
             let path = path.clone();
-            self.request_viewer_preview(&path, cx);
+            if !kanalib_core::model::is_video(&path) && !is_remote_asset(&path) {
+                self.request_viewer_preview(&path, cx);
+            }
         }
         cx.notify();
     }
@@ -326,7 +336,11 @@ impl KanalibApp {
         }
     }
 
-    pub(crate) fn toggle_viewer_source(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn set_viewer_source_mode(
+        &mut self,
+        mode: ViewerSourceMode,
+        cx: &mut Context<Self>,
+    ) {
         let Some(path) = self
             .viewer_at
             .and_then(|at| self.viewer_slides.get(at))
@@ -334,13 +348,18 @@ impl KanalibApp {
         else {
             return;
         };
-        // 视频只显示首帧；远端虚拟路径没有本地原图。两者都不允许切到“原图”。
-        if kanalib_core::model::is_video(&path) || is_remote_asset(&path) {
+        // 视频只显示首帧；远端虚拟路径没有本地原图，只能快速预览。
+        if (kanalib_core::model::is_video(&path) || is_remote_asset(&path))
+            && mode != ViewerSourceMode::QuickPreview
+        {
             return;
         }
-        self.viewer_original = !self.viewer_original;
+        if self.viewer_source_mode == mode {
+            return;
+        }
+        self.viewer_source_mode = mode;
         self.remove_viewer_asset(&path, cx);
-        if self.viewer_original {
+        if mode == ViewerSourceMode::ColorManaged {
             self.request_viewer_preview(&path, cx);
         }
         cx.notify();
@@ -401,20 +420,25 @@ impl KanalibApp {
                 ),
             }
         };
-        // 视频固定首帧；远端虚拟路径没有本地原图，同样不能切“原图”。
-        let show_original = !is_video && !remote;
-        // 原图模式绝不直接交给 ImageViewer 未转换的广色域文件：
-        // sRGB 源（Passthrough）才显示原图，其余先等后台生成的 sRGB 预览；
-        // 等待/失败期间继续用缩略图。
-        let preview = (show_original && self.viewer_original)
+        // 视频固定首帧；远端虚拟路径没有本地原图，只能快速预览。
+        let can_original = !is_video && !remote;
+        let mode = if can_original {
+            self.viewer_source_mode
+        } else {
+            ViewerSourceMode::QuickPreview
+        };
+        // 色彩管理是显式模式：等待/失败期间继续用缩略图；原图模式不经过预览管线。
+        let preview = (mode == ViewerSourceMode::ColorManaged)
             .then(|| preview_state(&path))
             .flatten();
-        let source = match &preview {
-            Some(ViewerPreview::Ready(preview)) => Some(preview.clone()),
-            Some(ViewerPreview::Passthrough) => Some(path.clone()),
-            _ => thumb
-                .clone()
-                .or_else(|| (!self.viewer_original && show_original).then(|| path.clone())),
+        let source = match mode {
+            ViewerSourceMode::Original => Some(path.clone()),
+            ViewerSourceMode::QuickPreview => thumb.clone(),
+            ViewerSourceMode::ColorManaged => match &preview {
+                Some(ViewerPreview::Ready(preview)) => Some(preview.clone()),
+                Some(ViewerPreview::Passthrough) => Some(path.clone()),
+                _ => thumb.clone(),
+            },
         };
         let count = self.viewer_slides.len();
         let animated = is_animation_container(&path);
@@ -443,19 +467,27 @@ impl KanalibApp {
         if remote {
             hint_parts.push("远端只读 · 未下载原图");
         }
-        if show_original && self.viewer_original {
-            match &preview {
-                Some(ViewerPreview::Ready(_)) => hint_parts.push("广色域原图 · 已转换到 sRGB"),
-                Some(ViewerPreview::Pending(_)) => hint_parts.push("正在生成 sRGB 预览"),
-                Some(ViewerPreview::Failed) => hint_parts.push("sRGB 预览失败 · 显示缩略图"),
-                Some(ViewerPreview::Passthrough) | None => {}
+        match mode {
+            ViewerSourceMode::Original => hint_parts.push("原图直读（未做色彩转换）"),
+            ViewerSourceMode::QuickPreview if can_original => {
+                hint_parts.push("快速预览 · 缩略图");
             }
+            ViewerSourceMode::ColorManaged => match &preview {
+                Some(ViewerPreview::Ready(_)) => hint_parts.push("色彩管理 · 已转换到 sRGB"),
+                Some(ViewerPreview::Pending(_)) => hint_parts.push("正在生成色彩管理预览"),
+                Some(ViewerPreview::Failed) => hint_parts.push("色彩管理预览失败 · 显示缩略图"),
+                Some(ViewerPreview::Passthrough) => hint_parts.push("色彩管理 · 原图为 sRGB"),
+                None => {}
+            },
+            ViewerSourceMode::QuickPreview => {}
         }
         let hint = hint_parts.join(" · ");
-        let empty_label = if show_original && self.viewer_original {
+        let empty_label = if mode == ViewerSourceMode::Original {
+            "无法加载原图"
+        } else if mode == ViewerSourceMode::ColorManaged {
             match &preview {
-                Some(ViewerPreview::Failed) => "无法生成 sRGB 预览（未显示未转换原图）",
-                _ => "正在生成 sRGB 预览…",
+                Some(ViewerPreview::Failed) => "无法生成色彩管理预览",
+                _ => "正在生成色彩管理预览…",
             }
         } else if is_video {
             "暂无视频首帧（生成首帧需要 FFmpeg）"
@@ -566,20 +598,28 @@ impl KanalibApp {
                                     .text_color(colors.subtle)
                                     .child(format!("{} / {count}", at + 1)),
                             )
-                            .children(show_original.then(|| {
-                                Button::new(
+                            .children(can_original.then(|| {
+                                SegmentedControl::new(
                                     "viewer-source",
-                                    if self.viewer_original {
-                                        "预览"
-                                    } else {
-                                        "原图"
+                                    match mode {
+                                        ViewerSourceMode::Original => "original",
+                                        ViewerSourceMode::QuickPreview => "quick",
+                                        ViewerSourceMode::ColorManaged => "color",
                                     },
                                 )
                                 .size(ControlSize::Sm)
-                                .variant(ButtonVariant::Ghost)
-                                .on_click(move |_, _, cx| {
-                                    let _ = source_button
-                                        .update(cx, |app, cx| app.toggle_viewer_source(cx));
+                                .segment("original", "原图", None)
+                                .segment("quick", "快速预览", None)
+                                .segment("color", "色彩管理", None)
+                                .on_change(move |value, _, cx| {
+                                    let mode = match value.as_ref() {
+                                        "quick" => ViewerSourceMode::QuickPreview,
+                                        "color" => ViewerSourceMode::ColorManaged,
+                                        _ => ViewerSourceMode::Original,
+                                    };
+                                    let _ = source_button.update(cx, |app, cx| {
+                                        app.set_viewer_source_mode(mode, cx);
+                                    });
                                 })
                             }))
                             .children(can_external.then(|| {
