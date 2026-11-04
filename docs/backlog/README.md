@@ -47,6 +47,7 @@
 | [pending/dedup.md](pending/dedup.md) | 去重：F-045 |
 | [pending/ops.md](pending/ops.md) | 性能/可靠性与交付：F-038/F-039、F-061–F-063 |
 | [candidate-pool.md](candidate-pool.md) | 低优先级/远期候选 |
+| [next-steps.md](next-steps.md) | 2026-11-04 暂停点：后续任务分类、优先级、红线与命令速查（未验收项保持未勾选） |
 | [constraints.md](constraints.md) | 安全/性能/缓存/许可/本机脚本等全局约束 |
 | [parallel-plan.md](parallel-plan.md) | 并行开发矩阵 + 第一轮可直接派发的任务包 |
 | [round-2.md](round-2.md) | 第二轮任务包：打标质量/队列、搜索性能、媒体格式与阶段 2 |
