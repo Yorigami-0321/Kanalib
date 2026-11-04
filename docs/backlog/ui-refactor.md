@@ -6,6 +6,8 @@
 >
 > 2026-11-04 追加：阶段 2 补菜单组件状态——禁用行改为「固定标签 + `disabled_reason` tooltip / UIA 描述」，键位提示只标 `cx.bind_keys` 真实绑定的键；阶段 3 把「清理孤儿 / 恢复备份 / 重新扫描」三处危险操作统一到内建确认层。细节与边界见 [pending/browse.md](pending/browse.md) 的 F-073 实现记录。
 >
+> 2026-11-04 第三批（阶段 2 续）：按 6.2/6.3 重新盘点组件状态，补齐纯图标控件的 tooltip（活动栏 5 项 + 窗口控制 3 项）、把 5 个耗时按钮接到 Ely `Button::loading()`、设置页与远端来源对话框输入补 `.clearable()` 并给 URL 试点 `.invalid()`；组件层修正 `disabled` 与 `loading` 同时为真时的语义（loading 优先，不再宣读为「不可用」）。状态口径已写入 [constraints.md](constraints.md)；真实 GUI 悬停/焦点/截图验收仍未做，未写成通过。
+>
 > 用户边界（2026-11-02）：主图库网格与查看器/检查器这两张截图的布局不需要特别大的改动；重点放在 UI 组件、视觉体系、状态、外围界面与交互一致性。
 >
 > 方向修正（2026-11-02，用户指示）：**不以 VS Code 为主参考对象**。主参考改为图片/素材管理器（Lightroom Classic、digiKam、Eagle、Immich、PhotoPrism、Capture One）；桌面系统惯例（Windows 11 / Fluent、Apple HIG）作为次参考；VS Code 只保留命令面板、键盘/焦点、菜单行为等局部模式参考，不作为整体信息架构、视觉或搜索视图的目标。
