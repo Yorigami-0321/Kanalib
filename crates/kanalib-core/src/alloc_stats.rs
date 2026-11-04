@@ -126,7 +126,7 @@ pub mod traces {
 
 unsafe impl GlobalAlloc for CountingAlloc {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        let ptr = System.alloc(layout);
+        let ptr = unsafe { System.alloc(layout) };
         if !ptr.is_null() {
             LIVE_TOTAL.fetch_add(layout.size() as u64, Relaxed);
             if let Some(index) = bucket(layout.size()) {
@@ -141,7 +141,7 @@ unsafe impl GlobalAlloc for CountingAlloc {
     }
 
     unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
-        let ptr = System.alloc_zeroed(layout);
+        let ptr = unsafe { System.alloc_zeroed(layout) };
         if !ptr.is_null() {
             LIVE_TOTAL.fetch_add(layout.size() as u64, Relaxed);
             if let Some(index) = bucket(layout.size()) {
@@ -164,11 +164,11 @@ unsafe impl GlobalAlloc for CountingAlloc {
                 traces::forget(ptr);
             }
         }
-        System.dealloc(ptr, layout)
+        unsafe { System.dealloc(ptr, layout) }
     }
 
     unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
-        let new_ptr = System.realloc(ptr, layout, new_size);
+        let new_ptr = unsafe { System.realloc(ptr, layout, new_size) };
         if !new_ptr.is_null() {
             LIVE_TOTAL.fetch_add(new_size as u64, Relaxed);
             LIVE_TOTAL.fetch_sub(layout.size() as u64, Relaxed);
