@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""F-073 UI 不变量的只读静态检查，不需要 GUI 或前台窗口。
+"""F-073 / F-070 UI 不变量的只读静态检查，不需要 GUI 或前台窗口。
 
 用法：python scripts/check_ui_invariants.py
 退出码 0 表示全部通过；1 表示有违规（会打印文件与行号）。
@@ -9,6 +9,7 @@
   2. open_asset_with_system 的失败分支不能只发 toast，还要写就地错误。
   3. 设置页分区标签数量与滚动锚点必须一一对应（F-070 方案 A）。
   4. 命令面板展示的键位必须在 cx.bind_keys 里真实存在。
+  5. 上下文侧栏结构：单份标签搜索句柄、四种上下文都有分派、活动栏只在 sidebar.rs 构造。
 """
 
 from __future__ import annotations
@@ -96,6 +97,64 @@ def check_settings_anchors() -> tuple[list[str], int]:
     return problems, len(anchors)
 
 
+def check_sidebar_contexts() -> tuple[list[str], int]:
+    """F-070 方案 A：单搜索句柄、四上下文分派、活动栏与菜单的单一实现。"""
+    app = (UI / "app.rs").read_text(encoding="utf-8")
+    sidebar = (UI / "sidebar.rs").read_text(encoding="utf-8")
+    tags = (UI / "tags.rs").read_text(encoding="utf-8")
+    problems: list[str] = []
+    checks = 0
+
+    # 1) 标签管理搜索只创建一份，否则侧栏与标签页会变成两套状态。
+    checks += 1
+    creators = sum(
+        text.count('use_keyed_state("tag-manager-search"')
+        for text in (app, sidebar, tags)
+    )
+    if app.count('use_keyed_state("tag-manager-search"') != 1 or creators != 1:
+        problems.append(
+            "tag-manager-search 必须且只能在 app.rs 创建一次"
+            f"（app/sidebar/tags 合计 {creators} 次）"
+        )
+
+    # 2) 四种上下文都要有各自的 body 分支。
+    checks += 1
+    dispatch = re.search(
+        r"let body: AnyElement = match ctx \{(.*?)\n        \};", sidebar, re.S
+    )
+    if not dispatch:
+        problems.append("sidebar.rs 找不到 `let body: AnyElement = match ctx` 分派块")
+    else:
+        for ctx in ("Library", "Tags", "Settings", "Duplicates"):
+            if f"SidebarContext::{ctx} =>" not in dispatch.group(1):
+                problems.append(f"侧栏 body 分派缺少 SidebarContext::{ctx} 分支")
+
+    # 3) 活动栏只在 sidebar.rs 构造，app.rs 不得复制。
+    checks += 1
+    if '"activity-bar"' in app:
+        problems.append("app.rs 出现 activity-bar，活动栏被重复构造")
+
+    # 4) 资源管理器专属菜单动作只在 Library 分支，其余上下文给出返回图库。
+    checks += 1
+    menu = re.search(
+        r"let mut more_menu = Menu::new\(\);(.*?)\n        let panel = div\(\)",
+        sidebar,
+        re.S,
+    )
+    if not menu:
+        problems.append("sidebar.rs 找不到按上下文构造的 more_menu")
+    else:
+        block = menu.group(1)
+        if 'MenuItem::new("返回图库")' not in block:
+            problems.append("非 Library 上下文的溢出菜单缺「返回图库」")
+        library_branch = block.split("} else {")[0]
+        for label in ("添加文件夹", "全部折叠"):
+            if f'MenuItem::new("{label}")' not in library_branch:
+                problems.append(f"「{label}」应只出现在 Library 上下文菜单分支")
+
+    return problems, checks
+
+
 def check_palette_keys() -> tuple[list[str], int]:
     app = (UI / "app.rs").read_text(encoding="utf-8")
     shown = set(re.findall(r'\.keys\("([^"]+)"\)', app))
@@ -110,6 +169,7 @@ def main() -> int:
         ("手搓 role(Role::Button) 元素（id/aria/键盘可达）", *check_role_buttons()),
         ("open_asset_with_system 失败分支（toast + 就地错误）", *check_open_errors()),
         ("设置页分区标签与滚动锚点一一对应", *check_settings_anchors()),
+        ("上下文侧栏结构（单搜索/四上下文/单一活动栏与菜单）", *check_sidebar_contexts()),
         ("命令面板键位（必须真实绑定）", *check_palette_keys()),
     ]
     failed = False
