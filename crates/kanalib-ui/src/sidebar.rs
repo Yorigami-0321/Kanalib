@@ -279,14 +279,11 @@ pub(crate) fn source_menu(root: &Path, this: Entity<KanalibApp>) -> Menu {
                 }),
         )
         .item(
-            MenuItem::new(if remote {
-                "网络来源只读，无本地路径"
-            } else {
-                "在资源管理器中打开"
-            })
-            .icon(IconName::FolderOpen)
-            .disabled(remote)
-            .on_click(move |_, _| reveal_path(&reveal_root)),
+            MenuItem::new("在资源管理器中打开")
+                .icon(IconName::FolderOpen)
+                .disabled(remote)
+                .disabled_reason("网络来源只读，没有可打开的本地文件夹")
+                .on_click(move |_, _| reveal_path(&reveal_root)),
         )
         .separator()
         .item(

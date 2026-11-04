@@ -291,6 +291,11 @@ pub struct KanalibApp {
     pub(crate) dedup_focus: FocusHandle,
     pub(crate) dedup_focus_pending: bool,
     pub(crate) last_trash_audit: Option<crate::dedup::TrashAudit>,
+    // ---- F-073（第八轮）：危险操作的统一确认层；只存会话状态，不落库。 ----
+    /// 「清理孤儿缩略图」待确认的孤儿数量；确认后才调用 `cleanup_cache`。
+    pub(crate) cache_cleanup_confirm: Option<usize>,
+    /// 已选待恢复的备份路径；确认后交给 `begin_restore`。
+    pub(crate) restore_confirm: Option<PathBuf>,
 }
 
 impl Render for KanalibApp {
@@ -1602,8 +1607,64 @@ impl Render for KanalibApp {
                 },
             )
             .confirm("重新扫描图库")
+            .destructive()
             .on_confirm(move |_, cx| {
                 let _ = confirm.update(cx, |app, cx| app.perform_rescan(origin, cx));
+            })
+            .into_any_element()
+        });
+        // F-073：缓存清理与数据库恢复原来分别直接执行 / 走原生 rfd 弹窗，
+        // 统一接入项目内建确认层（Esc、焦点陷阱、危险按钮与返回焦点一致）。
+        let cache_cleanup_dialog = self.cache_cleanup_confirm.map(|count| {
+            let close = this.clone();
+            let confirm = this.clone();
+            ConfirmDialog::new(
+                "cache-cleanup-dialog",
+                "清理孤儿缩略图？",
+                format!(
+                    "将删除 {count} 个不再对应图库资产的缩略图缓存文件。\n只清理缓存，不会删除原图或改动数据库；扫描进行中会拒绝执行。"
+                ),
+                move |_, cx| {
+                    let _ = close.update(cx, |app, cx| {
+                        app.cache_cleanup_confirm = None;
+                        cx.notify();
+                    });
+                },
+            )
+            .confirm("清理缓存")
+            .destructive()
+            .on_confirm(move |_, cx| {
+                let _ = confirm.update(cx, |app, cx| {
+                    app.cache_cleanup_confirm = None;
+                    app.cleanup_cache(cx);
+                });
+            })
+            .into_any_element()
+        });
+        let restore_dialog = self.restore_confirm.clone().map(|candidate| {
+            let close = this.clone();
+            let confirm = this.clone();
+            ConfirmDialog::new(
+                "restore-backup-dialog",
+                "恢复数据库备份？",
+                format!(
+                    "将用以下备份替换当前图库数据库：\n{}\n\n恢复前会自动创建当前库的安全备份；恢复在重启 Kanalib 后应用。",
+                    candidate.display()
+                ),
+                move |_, cx| {
+                    let _ = close.update(cx, |app, cx| {
+                        app.restore_confirm = None;
+                        cx.notify();
+                    });
+                },
+            )
+            .confirm("暂存恢复")
+            .destructive()
+            .on_confirm(move |_, cx| {
+                let _ = confirm.update(cx, |app, cx| {
+                    app.restore_confirm = None;
+                    app.begin_restore(candidate.clone(), cx);
+                });
             })
             .into_any_element()
         });
@@ -1861,6 +1922,8 @@ impl Render for KanalibApp {
                 .children(tag_merge_dialog)
                 .children(remove_source_dialog)
                 .children(rescan_dialog)
+                .children(cache_cleanup_dialog)
+                .children(restore_dialog)
                 .children(tag_retag_dialog)
                 .children(source_rename_dialog)
                 .children(remote_add_dialog)
@@ -2485,6 +2548,8 @@ impl KanalibApp {
             dedup_confirm: None,
             dedup_notice: None,
             rescan_confirm: None,
+            cache_cleanup_confirm: None,
+            restore_confirm: None,
             settings_notice: None,
             tag_thresholds: None,
             tag_queue_status: None,

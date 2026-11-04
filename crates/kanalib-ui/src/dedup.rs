@@ -1195,13 +1195,16 @@ impl KanalibApp {
                     }
                 });
 
-        let more_menu = Menu::new().item(MenuItem::new("重新扫描图库").disabled(busy).on_click(
-            move |_, cx| {
-                let _ = this_rescan.update(cx, |app, cx| {
-                    app.request_rescan(RescanOrigin::Dedup, cx);
-                });
-            },
-        ));
+        let more_menu = Menu::new().item(
+            MenuItem::new("重新扫描图库")
+                .disabled(busy)
+                .disabled_reason("扫描进行中，完成后再重新扫描")
+                .on_click(move |_, cx| {
+                    let _ = this_rescan.update(cx, |app, cx| {
+                        app.request_rescan(RescanOrigin::Dedup, cx);
+                    });
+                }),
+        );
         let header = div()
             .h(px(PAGE_HEADER_HEIGHT))
             .px(px(SPACE_4))

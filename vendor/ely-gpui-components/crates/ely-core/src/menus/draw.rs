@@ -28,6 +28,13 @@ fn row(item: &MenuItem, ix: usize, current: bool, cx: &App) -> Stateful<Div> {
     } else {
         colors.fg
     };
+    // A disabled row keeps its plain label; the reason lives in the tooltip and the a11y
+    // description instead of being folded into the label text.
+    let disabled_note = item
+        .disabled
+        .then(|| item.disabled_reason.clone())
+        .flatten()
+        .unwrap_or_else(|| i18n::text(cx, "state.unavailable", &[]));
     let (lead, lead_color) = match &item.kind {
         Kind::Check(true) => (Some(IconName::Check), fg),
         Kind::Radio(true) => (Some(IconName::Dot), fg),
@@ -42,8 +49,8 @@ fn row(item: &MenuItem, ix: usize, current: bool, cx: &App) -> Stateful<Div> {
         })
         .aria_label(item.label.clone())
         .aria_selected(current)
-        .when(item.disabled, |row| {
-            row.aria_description(i18n::text(cx, "state.unavailable", &[]))
+        .when(item.disabled, move |row| {
+            row.aria_description(disabled_note.clone())
         })
         .relative()
         .flex()
@@ -95,6 +102,20 @@ fn row(item: &MenuItem, ix: usize, current: bool, cx: &App) -> Stateful<Div> {
                     .color(colors.fg_subtle),
             )
         })
+        .when_some(
+            item.disabled
+                .then(|| item.disabled_reason.clone())
+                .flatten(),
+            |row, note| {
+                row.tooltip(Tooltip::rich(move |_, cx| {
+                    div()
+                        .text_xs()
+                        .text_color(cx.theme().colors.tooltip_fg)
+                        .child(note.clone())
+                        .into_any_element()
+                }))
+            },
+        )
 }
 
 /// Button `column` of row `ix`, named by its label.
@@ -113,6 +134,13 @@ pub(super) fn button(
         (false, false) => colors.fg_muted,
     };
     let (label, keys) = (item.label.clone(), item.keys.clone());
+    let disabled_note = item
+        .disabled
+        .then(|| item.disabled_reason.clone())
+        .flatten();
+    let aria_note = disabled_note
+        .clone()
+        .unwrap_or_else(|| i18n::text(cx, "state.unavailable", &[]));
     let icon = item.icon.expect("a menu button has its icon");
     div()
         .id((SharedString::from(format!("button-{ix}")), column))
@@ -129,8 +157,8 @@ pub(super) fn button(
         .border_color(colors.border)
         .aria_selected(current)
         .when(current && !item.disabled, |button| button.bg(colors.hover))
-        .when(item.disabled, |button| {
-            button.aria_description(i18n::text(cx, "state.unavailable", &[]))
+        .when(item.disabled, move |button| {
+            button.aria_description(aria_note.clone())
         })
         .when(!item.disabled, |button| {
             let read = press.clone();
@@ -147,14 +175,28 @@ pub(super) fn button(
         .tooltip(Tooltip::rich(move |_, cx| {
             div()
                 .flex()
-                .items_center()
-                .gap_2()
-                .child(label.clone())
-                .when_some(keys.clone(), |tip, keys| {
+                .flex_col()
+                .gap_1()
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .child(label.clone())
+                        .when_some(keys.clone(), |tip, keys| {
+                            tip.child(
+                                div()
+                                    .text_color(cx.theme().colors.tooltip_fg.opacity(0.6))
+                                    .child(KbdCombo::new(&keys)),
+                            )
+                        }),
+                )
+                .when_some(disabled_note.clone(), |tip, note| {
                     tip.child(
                         div()
+                            .text_xs()
                             .text_color(cx.theme().colors.tooltip_fg.opacity(0.6))
-                            .child(KbdCombo::new(&keys)),
+                            .child(note),
                     )
                 })
                 .into_any_element()

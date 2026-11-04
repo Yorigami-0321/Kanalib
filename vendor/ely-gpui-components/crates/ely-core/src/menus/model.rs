@@ -21,6 +21,8 @@ pub struct MenuItem {
     pub(super) keys: Option<SharedString>,
     pub(super) kind: Kind,
     pub(super) disabled: bool,
+    /// Why this row is unavailable; shown in a tooltip and as the a11y description.
+    pub(super) disabled_reason: Option<SharedString>,
     pub(super) on_click: Option<Run>,
     pub(super) hits: Vec<Range<usize>>,
 }
@@ -33,6 +35,7 @@ impl MenuItem {
             keys: None,
             kind,
             disabled: false,
+            disabled_reason: None,
             on_click: None,
             hits: Vec::new(),
         }
@@ -73,6 +76,12 @@ impl MenuItem {
     /// Shows it but takes no press.
     pub fn disabled(mut self, disabled: bool) -> Self {
         self.disabled = disabled;
+        self
+    }
+
+    /// Explains an unavailable row; only used while `disabled` is true.
+    pub fn disabled_reason(mut self, reason: impl Into<SharedString>) -> Self {
+        self.disabled_reason = Some(reason.into());
         self
     }
 

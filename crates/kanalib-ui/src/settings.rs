@@ -892,20 +892,12 @@ impl KanalibApp {
                 return;
             };
             let candidate = handle.path().to_path_buf();
-            let confirmed = rfd::AsyncMessageDialog::new()
-                .set_level(rfd::MessageLevel::Warning)
-                .set_title("恢复数据库备份")
-                .set_description(format!(
-                    "将用以下备份替换当前图库数据库：\n{}\n\n恢复前会自动创建当前库的安全备份；恢复在重启 Kanalib 后应用。继续？",
-                    candidate.display()
-                ))
-                .set_buttons(rfd::MessageButtons::YesNo)
-                .show()
-                .await;
-            if confirmed != rfd::MessageDialogResult::Yes {
-                return;
-            }
-            let _ = weak.update(cx, |app, cx| app.begin_restore(candidate, cx));
+            // F-073：确认层走项目内建 ConfirmDialog（见 app.rs 的 restore_dialog），
+            // 不再混用 rfd 原生消息框，Esc/焦点/危险按钮语义与其它确认一致。
+            let _ = weak.update(cx, |app, cx| {
+                app.restore_confirm = Some(candidate);
+                cx.notify();
+            });
         })
         .detach();
         cx.notify();
@@ -2671,8 +2663,10 @@ impl KanalibApp {
                             .size(ControlSize::Sm)
                             .disabled(orphan_count == 0)
                             .on_click(move |_, _, cx| {
-                                let _ = this_cleanup_cache
-                                    .update(cx, |app, cx| app.cleanup_cache(cx));
+                                let _ = this_cleanup_cache.update(cx, |app, cx| {
+                                    app.cache_cleanup_confirm = Some(orphan_count);
+                                    cx.notify();
+                                });
                             }),
                     ),
             );

@@ -167,22 +167,29 @@ pub(crate) fn asset_context_menu(asset: &Asset, this: &Entity<KanalibApp>) -> Me
         ] {
             let this = this.clone();
             let path = path.clone();
-            menu = menu.item(MenuItem::new(label).on_click(move |_, cx| {
-                let _ = this.update(cx, |app, cx| {
-                    app.select_single_path(path.clone(), cx);
-                    app.apply_star(value, cx);
-                });
-            }));
+            menu = menu.item(
+                MenuItem::new(label)
+                    .keys(value.to_string())
+                    .on_click(move |_, cx| {
+                        let _ = this.update(cx, |app, cx| {
+                            app.select_single_path(path.clone(), cx);
+                            app.apply_star(value, cx);
+                        });
+                    }),
+            );
         }
         let this = this.clone();
         let path = path.clone();
-        menu.separator()
-            .item(MenuItem::new("清除星级").on_click(move |_, cx| {
-                let _ = this.update(cx, |app, cx| {
-                    app.select_single_path(path.clone(), cx);
-                    app.apply_star(0, cx);
-                });
-            }))
+        menu.separator().item(
+            MenuItem::new("清除星级")
+                .keys("0")
+                .on_click(move |_, cx| {
+                    let _ = this.update(cx, |app, cx| {
+                        app.select_single_path(path.clone(), cx);
+                        app.apply_star(0, cx);
+                    });
+                }),
+        )
     };
     let quick_this = this.clone();
     let quick_path = path.clone();
@@ -203,17 +210,11 @@ pub(crate) fn asset_context_menu(asset: &Asset, this: &Entity<KanalibApp>) -> Me
     let reveal_this = this.clone();
     let video = asset.is_video();
     let remote = is_remote_asset(&path);
-    let open_label = if remote {
-        "打开文件（远端只读）"
-    } else if video {
+    const REMOTE_DISABLED_REASON: &str = "远端只读来源没有本地文件，无法访问本地路径";
+    let open_label = if video {
         "用系统播放器打开"
     } else {
         "打开文件"
-    };
-    let reveal_label = if remote {
-        "在资源管理器中显示（远端只读）"
-    } else {
-        "在资源管理器中显示"
     };
     let open_icon = if video {
         IconName::Play
@@ -224,6 +225,7 @@ pub(crate) fn asset_context_menu(asset: &Asset, this: &Entity<KanalibApp>) -> Me
         .item(
             MenuItem::new("快速查看")
                 .icon(IconName::Maximize2)
+                .keys("enter")
                 .on_click(move |_, cx| {
                     let _ = quick_this.update(cx, |app, cx| {
                         app.select_single_path(quick_path.clone(), cx);
@@ -250,6 +252,7 @@ pub(crate) fn asset_context_menu(asset: &Asset, this: &Entity<KanalibApp>) -> Me
         .item(
             MenuItem::new(if favorite { "取消收藏" } else { "收藏" })
                 .icon(IconName::Heart)
+                .keys("f")
                 .on_click(move |_, cx| {
                     let _ = favorite_this.update(cx, |app, cx| {
                         app.select_single_path(favorite_path.clone(), cx);
@@ -293,6 +296,7 @@ pub(crate) fn asset_context_menu(asset: &Asset, this: &Entity<KanalibApp>) -> Me
             MenuItem::new(open_label)
                 .icon(open_icon)
                 .disabled(remote)
+                .disabled_reason(REMOTE_DISABLED_REASON)
                 .on_click(move |_, cx| {
                     if let Err(error) = open_asset_with_system(&open_file) {
                         let _ = open_this.update(cx, |app, cx| {
@@ -302,9 +306,10 @@ pub(crate) fn asset_context_menu(asset: &Asset, this: &Entity<KanalibApp>) -> Me
                 }),
         )
         .item(
-            MenuItem::new(reveal_label)
+            MenuItem::new("在资源管理器中显示")
                 .icon(IconName::FolderOpen)
                 .disabled(remote)
+                .disabled_reason(REMOTE_DISABLED_REASON)
                 .on_click(move |_, cx| {
                     if !can_touch_local_file(&reveal_file) {
                         let _ = reveal_this.update(cx, |app, cx| {
