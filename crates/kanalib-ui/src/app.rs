@@ -15,7 +15,7 @@ use crate::viewer::VIEWER_CONTEXT;
 use crate::views::{GRID_CONTEXT, grid_columns};
 use crate::*;
 use ely_gpui_component::forms::{InputEvent, SelectAll};
-use gpui::ExternalPaths;
+use gpui::{ExternalPaths, ScrollHandle};
 use kanalib_core::model::{ExcludedAssetAction, SavedSearchView, ScanFilterImpact, is_image};
 
 pub(crate) fn rating_rank(rating: &str) -> u64 {
@@ -184,6 +184,8 @@ pub struct KanalibApp {
     pub(crate) show_sidebar: bool,
     pub(crate) sidebar_width: f32,
     pub(crate) sidebar_collapsed: HashMap<SidebarContext, HashSet<String>>,
+    /// F-070 方案 A：设置页分区锚点导航的滚动句柄。
+    pub(crate) settings_scroll: ScrollHandle,
     pub(crate) sidebar_resizing: bool,
     pub(crate) sidebar_persist_task: Option<Task<()>>,
     pub(crate) show_extensions: bool,
@@ -2625,6 +2627,7 @@ impl KanalibApp {
             show_sidebar,
             sidebar_width,
             sidebar_collapsed,
+            settings_scroll: ScrollHandle::default(),
             sidebar_resizing: false,
             sidebar_persist_task: None,
             show_extensions,

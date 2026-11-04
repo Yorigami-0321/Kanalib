@@ -21,6 +21,26 @@ pub(crate) const SIDEBAR_SECTIONS: [&str; 8] = [
     "organize",
 ];
 
+/// F-070 方案 A：设置页分区导航，顺序与 `render_settings` 的 15 个 `*_section` 一致，
+/// 下标同时用作 `ScrollHandle::scroll_to_top_of_item` 的锚点索引。
+pub(crate) const SETTINGS_SECTIONS: [&str; 15] = [
+    "打标与队列",
+    "低置信度审核",
+    "本地来源",
+    "网络来源",
+    "去重保护路径",
+    "相似图片",
+    "数据与缓存",
+    "数据库备份",
+    "诊断信息",
+    "任务队列",
+    "键盘与鼠标",
+    "安全规则",
+    "扫描进度与摘要",
+    "排除与忽略规则",
+    "忽略列表",
+];
+
 /// F-070 方案 A：每个侧栏上下文各自的可折叠分区。
 /// 标签/设置/去重上下文的分区由 S3/S4 补齐；在那之前返回空，不会误用资源管理器分区。
 pub(crate) fn sidebar_sections(ctx: SidebarContext) -> &'static [&'static str] {
@@ -1233,11 +1253,101 @@ impl KanalibApp {
             )
             .into_any_element()
         };
+        let settings_body = || {
+            let mut nav = div()
+                .id("sidebar-body")
+                .flex_1()
+                .min_h(px(0.))
+                .flex()
+                .flex_col()
+                .gap(px(SPACE_1))
+                .px(px(SPACE_2))
+                .py(px(SPACE_2))
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(colors.subtle)
+                        .child("分区导航"),
+                );
+            for (index, label) in SETTINGS_SECTIONS.iter().enumerate() {
+                let this = this.clone();
+                nav = nav.child(
+                    Button::new(
+                        SharedString::from(format!("settings-nav-{index}")),
+                        *label,
+                    )
+                    .size(ControlSize::Sm)
+                    .variant(ButtonVariant::Ghost)
+                    .on_click(move |_, _, cx| {
+                        let _ = this.update(cx, |app, cx| {
+                            app.settings_scroll.scroll_to_top_of_item(index);
+                            cx.notify();
+                        });
+                    }),
+                );
+            }
+            nav.into_any_element()
+        };
+        let dedup_body = || {
+            let this_exact = this.clone();
+            let this_similar = this.clone();
+            let similar = self.dedup_mode == GroupKind::Similar;
+            div()
+                .id("sidebar-body")
+                .flex_1()
+                .min_h(px(0.))
+                .flex()
+                .flex_col()
+                .gap(px(SPACE_2))
+                .px(px(SPACE_2))
+                .py(px(SPACE_2))
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(colors.subtle)
+                        .child("重复项模式"),
+                )
+                .child(
+                    Button::new("sidebar-dedup-exact", "完全重复")
+                        .size(ControlSize::Sm)
+                        .variant(if similar {
+                            ButtonVariant::Ghost
+                        } else {
+                            ButtonVariant::Primary
+                        })
+                        .on_click(move |_, _, cx| {
+                            let _ = this_exact.update(cx, |app, cx| {
+                                app.open_dedup_mode(GroupKind::Exact, cx)
+                            });
+                        }),
+                )
+                .child(
+                    Button::new("sidebar-dedup-similar", "相似图片")
+                        .size(ControlSize::Sm)
+                        .variant(if similar {
+                            ButtonVariant::Primary
+                        } else {
+                            ButtonVariant::Ghost
+                        })
+                        .on_click(move |_, _, cx| {
+                            let _ = this_similar.update(cx, |app, cx| {
+                                app.open_dedup_mode(GroupKind::Similar, cx)
+                            });
+                        }),
+                )
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(colors.subtle)
+                        .child(format!("待审 {dedup_pending} 组；切图与评审在内容区完成")),
+                )
+                .into_any_element()
+        };
         let body: AnyElement = match ctx {
             SidebarContext::Library => library_body(),
             SidebarContext::Tags => tags_body(),
-            // S4：设置页 / 去重页各自的上下文侧栏。
-            _ => library_body(),
+            SidebarContext::Settings => settings_body(),
+            SidebarContext::Duplicates => dedup_body(),
         };
 
         let screen_title = match screen {

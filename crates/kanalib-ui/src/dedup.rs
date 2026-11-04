@@ -1171,29 +1171,15 @@ impl KanalibApp {
         let this_library = this.clone();
         let this_similar_scan = this.clone();
         let preselect_mode = self.dedup_mode;
-        let similar_tab_label = if similar_scanning {
-            "相似图片 · 扫描中".to_string()
-        } else if similar_scanned {
-            format!("相似图片 {}", similar_summary.total)
-        } else {
-            "相似图片 · 未扫描".to_string()
-        };
-        let tabs =
-            SegmentedControl::new("dedup-mode", if similar_mode { "similar" } else { "exact" })
-                .size(ControlSize::Sm)
-                .segment("exact", format!("完全重复 {}", exact_summary.total), None)
-                .segment("similar", similar_tab_label, None)
-                .on_change({
-                    let this = this.clone();
-                    move |value, _, cx| {
-                        let mode = if value.as_ref() == "similar" {
-                            GroupKind::Similar
-                        } else {
-                            GroupKind::Exact
-                        };
-                        let _ = this.update(cx, |app, cx| app.open_dedup_mode(mode, cx));
-                    }
-                });
+        // F-070 方案 A：模式切换移到上下文侧栏，页头只显示当前模式与组数，避免第二套控件。
+        let tabs = div()
+            .text_xs()
+            .text_color(colors.muted)
+            .child(if similar_mode {
+                format!("当前：相似图片 · {} 组", similar_summary.total)
+            } else {
+                format!("当前：完全重复 · {} 组", exact_summary.total)
+            });
 
         let more_menu = Menu::new().item(
             MenuItem::new("重新扫描图库")
