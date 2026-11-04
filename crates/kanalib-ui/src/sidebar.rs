@@ -89,6 +89,8 @@ pub(crate) fn activity_item(
     let this_click = this.clone();
     let item = div()
         .id(SharedString::from(format!("activity-{label}")))
+        .tab_index(0)
+        .focus(move |style| style.bg(colors.hover))
         .role(Role::Button)
         .aria_label(label)
         // F-073 6.3：纯图标控件必须同时有可读名称与悬停提示。
@@ -186,6 +188,8 @@ pub(crate) fn source_row(
     };
     let mut row = div()
         .id(id)
+        .tab_index(0)
+        .focus(move |style| style.bg(colors.hover))
         .role(Role::Button)
         .aria_label(aria)
         .flex()
@@ -312,6 +316,8 @@ pub(crate) fn filter_row(
 ) -> impl IntoElement {
     let mut row = div()
         .id(id)
+        .tab_index(0)
+        .focus(move |style| style.bg(colors.hover))
         .role(Role::Button)
         .aria_label(label.clone())
         .flex()
@@ -360,6 +366,8 @@ pub(crate) fn dedup_row(
 ) -> impl IntoElement {
     let mut row = div()
         .id(id)
+        .tab_index(0)
+        .focus(move |style| style.bg(colors.hover))
         .role(Role::Button)
         .aria_label(label)
         .flex()
@@ -524,6 +532,8 @@ impl KanalibApp {
         let this = this.clone();
         div()
             .id(SharedString::from(format!("sidebar-section-{key}")))
+            .tab_index(0)
+            .focus(move |style| style.bg(colors.hover))
             .role(Role::Button)
             .aria_label(title)
             .flex_1()
@@ -901,6 +911,8 @@ impl KanalibApp {
                     let search_click = search.clone();
                     let mut row = div()
                         .id(SharedString::from(format!("filter-tag-{name}")))
+                        .tab_index(0)
+                        .focus(move |style| style.bg(colors.hover))
                         .role(Role::Button)
                         .aria_label(SharedString::from(format!("#{name}")))
                         .flex()
@@ -1492,6 +1504,8 @@ impl KanalibApp {
             .child(
                 div()
                     .id(SharedString::from(format!("saved-search-{id}")))
+                    .tab_index(0)
+                    .focus(move |style| style.bg(colors.hover))
                     .role(Role::Button)
                     .aria_label(name.clone())
                     .flex_1()
@@ -1611,6 +1625,8 @@ impl KanalibApp {
             .child(
                 div()
                     .id(SharedString::from(format!("album-{id}")))
+                    .tab_index(0)
+                    .focus(move |style| style.bg(colors.hover))
                     .role(Role::Button)
                     .aria_label(format!("相册 {name}"))
                     .flex_1()

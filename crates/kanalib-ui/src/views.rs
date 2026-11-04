@@ -300,6 +300,8 @@ pub(crate) fn asset_context_menu(asset: &Asset, this: &Entity<KanalibApp>) -> Me
                 .on_click(move |_, cx| {
                     if let Err(error) = open_asset_with_system(&open_file) {
                         let _ = open_this.update(cx, |app, cx| {
+                            // F-073 6.2：toast 之外还要有常驻的就地说明。
+                            app.state.set_ui_error(format!("打开文件失败：{error}"));
                             push_toast(&app.toaster, cx, error, Severity::Danger);
                         });
                     }

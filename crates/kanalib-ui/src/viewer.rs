@@ -444,6 +444,7 @@ impl KanalibApp {
         let animated = is_animation_container(&path);
         let external_path = path.clone();
         let external_toaster = self.toaster.clone();
+        let external_state = self.state.clone();
         let can_external =
             (is_video || animated) && !remote && kanalib_core::open::can_open_externally(&path);
         let external_label = if is_video {
@@ -630,6 +631,10 @@ impl KanalibApp {
                                     .icon(IconName::Play)
                                     .on_click(move |_, _, cx| {
                                         if let Err(error) = open_asset_with_system(&external_path) {
+                                            // F-073 6.2：toast 之外还要有常驻的就地说明。
+                                            external_state.set_ui_error(format!(
+                                                "用系统应用打开失败：{error}"
+                                            ));
                                             push_toast(
                                                 &external_toaster,
                                                 cx,

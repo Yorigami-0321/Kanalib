@@ -1768,10 +1768,13 @@ impl KanalibApp {
                 "打开保留项"
             };
             let open_toaster = self.toaster.clone();
+            let open_state = self.state.clone();
             Button::new("dedup-open", label)
                 .disabled(remote)
                 .on_click(move |_, _, cx| {
                     if let Err(error) = open_asset_with_system(&path) {
+                        // F-073 6.2：去重页 banner 会把 shared.error 优先显示为 danger 就地说明。
+                        open_state.set_ui_error(format!("打开保留项失败：{error}"));
                         push_toast(&open_toaster, cx, error, Severity::Danger);
                     }
                 })

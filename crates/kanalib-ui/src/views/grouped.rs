@@ -813,6 +813,8 @@ pub(crate) fn group_header(
             group.key,
             if pinned { "pinned" } else { "inline" }
         )))
+        .tab_index(0)
+        .focus(move |style| style.bg(colors.hover))
         .role(Role::Button)
         .aria_label(aria)
         .w_full()

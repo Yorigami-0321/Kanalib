@@ -3264,6 +3264,12 @@ impl AppState {
         shared.status = "重试失败".into();
     }
 
+    /// UI 侧的瞬时操作失败：只写共享错误条，不覆盖扫描/导入状态文本。
+    /// 清除沿用全局 error 的既有语义（core 成功路径会置 None）。
+    pub fn set_ui_error(&self, message: String) {
+        self.shared.lock().unwrap().error = Some(message);
+    }
+
     /// 文件已进回收站后删除图库记录；失败时明确告知“文件已移动、记录未删除”，
     /// 不把部分完成伪装成整体失败。
     fn delete_trashed_records(&self, db: &Db, moved: &[PathBuf]) -> Result<()> {

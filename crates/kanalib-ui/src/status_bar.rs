@@ -61,6 +61,8 @@ pub(crate) fn status_bar_item(
 ) -> AnyElement {
     div()
         .id(id)
+        .tab_index(0)
+        .focus(move |style| style.bg(colors.hover))
         .role(Role::Button)
         .aria_label(label.clone())
         .h_full()
@@ -271,6 +273,8 @@ impl KanalibApp {
             left = left.child(
                 div()
                     .id("status-undo")
+                    .tab_index(0)
+                    .focus(move |style| style.bg(colors.hover))
                     .role(Role::Button)
                     .aria_label(SharedString::from(aria))
                     .h_full()
@@ -402,6 +406,8 @@ impl KanalibApp {
         let this_palette = this.clone();
         let palette = div()
             .id("status-palette")
+            .tab_index(0)
+            .focus(move |style| style.bg(colors.hover))
             .role(Role::Button)
             .aria_label("命令面板 (Ctrl+K)")
             .h_full()

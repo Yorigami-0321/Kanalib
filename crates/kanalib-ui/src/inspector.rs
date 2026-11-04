@@ -222,6 +222,7 @@ impl KanalibApp {
             let this_quick = this.clone();
             let path_for_open = asset.path.clone();
             let open_toaster = self.toaster.clone();
+            let open_state = self.state.clone();
             let open_remote = is_remote_asset(&asset.path);
             let open_label = if open_remote {
                 "远端只读"
@@ -314,14 +315,15 @@ impl KanalibApp {
                                 }),
                         )
                         .child(
-                            Button::new("preview-open-file", open_label)
-                                .size(ControlSize::Sm)
-                                .disabled(open_remote)
-                                .on_click(move |_, _, cx| {
-                                    if let Err(error) = open_asset_with_system(&path_for_open) {
-                                        push_toast(&open_toaster, cx, error, Severity::Danger);
-                                    }
-                                }),
+                        Button::new("preview-open-file", open_label)
+                            .size(ControlSize::Sm)
+                            .disabled(open_remote)
+                            .on_click(move |_, _, cx| {
+                                if let Err(error) = open_asset_with_system(&path_for_open) {
+                                    open_state.set_ui_error(format!("打开文件失败：{error}"));
+                                    push_toast(&open_toaster, cx, error, Severity::Danger);
+                                }
+                            }),
                         )
                         .child(
                             Button::new("preview-find-similar", "查找相似")
@@ -646,6 +648,7 @@ impl KanalibApp {
 
             let path_for_open = path.clone();
             let open_toaster = self.toaster.clone();
+            let open_state = self.state.clone();
             let open_remote = is_remote_asset(&path);
             let open_label = if open_remote {
                 "远端只读"
@@ -659,6 +662,8 @@ impl KanalibApp {
                 .disabled(open_remote)
                 .on_click(move |_, _, cx| {
                     if let Err(error) = open_asset_with_system(&path_for_open) {
+                        // F-073 6.2：toast 之外还要有常驻的就地说明。
+                        open_state.set_ui_error(format!("打开文件失败：{error}"));
                         push_toast(&open_toaster, cx, error, Severity::Danger);
                     }
                 });
@@ -666,12 +671,15 @@ impl KanalibApp {
             let animation_open = !open_remote && crate::format::is_animation_container(&path);
             let animation_path = path.clone();
             let animation_toaster = self.toaster.clone();
+            let animation_state = self.state.clone();
             let animation_button = animation_open.then(|| {
                 Button::new("inspector-open-animation", "用系统应用播放")
                     .size(ControlSize::Sm)
                     .icon(IconName::Play)
                     .on_click(move |_, _, cx| {
                         if let Err(error) = open_asset_with_system(&animation_path) {
+                            animation_state
+                                .set_ui_error(format!("用系统应用播放失败：{error}"));
                             push_toast(&animation_toaster, cx, error, Severity::Danger);
                         }
                     })
