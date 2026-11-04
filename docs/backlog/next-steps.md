@@ -60,7 +60,10 @@
 - [x] Tab 顺序：设置页/标签页逐站记录与焦点环（根 FocusScope 修复后；`tab_walk_settings.log`、`tab_walk.log`）
 - [ ] Shift+Tab、焦点全遍历、Esc 其它分层路径
 - [x] 回归：F-006 折叠与重启持久化（`ui.sidebar_collapsed=sources`，旧键生效；宽度拖拽未验）+ 方案 C 的「查看图片 → Esc 返回 → 状态保留」
-- [ ] F-011 标签面、F-020 别名合并、F-025 低频清理、F-067 撤销回归（F-020 对话框入口已开、UIA 提交未完成；核心 `db::tests::renaming_and_merging_tags_keep_aliases_and_fts` 通过）
+- [x] F-011 侧栏标签面（chips/搜索/排序/查看图片在标签页验收中覆盖）
+- [x] F-025 低频/0 使用筛选与计数（低频 30156、0 使用 0；无自动删除入口）
+- [x] F-067 撤销（3 星 → 底栏「可撤销」→ 已撤销 toast → DB star 归 0；证据 `f067_after_star.png`、`f067_after_undo.png`）
+- [ ] F-020 别名合并 GUI 提交链路（对话框可开、字段可见；UIA Invoke 与 Enter 均只关闭对话框、未完成合并；核心 `db::tests::renaming_and_merging_tags_keep_aliases_and_fts` 通过）
 
 **F-073 全局 UI**
 
