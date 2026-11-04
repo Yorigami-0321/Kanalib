@@ -228,7 +228,18 @@
 - 侧栏标签搜索 placeholder 改为「筛选标签（有使用）」；标签页搜索改为「搜索全部标签（含 0 使用/已屏蔽）」。
 - 侧栏顺序改为「来源 → 筛选 → 评级 → 自动归类 → 标签 → 智能集合 → 相册 → 整理」；`SIDEBAR_SECTIONS` 同步，评级/自动归类仍按数据存在时显示。
 - 证据：`.kanalib/r8_f070_tags.png`（标签页单搜索/单 chips）、`r8_f070_tag_assets.png`（查看图片 + 返回入口 + 计数）、`r8_f070_tag_return.png`（Esc 返回）、`r8_f070_sidebar_order.png`（侧栏新顺序）。
-- 剩余：方案 A/B、3 万标签实测、深层滚动位置恢复未单独验收。
+### 实现记录（2026-11-04，方案 A 完整落地，S1–S5）
+
+- 用户在 2026-11-04 选定「完整方案 A」，按 S1→S5 分提交实施；纯代码落地 + 后台自验完成，需 GUI 前台的验收按用户「往后放」的优先级未做。
+- **S1 状态层**：`lib.rs` 新增 `SidebarContext`（Library/Tags/Settings/Duplicates，由 `Screen` 派生，Similar/Compare 归 Library）；`sidebar_collapsed` 从 `HashSet<String>` 改为 `HashMap<SidebarContext, HashSet<String>>`。实现细节比方案更兼容：Library 继续用旧键 `ui.sidebar_collapsed`（旧值自动生效），其余上下文各用 `ui.sidebar_collapsed_tags` / `_settings` / `_dedup`，逗号分隔格式不变、无 schema 迁移（比"单键存整个 map"更稳）。新增 `parse_collapsed` / `serialize_collapsed` 与 2 个单测。
+- **S2 分派骨架**：`render_sidebar` 内把原 8 分区 body 抽成 `library_body` 闭包并按 `ctx` 分派。活动栏、拖拽手柄、面板外壳本就与 body 同属 `render_sidebar`（`sidebar.rs:1388`），因此在 `app.rs` 层分派会重复构造活动栏 —— 按代码结构调整到 `sidebar.rs` 内部；S2 时其余上下文仍回退 `library_body`，零视觉变化。
+- **S3 标签上下文**：`tag-manager-search` 改由 `app.rs::render` **创建一次**，同时传给侧栏与 `render_tags`（`tags.rs` 内不再 `use_keyed_state`）；搜索框、筛选 chips、排序菜单、计数搬进 `tags_body`，`render_tags` 只留页头（标题/计数/刷新/返回）与列表。Tags 上下文侧栏标题改「标签导航」。方案 C 的「查看图片 / `tag_return_pending` / Esc 返回 / `tag_scroll` 不重置」闭环未动；静态核查确认全库仅一处 `tag-manager-search`、chips 仅在侧栏。
+- **S4 设置/去重**：设置页 15 个分区从「包一层 div」改为 `#settings-scroll` 的**直接子元素**并加 `.track_scroll(&settings_scroll)`，侧栏用 `SETTINGS_SECTIONS`（15 项，标题按卡片实际文案登记）做锚点，点击 `ScrollHandle::scroll_to_top_of_item(i)`。去重页侧栏提供模式切换与待审组数，页头 `SegmentedControl` 改为只读摘要，消除第二套模式控件。
+- **S5 收口**：溢出菜单按上下文适配 —— Library 保留「添加文件夹/重新扫描/停止扫描/重试失败/全部折叠」，其余上下文只留「返回图库」（它们没有资源管理器分区，"全部折叠"无意义）；`sidebar_sections()` 目前只对 Library 返回 8 个分区，其它上下文无可折叠分区但状态仍按上下文隔离。`scripts/check_ui_invariants.py` 新增「侧栏标签数 = 设置页锚点数」断言，`sidebar.rs` 新增 `SETTINGS_SECTIONS` 唯一性单测。
+- 边界：不改 schema、标签别名/合并语义、搜索语法、缓存预算；不改设置项数据语义与写入时机；不重排主图库网格/查看器/检查器；活动栏、`Ctrl+B` 全局显隐与侧栏宽度拖拽保持。
+- 回归（2026-11-04，全部后台、不建窗不抢前台）：`cargo check --workspace` 通过；`cargo test -p kanalib-ui -p kanalib` UI 71 + bin 6 通过（本轮新增 3 个单测）；`cargo test` 213 通过 / 1 既有失败（`immich_missing_key_and_disconnect_do_not_block_local_library`，core 本轮未改）/ 4 忽略；`check_backlog_docs.sh` 通过；`check_ui_invariants.py` 4 项全 PASS（16 按钮 / 6 失败分支 / 15 锚点 / 18 键位）；`check_theme_contrast.py` PASS。
+- **往后放（需 GUI 前台或用户手动，未写成通过）**：四种上下文侧栏的实际渲染与截图基线、设置页锚点滚动是否到位、UIA 名称、3 万标签侧栏 chips 换行与虚拟列表滚动、焦点环与 Tab 顺序、Esc 分层、F-006 侧栏宽度/折叠以及 F-011/F-020/F-025/F-067 回归、1024/1440/1920 宽度。
+- 剩余：方案 B 已被 A 取代不再做；3 万标签实测、深层滚动位置恢复、上述 GUI 验收；F-073 截图基线需补四种新侧栏。
 
 ## F-071 活动栏与标题栏控制收敛
 
