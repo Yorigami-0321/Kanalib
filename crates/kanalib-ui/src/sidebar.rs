@@ -1366,47 +1366,64 @@ impl KanalibApp {
         let this_stop = this.clone();
         let this_retry = this.clone();
         let this_collapse = this.clone();
-        let mut more_menu = Menu::new()
-            .item(
-                MenuItem::new("添加文件夹")
-                    .icon(IconName::FolderOpen)
+        let this_library = this.clone();
+        let mut more_menu = Menu::new();
+        if ctx == SidebarContext::Library {
+            more_menu = more_menu
+                .item(
+                    MenuItem::new("添加文件夹")
+                        .icon(IconName::FolderOpen)
+                        .on_click(move |_, cx| {
+                            let _ = this_choose.update(cx, |app, cx| app.choose_folder(cx));
+                        }),
+                )
+                .item(
+                    MenuItem::new("重新扫描图库")
+                        .icon(IconName::RefreshCw)
+                        .on_click(move |_, cx| {
+                            let _ = this_rescan.update(cx, |app, cx| app.rescan(cx));
+                        }),
+                );
+            if scanning {
+                more_menu = more_menu.item(MenuItem::new("停止扫描").icon(IconName::Square).on_click(
+                    move |_, cx| {
+                        let _ = this_stop.update(cx, |app, cx| {
+                            app.state.stop();
+                            cx.notify();
+                        });
+                    },
+                ));
+            }
+            if counts.failed > 0 {
+                more_menu = more_menu.item(
+                    MenuItem::new("重试失败")
+                        .icon(IconName::RotateCcw)
+                        .on_click(move |_, cx| {
+                            let _ = this_retry.update(cx, |app, cx| app.retry_failed(cx));
+                        }),
+                );
+            }
+            more_menu = more_menu.separator().item(
+                MenuItem::new("全部折叠")
+                    .icon(IconName::ChevronsUpDown)
                     .on_click(move |_, cx| {
-                        let _ = this_choose.update(cx, |app, cx| app.choose_folder(cx));
-                    }),
-            )
-            .item(
-                MenuItem::new("重新扫描图库")
-                    .icon(IconName::RefreshCw)
-                    .on_click(move |_, cx| {
-                        let _ = this_rescan.update(cx, |app, cx| app.rescan(cx));
+                        let _ =
+                            this_collapse.update(cx, |app, cx| app.collapse_sidebar_sections(cx));
                     }),
             );
-        if scanning {
-            more_menu = more_menu.item(MenuItem::new("停止扫描").icon(IconName::Square).on_click(
-                move |_, cx| {
-                    let _ = this_stop.update(cx, |app, cx| {
-                        app.state.stop();
-                        cx.notify();
-                    });
-                },
-            ));
-        }
-        if counts.failed > 0 {
+        } else {
+            // F-070 方案 A：上下文侧栏没有资源管理器分区，溢出菜单只保留返回图库。
             more_menu = more_menu.item(
-                MenuItem::new("重试失败")
-                    .icon(IconName::RotateCcw)
+                MenuItem::new("返回图库")
+                    .icon(IconName::Library)
                     .on_click(move |_, cx| {
-                        let _ = this_retry.update(cx, |app, cx| app.retry_failed(cx));
+                        let _ = this_library.update(cx, |app, cx| {
+                            app.screen = Screen::Library;
+                            cx.notify();
+                        });
                     }),
             );
         }
-        more_menu = more_menu.separator().item(
-            MenuItem::new("全部折叠")
-                .icon(IconName::ChevronsUpDown)
-                .on_click(move |_, cx| {
-                    let _ = this_collapse.update(cx, |app, cx| app.collapse_sidebar_sections(cx));
-                }),
-        );
 
         let panel = div()
             .relative()
@@ -2332,6 +2349,13 @@ mod tests {
         assert!(parse_collapsed(Some("sources,tags"), SidebarContext::Tags).is_empty());
         assert!(parse_collapsed(None, SidebarContext::Library).is_empty());
         assert_eq!(serialize_collapsed(&library), "sources,tags");
+    }
+
+    #[test]
+    fn settings_sections_are_unique() {
+        assert_eq!(SETTINGS_SECTIONS.len(), 15);
+        let unique = SETTINGS_SECTIONS.iter().collect::<HashSet<_>>();
+        assert_eq!(unique.len(), SETTINGS_SECTIONS.len());
     }
 
     #[test]

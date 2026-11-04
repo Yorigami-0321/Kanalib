@@ -7,7 +7,8 @@
 覆盖前几批靠人工盘点得出的结论，把它们固化成回归检查：
   1. 手搓 role(Role::Button) 元素必须有 id / aria_label / 键盘可达。
   2. open_asset_with_system 的失败分支不能只发 toast，还要写就地错误。
-  3. 命令面板展示的键位必须在 cx.bind_keys 里真实存在。
+  3. 设置页分区标签数量与滚动锚点必须一一对应（F-070 方案 A）。
+  4. 命令面板展示的键位必须在 cx.bind_keys 里真实存在。
 """
 
 from __future__ import annotations
@@ -72,6 +73,29 @@ def check_open_errors() -> tuple[list[str], int]:
     return problems, count
 
 
+def check_settings_anchors() -> tuple[list[str], int]:
+    """F-070 方案 A：侧栏分区标签数量必须与设置页滚动锚点一一对应。"""
+    sidebar = (UI / "sidebar.rs").read_text(encoding="utf-8")
+    match = re.search(
+        r"SETTINGS_SECTIONS: \[&str; (\d+)\] = \[(.*?)\];", sidebar, re.S
+    )
+    if not match:
+        return ["sidebar.rs 找不到 SETTINGS_SECTIONS 常量"], 0
+    labels = re.findall(r'"([^"]+)"', match.group(2))
+    settings = (UI / "settings.rs").read_text(encoding="utf-8")
+    anchors = re.findall(
+        r"\.child\(div\(\)\.w\(column_width\)\.child\((\w+)\)\)", settings
+    )
+    problems = []
+    if int(match.group(1)) != len(labels):
+        problems.append("SETTINGS_SECTIONS 声明长度与实际条目数不一致")
+    if len(labels) != len(anchors):
+        problems.append(
+            f"侧栏分区标签 {len(labels)} 个，设置页锚点 {len(anchors)} 个，索引会错位"
+        )
+    return problems, len(anchors)
+
+
 def check_palette_keys() -> tuple[list[str], int]:
     app = (UI / "app.rs").read_text(encoding="utf-8")
     shown = set(re.findall(r'\.keys\("([^"]+)"\)', app))
@@ -85,6 +109,7 @@ def main() -> int:
     checks = [
         ("手搓 role(Role::Button) 元素（id/aria/键盘可达）", *check_role_buttons()),
         ("open_asset_with_system 失败分支（toast + 就地错误）", *check_open_errors()),
+        ("设置页分区标签与滚动锚点一一对应", *check_settings_anchors()),
         ("命令面板键位（必须真实绑定）", *check_palette_keys()),
     ]
     failed = False
