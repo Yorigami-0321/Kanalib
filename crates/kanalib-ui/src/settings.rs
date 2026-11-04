@@ -91,6 +91,19 @@ pub(crate) struct RemoteSourceFeedback {
     pub(crate) severity: Severity,
 }
 
+/// 进行中的远端任务类型；F-073 6.2 要求按钮只为自己的任务显示加载态。
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum RemoteTask {
+    Test,
+    Sync,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct RemoteBusy {
+    pub(crate) task: RemoteTask,
+    pub(crate) label: String,
+}
+
 /// F-035 网络来源设置页的全部 UI 状态；凭据只留在系统凭据库与输入框。
 #[derive(Default)]
 pub(crate) struct RemoteSourcesState {
@@ -98,7 +111,7 @@ pub(crate) struct RemoteSourcesState {
     pub(crate) infos: Vec<SourceInfo>,
     /// `Ok(true)` 已保存，`Ok(false)` 未保存，`Err` 表示读取凭据库失败。
     pub(crate) credentials: HashMap<i64, Result<bool, String>>,
-    pub(crate) busy: HashMap<i64, String>,
+    pub(crate) busy: HashMap<i64, RemoteBusy>,
     pub(crate) feedback: HashMap<i64, RemoteSourceFeedback>,
     pub(crate) add_kind: Option<RemoteAddKind>,
     pub(crate) add_epoch: u64,
@@ -2089,7 +2102,7 @@ impl KanalibApp {
             .child(
                 Button::new("tag-queue-cancel", "取消打标")
                     .size(ControlSize::Sm)
-                    .disabled(queue.cancelling)
+                    .loading(queue.cancelling)
                     .on_click(move |_, _, cx| {
                         let _ = this_cancel.update(cx, |app, cx| app.cancel_tag_queue(cx));
                     }),
@@ -4069,8 +4082,12 @@ impl KanalibApp {
                 let has_key = matches!(self.remote_sources.credentials.get(&id), Some(Ok(true)));
                 let busy = self.remote_sources.busy.get(&id).cloned();
                 let busy_now = busy.is_some();
-                let (status_text, status_color) = if let Some(label) = busy {
-                    (label, colors.accent)
+                let test_running =
+                    matches!(busy.as_ref(), Some(state) if state.task == RemoteTask::Test);
+                let sync_running =
+                    matches!(busy.as_ref(), Some(state) if state.task == RemoteTask::Sync);
+                let (status_text, status_color) = if let Some(state) = busy {
+                    (state.label, colors.accent)
                 } else if let Some(feedback) = self.remote_sources.feedback.get(&id) {
                     (
                         feedback.message.clone(),
@@ -4175,7 +4192,8 @@ impl KanalibApp {
                                         "测试连接",
                                     )
                                     .size(ControlSize::Sm)
-                                    .disabled(busy_now)
+                                    .loading(test_running)
+                                    .disabled(sync_running)
                                     .on_click(
                                         move |_, _, cx| {
                                             let _ = this_test.update(cx, |app, cx| {
@@ -4190,7 +4208,8 @@ impl KanalibApp {
                                         "立即同步",
                                     )
                                     .size(ControlSize::Sm)
-                                    .disabled(busy_now)
+                                    .loading(sync_running)
+                                    .disabled(test_running)
                                     .on_click(
                                         move |_, _, cx| {
                                             let _ = this_sync.update(cx, |app, cx| {
@@ -4557,9 +4576,13 @@ impl KanalibApp {
                 },
             );
         }
-        self.remote_sources
-            .busy
-            .insert(id, "正在测试连接…".to_string());
+        self.remote_sources.busy.insert(
+            id,
+            RemoteBusy {
+                task: RemoteTask::Test,
+                label: "正在测试连接…".to_string(),
+            },
+        );
         self.settings_notice = Some(format!("正在测试 {} 连接…", info.name));
         cx.notify();
         let state = self.state.clone();
@@ -4629,7 +4652,13 @@ impl KanalibApp {
                 },
             );
         }
-        self.remote_sources.busy.insert(id, "正在同步…".to_string());
+        self.remote_sources.busy.insert(
+            id,
+            RemoteBusy {
+                task: RemoteTask::Sync,
+                label: "正在同步…".to_string(),
+            },
+        );
         self.settings_notice = Some(format!("正在同步 {}…", info.name));
         cx.notify();
         let state = self.state.clone();

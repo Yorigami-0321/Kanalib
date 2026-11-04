@@ -1038,7 +1038,9 @@ impl Render for KanalibApp {
                     Command::new("pane:details", "窗格 · 详细信息").icon(IconName::PanelRight),
                     Command::new("pane:preview", "窗格 · 预览").icon(IconName::Image),
                     Command::new("pane:hidden", "窗格 · 隐藏").icon(IconName::EyeOff),
-                    Command::new("view:sidebar", "显示/隐藏侧栏").icon(IconName::PanelLeft),
+                    Command::new("view:sidebar", "显示/隐藏侧栏")
+                        .icon(IconName::PanelLeft)
+                        .keys("ctrl-b"),
                     Command::new("view:extensions", "显示/隐藏文件扩展名").icon(IconName::FileType),
                     Command::new(
                         "view:theme",
@@ -1057,12 +1059,24 @@ impl Render for KanalibApp {
                     Command::new("act:toggle-fav", "切换收藏")
                         .icon(IconName::Heart)
                         .keys("f"),
-                    Command::new("act:star1", "设为 1 星").icon(IconName::Star),
-                    Command::new("act:star2", "设为 2 星").icon(IconName::Star),
-                    Command::new("act:star3", "设为 3 星").icon(IconName::Star),
-                    Command::new("act:star4", "设为 4 星").icon(IconName::Star),
-                    Command::new("act:star5", "设为 5 星").icon(IconName::Star),
-                    Command::new("act:star0", "清除星级").icon(IconName::Star),
+                    Command::new("act:star1", "设为 1 星")
+                        .icon(IconName::Star)
+                        .keys("1"),
+                    Command::new("act:star2", "设为 2 星")
+                        .icon(IconName::Star)
+                        .keys("2"),
+                    Command::new("act:star3", "设为 3 星")
+                        .icon(IconName::Star)
+                        .keys("3"),
+                    Command::new("act:star4", "设为 4 星")
+                        .icon(IconName::Star)
+                        .keys("4"),
+                    Command::new("act:star5", "设为 5 星")
+                        .icon(IconName::Star)
+                        .keys("5"),
+                    Command::new("act:star0", "清除星级")
+                        .icon(IconName::Star)
+                        .keys("0"),
                     Command::new("act:copy-prompt", "复制选中 Prompt")
                         .icon(IconName::ClipboardCheck),
                     Command::new("act:copy-paths", "复制选中路径").icon(IconName::Copy),
