@@ -11,7 +11,7 @@ use ely_gpui_component::{
     menus::{ContextMenu, DropdownMenu, Menu, MenuItem, OverflowMenu},
     navigation::{Command, CommandPalette},
     overlays::{ConfirmDialog, Dialog, PromptDialog},
-    primitives::{Icon, IconName, Severity, Tooltip},
+    primitives::{FocusScope, Icon, IconName, Severity, Tooltip},
     theme::{ActiveTheme, ControlSize, IconSize, Mode, Theme},
 };
 use gpui::prelude::*;

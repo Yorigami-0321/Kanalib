@@ -10,6 +10,7 @@
   3. 设置页分区标签数量与滚动锚点必须一一对应（F-070 方案 A）。
   4. 命令面板展示的键位必须在 cx.bind_keys 里真实存在。
   5. 上下文侧栏结构：单份标签搜索句柄、四种上下文都有分派、活动栏只在 sidebar.rs 构造。
+  6. 根 FocusScope：应用根必须包 `.root()` + `.node(...)`，否则 Ely 的 Tab 焦点遍历不生效。
 """
 
 from __future__ import annotations
@@ -155,6 +156,36 @@ def check_sidebar_contexts() -> tuple[list[str], int]:
     return problems, checks
 
 
+def check_root_focus_scope() -> tuple[list[str], int]:
+    """Ely 的 Tab 绑定挂在 FocusScope 的 ElyFocus 上下文；根必须用 .root() + .node()。"""
+    app = (UI / "app.rs").read_text(encoding="utf-8")
+    lib = (UI / "lib.rs").read_text(encoding="utf-8")
+    problems: list[str] = []
+    checks = 0
+
+    checks += 1
+    if "root_focus: FocusHandle" not in app or "root_focus: cx.focus_handle()" not in app:
+        problems.append("KanalibApp 缺少 root_focus 字段或初始化")
+
+    checks += 1
+    if "FocusScope::new(&self.root_focus)" not in app:
+        problems.append("app.rs 根视图没有 FocusScope::new(&self.root_focus)")
+
+    checks += 1
+    scope = re.search(r"FocusScope::new\(&self\.root_focus\)(.*?)\)\s*\.size_full\(\)", app, re.S)
+    block = scope.group(1) if scope else ""
+    if ".root()" not in block:
+        problems.append("根 FocusScope 缺少 .root()")
+    if '.node("kanalib-root-focus"' not in block:
+        problems.append("根 FocusScope 缺少 .node(...)，Tab 动作分发路径会断在无 id 的根节点")
+
+    checks += 1
+    if "FocusScope" not in lib:
+        problems.append("lib.rs 未导入 FocusScope")
+
+    return problems, checks
+
+
 def check_palette_keys() -> tuple[list[str], int]:
     app = (UI / "app.rs").read_text(encoding="utf-8")
     shown = set(re.findall(r'\.keys\("([^"]+)"\)', app))
@@ -170,6 +201,7 @@ def main() -> int:
         ("open_asset_with_system 失败分支（toast + 就地错误）", *check_open_errors()),
         ("设置页分区标签与滚动锚点一一对应", *check_settings_anchors()),
         ("上下文侧栏结构（单搜索/四上下文/单一活动栏与菜单）", *check_sidebar_contexts()),
+        ("根 FocusScope（.root() + .node()，保证 Tab 遍历）", *check_root_focus_scope()),
         ("命令面板键位（必须真实绑定）", *check_palette_keys()),
     ]
     failed = False

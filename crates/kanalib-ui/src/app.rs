@@ -169,6 +169,7 @@ pub struct KanalibApp {
     pub(crate) cache_task: Option<Task<()>>,
     pub(crate) scroll_task: Option<Task<()>>,
     pub(crate) similar_task: Option<Task<()>>,
+    pub(crate) root_focus: FocusHandle,
     pub(crate) grid_focus: FocusHandle,
     pub(crate) viewer_focus: FocusHandle,
     pub(crate) focus_grid_pending: bool,
@@ -2109,7 +2110,13 @@ impl Render for KanalibApp {
         // 整棵树共用一个有界图片缓存：子树里所有 img 都走它，不再进无上限的全局 asset cache。
         image_cache(self.thumb_cache.clone())
             .size_full()
-            .child(shell)
+            .child(
+                FocusScope::new(&self.root_focus)
+                    .root()
+                    .node("kanalib-root-focus", Role::Group, "Kanalib", None)
+                    .size_full()
+                    .child(shell),
+            )
     }
 }
 
@@ -2612,6 +2619,7 @@ impl KanalibApp {
             }),
             scroll_task: None,
             similar_task: None,
+            root_focus: cx.focus_handle(),
             grid_focus: cx.focus_handle(),
             viewer_focus: cx.focus_handle(),
             focus_grid_pending: true,
