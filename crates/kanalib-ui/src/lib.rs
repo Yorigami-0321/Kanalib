@@ -393,6 +393,41 @@ enum Screen {
     Settings,
 }
 
+/// F-070 方案 A：侧栏内容随活动栏目的地切换，折叠状态也按上下文分别保存。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub(crate) enum SidebarContext {
+    Library,
+    Tags,
+    Settings,
+    Duplicates,
+}
+
+impl SidebarContext {
+    pub(crate) fn from_screen(screen: Screen) -> Self {
+        match screen {
+            Screen::Tags => Self::Tags,
+            Screen::Settings => Self::Settings,
+            Screen::Duplicates => Self::Duplicates,
+            // 相似结果/图片对比仍是图库的临时视图，沿用资源管理器上下文。
+            Screen::Library | Screen::Similar | Screen::Compare => Self::Library,
+        }
+    }
+
+    /// Library 沿用既有键，升级后旧折叠状态不会丢；其余上下文各自一个 settings JSON 键。
+    pub(crate) fn persist_key(self) -> &'static str {
+        match self {
+            Self::Library => "ui.sidebar_collapsed",
+            Self::Tags => "ui.sidebar_collapsed_tags",
+            Self::Settings => "ui.sidebar_collapsed_settings",
+            Self::Duplicates => "ui.sidebar_collapsed_dedup",
+        }
+    }
+
+    pub(crate) fn all() -> [Self; 4] {
+        [Self::Library, Self::Tags, Self::Settings, Self::Duplicates]
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ActivityTarget {
     Library,

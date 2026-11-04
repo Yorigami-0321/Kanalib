@@ -4,7 +4,7 @@ use crate::settings::{
     RemoteAddKind, RemoteSourcesState, parse_optional_bytes, validate_remote_url,
 };
 use crate::sidebar::{
-    SIDEBAR_DEFAULT_WIDTH, SIDEBAR_MAX_WIDTH, SIDEBAR_MIN_WIDTH, SIDEBAR_SECTIONS, source_label,
+    SIDEBAR_DEFAULT_WIDTH, SIDEBAR_MAX_WIDTH, SIDEBAR_MIN_WIDTH, parse_collapsed, source_label,
     source_menu,
 };
 use crate::theme::*;
@@ -183,7 +183,7 @@ pub struct KanalibApp {
     pub(crate) pane_mode: PaneMode,
     pub(crate) show_sidebar: bool,
     pub(crate) sidebar_width: f32,
-    pub(crate) sidebar_collapsed: HashSet<String>,
+    pub(crate) sidebar_collapsed: HashMap<SidebarContext, HashSet<String>>,
     pub(crate) sidebar_resizing: bool,
     pub(crate) sidebar_persist_task: Option<Task<()>>,
     pub(crate) show_extensions: bool,
@@ -2488,16 +2488,14 @@ impl KanalibApp {
             .and_then(|value| value.parse::<f32>().ok())
             .map(|value| value.clamp(SIDEBAR_MIN_WIDTH, SIDEBAR_MAX_WIDTH))
             .unwrap_or(SIDEBAR_DEFAULT_WIDTH);
-        let sidebar_collapsed = state
-            .setting("ui.sidebar_collapsed")
-            .map(|value| {
-                value
-                    .split(',')
-                    .filter(|key| SIDEBAR_SECTIONS.contains(key))
-                    .map(str::to_string)
-                    .collect()
+        // F-070 方案 A：折叠状态按侧栏上下文分别持久化；图库沿用旧键，旧值自动生效。
+        let sidebar_collapsed = SidebarContext::all()
+            .into_iter()
+            .map(|ctx| {
+                let stored = state.setting(ctx.persist_key());
+                (ctx, parse_collapsed(stored.as_deref(), ctx))
             })
-            .unwrap_or_default();
+            .collect();
         let thumb_budget_gb = state
             .setting("cache.thumb_budget_gb")
             .and_then(|value| value.parse::<u64>().ok())

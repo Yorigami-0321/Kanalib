@@ -21,6 +21,34 @@ pub(crate) const SIDEBAR_SECTIONS: [&str; 8] = [
     "organize",
 ];
 
+/// F-070 方案 A：每个侧栏上下文各自的可折叠分区。
+/// 标签/设置/去重上下文的分区由 S3/S4 补齐；在那之前返回空，不会误用资源管理器分区。
+pub(crate) fn sidebar_sections(ctx: SidebarContext) -> &'static [&'static str] {
+    match ctx {
+        SidebarContext::Library => &SIDEBAR_SECTIONS[..],
+        _ => &[],
+    }
+}
+
+/// 从 settings JSON 的逗号分隔值还原折叠状态；只保留该上下文认识的分区，
+/// 这样升级后旧 `ui.sidebar_collapsed` 只作用于图库上下文，不会污染新上下文。
+pub(crate) fn parse_collapsed(value: Option<&str>, ctx: SidebarContext) -> HashSet<String> {
+    value
+        .map(|raw| {
+            raw.split(',')
+                .filter(|key| sidebar_sections(ctx).contains(key))
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn serialize_collapsed(keys: &HashSet<String>) -> String {
+    let mut keys = keys.iter().cloned().collect::<Vec<_>>();
+    keys.sort();
+    keys.join(",")
+}
+
 /// 组织对象的新建/重命名/删除弹窗；命名冲突由核心 `DuplicateNameError` 判定。
 #[derive(Clone, Debug)]
 pub(crate) enum OrgDialog {
@@ -491,24 +519,37 @@ impl KanalibApp {
     }
 
     pub(crate) fn sidebar_section_open(&self, key: &str) -> bool {
-        !self.sidebar_collapsed.contains(key)
+        let ctx = SidebarContext::from_screen(self.screen);
+        !self
+            .sidebar_collapsed
+            .get(&ctx)
+            .is_some_and(|set| set.contains(key))
     }
 
     pub(crate) fn toggle_sidebar_section(&mut self, key: &str, cx: &mut Context<Self>) {
-        if !self.sidebar_collapsed.remove(key) {
-            self.sidebar_collapsed.insert(key.to_string());
-        }
-        let mut keys = self.sidebar_collapsed.iter().cloned().collect::<Vec<_>>();
-        keys.sort();
-        self.persist_setting("ui.sidebar_collapsed", keys.join(","), cx);
+        let ctx = SidebarContext::from_screen(self.screen);
+        let serialized = {
+            let set = self.sidebar_collapsed.entry(ctx).or_default();
+            if !set.remove(key) {
+                set.insert(key.to_string());
+            }
+            serialize_collapsed(set)
+        };
+        self.persist_setting(ctx.persist_key(), serialized, cx);
         cx.notify();
     }
 
     pub(crate) fn collapse_sidebar_sections(&mut self, cx: &mut Context<Self>) {
-        self.sidebar_collapsed = SIDEBAR_SECTIONS.iter().map(|key| key.to_string()).collect();
-        let mut keys = self.sidebar_collapsed.iter().cloned().collect::<Vec<_>>();
-        keys.sort();
-        self.persist_setting("ui.sidebar_collapsed", keys.join(","), cx);
+        let ctx = SidebarContext::from_screen(self.screen);
+        let serialized = {
+            let set = self.sidebar_collapsed.entry(ctx).or_default();
+            *set = sidebar_sections(ctx)
+                .iter()
+                .map(|key| key.to_string())
+                .collect();
+            serialize_collapsed(set)
+        };
+        self.persist_setting(ctx.persist_key(), serialized, cx);
         cx.notify();
     }
 
@@ -2045,6 +2086,44 @@ mod tests {
         assert!(SIDEBAR_SECTIONS.contains(&"albums"));
         let unique = SIDEBAR_SECTIONS.iter().collect::<HashSet<_>>();
         assert_eq!(unique.len(), SIDEBAR_SECTIONS.len());
+    }
+
+    #[test]
+    fn sidebar_contexts_have_separate_persist_keys() {
+        assert_eq!(SidebarContext::Library.persist_key(), "ui.sidebar_collapsed");
+        let keys = SidebarContext::all()
+            .iter()
+            .map(|ctx| ctx.persist_key())
+            .collect::<HashSet<_>>();
+        assert_eq!(keys.len(), SidebarContext::all().len());
+        assert_eq!(
+            SidebarContext::from_screen(crate::Screen::Similar),
+            SidebarContext::Library
+        );
+        assert_eq!(
+            SidebarContext::from_screen(crate::Screen::Tags),
+            SidebarContext::Tags
+        );
+        assert_eq!(
+            SidebarContext::from_screen(crate::Screen::Settings),
+            SidebarContext::Settings
+        );
+        assert_eq!(
+            SidebarContext::from_screen(crate::Screen::Duplicates),
+            SidebarContext::Duplicates
+        );
+    }
+
+    #[test]
+    fn collapsed_state_is_scoped_and_filters_unknown_sections() {
+        let library = parse_collapsed(Some("sources,tags,bogus"), SidebarContext::Library);
+        assert!(library.contains("sources"));
+        assert!(library.contains("tags"));
+        assert!(!library.contains("bogus"));
+        // 旧 `ui.sidebar_collapsed` 的值不会串到其它上下文。
+        assert!(parse_collapsed(Some("sources,tags"), SidebarContext::Tags).is_empty());
+        assert!(parse_collapsed(None, SidebarContext::Library).is_empty());
+        assert_eq!(serialize_collapsed(&library), "sources,tags");
     }
 
     #[test]
