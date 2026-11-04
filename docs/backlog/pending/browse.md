@@ -410,7 +410,7 @@
   - toast 分级时长：`push_toast` 原先一律走 Ely 默认 5 秒，Danger 级 61 处失败提示读不完就消失。改为 Danger 12s / Warning 8s / Info·Success 5s（单一入口，163 处调用一起生效）。
   - 去重「移入回收站」确认层改走 Ely `Dialog`：它是全项目唯一的自绘模态，恰好承载最危险的操作，原先没有 Esc、没有焦点陷阱与返回焦点、遮罩无关闭回调、Enter 语义缺失。改后由 `Dialog` 统一提供遮罩/Esc/焦点陷阱/返回焦点，卡片宽度、内边距、圆角不再各写一套字面量；文件行清单与「取消 + 确认移入回收站」两动作保留，危险按钮仍 `.disabled(remote)` 且默认焦点落在取消（`Dialog` 未设 `focus_first`，也没有 Enter 绑定）。
   - 验证（隔离根 + 副屏 1840×1240 物理窗）：确认后弹出 `ControlType.Window||移入回收站？` 含 取消/确认移入回收站；点取消后对话框消失且数据未动（仍 3 张、组仍待审）。证据 `.kanalib/r8_f073_dedup_dialog.png`。Esc 未做注入验收：gpui 需要窗口前台 + 带扫描码的按键，`SendMessage(WM_KEYDOWN)` 无效，而本轮约定不抢前台。
-  - 盘点出来但**未修**的缺口（留作后续）：资产右键/来源/去重菜单缺 `.keys(...)` 快捷键提示（只有视图模式项有）；禁用项靠改标签文案表达原因；设置页「清理孤儿」直接执行无确认；「重新扫描（清空相似结果）」未标 `.destructive()`；恢复数据库备份走原生 rfd `AsyncMessageDialog`，与内建确认路径并存。
+  - 当时盘点出来但未修的缺口（2026-11-04 已收口前四项，见下一条）：资产右键/来源/去重菜单缺 `.keys(...)` 快捷键提示（只有视图模式项有）；禁用项靠改标签文案表达原因；设置页「清理孤儿」直接执行无确认；「重新扫描（清空相似结果）」未标 `.destructive()`；恢复数据库备份走原生 rfd `AsyncMessageDialog`，与内建确认路径并存。
 - 阶段 0 截图基线（2026-11-03 补）：新增 `scripts/ui_baseline.ps1`，在副屏边界内按「尺寸 × 页面 × 亮暗」矩阵采集，并做 UIA 水平越界审计。
   - 用法：`KANALIB_ROOT=<数据根> KANALIB_FOLDER=<图库根> target/debug/kanalib.exe`，再 `powershell -File scripts/ui_baseline.ps1 -Hwnd <hwnd> -Sizes 1536x1000`（物理像素；副屏 1920×1280 @150%，`1536x1000`=1024×667 逻辑、`1800x1200`=1200×800 逻辑）。页面与主题切换按活动栏子元素**索引**点击，脚本不含中文字面量——PowerShell 5.1 会按 GBK 读无 BOM 的 .ps1，中文默认值会解析失败。
   - 已采：图库/重复项/标签/设置 × 亮暗 × 1024 与 1200 逻辑宽，共 16 张，归档 `.kanalib/ui_baseline/`（该目录被 gitignore，重跑即可再生；图库根是 `sample_library` 的 15 张副本，含 1 个故意失败的 avif 以覆盖损坏态）。
@@ -419,7 +419,14 @@
   - 未覆盖：1440/1920 逻辑宽（副屏物理只有 1920 宽，放不下 1440 逻辑=2160 物理；要么用主屏，要么把目标宽降到副屏能容纳的范围）、查看器/对话框/命令面板/toast 基线、空库与 10k/100k 库（合成库已不在，需重跑 `scripts/generate_stress_library.py`）。
   - 顺带记录：设置页仍显示资源管理器侧栏（页头标题却写着「设置」），属 F-070 方案 A「上下文侧栏」未落地的既有缺口，不在本条修复。
 - 证据：`.kanalib/r8_f073_no_results.png`、`r8_f073_empty_reset.png`、`r8_f073_tags_empty.png`、`r8_f073_dedup_empty.png`、`r8_f073_header_tags.png`、`r8_f073_header_dedup.png`、`r8_f073_header_settings.png`、`r8_f073_chips_tags.png`、`r8_f073_chips_dedup.png`、`r8_f073_dedup_segments.png`、`r8_f073_settings_cards.png`、`r8_f070_sidebar_order.png`、`r8_f069_viewer_i18n_crop.png`。
-- 剩余：按钮/输入/菜单状态矩阵（对话框与 toast 已起步，见上一条）、菜单快捷键提示与禁用原因、设置页字段/对话框与命令面板、可访问性、1440/1920 宽度与浮层/查看器截图基线（1024/1200 逻辑宽 × 4 页 × 亮暗的首版已建，见上一条）、100k 性能回归；vendor 侧仍有硬编码英文的组件（视频控制/字幕等）待接入对应界面时再收。
+- 菜单与危险操作一致性（2026-11-04，F-073 第二批）：
+  - 组件层：vendor Ely `MenuItem` 增加 `disabled_reason(...)`；禁用行保持原标签，原因只进 tooltip 与 UIA `aria_description`（未填时回退通用 `state.unavailable`），菜单按钮行的 tooltip 也追加原因行。这样「禁用项靠改标签文案表达原因」不再需要。
+  - 键位提示：资产右键菜单按 `cx.bind_keys` 的真实绑定补 `.keys(...)` —— 快速查看 `enter`、收藏 `f`、1–5 星 `1`–`5`、清除星级 `0`；来源/去重菜单的动作没有全局绑定，**不编造键位**，只给去重「重新扫描图库」在 `busy` 时补 `disabled_reason`。
+  - 禁用文案：资产右键「打开文件 / 在资源管理器中显示」、来源右键「在资源管理器中打开」恢复固定标签 + 具体原因；远端只读提示不再混进标签。
+  - 危险操作：`rescan_dialog` 补 `.destructive()`；设置页「清理孤儿」由直接执行改为 `cache_cleanup_confirm: Option<usize>` + 内建 `ConfirmDialog`（destructive，显示孤儿数）；「恢复数据库备份」移除 `rfd::AsyncMessageDialog`，改为 `restore_confirm: Option<PathBuf>` + 内建 `ConfirmDialog`，选完文件在应用内确认后才调 `begin_restore`。三处确认现在共用 Esc/焦点陷阱/危险按钮语义。
+  - 边界：不改 schema，不动确认后的业务逻辑（`cleanup_cache`/`begin_restore` 原样调用）；未做真实 GUI/UIA 弹窗、Esc 注入与 tooltip 悬停验收（gpui 需窗口前台 + 扫描码按键），不写成通过。源码核查：`ConfirmDialog::new` 的第 4 参数 `on_close` 在 Esc/遮罩/取消/确认时都会触发（确认时先关闭再 `on_confirm`），因此两个会话态不会残留导致对话框重弹；`restore_dialog` 的候选路径由闭包自带，不依赖被清空的状态。
+  - 回归（2026-11-04）：`cargo check --workspace` 通过；`cargo test -p kanalib-ui -p kanalib` UI 68 通过 + bin 通过；`scripts/check_backlog_docs.sh` 通过（56 条无矛盾）。两项**既有**失败未写成通过：`cargo test`（default-members）的 `sources::tests::immich_missing_key_and_disconnect_do_not_block_local_library` 单独复跑仍失败（`http://127.0.0.1:1` 的错误 kind 不在断言集合，属环境/网络分类差异，core 源码本轮未改、其余 213 项通过）；`cargo test --workspace` 连带 vendor Ely 自带测试编译失败（`gpui::test`/`TestAppContext` 在 gpui-pre 0.3.10 下缺失，见 [constraints.md](../constraints.md) 第 10 行的日常口径）。
+- 剩余：按钮/输入状态矩阵与菜单其余状态示例、设置页字段/对话框与命令面板、可访问性全量（WCAG/键盘/对比度）、1440/1920 宽度与浮层/查看器截图基线（1024/1200 逻辑宽 × 4 页 × 亮暗的首版已建）、真实 GUI 弹窗/菜单 UIA 验收、100k 性能回归；vendor 侧仍有硬编码英文的组件（视频控制/字幕等）待接入对应界面时再收；F-070 方案 A「上下文侧栏」（设置页仍显示资源管理器侧栏）仍未落地。
 
 ## F-074 查看器默认加载原图
 
