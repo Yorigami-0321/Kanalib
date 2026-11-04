@@ -247,6 +247,20 @@
   - 最终回归：`cargo check --workspace` 与 `--features frame-profiler` 均通过；`cargo test -p kanalib-ui -p kanalib` UI 71 + bin 6 通过；`cargo test` 213 通过 / 1 既有失败（Immich 断连）/ 4 忽略，core 本轮只改 `frame-profiler` 专属的 `alloc_stats.rs`，与该失败无关；`check_backlog_docs.sh`、`check_ui_invariants.py`（5 项）、`check_theme_contrast.py` 全 PASS；便携包 pre-flight 通过。
   - 全部在后台命令行完成，未启动或激活任何窗口；需 GUI 前台的验收仍按用户要求往后放。
 
+### GUI 验收（2026-11-04，副屏，方案 A 落地后）
+
+- 数据根与窗口：`.kanalib/accept_f070_gui`（10k 测试库副本，268 标签、102 精确重复组；缺失来源显示离线、缩略图缓存可用；隔离根无 sidecar，出现 `sidecar script not found` 红色提示，属环境）。窗口全部落在副屏物理 `-1920,-623..0,657`（150%，逻辑约 1280×853），主屏未占用；先预置窗口状态再 `SetWindowPos` 校正。
+- 截图矩阵：图库/重复项/标签/设置 × 亮暗 × 1024/1200 逻辑宽（物理 1536×1000 / 1800×1200），共 16 张，UIA 水平越界审计全部 `h-overflow=0`（修复后）。证据 `.kanalib/verify_f070/` 下同名 PNG。
+- 侧栏上下文：图库=资源管理器 8 分区；标签=「标签导航」（1 个搜索框、计数、4 个筛选 chip、排序）；设置=15 个分区锚点；去重=模式切换 + 待审组数，页头为只读摘要。标签页屏幕内 UIA 只有 1 个 Edit（`搜索全部标签（含 0 使用/已屏蔽）`），与页内列表联动。
+- 设置锚点：UIA 依次点击「数据库备份 / 诊断信息 / 忽略列表 / 打标与队列」；目标控件从视口外移入顶部（`立即备份` y 3722→-143、`复制诊断信息` y 4761→326、`编辑排除规则` y 6165→-200）。截图 `settings_nav_07/08/14/00.png`，日志 `settings_walk.log`。
+- 标签页联动：chips「低频 156」「0 使用 0」「全部 268」有效（0 使用 → 0 行）；侧栏搜索 `girl` → 2 行；排序菜单可切换为「名称」，列表从使用次数序改为名称序；首行「查看图片」进入图库（`← 标签管理 #1girl 18 张`），Esc 返回标签页且搜索保留（仍 2 行）。证据 `tags_*.png`、`tags_walk.log`、`tags_sort_menu.png`、`uia_tags_sort.txt`。
+- 折叠与菜单：图库「来源」折叠后 5 行消失（按钮数 96→91），切标签页不受影响（31 按钮、1 搜索框），切回图库仍折叠；重启后仍折叠，持久化键 `ui.sidebar_collapsed=sources`（旧键直接生效）。溢出菜单：图库 [添加文件夹 / 重新扫描图库 / 全部折叠]，设置 [返回图库]。证据 `collapse_*.png`、`menu_*.png`、`collapse_walk.log`、`uia_after_restart.txt`。
+- UIA：活动栏 5 项、设置 15 锚点、标签搜索 / chips / 查看图片 / 重命名 / 合并到其他标签 / 屏蔽、去重评审按钮、溢出菜单项均有可读名称；设置页选中锚点有可见焦点环。
+- Tab 顺序与根焦点修复（2026-11-04 续）：首次实测发现 Tab 完全不动 —— Kanalib 根视图没有 Ely `FocusScope`，Tab/Shift-Tab 的 `ElyFocus` 绑定不生效，F-073 第五批加的 `.tab_index(0)` 停靠点无法用键盘到达。已在 `app.rs` 根视图包 `FocusScope::new(&self.root_focus).root().node("kanalib-root-focus", Role::Group, "Kanalib", None)`（根无元素 id 时 FocusNext 的冒泡分发会断在根节点），`scripts/check_ui_invariants.py` 增加第 6 项静态断言。副屏实测（仅将本实例临时置前）：设置页顺序 最小化→最大化→关闭→图库→重复项→标签→主题→设置→侧栏操作→15 个分区锚点；标签页顺序 侧栏搜索框→4 chips→排序→刷新→返回图库→首行「查看图片」；焦点环可见。Shift+Tab 未单独注入验证（Ely 对称绑定）。证据 `tab_walk_settings.log`、`tab_walk.log`、`tab_*.png`。
+- 3 万标签（2026-11-04 续）：在 `.kanalib/accept_f070_tags30k` 复制同一 10k 库并插入 30,000 个通用标签（共 30,268）与 30,871 条使用记录。标签页首屏可见行 152ms，工作集 133MB；搜索 `stress_30000` → 1 条 513ms（含 12 字符键入约 360ms）；宽查询 `stress_1` 过滤后列表滚动 12 格正常换行，工作集 121MB，无卡顿/崩溃。侧栏只有固定分类 chips 与「有使用」列表（默认 10、更多 200），30k 不改变 chip 行数。截图 `tags30k_initial.png`、`tags30k_search_exact.png`、`tags30k_search_broad.png`、`tags30k_scrolled2.png`，日志 `tags30k_walk.log`。
+- 发现并修复（2026-11-04）：去重页评审区头部在 1024 逻辑宽下 4 个按钮横向溢出（最大 399px），1200 逻辑宽仍溢出 2 个（最大 135px）。`dedup.rs` 头部改为 `detail_width < 720px` 时纵向布局、标题截断、按钮换行；修复后 1024/1200 均 `h-overflow=0`，截图 `重复项_*.png` 已重采。
+- 仍未验：1440/1920 逻辑宽（副屏逻辑宽仅 1280，需改 DPI 或占用主屏）；Esc 分层除「查看图片→返回」外的其它路径；F-011/F-020/F-025/F-067 回归；查看器/对话框/命令面板/Toast 截图；侧栏宽度拖拽。以上不写成通过。
+
 ## F-071 活动栏与标题栏控制收敛
 
 > 2026-11-02 用户截图与口述登记；状态「实现中」：活动栏/标题栏已收敛，待补完整 UI 验收。这是明确的小范围布局调整，不涉及主图库/查看器布局。
@@ -464,7 +478,13 @@
   - 后台自验结果（**全部不建窗、不抢前台**）：`cargo check --workspace` 通过；`cargo test` 213 通过 / 1 既有失败（Immich 断连，core 源码本轮仅增一个方法）/ 4 忽略；`cargo check --features frame-profiler` 通过（5m46s，取证档可编译）；`check_backlog_docs.sh` 通过；`check_ui_invariants.py` PASS（16 处按钮 / 6 处失败分支 / 18 个键位）；`check_theme_contrast.py` PASS（亮暗各 17 个正文配对全部 ≥4.5:1，最低 light `fg_subtle/sunken` 5.14:1；5 个 alpha 字段未参与，且是 token 设计值而非渲染实测）；`build_portable.ps1 -ValidateOnly` 通过（LGPL、无 GPL、文件齐全）；headless 冒烟退出码 0 —— `KANALIB_HEADLESS` 在 GPUI 启动前 return，15 张示例库产出 `headless scan finished`、`dedup summary`、4 条 `search metrics`、3 条 `similar metrics` 与 `scan metrics` JSONL（`thumb_errors:1` 是示例库故意放的损坏 AVIF）。headless 用的是既有 release 二进制，验证 core 扫描/搜索/相似链路，与 UI 改动无关。
   - 100k 性能回归：后台重新启动 `scripts/generate_stress_library.py` 生成 100k 合成库，10m51s 只到 21604 张（约 21.6%），按用户「往后放」的要求停止该长任务（部分文件留在被 gitignore 的 `.kanalib/stress_100k/`，未清理）。100k 冷导入基线 42.3min、滚动帧率/`present p99`/峰值内存在失焦时不记录（见 `docs/PLAN.md`），本轮未重跑；15 张示例库的搜索 p95 只证明链路可跑，**不能与 100k 基线比较**。
   - 明确往后放（需用户手动 / 前台窗口）：焦点环与 Tab 顺序观感、1440/1920 与浮层/查看器截图基线、真实 GUI/UIA 弹窗菜单与悬停验收、渲染后 WCAG 实测、帧率 present p99（窗口失焦即作废）、100k 滚动内存/冷导入、IME/拖放/OneDrive/HEIC/RAW/广色域样本。100k 库生成与 headless 冷导入属「后台可跑但耗时」，不属手动验收，仅因本轮时长未做。
-- 剩余：error 的通用重试入口（需方案）、组件状态其余示例（hover/focus/pressed/selected 一致性）、设置页字段/对话框、渲染后可访问性实测、截图基线与 UIA 验收、100k 全量性能回归；项目侧 UI 文案整体未引入 i18n（属体系决策，待确认）；vendor 侧仍有硬编码英文的组件（视频控制/字幕等）待接入对应界面时再收 —— 已核实 Kanalib 实际用到的组件英文默认值均被业务侧覆盖；F-070 方案 A「上下文侧栏」（设置页仍显示资源管理器侧栏）仍未落地且方案待定。
+- GUI 基线更新与窄宽修复（2026-11-04，副屏）：
+  - 重新采集图库/重复项/标签/设置 × 亮暗 × 1024/1200 逻辑宽共 16 张，水平越界审计全部 0；新基线已包含 F-070 四种上下文侧栏（`.kanalib/verify_f070/`）。
+  - 首次在 10k 数据上发现去重页评审区头部窄宽溢出：1024 逻辑宽 4 个按钮越界（最大 399px）、1200 逻辑宽 2 个（最大 135px）；修复 `dedup.rs` 评审区头部为窄宽纵向布局 + 标题截断 + 按钮 `flex_wrap`，复测两尺寸均 0。证据 `.kanalib/verify_f070/重复项_*.png`。
+  - UIA 名称抽查：活动栏、设置 15 锚点、标签搜索/chips/行内动作、去重评审按钮、溢出菜单项均可读；设置页选中锚点有可见焦点环。
+  - 键盘 Tab 遍历修复（2026-11-04 续）：根视图原先没有 Ely `FocusScope`，Tab/Shift-Tab 的 `ElyFocus` 绑定不生效，`.tab_index(0)` 停靠点全部键盘不可达。现在根视图包 `FocusScope::new(&self.root_focus).root().node("kanalib-root-focus", Role::Group, "Kanalib", None)`（无元素 id 的根会让 FocusNext 冒泡分发断掉）；`check_ui_invariants.py` 新增第 6 项断言。副屏实测设置页/标签页 Tab 顺序正确、焦点环可见；Shift+Tab 未单独注入验证。
+  - 回归（2026-11-04）：`cargo check --workspace` 通过；`cargo test -p kanalib-ui -p kanalib` UI 71 + bin 6 通过；`cargo test` 214 通过 / 0 失败 / 4 忽略（上一轮既有的 Immich 断连失败本轮未复现，按环境差异记录，不写成已修复）。
+- 剩余：error 的通用重试入口（需方案）、组件状态其余示例（hover/focus/pressed/selected 一致性）、设置页字段/对话框、渲染后可访问性实测、1440/1920 与浮层截图基线、Shift+Tab 与焦点全遍历、tooltip/loading 视觉验收、100k 全量性能回归；项目侧 UI 文案整体未引入 i18n（属体系决策，待确认）；vendor 侧仍有硬编码英文的组件（视频控制/字幕等）待接入对应界面时再收 —— 已核实 Kanalib 实际用到的组件英文默认值均被业务侧覆盖；F-070 方案 A 已落地并完成副屏 GUI 验收（四种侧栏、锚点、单搜索、折叠隔离），不再列为待定。
 
 ## F-074 查看器默认加载原图
 
