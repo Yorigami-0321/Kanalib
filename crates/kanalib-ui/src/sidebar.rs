@@ -638,511 +638,521 @@ impl KanalibApp {
         panel_width: f32,
         colors: UiColors,
     ) -> impl IntoElement + use<> {
-        let state = self.state.clone();
-        let this_dedup = this.clone();
-        let library = screen == Screen::Library;
-        let mut body = div()
-            .id("sidebar-body")
-            .flex_1()
-            .min_h(px(0.))
-            .overflow_y_scroll()
-            .px(px(SPACE_2))
-            .pb(px(SPACE_3))
-            .flex()
-            .flex_col()
-            .gap(px(SPACE_HALF));
+        let ctx = SidebarContext::from_screen(screen);
+        // F-070 方案 A：资源管理器侧栏 body 独立成一段；S3/S4 为其它上下文提供各自的 body。
+        let library_body = || {
+            let state = self.state.clone();
+            let this_dedup = this.clone();
+            let library = screen == Screen::Library;
+            let mut body = div()
+                .id("sidebar-body")
+                .flex_1()
+                .min_h(px(0.))
+                .overflow_y_scroll()
+                .px(px(SPACE_2))
+                .pb(px(SPACE_3))
+                .flex()
+                .flex_col()
+                .gap(px(SPACE_HALF));
 
-        body = body.child(self.sidebar_section_header(
-            "sources",
-            "来源",
-            Some(roots.len()),
-            this,
-            colors,
-        ));
-        if self.sidebar_section_open("sources") {
-            if roots.is_empty() {
-                body = body.child(
-                    div()
-                        .px(px(8.))
-                        .pb(px(4.))
-                        .text_xs()
-                        .text_color(colors.subtle)
-                        .child("还没有图库文件夹"),
-                );
-            } else {
-                for root in roots {
-                    let count = counts
-                        .sources
-                        .iter()
-                        .find(|(path, _)| path == root)
-                        .map(|(_, count)| *count)
-                        .unwrap_or(0);
-                    let status = self
-                        .source_statuses
-                        .iter()
-                        .find(|status| &status.root == root)
-                        .cloned();
-                    body = body.child(source_row(
-                        SharedString::from(format!("filter-source-{}", root.display())),
-                        root.clone(),
-                        source_label(root, source_aliases),
-                        count,
-                        library && filter == &Filter::Source(root.clone()),
-                        status,
-                        this.clone(),
-                        colors,
-                    ));
-                }
-            }
-        }
-
-        body = body.child(self.sidebar_section_header(
-            "filters",
-            "筛选",
-            Some(counts.total),
-            this,
-            colors,
-        ));
-        if self.sidebar_section_open("filters") {
-            body = body.child(filter_row(
-                SharedString::from("filter-all"),
-                "全部图片".into(),
-                counts.total,
-                library && *filter == Filter::All,
-                Filter::All,
-                state.clone(),
-                this.clone(),
-                colors,
-            ));
-            body = body.child(filter_row(
-                SharedString::from("filter-untagged"),
-                "未打标".into(),
-                counts.untagged,
-                library && *filter == Filter::Untagged,
-                Filter::Untagged,
-                state.clone(),
-                this.clone(),
-                colors,
-            ));
-            body = body.child(filter_row(
-                SharedString::from("filter-favorites"),
-                "收藏".into(),
-                counts.favorites,
-                library && *filter == Filter::Favorites,
-                Filter::Favorites,
-                state.clone(),
-                this.clone(),
-                colors,
-            ));
-            if counts.failed > 0 {
-                body = body.child(filter_row(
-                    SharedString::from("filter-failed"),
-                    "失败".into(),
-                    counts.failed,
-                    library && filter == &Filter::Failed,
-                    Filter::Failed,
-                    state.clone(),
-                    this.clone(),
-                    colors,
-                ));
-            }
-            if counts.damaged > 0 {
-                body = body.child(filter_row(
-                    SharedString::from("filter-damaged"),
-                    "损坏".into(),
-                    counts.damaged,
-                    library && filter == &Filter::Damaged,
-                    Filter::Damaged,
-                    state.clone(),
-                    this.clone(),
-                    colors,
-                ));
-            }
-        }
-
-        if !counts.ratings.is_empty() {
             body = body.child(self.sidebar_section_header(
-                "ratings",
-                "评级",
-                Some(counts.ratings.len()),
+                "sources",
+                "来源",
+                Some(roots.len()),
                 this,
                 colors,
             ));
-            if self.sidebar_section_open("ratings") {
-                for (rating, count) in counts.ratings.iter() {
-                    body = body.child(filter_row(
-                        SharedString::from(format!("filter-rating-{rating}")),
-                        format!("评级 {rating}"),
-                        *count,
-                        library && filter == &Filter::Rating(rating.clone()),
-                        Filter::Rating(rating.clone()),
-                        state.clone(),
-                        this.clone(),
-                        colors,
-                    ));
-                }
-            }
-        }
-
-        if !counts.groups.is_empty() {
-            body = body.child(self.sidebar_section_header(
-                "groups",
-                "自动归类",
-                Some(counts.groups.len()),
-                this,
-                colors,
-            ));
-            if self.sidebar_section_open("groups") {
-                for (group, count) in counts.groups.iter() {
-                    body = body.child(filter_row(
-                        SharedString::from(format!("filter-group-{group}")),
-                        group.clone(),
-                        *count,
-                        library && filter == &Filter::Group(group.clone()),
-                        Filter::Group(group.clone()),
-                        state.clone(),
-                        this.clone(),
-                        colors,
-                    ));
-                }
-            }
-        }
-
-        // F-070：标签页打开时侧栏不再渲染第二套标签搜索/分类；标签管理入口统一由活动栏提供。
-        if screen != Screen::Tags {
-            let used_tag_count = tag_vocab
-                .iter()
-                .filter(|tag| tag.count > 0 && !blocked_tags.contains(&tag.name))
-                .count();
-            let blocked_tag_count = tag_vocab
-                .iter()
-                .filter(|tag| blocked_tags.contains(&tag.name))
-                .count();
-            let this_tag_sort = this.clone();
-            let this_tag_manage = this.clone();
-            body = body.child(
-                div()
-                    .flex()
-                    .items_center()
-                    .child(self.sidebar_section_header(
-                        "tags",
-                        "标签",
-                        Some(used_tag_count),
-                        this,
-                        colors,
-                    ))
-                    .child(
-                        IconButton::new("tag-pane-sort", IconName::ArrowDownUp)
-                            .size(ControlSize::Sm)
-                            .tooltip(if self.tag_pane_sort_name {
-                                "按使用次数排序"
-                            } else {
-                                "按名称排序"
-                            })
-                            .on_click(move |_, _, cx| {
-                                let _ = this_tag_sort.update(cx, |app, cx| {
-                                    app.tag_pane_sort_name = !app.tag_pane_sort_name;
-                                    cx.notify();
-                                });
-                            }),
-                    )
-                    .child(
-                        IconButton::new("tag-pane-manage", IconName::SlidersHorizontal)
-                            .size(ControlSize::Sm)
-                            .tooltip("标签管理")
-                            .on_click(move |_, _, cx| {
-                                let _ = this_tag_manage.update(cx, |app, cx| {
-                                    app.open_tag_manager(cx);
-                                });
-                            }),
-                    ),
-            );
-            body = body.child(
-                div()
-                    .px(px(SPACE_2))
-                    .pb(px(SPACE_1))
-                    .text_xs()
-                    .text_color(colors.subtle)
-                    .child(format!(
-                        "有使用 {used_tag_count} / 共 {} / 已屏蔽 {blocked_tag_count}",
-                        tag_vocab.len()
-                    )),
-            );
-            if self.sidebar_section_open("tags") {
-                body = body.child(
-                    div().px(px(8.)).pb(px(4.)).child(
-                        Input::new(tag_search)
-                            .clearable()
-                            .least("筛选标签（有使用）"),
-                    ),
-                );
-                let mut category_chips = div().flex().flex_wrap().gap(px(3.)).px(px(8.)).pb(px(4.));
-                for (key, label) in [
-                    ("general", "通用"),
-                    ("character", "角色"),
-                    ("copyright", "作品"),
-                    ("style", "风格"),
-                    ("meta", "元数据"),
-                    ("manual", "手工"),
-                ] {
-                    let this = this.clone();
-                    let active = self.tag_pane_category == key;
-                    category_chips = category_chips.child(
-                        div()
-                            .id(SharedString::from(format!("tag-category-{key}")))
-                            .px(px(6.))
-                            .py(px(2.))
-                            .rounded(px(RADIUS_SM))
-                            .text_xs()
-                            .cursor_pointer()
-                            .text_color(if active { colors.fg } else { colors.muted })
-                            .when(active, |chip| chip.bg(colors.selection))
-                            .hover(move |chip| chip.bg(colors.hover))
-                            .on_click(move |_, _, cx| {
-                                let _ = this.update(cx, |app, cx| {
-                                    app.tag_pane_category = key.to_string();
-                                    app.tag_pane_expanded = false;
-                                    cx.notify();
-                                });
-                            })
-                            .child(label),
-                    );
-                }
-                body = body.child(category_chips);
-
-                let needle = tag_query.trim().to_lowercase();
-                let mut pane_tags = tag_vocab
-                    .iter()
-                    .filter(|tag| {
-                        tag.count > 0
-                            && tag.category == self.tag_pane_category
-                            && !blocked_tags.contains(&tag.name)
-                            && (needle.is_empty() || tag.name.to_lowercase().contains(&needle))
-                    })
-                    .collect::<Vec<_>>();
-                if self.tag_pane_sort_name {
-                    pane_tags.sort_by(|a, b| a.name.cmp(&b.name));
-                } else {
-                    pane_tags
-                        .sort_by(|a, b| b.count.cmp(&a.count).then_with(|| a.name.cmp(&b.name)));
-                }
-                let total = pane_tags.len();
-                let limit = if self.tag_pane_expanded { 200 } else { 10 };
-                pane_tags.truncate(limit);
-                if pane_tags.is_empty() {
+            if self.sidebar_section_open("sources") {
+                if roots.is_empty() {
                     body = body.child(
                         div()
                             .px(px(8.))
                             .pb(px(4.))
                             .text_xs()
                             .text_color(colors.subtle)
-                            .child(if needle.is_empty() {
-                                "这个类别还没有标签"
-                            } else {
-                                "没有匹配的标签"
-                            }),
+                            .child("还没有图库文件夹"),
                     );
-                }
-                for tag in pane_tags {
-                    let name = tag.name.clone();
-                    let display_name = name.clone();
-                    let count = tag.count;
-                    let active = library && filter == &Filter::Tag(name.clone());
-                    let this_click = this.clone();
-                    let search_click = search.clone();
-                    let mut row = div()
-                        .id(SharedString::from(format!("filter-tag-{name}")))
-                        .tab_index(0)
-                        .focus(move |style| style.bg(colors.hover))
-                        .role(Role::Button)
-                        .aria_label(SharedString::from(format!("#{name}")))
-                        .flex()
-                        .items_center()
-                        .justify_between()
-                        .px(px(8.))
-                        .py(px(5.))
-                        .rounded(px(RADIUS_SM))
-                        .cursor_pointer()
-                        .hover(move |row| row.bg(colors.hover));
-                    if active {
-                        row = row.bg(colors.selection);
+                } else {
+                    for root in roots {
+                        let count = counts
+                            .sources
+                            .iter()
+                            .find(|(path, _)| path == root)
+                            .map(|(_, count)| *count)
+                            .unwrap_or(0);
+                        let status = self
+                            .source_statuses
+                            .iter()
+                            .find(|status| &status.root == root)
+                            .cloned();
+                        body = body.child(source_row(
+                            SharedString::from(format!("filter-source-{}", root.display())),
+                            root.clone(),
+                            source_label(root, source_aliases),
+                            count,
+                            library && filter == &Filter::Source(root.clone()),
+                            status,
+                            this.clone(),
+                            colors,
+                        ));
                     }
-                    body = body.child(
-                        row.on_click(move |event, _, cx| {
-                            let modifiers = match event {
-                                ClickEvent::Mouse(event) => event.down.modifiers,
-                                ClickEvent::Keyboard(_) | ClickEvent::Touch(_) => {
-                                    Modifiers::default()
-                                }
-                            };
-                            if modifiers.secondary(cx) || modifiers.shift {
-                                let current = search_click.read(cx).text().to_string();
-                                let next = if current.trim().is_empty() {
-                                    format!("tag:{name}")
-                                } else {
-                                    format!("{current} tag:{name}")
-                                };
-                                search_click.update(cx, |input, cx| input.set_text(next, cx));
-                                let _ = this_click.update(cx, |app, cx| {
-                                    app.screen = Screen::Library;
-                                    app.tag_return_pending = false;
-                                    app.dedup_confirm = None;
-                                    cx.notify();
-                                });
-                            } else {
-                                let tag = name.clone();
-                                let _ = this_click.update(cx, |app, cx| {
-                                    app.set_filter(Filter::Tag(tag), cx);
-                                    app.dedup_confirm = None;
-                                });
-                            }
-                        })
-                        .child(
-                            div()
-                                .flex_1()
-                                .min_w(px(0.))
-                                .truncate()
-                                .text_xs()
-                                .text_color(colors.fg)
-                                .child(format!("#{display_name}")),
-                        )
-                        .child(
-                            div()
-                                .flex_none()
-                                .text_xs()
-                                .text_color(colors.subtle)
-                                .child(count.to_string()),
-                        ),
-                    );
-                }
-                if total > limit {
-                    let this_more = this.clone();
-                    body = body.child(
-                        div().px(px(8.)).pb(px(4.)).child(
-                            Button::new(
-                                "tag-pane-more",
-                                if self.tag_pane_expanded {
-                                    "收起".to_string()
-                                } else {
-                                    format!("查看更多（{total}）")
-                                },
-                            )
-                            .size(ControlSize::Sm)
-                            .on_click(move |_, _, cx| {
-                                let _ = this_more.update(cx, |app, cx| {
-                                    app.tag_pane_expanded = !app.tag_pane_expanded;
-                                    cx.notify();
-                                });
-                            }),
-                        ),
-                    );
                 }
             }
-        }
 
-        let this_save_search = this.clone();
-        body = body.child(
-            div()
-                .flex()
-                .items_center()
-                .child(self.sidebar_section_header(
-                    "collections",
-                    "智能集合",
-                    Some(saved_searches.len()),
-                    this,
-                    colors,
-                ))
-                .child(
-                    IconButton::new("save-saved-search", IconName::Plus)
-                        .size(ControlSize::Sm)
-                        .tooltip("保存当前视图为智能集合")
-                        .on_click(move |_, _, cx| {
-                            let _ = this_save_search.update(cx, |app, cx| {
-                                app.save_search_open = true;
-                                app.focus_grid_pending = false;
-                                cx.notify();
-                            });
-                        }),
-                ),
-        );
-        if self.sidebar_section_open("collections") {
-            if saved_searches.is_empty() {
-                body = body.child(
-                    div()
-                        .px(px(8.))
-                        .pb(px(4.))
-                        .text_xs()
-                        .text_color(colors.subtle)
-                        .child("保存筛选、搜索与排序，随时回来"),
-                );
-            } else {
-                for saved in saved_searches {
-                    body = body.child(self.saved_search_row(saved, search, this, colors));
-                }
-            }
-        }
-
-        // 手动相册：独立分区 id `albums`，与上面的智能集合（`collections`）是两套概念。
-        let albums = self.albums_snapshot();
-        let selected_count = self.selected_count();
-        let this_new_album = this.clone();
-        body = body.child(
-            div()
-                .flex()
-                .items_center()
-                .child(self.sidebar_section_header(
-                    "albums",
-                    "相册",
-                    Some(albums.len()),
-                    this,
-                    colors,
-                ))
-                .child(
-                    IconButton::new("new-album", IconName::FolderPlus)
-                        .size(ControlSize::Sm)
-                        .tooltip("新建相册")
-                        .on_click(move |_, _, cx| {
-                            let _ = this_new_album.update(cx, |app, cx| {
-                                app.open_org_dialog(OrgDialog::NewAlbum, cx);
-                            });
-                        }),
-                ),
-        );
-        if self.sidebar_section_open("albums") {
-            if albums.is_empty() {
-                body = body.child(
-                    div()
-                        .px(px(8.))
-                        .pb(px(4.))
-                        .text_xs()
-                        .text_color(colors.subtle)
-                        .child("新建相册把选中图片归档，不移动磁盘文件"),
-                );
-            } else {
-                for album in &albums {
-                    body = body.child(self.album_row(album, selected_count, this, colors));
-                }
-            }
-        }
-
-        body = body.child(self.sidebar_section_header(
-            "organize",
-            "整理",
-            Some(dedup_pending),
-            this,
-            colors,
-        ));
-        if self.sidebar_section_open("organize") {
-            body = body.child(dedup_row(
-                SharedString::from("dedup-entry"),
-                "重复项",
-                dedup_pending.to_string(),
-                screen == Screen::Duplicates,
-                GroupKind::Exact,
-                this_dedup,
+            body = body.child(self.sidebar_section_header(
+                "filters",
+                "筛选",
+                Some(counts.total),
+                this,
                 colors,
             ));
-        }
+            if self.sidebar_section_open("filters") {
+                body = body.child(filter_row(
+                    SharedString::from("filter-all"),
+                    "全部图片".into(),
+                    counts.total,
+                    library && *filter == Filter::All,
+                    Filter::All,
+                    state.clone(),
+                    this.clone(),
+                    colors,
+                ));
+                body = body.child(filter_row(
+                    SharedString::from("filter-untagged"),
+                    "未打标".into(),
+                    counts.untagged,
+                    library && *filter == Filter::Untagged,
+                    Filter::Untagged,
+                    state.clone(),
+                    this.clone(),
+                    colors,
+                ));
+                body = body.child(filter_row(
+                    SharedString::from("filter-favorites"),
+                    "收藏".into(),
+                    counts.favorites,
+                    library && *filter == Filter::Favorites,
+                    Filter::Favorites,
+                    state.clone(),
+                    this.clone(),
+                    colors,
+                ));
+                if counts.failed > 0 {
+                    body = body.child(filter_row(
+                        SharedString::from("filter-failed"),
+                        "失败".into(),
+                        counts.failed,
+                        library && filter == &Filter::Failed,
+                        Filter::Failed,
+                        state.clone(),
+                        this.clone(),
+                        colors,
+                    ));
+                }
+                if counts.damaged > 0 {
+                    body = body.child(filter_row(
+                        SharedString::from("filter-damaged"),
+                        "损坏".into(),
+                        counts.damaged,
+                        library && filter == &Filter::Damaged,
+                        Filter::Damaged,
+                        state.clone(),
+                        this.clone(),
+                        colors,
+                    ));
+                }
+            }
+
+            if !counts.ratings.is_empty() {
+                body = body.child(self.sidebar_section_header(
+                    "ratings",
+                    "评级",
+                    Some(counts.ratings.len()),
+                    this,
+                    colors,
+                ));
+                if self.sidebar_section_open("ratings") {
+                    for (rating, count) in counts.ratings.iter() {
+                        body = body.child(filter_row(
+                            SharedString::from(format!("filter-rating-{rating}")),
+                            format!("评级 {rating}"),
+                            *count,
+                            library && filter == &Filter::Rating(rating.clone()),
+                            Filter::Rating(rating.clone()),
+                            state.clone(),
+                            this.clone(),
+                            colors,
+                        ));
+                    }
+                }
+            }
+
+            if !counts.groups.is_empty() {
+                body = body.child(self.sidebar_section_header(
+                    "groups",
+                    "自动归类",
+                    Some(counts.groups.len()),
+                    this,
+                    colors,
+                ));
+                if self.sidebar_section_open("groups") {
+                    for (group, count) in counts.groups.iter() {
+                        body = body.child(filter_row(
+                            SharedString::from(format!("filter-group-{group}")),
+                            group.clone(),
+                            *count,
+                            library && filter == &Filter::Group(group.clone()),
+                            Filter::Group(group.clone()),
+                            state.clone(),
+                            this.clone(),
+                            colors,
+                        ));
+                    }
+                }
+            }
+
+            // F-070：标签页打开时侧栏不再渲染第二套标签搜索/分类；标签管理入口统一由活动栏提供。
+            if screen != Screen::Tags {
+                let used_tag_count = tag_vocab
+                    .iter()
+                    .filter(|tag| tag.count > 0 && !blocked_tags.contains(&tag.name))
+                    .count();
+                let blocked_tag_count = tag_vocab
+                    .iter()
+                    .filter(|tag| blocked_tags.contains(&tag.name))
+                    .count();
+                let this_tag_sort = this.clone();
+                let this_tag_manage = this.clone();
+                body = body.child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .child(self.sidebar_section_header(
+                            "tags",
+                            "标签",
+                            Some(used_tag_count),
+                            this,
+                            colors,
+                        ))
+                        .child(
+                            IconButton::new("tag-pane-sort", IconName::ArrowDownUp)
+                                .size(ControlSize::Sm)
+                                .tooltip(if self.tag_pane_sort_name {
+                                    "按使用次数排序"
+                                } else {
+                                    "按名称排序"
+                                })
+                                .on_click(move |_, _, cx| {
+                                    let _ = this_tag_sort.update(cx, |app, cx| {
+                                        app.tag_pane_sort_name = !app.tag_pane_sort_name;
+                                        cx.notify();
+                                    });
+                                }),
+                        )
+                        .child(
+                            IconButton::new("tag-pane-manage", IconName::SlidersHorizontal)
+                                .size(ControlSize::Sm)
+                                .tooltip("标签管理")
+                                .on_click(move |_, _, cx| {
+                                    let _ = this_tag_manage.update(cx, |app, cx| {
+                                        app.open_tag_manager(cx);
+                                    });
+                                }),
+                        ),
+                );
+                body = body.child(
+                    div()
+                        .px(px(SPACE_2))
+                        .pb(px(SPACE_1))
+                        .text_xs()
+                        .text_color(colors.subtle)
+                        .child(format!(
+                            "有使用 {used_tag_count} / 共 {} / 已屏蔽 {blocked_tag_count}",
+                            tag_vocab.len()
+                        )),
+                );
+                if self.sidebar_section_open("tags") {
+                    body = body.child(
+                        div().px(px(8.)).pb(px(4.)).child(
+                            Input::new(tag_search)
+                                .clearable()
+                                .least("筛选标签（有使用）"),
+                        ),
+                    );
+                    let mut category_chips = div().flex().flex_wrap().gap(px(3.)).px(px(8.)).pb(px(4.));
+                    for (key, label) in [
+                        ("general", "通用"),
+                        ("character", "角色"),
+                        ("copyright", "作品"),
+                        ("style", "风格"),
+                        ("meta", "元数据"),
+                        ("manual", "手工"),
+                    ] {
+                        let this = this.clone();
+                        let active = self.tag_pane_category == key;
+                        category_chips = category_chips.child(
+                            div()
+                                .id(SharedString::from(format!("tag-category-{key}")))
+                                .px(px(6.))
+                                .py(px(2.))
+                                .rounded(px(RADIUS_SM))
+                                .text_xs()
+                                .cursor_pointer()
+                                .text_color(if active { colors.fg } else { colors.muted })
+                                .when(active, |chip| chip.bg(colors.selection))
+                                .hover(move |chip| chip.bg(colors.hover))
+                                .on_click(move |_, _, cx| {
+                                    let _ = this.update(cx, |app, cx| {
+                                        app.tag_pane_category = key.to_string();
+                                        app.tag_pane_expanded = false;
+                                        cx.notify();
+                                    });
+                                })
+                                .child(label),
+                        );
+                    }
+                    body = body.child(category_chips);
+
+                    let needle = tag_query.trim().to_lowercase();
+                    let mut pane_tags = tag_vocab
+                        .iter()
+                        .filter(|tag| {
+                            tag.count > 0
+                                && tag.category == self.tag_pane_category
+                                && !blocked_tags.contains(&tag.name)
+                                && (needle.is_empty() || tag.name.to_lowercase().contains(&needle))
+                        })
+                        .collect::<Vec<_>>();
+                    if self.tag_pane_sort_name {
+                        pane_tags.sort_by(|a, b| a.name.cmp(&b.name));
+                    } else {
+                        pane_tags
+                            .sort_by(|a, b| b.count.cmp(&a.count).then_with(|| a.name.cmp(&b.name)));
+                    }
+                    let total = pane_tags.len();
+                    let limit = if self.tag_pane_expanded { 200 } else { 10 };
+                    pane_tags.truncate(limit);
+                    if pane_tags.is_empty() {
+                        body = body.child(
+                            div()
+                                .px(px(8.))
+                                .pb(px(4.))
+                                .text_xs()
+                                .text_color(colors.subtle)
+                                .child(if needle.is_empty() {
+                                    "这个类别还没有标签"
+                                } else {
+                                    "没有匹配的标签"
+                                }),
+                        );
+                    }
+                    for tag in pane_tags {
+                        let name = tag.name.clone();
+                        let display_name = name.clone();
+                        let count = tag.count;
+                        let active = library && filter == &Filter::Tag(name.clone());
+                        let this_click = this.clone();
+                        let search_click = search.clone();
+                        let mut row = div()
+                            .id(SharedString::from(format!("filter-tag-{name}")))
+                            .tab_index(0)
+                            .focus(move |style| style.bg(colors.hover))
+                            .role(Role::Button)
+                            .aria_label(SharedString::from(format!("#{name}")))
+                            .flex()
+                            .items_center()
+                            .justify_between()
+                            .px(px(8.))
+                            .py(px(5.))
+                            .rounded(px(RADIUS_SM))
+                            .cursor_pointer()
+                            .hover(move |row| row.bg(colors.hover));
+                        if active {
+                            row = row.bg(colors.selection);
+                        }
+                        body = body.child(
+                            row.on_click(move |event, _, cx| {
+                                let modifiers = match event {
+                                    ClickEvent::Mouse(event) => event.down.modifiers,
+                                    ClickEvent::Keyboard(_) | ClickEvent::Touch(_) => {
+                                        Modifiers::default()
+                                    }
+                                };
+                                if modifiers.secondary(cx) || modifiers.shift {
+                                    let current = search_click.read(cx).text().to_string();
+                                    let next = if current.trim().is_empty() {
+                                        format!("tag:{name}")
+                                    } else {
+                                        format!("{current} tag:{name}")
+                                    };
+                                    search_click.update(cx, |input, cx| input.set_text(next, cx));
+                                    let _ = this_click.update(cx, |app, cx| {
+                                        app.screen = Screen::Library;
+                                        app.tag_return_pending = false;
+                                        app.dedup_confirm = None;
+                                        cx.notify();
+                                    });
+                                } else {
+                                    let tag = name.clone();
+                                    let _ = this_click.update(cx, |app, cx| {
+                                        app.set_filter(Filter::Tag(tag), cx);
+                                        app.dedup_confirm = None;
+                                    });
+                                }
+                            })
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w(px(0.))
+                                    .truncate()
+                                    .text_xs()
+                                    .text_color(colors.fg)
+                                    .child(format!("#{display_name}")),
+                            )
+                            .child(
+                                div()
+                                    .flex_none()
+                                    .text_xs()
+                                    .text_color(colors.subtle)
+                                    .child(count.to_string()),
+                            ),
+                        );
+                    }
+                    if total > limit {
+                        let this_more = this.clone();
+                        body = body.child(
+                            div().px(px(8.)).pb(px(4.)).child(
+                                Button::new(
+                                    "tag-pane-more",
+                                    if self.tag_pane_expanded {
+                                        "收起".to_string()
+                                    } else {
+                                        format!("查看更多（{total}）")
+                                    },
+                                )
+                                .size(ControlSize::Sm)
+                                .on_click(move |_, _, cx| {
+                                    let _ = this_more.update(cx, |app, cx| {
+                                        app.tag_pane_expanded = !app.tag_pane_expanded;
+                                        cx.notify();
+                                    });
+                                }),
+                            ),
+                        );
+                    }
+                }
+            }
+
+            let this_save_search = this.clone();
+            body = body.child(
+                div()
+                    .flex()
+                    .items_center()
+                    .child(self.sidebar_section_header(
+                        "collections",
+                        "智能集合",
+                        Some(saved_searches.len()),
+                        this,
+                        colors,
+                    ))
+                    .child(
+                        IconButton::new("save-saved-search", IconName::Plus)
+                            .size(ControlSize::Sm)
+                            .tooltip("保存当前视图为智能集合")
+                            .on_click(move |_, _, cx| {
+                                let _ = this_save_search.update(cx, |app, cx| {
+                                    app.save_search_open = true;
+                                    app.focus_grid_pending = false;
+                                    cx.notify();
+                                });
+                            }),
+                    ),
+            );
+            if self.sidebar_section_open("collections") {
+                if saved_searches.is_empty() {
+                    body = body.child(
+                        div()
+                            .px(px(8.))
+                            .pb(px(4.))
+                            .text_xs()
+                            .text_color(colors.subtle)
+                            .child("保存筛选、搜索与排序，随时回来"),
+                    );
+                } else {
+                    for saved in saved_searches {
+                        body = body.child(self.saved_search_row(saved, search, this, colors));
+                    }
+                }
+            }
+
+            // 手动相册：独立分区 id `albums`，与上面的智能集合（`collections`）是两套概念。
+            let albums = self.albums_snapshot();
+            let selected_count = self.selected_count();
+            let this_new_album = this.clone();
+            body = body.child(
+                div()
+                    .flex()
+                    .items_center()
+                    .child(self.sidebar_section_header(
+                        "albums",
+                        "相册",
+                        Some(albums.len()),
+                        this,
+                        colors,
+                    ))
+                    .child(
+                        IconButton::new("new-album", IconName::FolderPlus)
+                            .size(ControlSize::Sm)
+                            .tooltip("新建相册")
+                            .on_click(move |_, _, cx| {
+                                let _ = this_new_album.update(cx, |app, cx| {
+                                    app.open_org_dialog(OrgDialog::NewAlbum, cx);
+                                });
+                            }),
+                    ),
+            );
+            if self.sidebar_section_open("albums") {
+                if albums.is_empty() {
+                    body = body.child(
+                        div()
+                            .px(px(8.))
+                            .pb(px(4.))
+                            .text_xs()
+                            .text_color(colors.subtle)
+                            .child("新建相册把选中图片归档，不移动磁盘文件"),
+                    );
+                } else {
+                    for album in &albums {
+                        body = body.child(self.album_row(album, selected_count, this, colors));
+                    }
+                }
+            }
+
+            body = body.child(self.sidebar_section_header(
+                "organize",
+                "整理",
+                Some(dedup_pending),
+                this,
+                colors,
+            ));
+            if self.sidebar_section_open("organize") {
+                body = body.child(dedup_row(
+                    SharedString::from("dedup-entry"),
+                    "重复项",
+                    dedup_pending.to_string(),
+                    screen == Screen::Duplicates,
+                    GroupKind::Exact,
+                    this_dedup,
+                    colors,
+                ));
+            }
+            body.into_any_element()
+        };
+        let body: AnyElement = match ctx {
+            SidebarContext::Library => library_body(),
+            // S2：其余上下文暂沿用资源管理器侧栏，零视觉变化；S3/S4 替换这里。
+            _ => library_body(),
+        };
 
         let screen_title = match screen {
             Screen::Library => "资源管理器",
