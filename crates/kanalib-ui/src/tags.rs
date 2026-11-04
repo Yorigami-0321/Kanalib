@@ -502,15 +502,12 @@ impl KanalibApp {
     pub(crate) fn render_tags(
         &mut self,
         this: &Entity<Self>,
-        window: &mut Window,
         cx: &mut Context<Self>,
         width: Pixels,
+        search: Entity<TextInput>,
         blocked_tags: &HashSet<String>,
         colors: UiColors,
     ) -> impl IntoElement + use<> {
-        let search = window.use_keyed_state("tag-manager-search", cx, |window, cx| {
-            TextInput::new(window, cx).placeholder("搜索全部标签（含 0 使用/已屏蔽）")
-        });
         let query = search.read(cx).text().trim().to_lowercase();
         let tags = filter_tag_summaries(&self.tag_list, &query, self.tag_manager_filter);
         let filtered = {
@@ -527,66 +524,6 @@ impl KanalibApp {
             .count();
         let this_back = this.clone();
         let this_refresh = this.clone();
-        let filter_bar = {
-            let mut bar = div()
-                .px(px(SPACE_4))
-                .py(px(SPACE_1_5))
-                .flex()
-                .items_center()
-                .gap(px(SPACE_1))
-                .border_b_1()
-                .border_color(colors.border);
-            for filter in TagManagerFilter::ALL {
-                let count = match filter {
-                    TagManagerFilter::All => total,
-                    TagManagerFilter::Unused => unused,
-                    TagManagerFilter::LowFrequency => low_frequency,
-                    TagManagerFilter::AutoOnly => auto_only,
-                };
-                let this = this.clone();
-                let active = self.tag_manager_filter == filter;
-                bar = bar.child(filter_chip(
-                    SharedString::from(format!("tag-filter-{}", filter.slug())),
-                    format!("{} {}", filter.label(), count),
-                    active,
-                    move |_, _, cx| {
-                        let _ = this.update(cx, |app, cx| {
-                            app.tag_manager_filter = filter;
-                            app.tag_scroll.scroll_to_item(0, ScrollStrategy::Top);
-                            cx.notify();
-                        });
-                    },
-                ));
-            }
-            let mut sort_menu = Menu::new();
-            for sort in TagManagerSort::ALL {
-                let this = this.clone();
-                sort_menu = sort_menu.item(
-                    MenuItem::radio(sort.label(), self.tag_manager_sort == sort).on_click(
-                        move |_, cx| {
-                            let _ = this.update(cx, |app, cx| {
-                                app.tag_manager_sort = sort;
-                                app.tag_scroll.scroll_to_item(0, ScrollStrategy::Top);
-                                cx.notify();
-                            });
-                        },
-                    ),
-                );
-            }
-            bar.child(div().flex_1())
-                .child(
-                    div()
-                        .flex_none()
-                        .text_xs()
-                        .text_color(colors.subtle)
-                        .child("只排序/筛选展示，不会自动删除标签"),
-                )
-                .child(
-                    DropdownMenu::new("tag-manager-sort", "排序", sort_menu)
-                        .icon(IconName::ArrowDownUp)
-                        .variant(ButtonVariant::Ghost),
-                )
-        };
         let body: AnyElement = if filtered.is_empty() {
             let this_reset = this.clone();
             let search_reset = search.clone();
@@ -803,15 +740,6 @@ impl KanalibApp {
                             .items_center()
                             .gap(px(SPACE_1_5))
                             .child(
-                                div()
-                                    .w(px(260.))
-                                    .child(
-                                        Input::new(&search)
-                                            .clearable()
-                                            .least("搜索全部标签"),
-                                    ),
-                            )
-                            .child(
                                 Button::new("tags-refresh", "刷新")
                                     .icon(IconName::RefreshCw)
                                     .on_click(move |_, _, cx| {
@@ -833,7 +761,6 @@ impl KanalibApp {
                             ),
                     ),
             )
-            .child(filter_bar)
             .child(body)
     }
 }

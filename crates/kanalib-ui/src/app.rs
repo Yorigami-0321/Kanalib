@@ -839,6 +839,11 @@ impl Render for KanalibApp {
             TextInput::new(window, cx).placeholder("筛选标签（有使用）")
         });
         let tag_query = tag_search.read(cx).text().to_string();
+        // F-070 方案 A：标签管理搜索只创建一份，侧栏导航与标签页共用，避免两套状态。
+        let tag_manager_search =
+            window.use_keyed_state("tag-manager-search", cx, |window, cx| {
+                TextInput::new(window, cx).placeholder("搜索全部标签（含 0 使用/已屏蔽）")
+            });
         let sidebar: AnyElement = if self.show_sidebar {
             self.render_sidebar(
                 &this,
@@ -854,6 +859,7 @@ impl Render for KanalibApp {
                 &self.tag_vocab,
                 &tag_search,
                 &tag_query,
+                &tag_manager_search,
                 &search,
                 panel_width.as_f32(),
                 colors,
@@ -877,8 +883,15 @@ impl Render for KanalibApp {
             viewer
         } else if self.screen == Screen::Tags {
             let tags_width = (window_width - sidebar_width).max(px(640.));
-            self.render_tags(&this, window, cx, tags_width, &blocked_tags, colors)
-                .into_any_element()
+            self.render_tags(
+                &this,
+                cx,
+                tags_width,
+                tag_manager_search.clone(),
+                &blocked_tags,
+                colors,
+            )
+            .into_any_element()
         } else if self.screen == Screen::Settings {
             if !self.remote_sources.loaded {
                 self.refresh_remote_sources();

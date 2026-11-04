@@ -634,6 +634,7 @@ impl KanalibApp {
         tag_vocab: &[TagSummary],
         tag_search: &Entity<TextInput>,
         tag_query: &str,
+        tag_manager_search: &Entity<TextInput>,
         search: &Entity<TextInput>,
         panel_width: f32,
         colors: UiColors,
@@ -1148,19 +1149,106 @@ impl KanalibApp {
             }
             body.into_any_element()
         };
+        // F-070 方案 A：标签页的上下文侧栏接管搜索/筛选/排序，页内只留列表。
+        let tags_body = || {
+            let total = self.tag_list.len();
+            let (unused, low_frequency, auto_only) =
+                crate::tags::tag_manager_counts(&self.tag_list);
+            let blocked_count = self
+                .tag_list
+                .iter()
+                .filter(|tag| blocked_tags.contains(&tag.name))
+                .count();
+            let mut nav = div()
+                .id("sidebar-body")
+                .flex_1()
+                .min_h(px(0.))
+                .flex()
+                .flex_col()
+                .gap(px(SPACE_2))
+                .px(px(SPACE_2))
+                .py(px(SPACE_2))
+                .child(
+                    div().w_full().child(
+                        Input::new(tag_manager_search)
+                            .clearable()
+                            .least("搜索全部标签"),
+                    ),
+                )
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(colors.subtle)
+                        .child(format!(
+                            "共 {total} 个标签 · 0 使用 {unused} · 低频 {low_frequency} · 仅自动 {auto_only} · 已屏蔽 {blocked_count}"
+                        )),
+                );
+            for filter in crate::tags::TagManagerFilter::ALL {
+                let count = match filter {
+                    crate::tags::TagManagerFilter::All => total,
+                    crate::tags::TagManagerFilter::Unused => unused,
+                    crate::tags::TagManagerFilter::LowFrequency => low_frequency,
+                    crate::tags::TagManagerFilter::AutoOnly => auto_only,
+                };
+                let this = this.clone();
+                let active = self.tag_manager_filter == filter;
+                nav = nav.child(crate::components::filter_chip(
+                    SharedString::from(format!("sidebar-tag-filter-{}", filter.slug())),
+                    format!("{} {}", filter.label(), count),
+                    active,
+                    move |_, _, cx| {
+                        let _ = this.update(cx, |app, cx| {
+                            app.tag_manager_filter = filter;
+                            app.tag_scroll.scroll_to_item(0, ScrollStrategy::Top);
+                            cx.notify();
+                        });
+                    },
+                ));
+            }
+            let mut sort_menu = Menu::new();
+            for sort in crate::tags::TagManagerSort::ALL {
+                let this = this.clone();
+                sort_menu = sort_menu.item(
+                    MenuItem::radio(sort.label(), self.tag_manager_sort == sort).on_click(
+                        move |_, cx| {
+                            let _ = this.update(cx, |app, cx| {
+                                app.tag_manager_sort = sort;
+                                app.tag_scroll.scroll_to_item(0, ScrollStrategy::Top);
+                                cx.notify();
+                            });
+                        },
+                    ),
+                );
+            }
+            nav.child(
+                div()
+                    .text_xs()
+                    .text_color(colors.subtle)
+                    .child("只排序/筛选展示，不会自动删除标签"),
+            )
+            .child(
+                DropdownMenu::new("sidebar-tag-sort", "排序", sort_menu)
+                    .icon(IconName::ArrowDownUp)
+                    .variant(ButtonVariant::Ghost),
+            )
+            .into_any_element()
+        };
         let body: AnyElement = match ctx {
             SidebarContext::Library => library_body(),
-            // S2：其余上下文暂沿用资源管理器侧栏，零视觉变化；S3/S4 替换这里。
+            SidebarContext::Tags => tags_body(),
+            // S4：设置页 / 去重页各自的上下文侧栏。
             _ => library_body(),
         };
 
         let screen_title = match screen {
-            Screen::Library => "资源管理器",
             Screen::Similar => "查找相似",
             Screen::Compare => "图片对比",
-            Screen::Duplicates => "重复项",
-            Screen::Tags => "资源管理器",
-            Screen::Settings => "设置",
+            _ => match ctx {
+                SidebarContext::Library => "资源管理器",
+                SidebarContext::Tags => "标签导航",
+                SidebarContext::Settings => "设置",
+                SidebarContext::Duplicates => "重复项",
+            },
         };
 
         let this_choose = this.clone();
