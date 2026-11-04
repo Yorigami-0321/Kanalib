@@ -1783,6 +1783,7 @@ impl KanalibApp {
             })
         });
 
+        let compact_header = detail_width < px(720.);
         let header = div()
             .flex_none()
             .px(px(16.))
@@ -1790,16 +1791,23 @@ impl KanalibApp {
             .border_b_1()
             .border_color(colors.border)
             .flex()
+            .flex_wrap()
             .items_center()
             .justify_between()
-            .gap(px(12.))
+            .gap(px(8.))
+            .when(compact_header, |header| {
+                header.flex_col().items_start()
+            })
             .child(
                 div()
                     .flex()
                     .flex_col()
                     .gap(px(2.))
+                    .when(compact_header, |title| title.w_full())
+                    .when(!compact_header, |title| title.flex_1().min_w(px(0.)))
                     .child(
                         div()
+                            .truncate()
                             .text_sm()
                             .font_weight(FontWeight::SEMIBOLD)
                             .child(format!(
@@ -1813,7 +1821,7 @@ impl KanalibApp {
                                 }
                             )),
                     )
-                    .child(div().text_xs().text_color(colors.muted).child(format!(
+                    .child(div().truncate().text_xs().text_color(colors.muted).child(format!(
                         "{} · 可释放 {} · 当前保留：{}",
                         group.suggested_reason,
                         format_bytes(reclaimable),
@@ -1823,8 +1831,13 @@ impl KanalibApp {
             .child(
                 div()
                     .flex()
+                    .flex_wrap()
                     .items_center()
                     .gap(px(5.))
+                    .when(compact_header, |actions| {
+                        actions.w_full().justify_end()
+                    })
+                    .when(!compact_header, |actions| actions.flex_none())
                     .child(
                         Button::new("dedup-prev", "上一组").on_click(move |_, _, cx| {
                             let _ = this_prev.update(cx, |app, cx| {
