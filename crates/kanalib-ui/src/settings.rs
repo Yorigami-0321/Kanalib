@@ -1395,7 +1395,7 @@ impl KanalibApp {
                     .child(
                         div()
                             .w(px(320.))
-                            .child(Input::new(&protected_entry_input)),
+                            .child(Input::new(&protected_entry_input).clearable()),
                     )
                     .child(
                         Button::new("preview-protected-entry", "预览命中")
@@ -1969,12 +1969,12 @@ impl KanalibApp {
             .child(
                 div()
                     .w(px(220.))
-                    .child(Input::new(&tag_override_name).least("标签名，如 long_hair")),
+                    .child(Input::new(&tag_override_name).least("标签名，如 long_hair").clearable()),
             )
             .child(
                 div()
                     .w(px(110.))
-                    .child(Input::new(&tag_override_value).least("0.00–1.00")),
+                    .child(Input::new(&tag_override_value).least("0.00–1.00").clearable()),
             )
             .child(
                 Button::new("tag-override-apply", "应用覆盖")
@@ -2242,7 +2242,7 @@ impl KanalibApp {
                             },
                         )
                         .size(ControlSize::Sm)
-                        .disabled(self.tag_recompute_running)
+                        .loading(self.tag_recompute_running)
                         .on_click(move |_, _, cx| {
                             let _ = this_recompute.update(cx, |app, cx| {
                                 app.start_recompute_tag_thresholds(cx)
@@ -2311,7 +2311,7 @@ impl KanalibApp {
                 )
                 .size(ControlSize::Sm)
                 .icon(IconName::RefreshCw)
-                .disabled(self.tag_review_running)
+                .loading(self.tag_review_running)
                 .on_click(move |_, _, cx| {
                     let _ = this_review_refresh.update(cx, |app, cx| app.refresh_tag_reviews(cx));
                 }),
@@ -2929,7 +2929,9 @@ impl KanalibApp {
                             },
                         )
                         .primary()
-                        .disabled(self.backup_running)
+                        // F-073 6.2：进行中显示 spinner、保留宽度并吞掉重复点击，
+                        // 不再叠加 disabled（否则会被宣读成「不可用」）。
+                        .loading(self.backup_running)
                         .on_click(move |_, _, cx| {
                             let _ = this_backup.update(cx, |app, cx| app.start_backup(cx));
                         }),
@@ -3574,7 +3576,7 @@ impl KanalibApp {
                             .flex_wrap()
                             .items_center()
                             .gap(px(6.))
-                            .child(div().w(px(240.)).child(Input::new(&glob_field)))
+                            .child(div().w(px(240.)).child(Input::new(&glob_field).clearable()))
                             .child(
                                 Button::new("filter-glob-add", "添加 glob")
                                     .size(ControlSize::Sm)
@@ -3609,8 +3611,8 @@ impl KanalibApp {
                             .flex_wrap()
                             .items_center()
                             .gap(px(6.))
-                            .child(div().w(px(150.)).child(Input::new(&min_field)))
-                            .child(div().w(px(150.)).child(Input::new(&max_field)))
+                            .child(div().w(px(150.)).child(Input::new(&min_field).clearable()))
+                            .child(div().w(px(150.)).child(Input::new(&max_field).clearable()))
                             .child(
                                 Button::new("filter-preview", "预览命中")
                                     .size(ControlSize::Sm)
@@ -3685,7 +3687,9 @@ impl KanalibApp {
                             .gap(px(6.))
                             .child(
                                 div().w(px(240.)).child(
-                                    Input::new(&ignore_field).least("忽略 glob，如 *_tmp.png"),
+                                    Input::new(&ignore_field)
+                                        .least("忽略 glob，如 *_tmp.png")
+                                        .clearable(),
                                 ),
                             )
                             .child(

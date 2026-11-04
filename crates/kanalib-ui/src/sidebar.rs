@@ -91,6 +91,8 @@ pub(crate) fn activity_item(
         .id(SharedString::from(format!("activity-{label}")))
         .role(Role::Button)
         .aria_label(label)
+        // F-073 6.3：纯图标控件必须同时有可读名称与悬停提示。
+        .tooltip(Tooltip::text(label))
         .relative()
         .w_full()
         .h(px(ACTIVITY_ITEM_HEIGHT))

@@ -127,6 +127,8 @@ fn window_control_button(
         .group(group.clone())
         .role(Role::Button)
         .aria_label(SharedString::from(label))
+        // F-073 6.3：窗口控制是纯图标控件，补悬停提示；aria 名称已在上面。
+        .tooltip(Tooltip::text(label))
         .flex_none()
         .h_full()
         .w(px(46.))

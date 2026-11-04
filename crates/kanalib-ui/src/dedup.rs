@@ -1274,7 +1274,10 @@ impl KanalibApp {
                             },
                         )
                         .primary()
-                        .disabled(busy)
+                        // F-073 6.2：相似扫描进行中由按钮自己显示 spinner；图库扫描
+                        // 是另一项任务的禁用条件，两者不混成「不可用」。
+                        .loading(similar_scanning)
+                        .disabled(library_scanning)
                         .on_click(move |_, _, cx| {
                             let _ = this_similar_scan.update(cx, |app, cx| {
                                 app.state.start_similar_scan();
@@ -2823,6 +2826,8 @@ impl KanalibApp {
     ) -> AnyElement {
         let effective = draft.unwrap_or(default);
         let prefix = if settings { "settings" } else { "dedup" };
+        // F-073 6.2：应用并扫描会启动耗时扫描，进行中给出 spinner 且不再重复触发。
+        let scan_running = self.state.shared.lock().unwrap().scanning;
         let mut presets = div().flex().items_center().gap(px(5.));
         for (value, label) in [(6u8, "严格 ≤6"), (10u8, "标准 ≤10"), (14u8, "宽松 ≤14")]
         {
@@ -2967,6 +2972,7 @@ impl KanalibApp {
             Button::new("dedup-sim-apply-scan", format!("应用并扫描 ≤{effective}"))
                 .size(ControlSize::Sm)
                 .variant(ButtonVariant::Primary)
+                .loading(scan_running)
                 .on_click(move |_, _, cx| {
                     let _ =
                         this_scan.update(cx, |app, cx| app.apply_threshold_and_scan(effective, cx));

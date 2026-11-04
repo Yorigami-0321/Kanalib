@@ -1425,6 +1425,7 @@ impl Render for KanalibApp {
                 Err(_) if url_text.trim().is_empty() => None,
                 Err(message) => Some(message),
             };
+            let url_invalid = live_error.is_some();
             let error = self.remote_sources.add_error.clone().or(live_error);
             let ready = validate_remote_url(&url_text).is_ok();
             let close_app = this.clone();
@@ -1458,7 +1459,7 @@ impl Render for KanalibApp {
                             .text_color(colors.muted)
                             .child("名称（可留空）"),
                     )
-                    .child(Input::new(&name_field)),
+                    .child(Input::new(&name_field).clearable()),
             )
             .child(
                 div()
@@ -1471,7 +1472,7 @@ impl Render for KanalibApp {
                             .text_color(colors.muted)
                             .child("Base URL（http/https）"),
                     )
-                    .child(Input::new(&url_field)),
+                    .child(Input::new(&url_field).clearable().invalid(url_invalid)),
             );
             let dialog = match error {
                 Some(message) => {

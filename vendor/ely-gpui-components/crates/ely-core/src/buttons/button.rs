@@ -339,7 +339,10 @@ impl RenderOnce for Button {
                 )
             })
             .map(|el| {
-                if self.disabled {
+                // A busy button is not "unavailable": keep its spinner legible and let
+                // assistive technology read the in-progress label. `loading` already
+                // swallows presses, so it wins when both flags are set.
+                if self.disabled && !self.loading {
                     return el
                         .aria_description(i18n::text(cx, "state.unavailable", &[]))
                         .opacity(0.45)
