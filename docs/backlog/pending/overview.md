@@ -33,3 +33,5 @@
 > 2026-11-04（F-073 第五批）：按用户要求把纯代码部分收尾、后台自验做完、需手动验收的往后放。纯代码：6 处打开失败分支接进已有错误条（新增 `AppState::set_ui_error`，零新增布局元素）、13 处手搓按钮补 `.tab_index(0)` + 焦点态、新增 `scripts/check_ui_invariants.py` 与 `scripts/check_theme_contrast.py` 两个只读回归脚本。后台自验（不建窗/不抢前台）：编译、全量测试、取证档、文档自检、UI 不变量、亮暗主题对比度（34 个正文配对全部 ≥4.5:1）、便携包 pre-flight、headless 链路冒烟全部完成；100k 合成库生成因耗时超预期（10m51s 仅 21.6%）已停止，冷导入 42.3min 未重跑。明确往后放：焦点环/Tab 顺序观感、1440/1920 与浮层截图基线、GUI/UIA 悬停验收、渲染后可访问性实测、帧率 present p99（失焦即作废）、100k 滚动内存；项目侧 i18n 与 F-070 方案 A 属方案待定。细节见 [browse.md](browse.md)。
 >
 > 2026-11-04（F-070 方案 A）：用户选定完整方案 A，按 S1→S5 落地 —— `SidebarContext` 分组折叠状态（兼容旧 `ui.sidebar_collapsed`）、按上下文分派侧栏 body、标签页搜索/筛选/排序搬进侧栏且单份 `tag-manager-search` 句柄、设置页 15 分区滚动锚点导航、去重模式侧栏化（页头改只读摘要）、溢出菜单按上下文适配。方案 C 的「查看图片 / Esc 返回 / 状态保留」闭环保留。四种新侧栏的截图基线、UIA、3 万标签与焦点环验收按用户「需手动验收的往后放」未写成通过；细节见 [browse.md](browse.md) F-070 实现记录。
+>
+> 2026-11-04（F-070 补充自验）：方案 A 落地后补跑取证档编译（修掉 `alloc_stats.rs` 4 处 Rust 2024 兼容性 warning）、完整 debug 构建、用新二进制重跑 headless 冒烟与便携包 pre-flight；`check_ui_invariants.py` 新增上下文侧栏结构断言，5 项全 PASS。GUI/UIA/截图验收仍按用户要求往后放。

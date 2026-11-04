@@ -240,6 +240,12 @@
 - 回归（2026-11-04，全部后台、不建窗不抢前台）：`cargo check --workspace` 通过；`cargo test -p kanalib-ui -p kanalib` UI 71 + bin 6 通过（本轮新增 3 个单测）；`cargo test` 213 通过 / 1 既有失败（`immich_missing_key_and_disconnect_do_not_block_local_library`，core 本轮未改）/ 4 忽略；`check_backlog_docs.sh` 通过；`check_ui_invariants.py` 4 项全 PASS（16 按钮 / 6 失败分支 / 15 锚点 / 18 键位）；`check_theme_contrast.py` PASS。
 - **往后放（需 GUI 前台或用户手动，未写成通过）**：四种上下文侧栏的实际渲染与截图基线、设置页锚点滚动是否到位、UIA 名称、3 万标签侧栏 chips 换行与虚拟列表滚动、焦点环与 Tab 顺序、Esc 分层、F-006 侧栏宽度/折叠以及 F-011/F-020/F-025/F-067 回归、1024/1440/1920 宽度。
 - 剩余：方案 B 已被 A 取代不再做；3 万标签实测、深层滚动位置恢复、上述 GUI 验收；F-073 截图基线需补四种新侧栏。
+- 补充后台自验（2026-11-04 续，F-070 落地后）：
+  - `scripts/check_ui_invariants.py` 新增「上下文侧栏结构」检查：`tag-manager-search` 必须且只能在 `app.rs` 创建一次、`match ctx` 覆盖四个上下文、`activity-bar` 不得出现在 `app.rs`（避免重复构造活动栏）、「添加文件夹/全部折叠」只在 Library 分支且其它上下文有「返回图库」。连同既有 4 项共 5 项全 PASS（16 按钮 / 6 失败分支 / 15 锚点 / 4 项结构 / 18 键位）。
+  - 首次在 F-070 代码上跑 `cargo check --features frame-profiler`：发现 `crates/kanalib-core/src/alloc_stats.rs` 4 处 `unsafe_op_in_unsafe_fn`（Rust 2024 兼容性 warning，非本轮引入），已给 `System.alloc/alloc_zeroed/dealloc/realloc` 调用补显式 `unsafe {}` 块；取证档编译恢复干净，仅剩增量编译锁文件清理告警（环境性）。
+  - `cargo build` 完整 debug 构建成功（27.7s）；用**新构建的 debug 二进制**重跑 headless 冒烟，退出 0，`headless scan finished` + `dedup summary` + 4 条 `search metrics` + 3 条 `similar metrics` + `scan metrics` JSONL 齐全（15 张示例库，`thumb_errors:1` 是故意损坏的 AVIF）。`build_portable.ps1 -ValidateOnly` 通过（LGPL、无 GPL）。
+  - 最终回归：`cargo check --workspace` 与 `--features frame-profiler` 均通过；`cargo test -p kanalib-ui -p kanalib` UI 71 + bin 6 通过；`cargo test` 213 通过 / 1 既有失败（Immich 断连）/ 4 忽略，core 本轮只改 `frame-profiler` 专属的 `alloc_stats.rs`，与该失败无关；`check_backlog_docs.sh`、`check_ui_invariants.py`（5 项）、`check_theme_contrast.py` 全 PASS；便携包 pre-flight 通过。
+  - 全部在后台命令行完成，未启动或激活任何窗口；需 GUI 前台的验收仍按用户要求往后放。
 
 ## F-071 活动栏与标题栏控制收敛
 
