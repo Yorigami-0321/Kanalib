@@ -60,7 +60,7 @@
 | F-070 | 侧栏与标签工作区重构（浏览筛选/标签分配/标签管理分层，去除重复入口与重复搜索） | 用户 2026-11-02 截图与口述；Lightroom、digiKam、Eagle、PhotoPrism、Immich、Capture One | 实现中（方案 C + 分组重排） | 高 |
 | F-071 | 活动栏与标题栏控制收敛（设置移到主题下方，移除标题栏主题按钮） | 用户 2026-11-02 截图与口述 | 实现中 | 中 |
 | F-072 | 搜索入口与搜索态收敛（移除重复搜索按钮、Esc/失焦/清除、统一搜索作用域） | 用户 2026-11-02 口述；Apple HIG 搜索字段、图片管理器单一搜索框；VS Code 搜索视图仅作局部反例 | 实现中 | 高 |
-| F-073 | 全局 UI 组件与视觉体系重构（主图库/查看器布局保持，重点 token、组件状态、外围界面与可访问性） | 用户 2026-11-02 指示与截图；主参考 Lightroom、digiKam、Eagle、Immich、PhotoPrism、Capture One，次参考 Windows Fluent/Apple HIG；VS Code 仅作局部命令/键盘参考 | 实现中（阶段 0/1/2 首批 + 菜单状态/确认层 + 组件状态矩阵与键位收尾） | 高（当前最高） |
+| F-073 | 全局 UI 组件与视觉体系重构（主图库/查看器布局保持，重点 token、组件状态、外围界面与可访问性） | 用户 2026-11-02 指示与截图；主参考 Lightroom、digiKam、Eagle、Immich、PhotoPrism、Capture One，次参考 Windows Fluent/Apple HIG；VS Code 仅作局部命令/键盘参考 | 实现中（阶段 0/1/2 首批 + 菜单/确认层 + 状态矩阵/键位/键盘/错误反馈，后台自验已完成） | 高（当前最高） |
 | F-074 | 查看器默认加载原图（双击/快速查看不走缩略图或 sRGB 预览；保留显式快速预览与超大图提示） | 用户 2026-11-02 口述；ImageGlass/qView/Loupe 原图直读 | 实现中（默认原图/快速/色彩管理三态） | 高 |
 
 > 新增条目在对应类别段内递增；实现后移入 [implemented.md](implemented.md)，未完成项见 [pending/overview.md](pending/overview.md) 与对应职责文件。
