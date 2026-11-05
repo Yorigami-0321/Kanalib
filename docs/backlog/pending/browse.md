@@ -499,7 +499,8 @@
   - 新增 `localization.rs`：项目 catalog `zh-CN` / `en-US`，键名 `区域.用途`（小写点分，占位符 `{name}`）；`install_i18n` 在 main 安装两本目录，`KanalibApp::new` 读取 `ui.locale` 并应用；设置页头部新增「语言 中文 / English」分段控件，变更即时生效并写回 settings JSON。
   - 已迁移：活动栏 5 项、页面标题（标签/设置/重复项/相似/对比）、标题栏搜索占位/历史/语法帮助/排序/查看/导出、设置页标题/副标题/返回、侧栏上下文标题与资源管理器「重复项」行。
   - 验证：切 English 后活动栏 UIA 名称、页面标题、设置页头与侧栏标题切换；`ui.locale=en-US` 落库；重启后仍为 English；切回中文恢复。1024 逻辑宽设置页头 `h-overflow=0`。证据 `i18n_settings_zh.png`、`i18n_settings_en.png`、`uia_i18n_en.txt`、`uia_i18n_restart.txt`、`i18n_restart_zh.png`。
-  - 未迁移：设置页正文与侧栏分区标题、去重/标签页内容、状态栏、对话框、命令提示等约 1500 条；English 模式目前只覆盖壳层/导航，不写成全量完成。
+  - 第二批（2026-11-04 续）：新增 `status.*` 与 `sidebar.section.*` 键，迁移状态栏（错误前缀、扫描中、搜索中、待恢复、总数/已打标/未打标/失败/损坏、队列空闲/队列计数、推理设备未加载、命令面板及快捷键 aria）与侧栏 8 个分区标题（来源/筛选/评级/自动归类/标签/智能集合/相册/整理）；`render_status_bar` 与 `sidebar_section_header` 补 `cx` 参数。English 下分区标题与 10030 images / Tagged 23 / Untagged 10007 / Damaged 1 已切换；队列/推理设备/命令面板因错误态 compact 模式不显示，代码已迁移但未截图验证；错误前缀 `Error ·` 已翻译。证据 `i18n_batch2_en.png`、`i18n_batch2_en_wide.png`、`uia_i18n_batch2.txt`。
+  - 未迁移：侧栏过滤行与标签计数、扫描摘要、撤销标签、状态消息、设置页正文、去重/标签页内容、对话框、命令提示等约 1450 条；English 模式目前只覆盖壳层/导航/侧栏分区/状态栏计数，不写成全量完成。
 - 剩余：error 的通用重试入口（需方案）、组件状态其余示例（hover/focus/pressed/selected 一致性）、设置页字段/对话框、渲染后可访问性实测、1440/1920 与浮层截图基线、Shift+Tab 与焦点全遍历、tooltip/loading 视觉验收、100k 全量性能回归；项目级 i18n 其余页面文案待分批迁移；vendor 侧仍有硬编码英文的组件（视频控制/字幕等）待接入对应界面时再收 —— 已核实 Kanalib 实际用到的组件英文默认值均被业务侧覆盖；F-070 方案 A 已落地并完成副屏 GUI 验收（四种侧栏、锚点、单搜索、折叠隔离），不再列为待定。
 
 ## F-074 查看器默认加载原图
