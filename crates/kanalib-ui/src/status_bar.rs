@@ -5,50 +5,70 @@ use crate::theme::*;
 use crate::*;
 use kanalib_core::model::{ScanPhase, ScanProgress, ScanSummary};
 
-/// 扫描阶段的中文标签；底栏与设置页共用。
-pub(crate) fn scan_phase_label(phase: ScanPhase) -> &'static str {
-    match phase {
-        ScanPhase::Idle => "空闲",
-        ScanPhase::Discovering => "遍历",
-        ScanPhase::Hashing => "哈希",
-        ScanPhase::Thumbnails => "缩略图",
-        ScanPhase::Tagging => "打标",
-        ScanPhase::Reconciling => "对账",
-        ScanPhase::Done => "完成",
-        ScanPhase::Failed => "失败",
-    }
+/// 扫描阶段标签；底栏与设置页共用。
+pub(crate) fn scan_phase_label(cx: &App, phase: ScanPhase) -> SharedString {
+    let key = match phase {
+        ScanPhase::Idle => "scan.phase.idle",
+        ScanPhase::Discovering => "scan.phase.discovering",
+        ScanPhase::Hashing => "scan.phase.hashing",
+        ScanPhase::Thumbnails => "scan.phase.thumbnails",
+        ScanPhase::Tagging => "scan.phase.tagging",
+        ScanPhase::Reconciling => "scan.phase.reconciling",
+        ScanPhase::Done => "scan.phase.done",
+        ScanPhase::Failed => "scan.phase.failed",
+    };
+    crate::localization::t(cx, key)
 }
 
 /// 当前扫描的快照地址（阶段 done/total）。
-pub(crate) fn scan_progress_counts(progress: &ScanProgress) -> String {
-    let phase = scan_phase_label(progress.phase);
+pub(crate) fn scan_progress_counts(cx: &App, progress: &ScanProgress) -> String {
+    let phase = scan_phase_label(cx, progress.phase).to_string();
     if progress.total > 0 {
-        format!("{phase} {}/{}", progress.done, progress.total)
+        crate::localization::t_args(
+            cx,
+            "scan.progress",
+            &[
+                ("phase", &phase),
+                ("done", &progress.done.to_string()),
+                ("total", &progress.total.to_string()),
+            ],
+        )
+        .to_string()
     } else {
-        phase.to_string()
+        phase
     }
 }
 
 /// 扫描结束摘要的一行文本；`compact` 时只保留新增数，避免底栏被挤满。
-pub(crate) fn format_scan_summary(summary: &ScanSummary, compact: bool) -> String {
+pub(crate) fn format_scan_summary(cx: &App, summary: &ScanSummary, compact: bool) -> String {
     if compact {
-        return format!("上次扫描 · 新增 {}", summary.imported);
+        return crate::localization::t_args(
+            cx,
+            "scan.summary_compact",
+            &[("n", &summary.imported.to_string())],
+        )
+        .to_string();
     }
-    let cancelled = if summary.cancelled {
-        " · 已停止"
+    let elapsed = format!("{:.1}s", summary.elapsed_secs);
+    let stopped = if summary.cancelled {
+        crate::localization::t(cx, "scan.stopped").to_string()
     } else {
-        ""
+        String::new()
     };
-    format!(
-        "上次扫描 · 新增 {} · 更新 {} · 跳过 {} · 移除 {} · 失败 {} · {:.1}s{}",
-        summary.imported,
-        summary.updated,
-        summary.skipped,
-        summary.removed,
-        summary.failed,
-        summary.elapsed_secs,
-        cancelled
+    crate::localization::t_args(
+        cx,
+        "scan.summary",
+        &[
+            ("imported", &summary.imported.to_string()),
+            ("updated", &summary.updated.to_string()),
+            ("skipped", &summary.skipped.to_string()),
+            ("removed", &summary.removed.to_string()),
+            ("failed", &summary.failed.to_string()),
+            ("elapsed", &elapsed),
+            ("stopped", &stopped),
+        ],
     )
+    .to_string()
 }
 
 pub(crate) fn status_bar_item(
@@ -177,28 +197,46 @@ impl KanalibApp {
                     .px(px(6.))
                     .text_xs()
                     .text_color(colors.accent)
-                    .child(SharedString::from(scan_progress_counts(&progress))),
+                    .child(SharedString::from(scan_progress_counts(cx, &progress))),
             );
             if progress.throughput > 0.0 && !compact {
                 left = left.child(div().px(px(6.)).text_xs().text_color(colors.muted).child(
-                    SharedString::from(format!("{:.1} 张/秒", progress.throughput)),
+                    crate::localization::t_args(
+                        cx,
+                        "scan.throughput",
+                        &[("rate", &format!("{:.1}", progress.throughput))],
+                    ),
                 ));
             }
             if let Some(eta) = progress.eta_secs {
                 left = left.child(div().px(px(6.)).text_xs().text_color(colors.muted).child(
-                    SharedString::from(format!("剩余 {}", format_tag_eta(Some(eta)))),
+                    crate::localization::t_args(
+                        cx,
+                        "scan.eta",
+                        &[("eta", &format_tag_eta(Some(eta)))],
+                    ),
                 ));
             }
             if let Some(source) = &progress.source {
+                let source_name = source_label(source, &source_aliases);
                 let label = if progress.source_total > 1 {
-                    format!(
-                        "来源 {}/{} · {}",
-                        progress.source_index,
-                        progress.source_total,
-                        source_label(source, &source_aliases)
+                    crate::localization::t_args(
+                        cx,
+                        "scan.source_multi",
+                        &[
+                            ("index", &progress.source_index.to_string()),
+                            ("total", &progress.source_total.to_string()),
+                            ("source", &source_name),
+                        ],
                     )
+                    .to_string()
                 } else {
-                    format!("来源 · {}", source_label(source, &source_aliases))
+                    crate::localization::t_args(
+                        cx,
+                        "scan.source",
+                        &[("source", &source_name)],
+                    )
+                    .to_string()
                 };
                 left = left.child(
                     div()
@@ -226,7 +264,7 @@ impl KanalibApp {
             let this_summary = this.clone();
             left = left.child(status_bar_item(
                 "status-scan-summary",
-                SharedString::from(format_scan_summary(summary, compact)),
+                SharedString::from(format_scan_summary(cx, summary, compact)),
                 if summary.failed > 0 {
                     colors.warning
                 } else {

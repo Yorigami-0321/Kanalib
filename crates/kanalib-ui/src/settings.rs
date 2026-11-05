@@ -3238,18 +3238,32 @@ impl KanalibApp {
         scan_rows = scan_rows.child(info_row(
             "当前状态",
             if scanning_now {
-                format!(
-                    "扫描中 · {} · 吞吐 {} · ETA {}",
-                    scan_progress_counts(&scan_progress),
-                    if scan_progress.throughput > 0.0 {
-                        format!("{:.1} 张/秒", scan_progress.throughput)
-                    } else {
-                        "—".to_string()
-                    },
-                    crate::settings::format_tag_eta(scan_progress.eta_secs)
+                let rate = if scan_progress.throughput > 0.0 {
+                    crate::localization::t_args(
+                        cx,
+                        "scan.throughput",
+                        &[("rate", &format!("{:.1}", scan_progress.throughput))],
+                    )
+                } else {
+                    SharedString::from("—")
+                };
+                crate::localization::t_args(
+                    cx,
+                    "scan.current_scanning",
+                    &[
+                        ("progress", &scan_progress_counts(cx, &scan_progress)),
+                        ("rate", rate.as_ref()),
+                        ("eta", &crate::settings::format_tag_eta(scan_progress.eta_secs)),
+                    ],
                 )
+                .to_string()
             } else {
-                format!("空闲 · 最近阶段 {}", scan_phase_label(scan_progress.phase))
+                crate::localization::t_args(
+                    cx,
+                    "scan.idle_recent",
+                    &[("phase", &scan_phase_label(cx, scan_progress.phase))],
+                )
+                .to_string()
             },
             if scanning_now {
                 colors.accent
@@ -3289,7 +3303,7 @@ impl KanalibApp {
         if let Some(summary) = scan_summary.as_ref() {
             scan_rows = scan_rows.child(info_row(
                 "上次扫描",
-                format_scan_summary(summary, false),
+                format_scan_summary(cx, summary, false),
                 if summary.failed > 0 {
                     colors.warning
                 } else {
