@@ -8,6 +8,22 @@ use kanalib_core::color::{self, PreviewOutcome};
 
 pub(crate) const VIEWER_CONTEXT: &str = "KanalibViewer";
 
+/// F-069/F-074：超过该像素数视为超大图。默认回退快速预览并提示，
+/// 用户仍可在源模式里显式选「原图」强制加载，不静默降采样。
+pub(crate) const LARGE_IMAGE_PIXEL_LIMIT: u64 = 100_000_000;
+
+fn image_pixels(width: u32, height: u32) -> u64 {
+    u64::from(width) * u64::from(height)
+}
+
+fn is_large_image(width: u32, height: u32) -> bool {
+    image_pixels(width, height) > LARGE_IMAGE_PIXEL_LIMIT
+}
+
+fn image_megapixels(width: u32, height: u32) -> f64 {
+    image_pixels(width, height) as f64 / 1_000_000.0
+}
+
 /// F-074：查看器源模式。默认原图直读；快速预览用缩略图；色彩管理显式生成 sRGB 预览。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ViewerSourceMode {
@@ -143,6 +159,7 @@ impl KanalibApp {
             self.viewer_at = Some(at);
             self.focus_viewer_pending = true;
             self.viewer_source_mode = ViewerSourceMode::Original;
+            self.viewer_large_override = false;
             self.viewer_origin_filter = Some(self.state.shared.lock().unwrap().filter.clone());
             self.viewer_origin_search = self.last_search.clone();
         }
@@ -294,6 +311,8 @@ impl KanalibApp {
             .and_then(|previous| self.viewer_slides.get(previous))
             .map(|(path, _)| path.clone());
         self.viewer_at = Some(at);
+        // 超大图保护按图片生效：切到下一张后重新评估，不沿用上一张的强制原图选择。
+        self.viewer_large_override = false;
         if let Some((path, _)) = self.viewer_slides.get(at) {
             let path = path.clone();
             self.viewer_viewed.insert(path.clone());
@@ -354,7 +373,15 @@ impl KanalibApp {
         {
             return;
         }
+        // 超大图默认回退快速预览时，内部模式仍是 Original；用户点「原图」
+        // 需要置位 override 才会真正加载原图，因此不能只看模式是否相等。
+        let force_original = mode == ViewerSourceMode::Original;
+        let override_changed = self.viewer_large_override != force_original;
+        self.viewer_large_override = force_original;
         if self.viewer_source_mode == mode {
+            if override_changed {
+                cx.notify();
+            }
             return;
         }
         self.viewer_source_mode = mode;
@@ -392,6 +419,7 @@ impl KanalibApp {
         }
         self.viewer_at = None;
         self.viewer_slides.clear();
+        self.viewer_large_override = false;
         self.viewer_origin_filter = None;
         self.viewer_origin_search.clear();
         self.viewer_viewed.drain().collect()
@@ -404,7 +432,7 @@ impl KanalibApp {
         colors: UiColors,
     ) -> Option<AnyElement> {
         let (path, caption) = self.viewer_slides.get(at)?.clone();
-        let (is_video, remote, thumb) = {
+        let (is_video, remote, thumb, width, height) = {
             let shared = self.state.shared.lock().unwrap();
             let assets = shared.assets.read().unwrap();
             match assets.iter().find(|asset| asset.path == path) {
@@ -412,18 +440,31 @@ impl KanalibApp {
                     asset.is_video(),
                     is_remote_asset(&asset.path),
                     asset.thumb.clone().or_else(|| asset.tile_thumb.clone()),
+                    asset.width,
+                    asset.height,
                 ),
                 None => (
                     kanalib_core::model::is_video(&path),
                     is_remote_asset(&path),
                     None,
+                    0,
+                    0,
                 ),
             }
         };
         // 视频固定首帧；远端虚拟路径没有本地原图，只能快速预览。
         let can_original = !is_video && !remote;
+        let large_image = can_original && is_large_image(width, height);
+        // 超大图默认回退快速预览；用户显式选「原图」后 override 置位。
+        let large_fallback = large_image
+            && self.viewer_source_mode == ViewerSourceMode::Original
+            && !self.viewer_large_override;
         let mode = if can_original {
-            self.viewer_source_mode
+            if large_fallback {
+                ViewerSourceMode::QuickPreview
+            } else {
+                self.viewer_source_mode
+            }
         } else {
             ViewerSourceMode::QuickPreview
         };
@@ -452,7 +493,7 @@ impl KanalibApp {
         } else {
             "用系统应用播放"
         };
-        let mut hint_parts = vec![
+        let mut hint_parts: Vec<String> = [
             "← → 切图",
             "0 适应 / 1 100%",
             "+/- 缩放",
@@ -460,31 +501,59 @@ impl KanalibApp {
             "拖拽平移",
             "R 旋转",
             "F 全屏",
-        ];
+        ]
+        .into_iter()
+        .map(str::to_string)
+        .collect();
         if is_video {
-            hint_parts.push("视频仅显示首帧，播放请用系统播放器");
+            hint_parts.push("视频仅显示首帧，播放请用系统播放器".into());
         } else if animated {
-            hint_parts.push("动画仅首帧，播放请用系统应用");
+            hint_parts.push("动画仅首帧，播放请用系统应用".into());
         }
         if remote {
-            hint_parts.push("远端只读 · 未下载原图");
+            hint_parts.push("远端只读 · 未下载原图".into());
+        }
+        if large_image {
+            let megapixels = image_megapixels(width, height);
+            // 提示行右对齐并截断，超大图警告必须放在最前，否则会被键位提示挤掉。
+            hint_parts.insert(
+                0,
+                if large_fallback {
+                    format!(
+                        "原图约 {megapixels:.2} MP，超过 {} MP 阈值 · 已使用快速预览；切换「原图」可强制加载",
+                        LARGE_IMAGE_PIXEL_LIMIT / 1_000_000
+                    )
+                } else {
+                    format!("原图约 {megapixels:.2} MP，加载可能较慢/占用内存")
+                },
+            );
         }
         match mode {
-            ViewerSourceMode::Original => hint_parts.push("原图直读（未做色彩转换）"),
-            ViewerSourceMode::QuickPreview if can_original => {
-                hint_parts.push("快速预览 · 缩略图");
+            ViewerSourceMode::Original => hint_parts.push("原图直读（未做色彩转换）".into()),
+            ViewerSourceMode::QuickPreview if can_original && !large_fallback => {
+                hint_parts.push("快速预览 · 缩略图".into());
             }
             ViewerSourceMode::ColorManaged => match &preview {
-                Some(ViewerPreview::Ready(_)) => hint_parts.push("色彩管理 · 已转换到 sRGB"),
-                Some(ViewerPreview::Pending(_)) => hint_parts.push("正在生成色彩管理预览"),
-                Some(ViewerPreview::Failed) => hint_parts.push("色彩管理预览失败 · 显示缩略图"),
-                Some(ViewerPreview::Passthrough) => hint_parts.push("色彩管理 · 原图为 sRGB"),
+                Some(ViewerPreview::Ready(_)) => {
+                    hint_parts.push("色彩管理 · 已转换到 sRGB".into())
+                }
+                Some(ViewerPreview::Pending(_)) => {
+                    hint_parts.push("正在生成色彩管理预览".into())
+                }
+                Some(ViewerPreview::Failed) => {
+                    hint_parts.push("色彩管理预览失败 · 显示缩略图".into())
+                }
+                Some(ViewerPreview::Passthrough) => {
+                    hint_parts.push("色彩管理 · 原图为 sRGB".into())
+                }
                 None => {}
             },
             ViewerSourceMode::QuickPreview => {}
         }
         let hint = hint_parts.join(" · ");
-        let empty_label = if mode == ViewerSourceMode::Original {
+        let empty_label = if large_fallback {
+            "原图超过阈值，快速预览不可用"
+        } else if mode == ViewerSourceMode::Original {
             "无法加载原图"
         } else if mode == ViewerSourceMode::ColorManaged {
             match &preview {
@@ -493,8 +562,10 @@ impl KanalibApp {
             }
         } else if is_video {
             "暂无视频首帧（生成首帧需要 FFmpeg）"
-        } else {
+        } else if remote {
             "远端资产未下载原图，暂无预览"
+        } else {
+            "暂无缩略图，无法快速预览"
         };
         let preview: AnyElement = match source {
             Some(source) => ImageViewer::new("kanalib-viewer", source).into_any_element(),
@@ -729,5 +800,18 @@ impl KanalibApp {
             )
             .into_any_element(),
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn large_image_threshold_is_exclusive() {
+        assert!(!is_large_image(10_000, 10_000));
+        assert!(is_large_image(10_001, 10_000));
+        assert!(!is_large_image(0, 0));
+        assert_eq!(image_megapixels(10_000, 10_000), 100.0);
     }
 }
