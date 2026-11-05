@@ -495,7 +495,12 @@
   - UIA 名称抽查：活动栏、设置 15 锚点、标签搜索/chips/行内动作、去重评审按钮、溢出菜单项均可读；设置页选中锚点有可见焦点环。
   - 键盘 Tab 遍历修复（2026-11-04 续）：根视图原先没有 Ely `FocusScope`，Tab/Shift-Tab 的 `ElyFocus` 绑定不生效，`.tab_index(0)` 停靠点全部键盘不可达。现在根视图包 `FocusScope::new(&self.root_focus).root().node("kanalib-root-focus", Role::Group, "Kanalib", None)`（无元素 id 的根会让 FocusNext 冒泡分发断掉）；`check_ui_invariants.py` 新增第 6 项断言。副屏实测设置页/标签页 Tab 顺序正确、焦点环可见；Shift+Tab 未单独注入验证。
   - 回归（2026-11-04）：`cargo check --workspace` 通过；`cargo test -p kanalib-ui -p kanalib` UI 71 + bin 6 通过；`cargo test` 214 通过 / 0 失败 / 4 忽略（上一轮既有的 Immich 断连失败本轮未复现，按环境差异记录，不写成已修复）。
-- 剩余：error 的通用重试入口（需方案）、组件状态其余示例（hover/focus/pressed/selected 一致性）、设置页字段/对话框、渲染后可访问性实测、1440/1920 与浮层截图基线、Shift+Tab 与焦点全遍历、tooltip/loading 视觉验收、100k 全量性能回归；项目侧 UI 文案整体未引入 i18n（属体系决策，待确认）；vendor 侧仍有硬编码英文的组件（视频控制/字幕等）待接入对应界面时再收 —— 已核实 Kanalib 实际用到的组件英文默认值均被业务侧覆盖；F-070 方案 A 已落地并完成副屏 GUI 验收（四种侧栏、锚点、单搜索、折叠隔离），不再列为待定。
+- 项目级 i18n 第一批（2026-11-04）：
+  - 新增 `localization.rs`：项目 catalog `zh-CN` / `en-US`，键名 `区域.用途`（小写点分，占位符 `{name}`）；`install_i18n` 在 main 安装两本目录，`KanalibApp::new` 读取 `ui.locale` 并应用；设置页头部新增「语言 中文 / English」分段控件，变更即时生效并写回 settings JSON。
+  - 已迁移：活动栏 5 项、页面标题（标签/设置/重复项/相似/对比）、标题栏搜索占位/历史/语法帮助/排序/查看/导出、设置页标题/副标题/返回、侧栏上下文标题与资源管理器「重复项」行。
+  - 验证：切 English 后活动栏 UIA 名称、页面标题、设置页头与侧栏标题切换；`ui.locale=en-US` 落库；重启后仍为 English；切回中文恢复。1024 逻辑宽设置页头 `h-overflow=0`。证据 `i18n_settings_zh.png`、`i18n_settings_en.png`、`uia_i18n_en.txt`、`uia_i18n_restart.txt`、`i18n_restart_zh.png`。
+  - 未迁移：设置页正文与侧栏分区标题、去重/标签页内容、状态栏、对话框、命令提示等约 1500 条；English 模式目前只覆盖壳层/导航，不写成全量完成。
+- 剩余：error 的通用重试入口（需方案）、组件状态其余示例（hover/focus/pressed/selected 一致性）、设置页字段/对话框、渲染后可访问性实测、1440/1920 与浮层截图基线、Shift+Tab 与焦点全遍历、tooltip/loading 视觉验收、100k 全量性能回归；项目级 i18n 其余页面文案待分批迁移；vendor 侧仍有硬编码英文的组件（视频控制/字幕等）待接入对应界面时再收 —— 已核实 Kanalib 实际用到的组件英文默认值均被业务侧覆盖；F-070 方案 A 已落地并完成副屏 GUI 验收（四种侧栏、锚点、单搜索、折叠隔离），不再列为待定。
 
 ## F-074 查看器默认加载原图
 
