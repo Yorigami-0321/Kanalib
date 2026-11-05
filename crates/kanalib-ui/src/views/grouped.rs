@@ -30,6 +30,8 @@ pub(crate) struct GroupEntry {
     /// 折叠状态使用的稳定键（日期字符串 / 来源路径 / 评级代码）。
     pub(crate) key: String,
     pub(crate) title: String,
+    /// 评级分组的等级码；组头据此走目录文案，数据本身仍是等级字符。
+    pub(crate) rating: Option<u8>,
     pub(crate) count: usize,
     /// 该组第一个资产在 `ordered` 中的位置。
     pub(crate) start_asset: usize,
@@ -206,6 +208,8 @@ enum BucketKey {
 struct Bucket {
     key: String,
     title: String,
+    /// 评级分组的等级码；其余分组为 `None`。
+    rating: Option<u8>,
     /// 日期为天数（降序），评级为优先级（升序）；来源不使用。
     order: u64,
     indices: Vec<usize>,
@@ -297,9 +301,14 @@ pub(crate) fn build_group_layout(
                     (key, rating_title(code))
                 }
             };
+            let rating = match bucket_key {
+                BucketKey::Rating(code) => Some(code),
+                _ => None,
+            };
             buckets.push(Bucket {
                 key,
                 title,
+                rating,
                 order,
                 indices: Vec::new(),
             });
@@ -333,6 +342,7 @@ pub(crate) fn build_group_layout(
         groups.push(GroupEntry {
             key: bucket.key,
             title: bucket.title,
+            rating: bucket.rating,
             count,
             start_asset: ordered.len(),
             start_row,
@@ -802,11 +812,22 @@ pub(crate) fn group_header(
     pinned: bool,
     this: &Entity<KanalibApp>,
     colors: UiColors,
+    cx: &App,
 ) -> AnyElement {
     let key = group.key.clone();
     let this = this.clone();
     let collapsed = group.collapsed;
-    let aria = format!("{}，{} 张", group.title, group.count);
+    let title: SharedString = match group.rating {
+        Some(code) => rating_title_text(cx, code),
+        None => group.title.clone().into(),
+    };
+    let aria = crate::localization::t_args(
+        cx,
+        "views.group.aria",
+        &[("title", title.as_ref()), ("n", &group.count.to_string())],
+    );
+    let count =
+        crate::localization::t_args(cx, "views.group.count", &[("n", &group.count.to_string())]);
     div()
         .id(SharedString::from(format!(
             "group-header-{}-{}",
@@ -849,16 +870,27 @@ pub(crate) fn group_header(
                 .text_sm()
                 .font_weight(FontWeight::SEMIBOLD)
                 .text_color(colors.fg)
-                .child(group.title.clone()),
+                .child(title),
         )
         .child(
             div()
                 .flex_none()
                 .text_xs()
                 .text_color(colors.muted)
-                .child(format!("{} 张", group.count)),
+                .child(count),
         )
         .into_any_element()
+}
+
+/// 评级分组的组头标题；等级字符仍来自资产数据，文案走目录。
+fn rating_title_text(cx: &App, code: u8) -> SharedString {
+    match code {
+        1 => crate::localization::t_args(cx, "views.rating.value", &[("rating", "G")]),
+        2 => crate::localization::t_args(cx, "views.rating.value", &[("rating", "S")]),
+        3 => crate::localization::t_args(cx, "views.rating.value", &[("rating", "Q")]),
+        4 => crate::localization::t_args(cx, "views.rating.value", &[("rating", "E")]),
+        _ => crate::localization::t(cx, "views.rating.none"),
+    }
 }
 
 #[cfg(test)]

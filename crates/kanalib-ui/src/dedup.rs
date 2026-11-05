@@ -1,6 +1,7 @@
 use crate::app::{KanalibApp, push_toast};
 use crate::components::*;
 use crate::format::*;
+use crate::localization::{t, t_args};
 use crate::theme::*;
 use crate::views::GRID_CONTEXT;
 use crate::*;
@@ -32,14 +33,15 @@ impl DedupSort {
         Self::Reclaimable,
     ];
 
-    pub(crate) fn label(self) -> &'static str {
-        match self {
-            Self::Default => "默认顺序",
-            Self::Path => "路径",
-            Self::Name => "名称",
-            Self::Size => "组大小",
-            Self::Reclaimable => "可释放空间",
-        }
+    pub(crate) fn label(self, cx: &App) -> SharedString {
+        let key = match self {
+            Self::Default => "dedup.sort.default",
+            Self::Path => "dedup.sort.path",
+            Self::Name => "dedup.sort.name",
+            Self::Size => "dedup.sort.size",
+            Self::Reclaimable => "dedup.sort.reclaim",
+        };
+        t(cx, key)
     }
 
     /// 大小/可释放默认从大到小；路径/名称默认升序。
@@ -100,6 +102,47 @@ impl TrashAudit {
         })
     }
 
+    /// 审计摘要；界面文案走 `dedup.audit.*` 目录。
+    pub(crate) fn summary(&self, cx: &App) -> String {
+        let scope = if self.scope == "batch" {
+            t_args(
+                cx,
+                "dedup.audit.batch",
+                &[("groups", &self.groups.to_string())],
+            )
+            .to_string()
+        } else {
+            t(cx, "dedup.audit.single").to_string()
+        };
+        let mut text = t_args(
+            cx,
+            "dedup.audit.line",
+            &[
+                ("scope", &scope),
+                ("assets", &self.assets.to_string()),
+                ("bytes", &format_bytes(self.bytes)),
+            ],
+        )
+        .to_string();
+        if self.failed > 0 {
+            text.push_str(&t_args(
+                cx,
+                "dedup.audit.failed",
+                &[("n", &self.failed.to_string())],
+            ));
+        }
+        if self.protected_skipped > 0 {
+            text.push_str(&t_args(
+                cx,
+                "dedup.audit.skipped",
+                &[("n", &self.protected_skipped.to_string())],
+            ));
+        }
+        text
+    }
+
+    /// 测试用的中文快照；界面文本走 `dedup.audit.*` 目录。
+    #[cfg(test)]
     pub(crate) fn describe(&self) -> String {
         let mut text = format!(
             "{} · 移入 {} 张 · 释放约 {}",
@@ -310,15 +353,27 @@ pub(crate) struct SimilarView {
     pub(crate) error: Option<String>,
 }
 
+fn dedup_filter_key(filter: DedupFilter) -> &'static str {
+    match filter {
+        DedupFilter::Pending => "dedup.chip.pending",
+        DedupFilter::Ignored => "dedup.chip.ignored",
+        DedupFilter::Related => "dedup.chip.related",
+        DedupFilter::Done => "dedup.chip.done",
+        DedupFilter::All => "dedup.chip.all",
+    }
+}
+
 pub(crate) fn dedup_filter_chip(
+    cx: &App,
     filter: DedupFilter,
     count: usize,
     active: bool,
     this: Entity<KanalibApp>,
 ) -> AnyElement {
+    let key = dedup_filter_key(filter);
     filter_chip(
-        SharedString::from(format!("dedup-filter-{}", filter.label())),
-        format!("{} {}", filter.label(), count),
+        SharedString::from(format!("dedup-filter-{key}")),
+        format!("{} {}", t(cx, key), count),
         active,
         move |_, _, cx| {
             let _ = this.update(cx, |app, cx| {
@@ -344,16 +399,21 @@ pub(crate) fn small_badge(label: String, fg: Hsla, bg: Hsla) -> AnyElement {
         .into_any_element()
 }
 
-pub(crate) fn group_state_label(state: ReviewState) -> &'static str {
+pub(crate) fn group_state_key(state: ReviewState) -> &'static str {
     match state {
-        ReviewState::Pending => "未审",
-        ReviewState::Ignored => "已忽略",
-        ReviewState::Related => "相关变体",
-        ReviewState::Done => "已保留",
+        ReviewState::Pending => "dedup.state.pending",
+        ReviewState::Ignored => "dedup.state.ignored",
+        ReviewState::Related => "dedup.state.related",
+        ReviewState::Done => "dedup.state.done",
     }
 }
 
+pub(crate) fn group_state_label(cx: &App, state: ReviewState) -> SharedString {
+    t(cx, group_state_key(state))
+}
+
 pub(crate) fn dedup_group_row(
+    cx: &App,
     group: &DuplicateGroup,
     selected: bool,
     this: Entity<KanalibApp>,
@@ -398,12 +458,17 @@ pub(crate) fn dedup_group_row(
     let has_remote = any_remote_asset(group.assets.iter().map(|asset| asset.path.as_path()));
     let (kind_label, kind_fg, kind_bg) = match group.kind {
         GroupKind::Exact => (
-            "完全相同".to_string(),
+            t(cx, "dedup.kind.exact").to_string(),
             colors.success,
             colors.success_subtle,
         ),
         GroupKind::Similar => (
-            format!("相似 {}%", group.similarity_pct().unwrap_or(0)),
+            t_args(
+                cx,
+                "dedup.kind.similar",
+                &[("pct", &group.similarity_pct().unwrap_or(0).to_string())],
+            )
+            .to_string(),
             colors.warning,
             colors.warning_subtle,
         ),
@@ -472,32 +537,41 @@ pub(crate) fn dedup_group_row(
                                 .items_center()
                                 .gap(px(4.))
                                 .child(small_badge(
-                                    format!("{count} 张"),
+                                    t_args(cx, "dedup.badge.count", &[("n", &count.to_string())])
+                                        .to_string(),
                                     colors.muted,
                                     colors.sunken,
                                 ))
                                 .child(small_badge(kind_label, kind_fg, kind_bg))
                                 .children(has_protected.then(|| {
-                                    small_badge("保护".into(), colors.accent, colors.selection)
+                                    small_badge(
+                                        t(cx, "dedup.badge.protected").to_string(),
+                                        colors.accent,
+                                        colors.selection,
+                                    )
                                 }))
                                 .children(has_remote.then(|| {
-                                    small_badge("远端只读".into(), colors.accent, colors.selection)
+                                    small_badge(
+                                        t(cx, "dedup.badge.remote").to_string(),
+                                        colors.accent,
+                                        colors.selection,
+                                    )
                                 }))
                                 .child(small_badge(
-                                    group_state_label(group.state).into(),
+                                    group_state_label(cx, group.state).to_string(),
                                     state_fg,
                                     state_bg,
                                 )),
                         )
                         .child(
-                            div()
-                                .truncate()
-                                .text_xs()
-                                .text_color(colors.subtle)
-                                .child(format!(
-                                    "可释放 {reclaimable} · {}",
-                                    group.suggested_reason
-                                )),
+                            div().truncate().text_xs().text_color(colors.subtle).child(
+                                t_args(
+                                    cx,
+                                    "dedup.row.reclaim",
+                                    &[("bytes", &reclaimable), ("reason", &group.suggested_reason)],
+                                )
+                                .to_string(),
+                            ),
                         ),
                 ),
         )
@@ -505,6 +579,7 @@ pub(crate) fn dedup_group_row(
 }
 
 pub(crate) fn dedup_asset_card(
+    cx: &App,
     group: &DuplicateGroup,
     asset: &Asset,
     is_keeper: bool,
@@ -539,7 +614,7 @@ pub(crate) fn dedup_asset_card(
             .justify_center()
             .text_xs()
             .text_color(colors.subtle)
-            .child("无缩略图")
+            .child(t(cx, "dedup.card.no_thumb"))
             .into_any_element(),
     };
     let border = if is_keeper {
@@ -555,14 +630,19 @@ pub(crate) fn dedup_asset_card(
         .map(|ext| ext.to_string_lossy().to_uppercase())
         .unwrap_or_else(|| "?".to_string());
     let dimensions = if asset.width == 0 || asset.height == 0 {
-        "尺寸未知".to_string()
+        t(cx, "dedup.card.dimensions_unknown").to_string()
     } else {
         format!("{}×{}", asset.width, asset.height)
     };
     let rating = if asset.rating.is_empty() {
-        "未评级".to_string()
+        t(cx, "dedup.rating.none").to_string()
     } else {
-        format!("评级 {}", asset.rating.to_uppercase())
+        t_args(
+            cx,
+            "dedup.rating.value",
+            &[("rating", &asset.rating.to_uppercase())],
+        )
+        .to_string()
     };
     let mut badge = div()
         .absolute()
@@ -573,24 +653,28 @@ pub(crate) fn dedup_asset_card(
         .gap(px(4.));
     if is_keeper {
         badge = badge.child(small_badge(
-            "保留".into(),
+            t(cx, "dedup.badge.keeper").to_string(),
             colors.success,
             colors.success_subtle,
         ));
     }
     if is_suggested && !is_keeper {
         badge = badge.child(small_badge(
-            "推荐".into(),
+            t(cx, "dedup.badge.recommended").to_string(),
             colors.warning,
             colors.warning_subtle,
         ));
     }
     if is_protected_path {
-        badge = badge.child(small_badge("保护".into(), colors.accent, colors.selection));
+        badge = badge.child(small_badge(
+            t(cx, "dedup.badge.protected").to_string(),
+            colors.accent,
+            colors.selection,
+        ));
     }
     if is_remote {
         badge = badge.child(small_badge(
-            "远端只读".into(),
+            t(cx, "dedup.badge.remote").to_string(),
             colors.accent,
             colors.selection,
         ));
@@ -635,7 +719,11 @@ pub(crate) fn dedup_asset_card(
             .bg(colors.bg)
             .text_xs()
             .text_color(colors.warning)
-            .child(format!("相似 {pct}%"))
+            .child(t_args(
+                cx,
+                "dedup.kind.similar",
+                &[("pct", &pct.to_string())],
+            ))
             .into_any_element()
     });
 
@@ -679,15 +767,18 @@ pub(crate) fn dedup_asset_card(
                         )),
                 )
                 .child(
-                    div()
-                        .truncate()
-                        .text_xs()
-                        .text_color(colors.subtle)
-                        .child(format!(
-                            "修改 {} · {} 标签 · {rating}",
-                            format_date(asset.mtime),
-                            asset.all_tags().count()
-                        )),
+                    div().truncate().text_xs().text_color(colors.subtle).child(
+                        t_args(
+                            cx,
+                            "dedup.card.meta",
+                            &[
+                                ("date", &format_date(asset.mtime)),
+                                ("count", &asset.all_tags().count().to_string()),
+                                ("rating", &rating),
+                            ],
+                        )
+                        .to_string(),
+                    ),
                 )
                 .child(
                     div()
@@ -708,15 +799,20 @@ pub(crate) fn dedup_asset_card(
                             colors.subtle
                         })
                         .child(if is_keeper {
-                            "当前保留项".to_string()
+                            t(cx, "dedup.card.keeper_current").to_string()
                         } else if is_suggested {
-                            format!("推荐：{}", group.suggested_reason)
+                            t_args(
+                                cx,
+                                "dedup.card.recommended_reason",
+                                &[("reason", &group.suggested_reason)],
+                            )
+                            .to_string()
                         } else if editable {
-                            "点击设为保留".to_string()
+                            t(cx, "dedup.card.click_to_keep").to_string()
                         } else if pending {
-                            "扫描中，暂不可操作".to_string()
+                            t(cx, "dedup.card.scanning_locked").to_string()
                         } else {
-                            "此组已保留".to_string()
+                            t(cx, "dedup.card.group_done").to_string()
                         }),
                 ),
         );
@@ -730,7 +826,7 @@ pub(crate) fn dedup_asset_card(
 }
 
 pub(crate) struct DiffRow {
-    label: &'static str,
+    label: SharedString,
     values: Vec<String>,
     best: Option<usize>,
 }
@@ -767,7 +863,7 @@ pub(crate) fn best_min<T: Ord + Copy>(
 
 pub(crate) fn push_diff_row(
     rows: &mut Vec<DiffRow>,
-    label: &'static str,
+    label: SharedString,
     values: Vec<String>,
     best: Option<usize>,
 ) {
@@ -781,6 +877,7 @@ pub(crate) fn push_diff_row(
 }
 
 pub(crate) fn dedup_diff(
+    cx: &App,
     group: &DuplicateGroup,
     assets: &[&Asset],
     colors: UiColors,
@@ -791,12 +888,12 @@ pub(crate) fn dedup_diff(
     let mut rows = Vec::new();
     push_diff_row(
         &mut rows,
-        "分辨率",
+        t(cx, "dedup.diff.resolution"),
         assets
             .iter()
             .map(|asset| {
                 if asset.width == 0 || asset.height == 0 {
-                    "未知".to_string()
+                    t(cx, "dedup.diff.unknown").to_string()
                 } else {
                     format!("{}×{}", asset.width, asset.height)
                 }
@@ -806,7 +903,7 @@ pub(crate) fn dedup_diff(
     );
     push_diff_row(
         &mut rows,
-        "文件大小",
+        t(cx, "dedup.diff.size"),
         assets
             .iter()
             .map(|asset| format_bytes(asset.bytes))
@@ -815,7 +912,7 @@ pub(crate) fn dedup_diff(
     );
     push_diff_row(
         &mut rows,
-        "格式",
+        t(cx, "dedup.diff.format"),
         assets
             .iter()
             .map(|asset| {
@@ -830,7 +927,7 @@ pub(crate) fn dedup_diff(
     );
     push_diff_row(
         &mut rows,
-        "修改日期",
+        t(cx, "dedup.diff.modified"),
         assets
             .iter()
             .map(|asset| format_date(asset.mtime))
@@ -845,7 +942,7 @@ pub(crate) fn dedup_diff(
     );
     push_diff_row(
         &mut rows,
-        "标签",
+        t(cx, "dedup.diff.tags"),
         assets
             .iter()
             .map(|asset| {
@@ -855,10 +952,16 @@ pub(crate) fn dedup_diff(
                     .map(|hit| hit.tag.as_str())
                     .collect::<Vec<_>>()
                     .join(" / ");
+                let count = asset.all_tags().count().to_string();
                 if top.is_empty() {
-                    format!("{} 个", asset.all_tags().count())
+                    t_args(cx, "dedup.diff.tag_count", &[("n", &count)]).to_string()
                 } else {
-                    format!("{} 个 · {top}", asset.all_tags().count())
+                    t_args(
+                        cx,
+                        "dedup.diff.tag_count_top",
+                        &[("n", &count), ("top", &top)],
+                    )
+                    .to_string()
                 }
             })
             .collect(),
@@ -866,12 +969,12 @@ pub(crate) fn dedup_diff(
     );
     push_diff_row(
         &mut rows,
-        "评级",
+        t(cx, "dedup.diff.rating"),
         assets
             .iter()
             .map(|asset| {
                 if asset.rating.is_empty() {
-                    "未评级".to_string()
+                    t(cx, "dedup.rating.none").to_string()
                 } else {
                     asset.rating.to_uppercase()
                 }
@@ -882,19 +985,24 @@ pub(crate) fn dedup_diff(
     if group.kind == GroupKind::Similar {
         push_diff_row(
             &mut rows,
-            "相似度",
+            t(cx, "dedup.diff.similarity"),
             assets
                 .iter()
                 .map(|asset| {
                     group
                         .distance_to_keeper(asset)
                         .map(|distance| {
-                            format!(
-                                "{}%（距离 {distance}）",
-                                similarity_pct_from_distance(distance)
+                            t_args(
+                                cx,
+                                "dedup.diff.similarity_value",
+                                &[
+                                    ("pct", &similarity_pct_from_distance(distance).to_string()),
+                                    ("distance", &distance.to_string()),
+                                ],
                             )
+                            .to_string()
                         })
-                        .unwrap_or_else(|| "未知".to_string())
+                        .unwrap_or_else(|| t(cx, "dedup.diff.unknown").to_string())
                 })
                 .collect(),
             best_min(assets, |asset| {
@@ -904,7 +1012,7 @@ pub(crate) fn dedup_diff(
     }
     push_diff_row(
         &mut rows,
-        "路径",
+        t(cx, "dedup.diff.path"),
         assets
             .iter()
             .map(|asset| asset.path.display().to_string())
@@ -927,7 +1035,7 @@ pub(crate) fn dedup_diff(
                 .py(px(5.))
                 .text_xs()
                 .text_color(colors.subtle)
-                .child("字段"),
+                .child(t(cx, "dedup.diff.field")),
         )
         .children(assets.iter().map(|asset| {
             div()
@@ -985,13 +1093,20 @@ pub(crate) fn dedup_diff(
         .gap(px(8.))
         .text_xs()
         .text_color(colors.muted)
-        .child(format!(
-            "建议保留：{}",
-            group
-                .suggested_asset()
-                .map(Asset::title)
-                .unwrap_or_default()
-        ))
+        .child(
+            t_args(
+                cx,
+                "dedup.diff.recommend",
+                &[(
+                    "name",
+                    &group
+                        .suggested_asset()
+                        .map(Asset::title)
+                        .unwrap_or_default(),
+                )],
+            )
+            .to_string(),
+        )
         .child(
             div()
                 .text_color(colors.warning)
@@ -1015,22 +1130,22 @@ pub(crate) fn dedup_diff(
                     div()
                         .text_xs()
                         .font_weight(FontWeight::SEMIBOLD)
-                        .child("差异"),
+                        .child(t(cx, "dedup.diff.title")),
                 )
                 .child(
                     div()
                         .text_xs()
                         .text_color(colors.subtle)
-                        .child("只显示不同字段"),
+                        .child(t(cx, "dedup.diff.only_changed")),
                 ),
         )
         .child(recommendation)
         .child(table)
         .child(div().text_xs().text_color(colors.subtle).child(
             if group.kind == GroupKind::Similar {
-                "相似度按 pHash 汉明距离换算；组内可能链式合并，请逐组确认。"
+                t(cx, "dedup.diff.note_similar")
             } else {
-                "字节相同：重点看路径、日期和标签；分辨率/大小通常相同。"
+                t(cx, "dedup.diff.note_exact")
             },
         ))
         .into_any_element()
@@ -1106,7 +1221,7 @@ impl KanalibApp {
     ) -> impl IntoElement {
         // F-046：结果视图内的筛选输入；只影响本页可见组，不触发图库查询。
         let filter_input = window.use_keyed_state("dedup-group-filter", cx, |window, cx| {
-            TextInput::new(window, cx).placeholder("筛选组（名称 / 路径 / size:>10mb）")
+            TextInput::new(window, cx).placeholder_key("dedup.filter.placeholder")
         });
         if self.dedup_query_input.is_none() {
             self.dedup_query_input = Some(filter_input.clone());
@@ -1176,15 +1291,23 @@ impl KanalibApp {
             .text_xs()
             .text_color(colors.muted)
             .child(if similar_mode {
-                format!("当前：相似图片 · {} 组", similar_summary.total)
+                t_args(
+                    cx,
+                    "dedup.tabs.similar",
+                    &[("n", &similar_summary.total.to_string())],
+                )
             } else {
-                format!("当前：完全重复 · {} 组", exact_summary.total)
+                t_args(
+                    cx,
+                    "dedup.tabs.exact",
+                    &[("n", &exact_summary.total.to_string())],
+                )
             });
 
         let more_menu = Menu::new().item(
-            MenuItem::new("重新扫描图库")
+            MenuItem::new(t(cx, "dedup.rescan"))
                 .disabled(busy)
-                .disabled_reason("扫描进行中，完成后再重新扫描")
+                .disabled_reason(t(cx, "dedup.rescan_disabled"))
                 .on_click(move |_, cx| {
                     let _ = this_rescan.update(cx, |app, cx| {
                         app.request_rescan(RescanOrigin::Dedup, cx);
@@ -1218,7 +1341,7 @@ impl KanalibApp {
                                     .flex_none()
                                     .text_lg()
                                     .font_weight(FontWeight::SEMIBOLD)
-                                    .child("重复项"),
+                                    .child(t(cx, "page.duplicates")),
                             )
                             .child(tabs),
                     )
@@ -1227,18 +1350,24 @@ impl KanalibApp {
                             .truncate()
                             .text_xs()
                             .text_color(colors.muted)
-                            .child(format!(
-                                "未审 {} 组 · {} 张 · 可释放 {} · {}",
-                                summary.pending,
-                                summary.pending_assets,
-                                format_bytes(summary.pending_bytes),
-                                if library_scanning {
-                                    "图库扫描中..."
-                                } else if similar_mode && similar_scanning {
-                                    "相似扫描中..."
-                                } else {
-                                    status
-                                }
+                            .child(t_args(
+                                cx,
+                                "dedup.summary",
+                                &[
+                                    ("pending", &summary.pending.to_string()),
+                                    ("assets", &summary.pending_assets.to_string()),
+                                    ("bytes", &format_bytes(summary.pending_bytes)),
+                                    (
+                                        "status",
+                                        &if library_scanning {
+                                            t(cx, "dedup.summary.library_scanning").to_string()
+                                        } else if similar_mode && similar_scanning {
+                                            t(cx, "dedup.summary.similar_scanning").to_string()
+                                        } else {
+                                            status.to_string()
+                                        },
+                                    ),
+                                ],
                             )),
                     ),
             )
@@ -1252,11 +1381,11 @@ impl KanalibApp {
                         Button::new(
                             "dedup-similar-scan",
                             if similar_scanning {
-                                "相似扫描中…"
+                                t(cx, "dedup.similar.scanning_button")
                             } else if similar_scanned {
-                                "重新扫描相似图片"
+                                t(cx, "dedup.similar.rescan")
                             } else {
-                                "扫描相似图片"
+                                t(cx, "dedup.similar.scan")
                             },
                         )
                         .primary()
@@ -1275,24 +1404,27 @@ impl KanalibApp {
                         })
                     }))
                     .child(
-                        Button::new("dedup-preselect", "按规则预选")
+                        Button::new("dedup-preselect", t(cx, "dedup.preselect"))
                             .disabled(busy || summary.pending == 0)
                             .on_click(move |_, _, cx| {
                                 let _ = this_preselect.update(cx, |app, cx| {
                                     let selected = app.state.preselect_dedup(preselect_mode);
                                     app.dedup_notice = Some(if selected == 0 {
-                                        "没有待处理的组".to_string()
+                                        t(cx, "dedup.preselect.empty").to_string()
                                     } else {
-                                        format!(
-                                            "已按规则预选 {selected} 组；移入回收站前仍会汇总确认"
+                                        t_args(
+                                            cx,
+                                            "dedup.preselect.done",
+                                            &[("n", &selected.to_string())],
                                         )
+                                        .to_string()
                                     });
                                     cx.notify();
                                 });
                             }),
                     )
                     .children((!similar_mode).then(|| {
-                        Button::new("dedup-batch", "批量移入回收站")
+                        Button::new("dedup-batch", t(cx, "dedup.batch_trash"))
                             .disabled(busy || summary.pending == 0 || has_remote_pending)
                             .on_click(move |_, _, cx| {
                                 let _ = this_batch.update(cx, |app, cx| {
@@ -1301,15 +1433,21 @@ impl KanalibApp {
                                 });
                             })
                     }))
-                    .child(DropdownMenu::new("dedup-more", "更多", more_menu))
+                    .child(DropdownMenu::new(
+                        "dedup-more",
+                        t(cx, "dedup.more"),
+                        more_menu,
+                    ))
                     .child(
-                        Button::new("dedup-library", "返回图库").on_click(move |_, _, cx| {
-                            let _ = this_library.update(cx, |app, cx| {
-                                app.screen = Screen::Library;
-                                app.dedup_confirm = None;
-                                cx.notify();
-                            });
-                        }),
+                        Button::new("dedup-library", t(cx, "common.back_to_library")).on_click(
+                            move |_, _, cx| {
+                                let _ = this_library.update(cx, |app, cx| {
+                                    app.screen = Screen::Library;
+                                    app.dedup_confirm = None;
+                                    cx.notify();
+                                });
+                            },
+                        ),
                     ),
             );
 
@@ -1320,6 +1458,7 @@ impl KanalibApp {
                 .border_b_1()
                 .border_color(colors.border)
                 .child(self.render_threshold_editor(
+                    cx,
                     this,
                     similar_threshold,
                     self.dedup_threshold_draft,
@@ -1338,12 +1477,14 @@ impl KanalibApp {
             .border_b_1()
             .border_color(colors.border)
             .child(dedup_filter_chip(
+                cx,
                 DedupFilter::Pending,
                 summary.pending,
                 self.dedup_filter == DedupFilter::Pending,
                 this.clone(),
             ))
             .child(dedup_filter_chip(
+                cx,
                 DedupFilter::Ignored,
                 summary.ignored,
                 self.dedup_filter == DedupFilter::Ignored,
@@ -1351,6 +1492,7 @@ impl KanalibApp {
             ))
             .children(similar_mode.then(|| {
                 dedup_filter_chip(
+                    cx,
                     DedupFilter::Related,
                     summary.related,
                     self.dedup_filter == DedupFilter::Related,
@@ -1358,12 +1500,14 @@ impl KanalibApp {
                 )
             }))
             .child(dedup_filter_chip(
+                cx,
                 DedupFilter::Done,
                 summary.done,
                 self.dedup_filter == DedupFilter::Done,
                 this.clone(),
             ))
             .child(dedup_filter_chip(
+                cx,
                 DedupFilter::All,
                 summary.total,
                 self.dedup_filter == DedupFilter::All,
@@ -1371,11 +1515,11 @@ impl KanalibApp {
             ))
             .child(div().flex_1())
             .child(div().text_xs().text_color(colors.subtle).child(if busy {
-                "扫描中，完成后更新分组"
+                t(cx, "dedup.hint.scanning")
             } else if similar_mode {
-                "相似组只逐组处理，不提供批量删除"
+                t(cx, "dedup.hint.similar")
             } else {
-                "先预选，再逐组确认"
+                t(cx, "dedup.hint.exact")
             }));
 
         // F-046：组筛选与排序；键盘 n/j/↓ 下一组，p/k/↑ 上一组。
@@ -1384,7 +1528,7 @@ impl KanalibApp {
             for sort in DedupSort::ALL {
                 let this = this.clone();
                 menu = menu.item(
-                    MenuItem::radio(sort.label(), self.dedup_sort == sort).on_click(
+                    MenuItem::radio(sort.label(cx), self.dedup_sort == sort).on_click(
                         move |_, cx| {
                             let _ = this.update(cx, |app, cx| {
                                 app.dedup_sort = sort;
@@ -1409,9 +1553,9 @@ impl KanalibApp {
         )
         .size(ControlSize::Sm)
         .tooltip(if self.dedup_sort_descending {
-            "当前降序，点击改为升序"
+            t(cx, "dedup.sort.desc_tooltip")
         } else {
-            "当前升序，点击改为降序"
+            t(cx, "dedup.sort.asc_tooltip")
         })
         .disabled(self.dedup_sort == DedupSort::Default)
         .on_click(move |_, _, cx| {
@@ -1422,18 +1566,18 @@ impl KanalibApp {
             });
         });
         let this_recycle = this.clone();
-        let open_recycle_bin = Button::new("dedup-recycle-bin", "回收站")
+        let open_recycle_bin = Button::new("dedup-recycle-bin", t(cx, "dedup.recycle_bin"))
             .size(ControlSize::Sm)
             .icon(IconName::FolderOpen)
             .on_click(move |_, _, cx| {
                 if let Err(error) = crate::platform::open_recycle_bin() {
-                    let _ = this_recycle.update(cx, |app, cx| {
-                        push_toast(
-                            &app.toaster,
-                            cx,
-                            format!("打开回收站失败：{error}"),
-                            Severity::Danger,
-                        );
+                    let message = t_args(
+                        cx,
+                        "dedup.recycle_bin_failed",
+                        &[("error", &error.to_string())],
+                    );
+                    let _ = this_recycle.update(cx, move |app, cx| {
+                        push_toast(&app.toaster, cx, message, Severity::Danger);
                     });
                 }
             });
@@ -1446,12 +1590,14 @@ impl KanalibApp {
             .border_b_1()
             .border_color(colors.border)
             .child(
-                div()
-                    .w(px(260.))
-                    .child(Input::new(&filter_input).clearable().least("筛选组")),
+                div().w(px(260.)).child(
+                    Input::new(&filter_input)
+                        .clearable()
+                        .least(t(cx, "dedup.filter.least")),
+                ),
             )
             .child(
-                DropdownMenu::new("dedup-sort", "排序", sort_menu)
+                DropdownMenu::new("dedup-sort", t(cx, "dedup.sort.menu"), sort_menu)
                     .icon(IconName::ArrowDownUp)
                     .variant(ButtonVariant::Ghost),
             )
@@ -1462,7 +1608,7 @@ impl KanalibApp {
                     .flex_none()
                     .text_xs()
                     .text_color(colors.subtle)
-                    .child("下一组 n / ↓ · 上一组 p / ↑"),
+                    .child(t(cx, "dedup.keyboard_hint")),
             )
             .child(open_recycle_bin);
 
@@ -1475,10 +1621,13 @@ impl KanalibApp {
                 .bg(colors.sunken)
                 .text_xs()
                 .text_color(colors.muted)
-                .child(format!(
-                    "最近移入回收站：{} · {}",
-                    relative_time(audit.at),
-                    audit.describe()
+                .child(t_args(
+                    cx,
+                    "dedup.audit.recent",
+                    &[
+                        ("time", &relative_time(audit.at)),
+                        ("summary", &audit.summary(cx)),
+                    ],
                 ))
                 .into_any_element()
         });
@@ -1495,14 +1644,13 @@ impl KanalibApp {
                 div()
                     .text_xs()
                     .font_weight(FontWeight::SEMIBOLD)
-                    .child("组"),
+                    .child(t(cx, "dedup.rail.groups")),
             )
-            .child(
-                div()
-                    .text_xs()
-                    .text_color(colors.subtle)
-                    .child(format!("{} 组", visible_indices.len())),
-            );
+            .child(div().text_xs().text_color(colors.subtle).child(t_args(
+                cx,
+                "dedup.rail.count",
+                &[("n", &visible_indices.len().to_string())],
+            )));
 
         let rail_list: AnyElement = if visible_indices.is_empty() {
             div()
@@ -1511,13 +1659,13 @@ impl KanalibApp {
                 .text_xs()
                 .text_color(colors.subtle)
                 .child(if similar_mode && !similar_scanned && !similar_scanning {
-                    "尚未扫描相似图片。"
+                    t(cx, "dedup.empty.unscanned")
                 } else if similar_scanning {
-                    "正在计算相似图片..."
+                    t(cx, "dedup.empty.scanning")
                 } else if library_scanning {
-                    "图库扫描完成后会显示重复组。"
+                    t(cx, "dedup.empty.library")
                 } else {
-                    "此筛选下没有组。"
+                    t(cx, "dedup.empty.filtered")
                 })
                 .into_any_element()
         } else {
@@ -1530,12 +1678,13 @@ impl KanalibApp {
             uniform_list(
                 "dedup-groups",
                 indices_for_list.len(),
-                move |range, _, _| {
+                move |range, _, cx| {
                     range
                         .map(|row| {
                             let index = indices_for_list[row];
                             let group = &groups_for_list[index];
                             dedup_group_row(
+                                cx,
                                 group,
                                 selected_key.as_deref() == Some(group.key.as_str()),
                                 this_for_list.clone(),
@@ -1569,6 +1718,7 @@ impl KanalibApp {
         let detail: AnyElement = if let Some(group) = selected {
             let detail_width = (width - px(DEDUP_RAIL_WIDTH)).max(px(0.));
             self.render_dedup_detail(
+                cx,
                 this,
                 &group,
                 groups.clone(),
@@ -1582,45 +1732,40 @@ impl KanalibApp {
                 if similar_mode && !similar_scanned && !similar_scanning {
                     (
                         IconName::Search,
-                        "尚未扫描相似图片",
-                        "在阈值栏选择一个相似度后开始扫描。",
+                        t(cx, "dedup.state.title_unscanned"),
+                        t(cx, "dedup.state.desc_unscanned"),
                     )
                 } else if similar_scanning {
                     (
                         IconName::RefreshCw,
-                        "正在计算相似图片",
-                        "扫描完成后相似组会出现在这里。",
+                        t(cx, "dedup.state.title_computing"),
+                        t(cx, "dedup.state.desc_computing"),
                     )
                 } else if library_scanning {
                     (
                         IconName::RefreshCw,
-                        "正在扫描图库",
-                        "扫描完成后重复组会自动刷新。",
+                        t(cx, "dedup.state.title_library"),
+                        t(cx, "dedup.state.desc_library"),
                     )
                 } else if similar_mode {
                     (
                         IconName::SearchX,
-                        "没有符合筛选的相似组",
-                        "调整筛选或排序后再试。",
+                        t(cx, "dedup.state.title_similar_filtered"),
+                        t(cx, "dedup.state.desc_filtered"),
                     )
                 } else {
                     (
                         IconName::SearchX,
-                        "没有符合筛选的重复组",
-                        "调整筛选或排序后再试。",
+                        t(cx, "dedup.state.title_exact_filtered"),
+                        t(cx, "dedup.state.desc_filtered"),
                     )
                 };
             empty_state(icon, title, description, None, colors)
         };
 
         let notice = self.dedup_notice.clone();
-        let remote_note = has_remote_pending.then(|| {
-            (
-                "含远端只读资产的组不能移入回收站；批量回收站已禁用，请逐组处理本地组。"
-                    .to_string(),
-                colors.warning,
-            )
-        });
+        let remote_note =
+            has_remote_pending.then(|| (t(cx, "dedup.remote_note").to_string(), colors.warning));
         let banner: Option<AnyElement> = error
             .map(|message| (message.to_string(), colors.danger))
             .or_else(|| notice.map(|message| (message, colors.muted)))
@@ -1639,7 +1784,7 @@ impl KanalibApp {
             });
 
         let overlay = self.dedup_confirm.clone().and_then(|confirm| {
-            self.render_dedup_confirm(this, &confirm, &groups, summary, colors)
+            self.render_dedup_confirm(cx, this, &confirm, &groups, summary, colors)
         });
 
         let this_keys = this.clone();
@@ -1706,6 +1851,7 @@ impl KanalibApp {
 
     pub(crate) fn render_dedup_detail(
         &mut self,
+        cx: &App,
         this: &Entity<Self>,
         group: &DuplicateGroup,
         groups: Arc<Vec<DuplicateGroup>>,
@@ -1726,12 +1872,14 @@ impl KanalibApp {
         let reclaimable = group.reclaimable();
         let group_kind = group.kind;
         let kind_label = match group.kind {
-            GroupKind::Exact => "字节完全相同",
-            GroupKind::Similar => "相似候选组",
+            GroupKind::Exact => t(cx, "dedup.detail.kind_exact"),
+            GroupKind::Similar => t(cx, "dedup.detail.kind_similar"),
         };
         let similarity = group
             .similarity_pct()
-            .map(|pct| format!(" · 相似度 ≥{pct}%"))
+            .map(|pct| {
+                t_args(cx, "dedup.detail.similarity", &[("pct", &pct.to_string())]).to_string()
+            })
             .unwrap_or_default();
         let protected_duplicate = group
             .duplicate_paths()
@@ -1747,11 +1895,11 @@ impl KanalibApp {
             let path = asset.path.clone();
             let remote = is_remote_asset(&path);
             let label = if remote {
-                "打开保留项（远端只读）"
+                t(cx, "dedup.open_remote")
             } else if asset.is_video() {
-                "用系统播放器打开"
+                t(cx, "dedup.open_video")
             } else {
-                "打开保留项"
+                t(cx, "dedup.open")
             };
             let open_toaster = self.toaster.clone();
             let open_state = self.state.clone();
@@ -1760,7 +1908,10 @@ impl KanalibApp {
                 .on_click(move |_, _, cx| {
                     if let Err(error) = open_asset_with_system(&path) {
                         // F-073 6.2：去重页 banner 会把 shared.error 优先显示为 danger 就地说明。
-                        open_state.set_ui_error(format!("打开保留项失败：{error}"));
+                        open_state.set_ui_error(
+                            t_args(cx, "dedup.open_failed", &[("error", &error.to_string())])
+                                .to_string(),
+                        );
                         push_toast(&open_toaster, cx, error, Severity::Danger);
                     }
                 })
@@ -1773,9 +1924,9 @@ impl KanalibApp {
             Button::new(
                 "dedup-compare-open",
                 if group.assets.len() > 4 {
-                    "对比前 4 张"
+                    t(cx, "dedup.compare_first4")
                 } else {
-                    "对比此组"
+                    t(cx, "dedup.compare_group")
                 },
             )
             .on_click(move |_, _, cx| {
@@ -1795,9 +1946,7 @@ impl KanalibApp {
             .items_center()
             .justify_between()
             .gap(px(8.))
-            .when(compact_header, |header| {
-                header.flex_col().items_start()
-            })
+            .when(compact_header, |header| header.flex_col().items_start())
             .child(
                 div()
                     .flex()
@@ -1810,23 +1959,41 @@ impl KanalibApp {
                             .truncate()
                             .text_sm()
                             .font_weight(FontWeight::SEMIBOLD)
-                            .child(format!(
-                                "{} 张 · {kind_label} · {}{similarity}{}",
-                                group.assets.len(),
-                                group_state_label(group.state),
-                                if has_protected {
-                                    " · 含保护路径"
-                                } else {
-                                    ""
-                                }
+                            .child(t_args(
+                                cx,
+                                "dedup.detail.header",
+                                &[
+                                    ("count", &group.assets.len().to_string()),
+                                    ("kind", &kind_label),
+                                    ("state", &group_state_label(cx, group.state)),
+                                    (
+                                        "protected",
+                                        &if has_protected {
+                                            t(cx, "dedup.detail.protected").to_string()
+                                        } else {
+                                            String::new()
+                                        },
+                                    ),
+                                    ("similarity", &similarity),
+                                ],
                             )),
                     )
-                    .child(div().truncate().text_xs().text_color(colors.muted).child(format!(
-                        "{} · 可释放 {} · 当前保留：{}",
-                        group.suggested_reason,
-                        format_bytes(reclaimable),
-                        keeper.map(Asset::title).unwrap_or_else(|| "未选择".into())
-                    ))),
+                    .child(div().truncate().text_xs().text_color(colors.muted).child(
+                        t_args(
+                            cx,
+                            "dedup.detail.meta",
+                            &[
+                                ("reason", &group.suggested_reason),
+                                ("bytes", &format_bytes(reclaimable)),
+                                (
+                                    "keeper",
+                                    &keeper.map(Asset::title).unwrap_or_else(|| {
+                                        t(cx, "dedup.detail.no_keeper").to_string()
+                                    }),
+                                ),
+                            ],
+                        ),
+                    )),
             )
             .child(
                 div()
@@ -1834,35 +2001,38 @@ impl KanalibApp {
                     .flex_wrap()
                     .items_center()
                     .gap(px(5.))
-                    .when(compact_header, |actions| {
-                        actions.w_full().justify_end()
-                    })
+                    .when(compact_header, |actions| actions.w_full().justify_end())
                     .when(!compact_header, |actions| actions.flex_none())
-                    .child(
-                        Button::new("dedup-prev", "上一组").on_click(move |_, _, cx| {
+                    .child(Button::new("dedup-prev", t(cx, "dedup.prev")).on_click(
+                        move |_, _, cx| {
                             let _ = this_prev.update(cx, |app, cx| {
                                 app.advance_dedup(&groups_prev, false);
                                 cx.notify();
                             });
-                        }),
-                    )
-                    .child(
-                        Button::new("dedup-next", "下一组").on_click(move |_, _, cx| {
+                        },
+                    ))
+                    .child(Button::new("dedup-next", t(cx, "dedup.next")).on_click(
+                        move |_, _, cx| {
                             let _ = this_next.update(cx, |app, cx| {
                                 app.advance_dedup(&groups_next, true);
                                 cx.notify();
                             });
-                        }),
-                    )
+                        },
+                    ))
                     .children(open)
                     .children(compare_button)
                     .children((group.assets.len() > DEDUP_MAX_VISIBLE).then(|| {
                         Button::new(
                             "dedup-show-all",
                             if self.dedup_show_all {
-                                "收起".to_string()
+                                t(cx, "dedup.collapse").to_string()
                             } else {
-                                format!("全部 {} 张", group.assets.len())
+                                t_args(
+                                    cx,
+                                    "dedup.show_all",
+                                    &[("n", &group.assets.len().to_string())],
+                                )
+                                .to_string()
                             },
                         )
                         .on_click(move |_, _, cx| {
@@ -1888,6 +2058,7 @@ impl KanalibApp {
             .iter()
             .map(|asset| {
                 dedup_asset_card(
+                    cx,
                     group,
                     asset,
                     group.keeper.as_ref() == Some(&asset.path),
@@ -1938,14 +2109,14 @@ impl KanalibApp {
                         .gap(px(5.))
                         .text_xs()
                         .text_color(colors.subtle)
-                        .child("点击任意卡片设为保留项")
-                        .child("保留项不会被移入回收站")
-                        .child("绿色 = 保留 · 黄色 = 推荐"),
+                        .child(t(cx, "dedup.note.click_to_keep"))
+                        .child(t(cx, "dedup.note.keeper_safe"))
+                        .child(t(cx, "dedup.note.legend")),
                 )
                 .into_any_element()
         };
 
-        let diff = dedup_diff(group, &shown_assets, colors);
+        let diff = dedup_diff(cx, group, &shown_assets, colors);
         let body: AnyElement = if side_by_side {
             div()
                 .flex_1()
@@ -1994,7 +2165,7 @@ impl KanalibApp {
                 .items_center()
                 .gap(px(5.))
                 .child(
-                    Button::new("dedup-ignore", "不是重复")
+                    Button::new("dedup-ignore", t(cx, "dedup.action.not_duplicate"))
                         .disabled(scanning)
                         .on_click({
                             let key = key.clone();
@@ -2007,11 +2178,19 @@ impl KanalibApp {
                                         group_kind,
                                     ) {
                                         Ok(()) => {
-                                            app.dedup_notice = Some("已忽略此组".into());
+                                            app.dedup_notice =
+                                                Some(t(cx, "dedup.notice.ignored").to_string());
                                             app.advance_dedup(&groups, true);
                                         }
                                         Err(error) => {
-                                            app.dedup_notice = Some(format!("操作失败: {error:#}"));
+                                            app.dedup_notice = Some(
+                                                t_args(
+                                                    cx,
+                                                    "dedup.notice.failed",
+                                                    &[("error", &format!("{error:#}"))],
+                                                )
+                                                .to_string(),
+                                            );
                                         }
                                     }
                                     cx.notify();
@@ -2020,7 +2199,7 @@ impl KanalibApp {
                         }),
                 )
                 .children((group_kind == GroupKind::Similar).then(|| {
-                    Button::new("dedup-related", "相关变体")
+                    Button::new("dedup-related", t(cx, "dedup.state.related"))
                         .disabled(scanning)
                         .on_click({
                             let key = key.clone();
@@ -2033,11 +2212,19 @@ impl KanalibApp {
                                         GroupKind::Similar,
                                     ) {
                                         Ok(()) => {
-                                            app.dedup_notice = Some("已标记为相关变体".into());
+                                            app.dedup_notice =
+                                                Some(t(cx, "dedup.notice.related").to_string());
                                             app.advance_dedup(&groups, true);
                                         }
                                         Err(error) => {
-                                            app.dedup_notice = Some(format!("操作失败: {error:#}"));
+                                            app.dedup_notice = Some(
+                                                t_args(
+                                                    cx,
+                                                    "dedup.notice.failed",
+                                                    &[("error", &format!("{error:#}"))],
+                                                )
+                                                .to_string(),
+                                            );
                                         }
                                     }
                                     cx.notify();
@@ -2046,15 +2233,17 @@ impl KanalibApp {
                         })
                 }))
                 .child(
-                    Button::new("dedup-later", "稍后").on_click(move |_, _, cx| {
-                        let _ = this_later.update(cx, |app, cx| {
-                            app.advance_dedup(&groups_later, true);
-                            cx.notify();
-                        });
-                    }),
+                    Button::new("dedup-later", t(cx, "dedup.action.later")).on_click(
+                        move |_, _, cx| {
+                            let _ = this_later.update(cx, |app, cx| {
+                                app.advance_dedup(&groups_later, true);
+                                cx.notify();
+                            });
+                        },
+                    ),
                 )
                 .child(
-                    Button::new("dedup-keep-all", "全部保留")
+                    Button::new("dedup-keep-all", t(cx, "dedup.action.keep_all"))
                         .disabled(scanning)
                         .on_click({
                             let key = key.clone();
@@ -2064,11 +2253,19 @@ impl KanalibApp {
                                     match app.state.mark_dedup(&key, ReviewState::Done, group_kind)
                                     {
                                         Ok(()) => {
-                                            app.dedup_notice = Some("已保留整组".into());
+                                            app.dedup_notice =
+                                                Some(t(cx, "dedup.notice.kept").to_string());
                                             app.advance_dedup(&groups, true);
                                         }
                                         Err(error) => {
-                                            app.dedup_notice = Some(format!("操作失败: {error:#}"));
+                                            app.dedup_notice = Some(
+                                                t_args(
+                                                    cx,
+                                                    "dedup.notice.failed",
+                                                    &[("error", &format!("{error:#}"))],
+                                                )
+                                                .to_string(),
+                                            );
                                         }
                                     }
                                     cx.notify();
@@ -2077,17 +2274,22 @@ impl KanalibApp {
                         }),
                 )
                 .child(
-                    Button::new("dedup-trash", format!("移入回收站 ({duplicate_count})"))
-                        .variant(ButtonVariant::Danger)
-                        .disabled(
-                            scanning || keeper.is_none() || protected_duplicate || group_remote,
-                        )
-                        .on_click(move |_, _, cx| {
-                            let _ = this_trash.update(cx, |app, cx| {
-                                app.dedup_confirm = Some(DedupConfirm::Group(key.clone()));
-                                cx.notify();
-                            });
-                        }),
+                    Button::new(
+                        "dedup-trash",
+                        t_args(
+                            cx,
+                            "dedup.action.trash",
+                            &[("n", &duplicate_count.to_string())],
+                        ),
+                    )
+                    .variant(ButtonVariant::Danger)
+                    .disabled(scanning || keeper.is_none() || protected_duplicate || group_remote)
+                    .on_click(move |_, _, cx| {
+                        let _ = this_trash.update(cx, |app, cx| {
+                            app.dedup_confirm = Some(DedupConfirm::Group(key.clone()));
+                            cx.notify();
+                        });
+                    }),
                 )
                 .into_any_element()
         } else {
@@ -2098,17 +2300,25 @@ impl KanalibApp {
                 .items_center()
                 .gap(px(5.))
                 .child(
-                    Button::new("dedup-reopen", "重新打开此组")
+                    Button::new("dedup-reopen", t(cx, "dedup.action.reopen"))
                         .disabled(scanning)
                         .on_click(move |_, _, cx| {
                             let _ = this_reopen.update(cx, |app, cx| {
                                 match app.state.mark_dedup(&key, ReviewState::Pending, group_kind) {
                                     Ok(()) => {
-                                        app.dedup_notice = Some("已重新打开此组".into());
+                                        app.dedup_notice =
+                                            Some(t(cx, "dedup.notice.reopened").to_string());
                                         app.dedup_selected = Some(key.clone());
                                     }
                                     Err(error) => {
-                                        app.dedup_notice = Some(format!("操作失败: {error:#}"));
+                                        app.dedup_notice = Some(
+                                            t_args(
+                                                cx,
+                                                "dedup.notice.failed",
+                                                &[("error", &format!("{error:#}"))],
+                                            )
+                                            .to_string(),
+                                        );
                                     }
                                 }
                                 cx.notify();
@@ -2142,31 +2352,34 @@ impl KanalibApp {
                             .truncate()
                             .text_xs()
                             .text_color(colors.fg)
-                            .child(format!(
-                                "保留 1 张 · {} {duplicate_count} 张 · 预计释放 {}",
-                                if group_kind == GroupKind::Similar {
-                                    "待确认"
-                                } else {
-                                    "待处理"
-                                },
-                                format_bytes(reclaimable)
+                            .child(t_args(
+                                cx,
+                                "dedup.action_bar.summary",
+                                &[
+                                    (
+                                        "mode",
+                                        &if group_kind == GroupKind::Similar {
+                                            t(cx, "dedup.action_bar.mode_similar").to_string()
+                                        } else {
+                                            t(cx, "dedup.action_bar.mode_exact").to_string()
+                                        },
+                                    ),
+                                    ("n", &duplicate_count.to_string()),
+                                    ("bytes", &format_bytes(reclaimable)),
+                                ],
                             )),
                     )
-                    .child(
-                        div()
-                            .truncate()
-                            .text_xs()
-                            .text_color(colors.subtle)
-                            .child(if scanning {
-                                "扫描中，完成后可操作"
-                            } else if group_remote {
-                                "包含远端只读资产，移入回收站已禁用；可标记忽略或全部保留"
-                            } else if protected_duplicate {
-                                "包含受保护路径，移入回收站已禁用；请把受保护文件设为保留项或调整保护路径"
-                            } else {
-                                "只移入系统回收站，不永久删除；可从回收站恢复"
-                            }),
-                    ),
+                    .child(div().truncate().text_xs().text_color(colors.subtle).child(
+                        if scanning {
+                            t(cx, "dedup.action_bar.scanning")
+                        } else if group_remote {
+                            t(cx, "dedup.action_bar.remote")
+                        } else if protected_duplicate {
+                            t(cx, "dedup.action_bar.protected")
+                        } else {
+                            t(cx, "dedup.action_bar.safe")
+                        },
+                    )),
             )
             .child(
                 div()
@@ -2194,6 +2407,7 @@ impl KanalibApp {
 
     pub(crate) fn render_dedup_confirm(
         &self,
+        cx: &App,
         this: &Entity<Self>,
         confirm: &DedupConfirm,
         groups: &Arc<Vec<DuplicateGroup>>,
@@ -2220,22 +2434,32 @@ impl KanalibApp {
                     .map(|asset| (asset.title(), format_bytes(asset.bytes)))
                     .collect::<Vec<_>>();
                 (
-                    "移入回收站？".to_string(),
-                    format!(
-                        "将把 {} 张{}副本移入系统回收站；保留 {}，不修改原图。{}",
-                        duplicates.len(),
-                        if group.kind == GroupKind::Similar {
-                            "相似"
-                        } else {
-                            ""
-                        },
-                        keeper.title(),
-                        if group.kind == GroupKind::Similar {
-                            " 相似组只是候选，请确认它们确实是同一张图的不同版本。"
-                        } else {
-                            ""
-                        }
-                    ),
+                    t(cx, "dedup.confirm.title").to_string(),
+                    t_args(
+                        cx,
+                        "dedup.confirm.group_detail",
+                        &[
+                            ("n", &duplicates.len().to_string()),
+                            (
+                                "kind",
+                                &if group.kind == GroupKind::Similar {
+                                    t(cx, "dedup.confirm.kind_similar").to_string()
+                                } else {
+                                    String::new()
+                                },
+                            ),
+                            ("keeper", &keeper.title()),
+                            (
+                                "note",
+                                &if group.kind == GroupKind::Similar {
+                                    t(cx, "dedup.confirm.similar_note").to_string()
+                                } else {
+                                    String::new()
+                                },
+                            ),
+                        ],
+                    )
+                    .to_string(),
                     rows,
                     Some(key.clone()),
                     remote,
@@ -2262,18 +2486,27 @@ impl KanalibApp {
                     .map(|group| {
                         (
                             group.title(),
-                            format!("{} 张副本", group.assets.len().saturating_sub(1)),
+                            t_args(
+                                cx,
+                                "dedup.confirm.copies",
+                                &[("n", &group.assets.len().saturating_sub(1).to_string())],
+                            )
+                            .to_string(),
                         )
                     })
                     .collect::<Vec<_>>();
                 (
-                    "批量移入回收站？".to_string(),
-                    format!(
-                        "将处理 {} 个未审组，把 {} 张副本移入系统回收站；每组保留当前保留项。含保护路径的组会跳过。预计释放 {}。",
-                        summary.pending,
-                        asset_count,
-                        format_bytes(summary.pending_bytes)
-                    ),
+                    t(cx, "dedup.confirm.batch_title").to_string(),
+                    t_args(
+                        cx,
+                        "dedup.confirm.batch_detail",
+                        &[
+                            ("groups", &summary.pending.to_string()),
+                            ("assets", &asset_count.to_string()),
+                            ("bytes", &format_bytes(summary.pending_bytes)),
+                        ],
+                    )
+                    .to_string(),
                     rows,
                     None,
                     remote,
@@ -2281,7 +2514,7 @@ impl KanalibApp {
             }
         };
         let detail = if remote {
-            format!("{detail} 其中含远端只读资产，不能移入回收站。")
+            t_args(cx, "dedup.confirm.remote_suffix", &[("detail", &detail)]).to_string()
         } else {
             detail
         };
@@ -2291,6 +2524,8 @@ impl KanalibApp {
 
         let close_app = this.clone();
         let this_confirm = this.clone();
+        let cancel_label = t(cx, "dedup.confirm.cancel");
+        let confirm_label = t(cx, "dedup.confirm.confirm");
         let overlay = Dialog::new("dedup-confirm-dialog", title, move |_, cx| {
             let _ = close_app.update(cx, |app, cx| {
                 app.dedup_confirm = None;
@@ -2333,11 +2568,12 @@ impl KanalibApp {
                         )
                 })),
         )
-        .action(|close| {
-            Button::new("dedup-cancel", "取消").on_click(move |_, window, cx| close(window, cx))
+        .action(move |close| {
+            Button::new("dedup-cancel", cancel_label)
+                .on_click(move |_, window, cx| close(window, cx))
         })
         .action(move |_| {
-            Button::new("dedup-confirm", "确认移入回收站")
+            Button::new("dedup-confirm", confirm_label)
                 .variant(ButtonVariant::Danger)
                 .disabled(remote)
                 .on_click(move |_, _, cx| {
@@ -2359,24 +2595,56 @@ impl KanalibApp {
                                 };
                                 app.persist_setting("dedup.last_trash", audit.to_json(), cx);
                                 app.last_trash_audit = Some(audit);
-                                app.dedup_notice = Some(format!(
-                                    "已处理 {} 组 · 移入回收站 {} 张{}{}",
-                                    done.groups,
-                                    done.assets,
-                                    if done.failed > 0 {
-                                        format!("；{} 张未移动", done.failed)
-                                    } else {
-                                        String::new()
-                                    },
-                                    if done.protected_skipped > 0 {
-                                        format!("；跳过 {} 个受保护组", done.protected_skipped)
-                                    } else {
-                                        String::new()
-                                    }
-                                ));
+                                app.dedup_notice = Some(
+                                    t_args(
+                                        cx,
+                                        "dedup.notice.trashed",
+                                        &[
+                                            ("groups", &done.groups.to_string()),
+                                            ("assets", &done.assets.to_string()),
+                                            (
+                                                "failed",
+                                                &if done.failed > 0 {
+                                                    t_args(
+                                                        cx,
+                                                        "dedup.notice.trash_failed",
+                                                        &[("n", &done.failed.to_string())],
+                                                    )
+                                                    .to_string()
+                                                } else {
+                                                    String::new()
+                                                },
+                                            ),
+                                            (
+                                                "skipped",
+                                                &if done.protected_skipped > 0 {
+                                                    t_args(
+                                                        cx,
+                                                        "dedup.notice.trash_skipped",
+                                                        &[(
+                                                            "n",
+                                                            &done.protected_skipped.to_string(),
+                                                        )],
+                                                    )
+                                                    .to_string()
+                                                } else {
+                                                    String::new()
+                                                },
+                                            ),
+                                        ],
+                                    )
+                                    .to_string(),
+                                );
                             }
                             Err(error) => {
-                                app.dedup_notice = Some(format!("移入回收站失败: {error:#}"));
+                                app.dedup_notice = Some(
+                                    t_args(
+                                        cx,
+                                        "dedup.notice.trash_error",
+                                        &[("error", &format!("{error:#}"))],
+                                    )
+                                    .to_string(),
+                                );
                             }
                         }
                         app.dedup_confirm = None;
@@ -2405,6 +2673,35 @@ fn similar_filter_matches(asset: &Asset, filter_lower: &str) -> bool {
 }
 
 /// 阈值预览的采样说明；精确计算时不写「抽样」。
+fn preview_sample_note_text(cx: &App, preview: &SimilarThresholdPreview) -> String {
+    if preview.sampled {
+        let pct = if preview.total_assets > 0 {
+            preview.sampled_assets as f64 * 100.0 / preview.total_assets as f64
+        } else {
+            0.0
+        };
+        t_args(
+            cx,
+            "dedup.preview.sampled",
+            &[
+                ("sampled", &preview.sampled_assets.to_string()),
+                ("total", &preview.total_assets.to_string()),
+                ("pct", &format!("{pct:.1}")),
+            ],
+        )
+        .to_string()
+    } else {
+        t_args(
+            cx,
+            "dedup.preview.full",
+            &[("n", &preview.total_assets.to_string())],
+        )
+        .to_string()
+    }
+}
+
+/// 测试用的中文快照；界面文本走 `dedup.preview.*` 目录。
+#[cfg(test)]
 fn preview_sample_note(preview: &SimilarThresholdPreview) -> String {
     if preview.sampled {
         let pct = if preview.total_assets > 0 {
@@ -2423,6 +2720,7 @@ fn preview_sample_note(preview: &SimilarThresholdPreview) -> String {
 
 /// 结果行：缩略图 + 名称/路径 + 距离/相似度；整行可点选，右键复用图库菜单。
 fn similar_hit_row(
+    cx: &App,
     asset: &Asset,
     distance: u32,
     similarity_pct: u32,
@@ -2435,7 +2733,7 @@ fn similar_hit_row(
     let path = asset.path.clone();
     let title = asset.title();
     let path_text = path.display().to_string();
-    let menu = crate::views::asset_context_menu(asset, &this);
+    let menu = crate::views::asset_context_menu(asset, &this, cx);
     let thumb = asset.tile_thumb.clone().or_else(|| asset.thumb.clone());
     let media: AnyElement = match thumb {
         Some(thumb) => img(thumb)
@@ -2522,12 +2820,17 @@ fn similar_hit_row(
                 ),
         )
         .child(small_badge(
-            format!("距离 {distance}"),
+            t_args(cx, "dedup.hit.distance", &[("n", &distance.to_string())]).to_string(),
             colors.warning,
             colors.warning_subtle,
         ))
         .child(small_badge(
-            format!("相似 {similarity_pct}%"),
+            t_args(
+                cx,
+                "dedup.kind.similar",
+                &[("pct", &similarity_pct.to_string())],
+            )
+            .to_string(),
             colors.accent,
             colors.selection,
         ));
@@ -2591,12 +2894,10 @@ impl KanalibApp {
             .or_else(|| self.visible_paths().first().cloned());
         match path {
             Some(path) => self.open_similar(path, cx),
-            None => crate::app::push_toast(
-                &self.toaster,
-                cx,
-                "先选择一张图片再查找相似",
-                Severity::Warning,
-            ),
+            None => {
+                let message = t(cx, "dedup.similar.select_first");
+                crate::app::push_toast(&self.toaster, cx, message, Severity::Warning)
+            }
         }
     }
 
@@ -2643,7 +2944,14 @@ impl KanalibApp {
                     view.hits.clear();
                     view.scanned = 0;
                     view.truncated = false;
-                    view.error = Some(format!("查找相似失败：{error:#}"));
+                    view.error = Some(
+                        t_args(
+                            cx,
+                            "dedup.similar.query_failed",
+                            &[("error", &format!("{error:#}"))],
+                        )
+                        .to_string(),
+                    );
                 }
             }
         }
@@ -2746,12 +3054,12 @@ impl KanalibApp {
         self.settings_threshold_draft = None;
         self.dedup_threshold_draft = None;
         self.schedule_threshold_preview(saved, cx);
-        crate::app::push_toast(
-            &self.toaster,
+        let message = t_args(
             cx,
-            format!("相似阈值默认值已设为 ≤{saved}；已有审核状态保留"),
-            Severity::Success,
+            "dedup.threshold.default_set",
+            &[("n", &saved.to_string())],
         );
+        crate::app::push_toast(&self.toaster, cx, message, Severity::Success);
         cx.notify();
     }
 
@@ -2762,9 +3070,14 @@ impl KanalibApp {
         self.state.start_similar_scan();
         self.dedup_selected = None;
         self.dedup_confirm = None;
-        self.dedup_notice = Some(format!(
-            "已用 ≤{saved} 重新扫描相似图片；已审核状态保留，扫描期间仍可查看旧分组"
-        ));
+        self.dedup_notice = Some(
+            t_args(
+                cx,
+                "dedup.threshold.rescan_notice",
+                &[("n", &saved.to_string())],
+            )
+            .to_string(),
+        );
         self.schedule_threshold_preview(saved, cx);
         cx.notify();
     }
@@ -2820,6 +3133,7 @@ impl KanalibApp {
     /// 设置页与去重页共用的阈值编辑器：滑杆 + 6/10/14 快捷档 + 预估 + 链式风险。
     pub(crate) fn render_threshold_editor(
         &self,
+        cx: &App,
         this: &Entity<Self>,
         default: u8,
         draft: Option<u8>,
@@ -2831,8 +3145,11 @@ impl KanalibApp {
         // F-073 6.2：应用并扫描会启动耗时扫描，进行中给出 spinner 且不再重复触发。
         let scan_running = self.state.shared.lock().unwrap().scanning;
         let mut presets = div().flex().items_center().gap(px(5.));
-        for (value, label) in [(6u8, "严格 ≤6"), (10u8, "标准 ≤10"), (14u8, "宽松 ≤14")]
-        {
+        for (value, label) in [
+            (6u8, t(cx, "dedup.threshold.preset_strict")),
+            (10u8, t(cx, "dedup.threshold.preset_standard")),
+            (14u8, t(cx, "dedup.threshold.preset_loose")),
+        ] {
             let this_preset = this.clone();
             presets = presets.child(
                 Button::new(
@@ -2880,17 +3197,32 @@ impl KanalibApp {
             Some(value) if value != default => div()
                 .text_xs()
                 .text_color(colors.warning)
-                .child(format!("临时 ≤{value}（未保存；默认 ≤{default}）"))
+                .child(t_args(
+                    cx,
+                    "dedup.threshold.draft_changed",
+                    &[
+                        ("value", &value.to_string()),
+                        ("default", &default.to_string()),
+                    ],
+                ))
                 .into_any_element(),
             Some(value) => div()
                 .text_xs()
                 .text_color(colors.muted)
-                .child(format!("临时 ≤{value}（与默认相同）"))
+                .child(t_args(
+                    cx,
+                    "dedup.threshold.draft_same",
+                    &[("value", &value.to_string())],
+                ))
                 .into_any_element(),
             None => div()
                 .text_xs()
                 .text_color(colors.muted)
-                .child(format!("使用默认 ≤{default}"))
+                .child(t_args(
+                    cx,
+                    "dedup.threshold.using_default",
+                    &[("default", &default.to_string())],
+                ))
                 .into_any_element(),
         };
 
@@ -2899,7 +3231,7 @@ impl KanalibApp {
                 div()
                     .text_xs()
                     .text_color(colors.accent)
-                    .child("预览中…（大库可能 1.8–2.6 秒）")
+                    .child(t(cx, "dedup.threshold.previewing"))
                     .into_any_element()
             } else if let Some(preview) = self
                 .similar_preview
@@ -2911,19 +3243,28 @@ impl KanalibApp {
                     .items_center()
                     .flex_wrap()
                     .gap(px(5.))
-                    .child(div().text_xs().text_color(colors.fg).child(format!(
-                        "预估 {} 组 · {} 张入组",
-                        preview.group_count, preview.member_count
+                    .child(div().text_xs().text_color(colors.fg).child(t_args(
+                        cx,
+                        "dedup.threshold.estimate",
+                        &[
+                            ("groups", &preview.group_count.to_string()),
+                            ("members", &preview.member_count.to_string()),
+                        ],
                     )))
                     .child(small_badge(
-                        preview_sample_note(preview),
+                        preview_sample_note_text(cx, preview),
                         colors.muted,
                         colors.sunken,
                     ));
                 if preview.chain_risk {
                     row = row
                         .child(small_badge(
-                            format!("链式合并风险 · {} 组", preview.chain_groups),
+                            t_args(
+                                cx,
+                                "dedup.threshold.chain_risk",
+                                &[("n", &preview.chain_groups.to_string())],
+                            )
+                            .to_string(),
                             colors.danger,
                             colors.sunken,
                         ))
@@ -2931,7 +3272,7 @@ impl KanalibApp {
                             div()
                                 .text_xs()
                                 .text_color(colors.warning)
-                                .child("低阈值会把间接相似的图串成一组，建议逐组确认或提高阈值。"),
+                                .child(t(cx, "dedup.threshold.chain_hint")),
                         );
                 }
                 row.into_any_element()
@@ -2940,9 +3281,9 @@ impl KanalibApp {
                     .text_xs()
                     .text_color(colors.subtle)
                     .child(if self.similar_preview_running {
-                        "正在预览其它阈值…"
+                        t(cx, "dedup.threshold.previewing_other")
                     } else {
-                        "尚无该阈值的预览；拖动滑杆或点「刷新预览」。"
+                        t(cx, "dedup.threshold.no_preview")
                     })
                     .into_any_element()
             };
@@ -2953,7 +3294,7 @@ impl KanalibApp {
         let this_discard = this.clone();
         let refresh = Button::new(
             SharedString::from(format!("{prefix}-sim-preview-refresh")),
-            "刷新预览",
+            t(cx, "dedup.threshold.refresh"),
         )
         .size(ControlSize::Sm)
         .on_click(move |_, _, cx| {
@@ -2963,7 +3304,11 @@ impl KanalibApp {
         });
         let apply = Button::new(
             SharedString::from(format!("{prefix}-sim-apply-default")),
-            format!("设为默认 ≤{effective}"),
+            t_args(
+                cx,
+                "dedup.threshold.set_default",
+                &[("value", &effective.to_string())],
+            ),
         )
         .size(ControlSize::Sm)
         .variant(ButtonVariant::Primary)
@@ -2971,19 +3316,25 @@ impl KanalibApp {
             let _ = this_apply.update(cx, |app, cx| app.apply_threshold_default(effective, cx));
         });
         let scan = (!settings).then(|| {
-            Button::new("dedup-sim-apply-scan", format!("应用并扫描 ≤{effective}"))
-                .size(ControlSize::Sm)
-                .variant(ButtonVariant::Primary)
-                .loading(scan_running)
-                .on_click(move |_, _, cx| {
-                    let _ =
-                        this_scan.update(cx, |app, cx| app.apply_threshold_and_scan(effective, cx));
-                })
+            Button::new(
+                "dedup-sim-apply-scan",
+                t_args(
+                    cx,
+                    "dedup.threshold.apply_scan",
+                    &[("value", &effective.to_string())],
+                ),
+            )
+            .size(ControlSize::Sm)
+            .variant(ButtonVariant::Primary)
+            .loading(scan_running)
+            .on_click(move |_, _, cx| {
+                let _ = this_scan.update(cx, |app, cx| app.apply_threshold_and_scan(effective, cx));
+            })
         });
         let discard = draft.map(|_| {
             Button::new(
                 SharedString::from(format!("{prefix}-sim-discard-draft")),
-                "放弃临时值",
+                t(cx, "dedup.threshold.discard"),
             )
             .size(ControlSize::Sm)
             .on_click(move |_, _, cx| {
@@ -3006,9 +3357,16 @@ impl KanalibApp {
                         div()
                             .text_xs()
                             .font_weight(FontWeight::SEMIBOLD)
-                            .child(format!(
-                                "相似阈值 ≤{effective} · 约 {}% 相似",
-                                similarity_pct_from_distance(effective as u32)
+                            .child(t_args(
+                                cx,
+                                "dedup.threshold.title",
+                                &[
+                                    ("value", &effective.to_string()),
+                                    (
+                                        "pct",
+                                        &similarity_pct_from_distance(effective as u32).to_string(),
+                                    ),
+                                ],
                             )),
                     )
                     .child(draft_label)
@@ -3029,9 +3387,10 @@ impl KanalibApp {
                     .children(discard),
             )
             .child(
-                div().text_xs().text_color(colors.subtle).child(
-                    "改动阈值只影响预览与扫描，不清空已审核状态；所有操作都不删除磁盘文件。",
-                ),
+                div()
+                    .text_xs()
+                    .text_color(colors.subtle)
+                    .child(t(cx, "dedup.threshold.footer")),
             )
             .into_any_element()
     }
@@ -3042,6 +3401,7 @@ impl KanalibApp {
 
     pub(crate) fn render_similar(
         &mut self,
+        cx: &App,
         this: &Entity<Self>,
         assets: Arc<RwLock<Vec<Asset>>>,
         visible_indices: Arc<Vec<usize>>,
@@ -3072,8 +3432,11 @@ impl KanalibApp {
         let this_clear = this.clone();
         let this_quick = this.clone();
         let mut preset_row = div().flex().items_center().gap(px(5.));
-        for (value, label) in [(6u8, "严格 ≤6"), (10u8, "标准 ≤10"), (14u8, "宽松 ≤14")]
-        {
+        for (value, label) in [
+            (6u8, t(cx, "dedup.threshold.preset_strict")),
+            (10u8, t(cx, "dedup.threshold.preset_standard")),
+            (14u8, t(cx, "dedup.threshold.preset_loose")),
+        ] {
             let this_preset = this.clone();
             preset_row = preset_row.child(
                 Button::new(
@@ -3122,7 +3485,7 @@ impl KanalibApp {
                     .items_center()
                     .gap(px(8.))
                     .child(
-                        Button::new("similar-back", "返回图库")
+                        Button::new("similar-back", t(cx, "common.back_to_library"))
                             .size(ControlSize::Sm)
                             .icon(IconName::ChevronLeft)
                             .variant(ButtonVariant::Ghost)
@@ -3134,7 +3497,7 @@ impl KanalibApp {
                         div()
                             .text_sm()
                             .font_weight(FontWeight::SEMIBOLD)
-                            .child("查找相似"),
+                            .child(t(cx, "page.similar")),
                     )
                     .child(
                         div()
@@ -3146,18 +3509,29 @@ impl KanalibApp {
                     )
                     .child(div().flex_1())
                     .child(small_badge(
-                        format!("已比较 {scanned} 张 pHash"),
+                        t_args(cx, "dedup.similar.compared", &[("n", &scanned.to_string())])
+                            .to_string(),
                         colors.muted,
                         colors.sunken,
                     ))
                     .child(small_badge(
-                        format!("{total_hits} 个结果 · 距离升序"),
+                        t_args(
+                            cx,
+                            "dedup.similar.results",
+                            &[("n", &total_hits.to_string())],
+                        )
+                        .to_string(),
                         colors.accent,
                         colors.selection,
                     ))
                     .children(truncated.then(|| {
                         small_badge(
-                            format!("仅显示前 {SIMILAR_RESULT_LIMIT} 条"),
+                            t_args(
+                                cx,
+                                "dedup.similar.truncated",
+                                &[("n", &SIMILAR_RESULT_LIMIT.to_string())],
+                            )
+                            .to_string(),
                             colors.warning,
                             colors.warning_subtle,
                         )
@@ -3169,14 +3543,21 @@ impl KanalibApp {
                     .items_center()
                     .flex_wrap()
                     .gap(px(10.))
-                    .child(div().text_xs().text_color(colors.subtle).child(format!(
-                        "阈值 ≤{threshold} · 相似度 ≥{}%",
-                        similarity_pct_from_distance(threshold as u32)
+                    .child(div().text_xs().text_color(colors.subtle).child(t_args(
+                        cx,
+                        "dedup.similar.threshold",
+                        &[
+                            ("threshold", &threshold.to_string()),
+                            (
+                                "pct",
+                                &similarity_pct_from_distance(threshold as u32).to_string(),
+                            ),
+                        ],
                     )))
                     .child(slider)
                     .child(preset_row)
                     .child(
-                        Button::new("similar-refresh", "重新查找")
+                        Button::new("similar-refresh", t(cx, "dedup.similar.refresh"))
                             .size(ControlSize::Sm)
                             .on_click(move |_, _, cx| {
                                 let _ = this_refresh
@@ -3189,9 +3570,9 @@ impl KanalibApp {
                             .text_xs()
                             .text_color(colors.subtle)
                             .child(if scanning {
-                                "图库扫描中，结果可能滞后".to_string()
+                                t(cx, "dedup.similar.scanning_note").to_string()
                             } else {
-                                "只读查询 · 不删除/移动文件 · 调整阈值不清空审核状态".to_string()
+                                t(cx, "dedup.similar.readonly_note").to_string()
                             }),
                     ),
             )
@@ -3209,38 +3590,44 @@ impl KanalibApp {
                             .child(
                                 Input::new(filter_input)
                                     .clearable()
-                                    .least("筛选相似结果（名称/标签/路径）"),
+                                    .least(t(cx, "dedup.similar.filter_least")),
                             ),
                     )
-                    .child(
-                        div()
-                            .text_xs()
-                            .text_color(colors.muted)
-                            .child(format!("{} / {total_hits} 条", visible_indices.len())),
-                    )
+                    .child(div().text_xs().text_color(colors.muted).child(t_args(
+                        cx,
+                        "dedup.similar.count",
+                        &[
+                            ("shown", &visible_indices.len().to_string()),
+                            ("total", &total_hits.to_string()),
+                        ],
+                    )))
                     .children((!selection.is_empty()).then(|| {
-                        div()
-                            .text_xs()
-                            .text_color(colors.accent)
-                            .child(format!("已选 {} 张", selection.len()))
+                        div().text_xs().text_color(colors.accent).child(t_args(
+                            cx,
+                            "dedup.similar.selected",
+                            &[("n", &selection.len().to_string())],
+                        ))
                     }))
                     .child(div().flex_1())
                     .child(
-                        Button::new("similar-select-all", "全选可见")
+                        Button::new("similar-select-all", t(cx, "dedup.similar.select_all"))
                             .size(ControlSize::Sm)
                             .on_click(move |_, _, cx| {
                                 let _ = this_all.update(cx, |app, cx| app.select_all_visible(cx));
                             }),
                     )
                     .child(
-                        Button::new("similar-clear-selection", "清除选择")
-                            .size(ControlSize::Sm)
-                            .on_click(move |_, _, cx| {
-                                let _ = this_clear.update(cx, |app, cx| app.clear_selection(cx));
-                            }),
+                        Button::new(
+                            "similar-clear-selection",
+                            t(cx, "dedup.similar.clear_selection"),
+                        )
+                        .size(ControlSize::Sm)
+                        .on_click(move |_, _, cx| {
+                            let _ = this_clear.update(cx, |app, cx| app.clear_selection(cx));
+                        }),
                     )
                     .child(
-                        Button::new("similar-quick-view", "快速查看")
+                        Button::new("similar-quick-view", t(cx, "dedup.similar.quick_view"))
                             .size(ControlSize::Sm)
                             .icon(IconName::Maximize2)
                             .on_click(move |_, _, cx| {
@@ -3258,7 +3645,7 @@ impl KanalibApp {
                 .child(
                     error
                         .clone()
-                        .unwrap_or_else(|| "没有相似图片；可以放宽阈值或清除筛选。".to_string()),
+                        .unwrap_or_else(|| t(cx, "dedup.similar.empty").to_string()),
                 )
                 .into_any_element()
         } else {
@@ -3272,7 +3659,7 @@ impl KanalibApp {
             uniform_list(
                 "similar-hits",
                 indices_for_list.len(),
-                move |range, _, _| {
+                move |range, _, cx| {
                     let Ok(assets) = assets_for_list.read() else {
                         return Vec::new();
                     };
@@ -3285,6 +3672,7 @@ impl KanalibApp {
                             let (distance, pct) =
                                 distances.get(&asset.path).copied().unwrap_or((0, 100));
                             similar_hit_row(
+                                cx,
                                 asset,
                                 distance,
                                 pct,

@@ -146,12 +146,12 @@ def check_sidebar_contexts() -> tuple[list[str], int]:
         problems.append("sidebar.rs 找不到按上下文构造的 more_menu")
     else:
         block = menu.group(1)
-        if 'MenuItem::new("返回图库")' not in block:
+        if 'common.back_to_library' not in block:
             problems.append("非 Library 上下文的溢出菜单缺「返回图库」")
         library_branch = block.split("} else {")[0]
-        for label in ("添加文件夹", "全部折叠"):
-            if f'MenuItem::new("{label}")' not in library_branch:
-                problems.append(f"「{label}」应只出现在 Library 上下文菜单分支")
+        for key in ("sidebar.more.add_folder", "sidebar.more.collapse_all"):
+            if key not in library_branch:
+                problems.append(f"{key} 应只出现在 Library 上下文菜单分支")
 
     return problems, checks
 

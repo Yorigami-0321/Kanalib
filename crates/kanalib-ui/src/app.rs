@@ -1,8 +1,6 @@
 use crate::format::*;
 use crate::search::{SearchBundle, query_wants_duplicates, search_timing_enabled};
-use crate::settings::{
-    RemoteAddKind, RemoteSourcesState, parse_optional_bytes, validate_remote_url,
-};
+use crate::settings::{RemoteAddKind, RemoteSourcesState, validate_remote_url};
 use crate::sidebar::{
     SIDEBAR_DEFAULT_WIDTH, SIDEBAR_MAX_WIDTH, SIDEBAR_MIN_WIDTH, parse_collapsed, source_label,
     source_menu,
@@ -328,7 +326,7 @@ impl Render for KanalibApp {
         }
         // F-004：结果视图内的本地筛选输入；变化时只重建结果下标，不触发图库查询。
         let similar_filter = window.use_keyed_state("kanalib-similar-filter", cx, |window, cx| {
-            TextInput::new(window, cx).placeholder("筛选相似结果（名称/标签/路径）")
+            TextInput::new(window, cx).placeholder_key("app.similar.filter_placeholder")
         });
         if self.similar_filter_input.is_none() {
             self.similar_filter_input = Some(similar_filter.clone());
@@ -846,7 +844,7 @@ impl Render for KanalibApp {
         // F-070 方案 A：标签管理搜索只创建一份，侧栏导航与标签页共用，避免两套状态。
         let tag_manager_search =
             window.use_keyed_state("tag-manager-search", cx, |window, cx| {
-                TextInput::new(window, cx).placeholder("搜索全部标签（含 0 使用/已屏蔽）")
+                TextInput::new(window, cx).placeholder_key("app.tags.manager_search_placeholder")
             });
         let sidebar: AnyElement = if self.show_sidebar {
             self.render_sidebar(
@@ -946,6 +944,7 @@ impl Render for KanalibApp {
             // F-004：临时结果视图，宽度与其它整页视图一致；不渲染检查器。
             let similar_width = (window_width - sidebar_width).max(px(640.));
             self.render_similar(
+                cx,
                 &this,
                 assets,
                 visible_indices,
@@ -972,6 +971,7 @@ impl Render for KanalibApp {
                 scanning,
                 main_width,
                 colors,
+                cx,
             )
             .into_any_element()
         };
@@ -1009,186 +1009,440 @@ impl Render for KanalibApp {
                 });
             })
             .group(
-                "跳转",
+                crate::localization::t(cx, "app.palette.group.goto"),
                 [
-                    Command::new("goto:all", "全部图片").icon(IconName::Image),
-                    Command::new("goto:untagged", "未打标").icon(IconName::Sparkles),
-                    Command::new("goto:fav", "收藏").icon(IconName::Heart),
-                    Command::new("goto:failed", "失败").icon(IconName::ImageOff),
-                    Command::new("goto:damaged", "损坏的图片").icon(IconName::ImageOff),
-                    Command::new("goto:dup", "重复项 · 完全重复").icon(IconName::Copy),
-                    Command::new("goto:similar", "重复项 · 相似图片").icon(IconName::LayoutGrid),
-                    Command::new("goto:tags", "标签管理").icon(IconName::Tag),
-                    Command::new("goto:settings", "设置").icon(IconName::SlidersHorizontal),
+                    Command::new(
+                        "goto:all",
+                        crate::localization::t(cx, "app.cmd.goto_all"),
+                    )
+                    .icon(IconName::Image),
+                    Command::new(
+                        "goto:untagged",
+                        crate::localization::t(cx, "app.cmd.goto_untagged"),
+                    )
+                    .icon(IconName::Sparkles),
+                    Command::new(
+                        "goto:fav",
+                        crate::localization::t(cx, "app.cmd.goto_favorites"),
+                    )
+                    .icon(IconName::Heart),
+                    Command::new(
+                        "goto:failed",
+                        crate::localization::t(cx, "app.cmd.goto_failed"),
+                    )
+                    .icon(IconName::ImageOff),
+                    Command::new(
+                        "goto:damaged",
+                        crate::localization::t(cx, "app.cmd.goto_damaged"),
+                    )
+                    .icon(IconName::ImageOff),
+                    Command::new(
+                        "goto:dup",
+                        crate::localization::t(cx, "app.cmd.goto_duplicates_exact"),
+                    )
+                    .icon(IconName::Copy),
+                    Command::new(
+                        "goto:similar",
+                        crate::localization::t(cx, "app.cmd.goto_duplicates_similar"),
+                    )
+                    .icon(IconName::LayoutGrid),
+                    Command::new(
+                        "goto:tags",
+                        crate::localization::t(cx, "app.cmd.goto_tags"),
+                    )
+                    .icon(IconName::Tag),
+                    Command::new(
+                        "goto:settings",
+                        crate::localization::t(cx, "app.cmd.goto_settings"),
+                    )
+                    .icon(IconName::SlidersHorizontal),
                 ],
             )
             .group(
-                "视图",
+                crate::localization::t(cx, "app.palette.group.view"),
                 [
-                    Command::new("view:quick", "快速查看")
-                        .icon(IconName::Maximize2)
-                        .keys("enter"),
-                    Command::new("view:select-all", "全选可见")
-                        .icon(IconName::SquareCheck)
-                        .keys("ctrl-a"),
-                    Command::new("view:clear", "清除选择")
-                        .icon(IconName::X)
-                        .keys("escape"),
-                    Command::new("view:save", "保存当前视图为智能集合").icon(IconName::Plus),
-                    Command::new("view:large", "查看 · 大图标")
-                        .icon(IconName::Image)
-                        .keys("ctrl-shift-1"),
-                    Command::new("view:medium", "查看 · 中图标")
-                        .icon(IconName::LayoutGrid)
-                        .keys("ctrl-shift-3"),
-                    Command::new("view:small", "查看 · 小图标")
-                        .icon(IconName::Columns3)
-                        .keys("ctrl-shift-4"),
-                    Command::new("view:list", "查看 · 列表")
-                        .icon(IconName::List)
-                        .keys("ctrl-shift-5"),
-                    Command::new("view:details", "查看 · 详细信息")
-                        .icon(IconName::Table)
-                        .keys("ctrl-shift-6"),
-                    Command::new("view:content", "查看 · 内容")
-                        .icon(IconName::AlignJustify)
-                        .keys("ctrl-shift-8"),
-                    Command::new("pane:details", "窗格 · 详细信息").icon(IconName::PanelRight),
-                    Command::new("pane:preview", "窗格 · 预览").icon(IconName::Image),
-                    Command::new("pane:hidden", "窗格 · 隐藏").icon(IconName::EyeOff),
-                    Command::new("view:sidebar", "显示/隐藏侧栏")
-                        .icon(IconName::PanelLeft)
-                        .keys("ctrl-b"),
-                    Command::new("view:extensions", "显示/隐藏文件扩展名").icon(IconName::FileType),
+                    Command::new(
+                        "view:quick",
+                        crate::localization::t(cx, "app.cmd.view_quick"),
+                    )
+                    .icon(IconName::Maximize2)
+                    .keys("enter"),
+                    Command::new(
+                        "view:select-all",
+                        crate::localization::t(cx, "app.cmd.select_all_visible"),
+                    )
+                    .icon(IconName::SquareCheck)
+                    .keys("ctrl-a"),
+                    Command::new(
+                        "view:clear",
+                        crate::localization::t(cx, "app.cmd.clear_selection"),
+                    )
+                    .icon(IconName::X)
+                    .keys("escape"),
+                    Command::new(
+                        "view:save",
+                        crate::localization::t(cx, "app.cmd.save_view_as_collection"),
+                    )
+                    .icon(IconName::Plus),
+                    Command::new(
+                        "view:large",
+                        crate::localization::t(cx, "app.cmd.view_icons_large"),
+                    )
+                    .icon(IconName::Image)
+                    .keys("ctrl-shift-1"),
+                    Command::new(
+                        "view:medium",
+                        crate::localization::t(cx, "app.cmd.view_icons_medium"),
+                    )
+                    .icon(IconName::LayoutGrid)
+                    .keys("ctrl-shift-3"),
+                    Command::new(
+                        "view:small",
+                        crate::localization::t(cx, "app.cmd.view_icons_small"),
+                    )
+                    .icon(IconName::Columns3)
+                    .keys("ctrl-shift-4"),
+                    Command::new(
+                        "view:list",
+                        crate::localization::t(cx, "app.cmd.view_list"),
+                    )
+                    .icon(IconName::List)
+                    .keys("ctrl-shift-5"),
+                    Command::new(
+                        "view:details",
+                        crate::localization::t(cx, "app.cmd.view_details"),
+                    )
+                    .icon(IconName::Table)
+                    .keys("ctrl-shift-6"),
+                    Command::new(
+                        "view:content",
+                        crate::localization::t(cx, "app.cmd.view_content"),
+                    )
+                    .icon(IconName::AlignJustify)
+                    .keys("ctrl-shift-8"),
+                    Command::new(
+                        "pane:details",
+                        crate::localization::t(cx, "app.cmd.pane_details"),
+                    )
+                    .icon(IconName::PanelRight),
+                    Command::new(
+                        "pane:preview",
+                        crate::localization::t(cx, "app.cmd.pane_preview"),
+                    )
+                    .icon(IconName::Image),
+                    Command::new(
+                        "pane:hidden",
+                        crate::localization::t(cx, "app.cmd.pane_hidden"),
+                    )
+                    .icon(IconName::EyeOff),
+                    Command::new(
+                        "view:sidebar",
+                        crate::localization::t(cx, "app.cmd.toggle_sidebar"),
+                    )
+                    .icon(IconName::PanelLeft)
+                    .keys("ctrl-b"),
+                    Command::new(
+                        "view:extensions",
+                        crate::localization::t(cx, "app.cmd.toggle_extensions"),
+                    )
+                    .icon(IconName::FileType),
                     Command::new(
                         "view:theme",
                         if dark {
-                            "切换到浅色主题"
+                            crate::localization::t(cx, "app.cmd.theme_light")
                         } else {
-                            "切换到深色主题"
+                            crate::localization::t(cx, "app.cmd.theme_dark")
                         },
                     )
                     .icon(if dark { IconName::Sun } else { IconName::Moon }),
                 ],
             )
             .group(
-                "图片操作",
+                crate::localization::t(cx, "app.palette.group.actions"),
                 [
-                    Command::new("act:toggle-fav", "切换收藏")
-                        .icon(IconName::Heart)
-                        .keys("f"),
-                    Command::new("act:star1", "设为 1 星")
-                        .icon(IconName::Star)
-                        .keys("1"),
-                    Command::new("act:star2", "设为 2 星")
-                        .icon(IconName::Star)
-                        .keys("2"),
-                    Command::new("act:star3", "设为 3 星")
-                        .icon(IconName::Star)
-                        .keys("3"),
-                    Command::new("act:star4", "设为 4 星")
-                        .icon(IconName::Star)
-                        .keys("4"),
-                    Command::new("act:star5", "设为 5 星")
-                        .icon(IconName::Star)
-                        .keys("5"),
-                    Command::new("act:star0", "清除星级")
-                        .icon(IconName::Star)
-                        .keys("0"),
-                    Command::new("act:copy-prompt", "复制选中 Prompt")
-                        .icon(IconName::ClipboardCheck),
-                    Command::new("act:copy-paths", "复制选中路径").icon(IconName::Copy),
-                    Command::new("tag:add", "添加标签…").icon(IconName::Tag),
-                    Command::new("tag:remove", "移除标签…").icon(IconName::X),
-                    Command::new("similar:find", "查找相似").icon(IconName::Search),
-                    Command::new("compare:selected", "图片对比（选中 2–4 张）")
-                        .icon(IconName::Columns2),
-                    Command::new("act:undo", "撤销上一步")
-                        .icon(IconName::Undo2)
-                        .keys("ctrl-z"),
+                    Command::new(
+                        "act:toggle-fav",
+                        crate::localization::t(cx, "app.cmd.toggle_favorite"),
+                    )
+                    .icon(IconName::Heart)
+                    .keys("f"),
+                    Command::new(
+                        "act:star1",
+                        crate::localization::t_args(cx, "app.cmd.set_stars", &[("n", "1")]),
+                    )
+                    .icon(IconName::Star)
+                    .keys("1"),
+                    Command::new(
+                        "act:star2",
+                        crate::localization::t_args(cx, "app.cmd.set_stars", &[("n", "2")]),
+                    )
+                    .icon(IconName::Star)
+                    .keys("2"),
+                    Command::new(
+                        "act:star3",
+                        crate::localization::t_args(cx, "app.cmd.set_stars", &[("n", "3")]),
+                    )
+                    .icon(IconName::Star)
+                    .keys("3"),
+                    Command::new(
+                        "act:star4",
+                        crate::localization::t_args(cx, "app.cmd.set_stars", &[("n", "4")]),
+                    )
+                    .icon(IconName::Star)
+                    .keys("4"),
+                    Command::new(
+                        "act:star5",
+                        crate::localization::t_args(cx, "app.cmd.set_stars", &[("n", "5")]),
+                    )
+                    .icon(IconName::Star)
+                    .keys("5"),
+                    Command::new(
+                        "act:star0",
+                        crate::localization::t(cx, "app.cmd.clear_stars"),
+                    )
+                    .icon(IconName::Star)
+                    .keys("0"),
+                    Command::new(
+                        "act:copy-prompt",
+                        crate::localization::t(cx, "app.cmd.copy_prompt"),
+                    )
+                    .icon(IconName::ClipboardCheck),
+                    Command::new(
+                        "act:copy-paths",
+                        crate::localization::t(cx, "app.cmd.copy_paths"),
+                    )
+                    .icon(IconName::Copy),
+                    Command::new(
+                        "tag:add",
+                        crate::localization::t(cx, "app.cmd.add_tag"),
+                    )
+                    .icon(IconName::Tag),
+                    Command::new(
+                        "tag:remove",
+                        crate::localization::t(cx, "app.cmd.remove_tag"),
+                    )
+                    .icon(IconName::X),
+                    Command::new(
+                        "similar:find",
+                        crate::localization::t(cx, "app.cmd.find_similar"),
+                    )
+                    .icon(IconName::Search),
+                    Command::new(
+                        "compare:selected",
+                        crate::localization::t(cx, "app.cmd.compare_selected"),
+                    )
+                    .icon(IconName::Columns2),
+                    Command::new(
+                        "act:undo",
+                        crate::localization::t(cx, "app.cmd.undo"),
+                    )
+                    .icon(IconName::Undo2)
+                    .keys("ctrl-z"),
                 ],
             )
             .group(
-                "导出",
+                crate::localization::t(cx, "app.palette.group.export"),
                 [
-                    Command::new("export:selected-csv", "导出选中 · CSV").icon(IconName::Download),
-                    Command::new("export:selected-json", "导出选中 · JSON")
-                        .icon(IconName::Download),
-                    Command::new("export:view-csv", "导出当前视图 · CSV").icon(IconName::Download),
-                    Command::new("export:view-json", "导出当前视图 · JSON")
-                        .icon(IconName::Download),
+                    Command::new(
+                        "export:selected-csv",
+                        crate::localization::t(cx, "app.cmd.export_selected_csv"),
+                    )
+                    .icon(IconName::Download),
+                    Command::new(
+                        "export:selected-json",
+                        crate::localization::t(cx, "app.cmd.export_selected_json"),
+                    )
+                    .icon(IconName::Download),
+                    Command::new(
+                        "export:view-csv",
+                        crate::localization::t(cx, "app.cmd.export_view_csv"),
+                    )
+                    .icon(IconName::Download),
+                    Command::new(
+                        "export:view-json",
+                        crate::localization::t(cx, "app.cmd.export_view_json"),
+                    )
+                    .icon(IconName::Download),
                 ],
             )
             .group(
-                "排序",
+                crate::localization::t(cx, "app.palette.group.sort"),
                 [
-                    Command::new("sort:name", "按文件名排序").icon(IconName::ArrowDownUp),
-                    Command::new("sort:modified", "按修改时间排序").icon(IconName::Clock),
-                    Command::new("sort:captured", "按拍摄时间排序").icon(IconName::Camera),
-                    Command::new("sort:size", "按文件大小排序").icon(IconName::FileImage),
-                    Command::new("sort:resolution", "按分辨率排序").icon(IconName::Maximize2),
-                    Command::new("sort:star", "按星级排序").icon(IconName::Star),
-                    Command::new("sort:fav", "收藏优先").icon(IconName::Heart),
-                    Command::new("sort:rating", "按模型评级排序").icon(IconName::Sparkles),
-                    Command::new("sort:toggle", "切换排序方向").icon(IconName::ArrowDownUp),
+                    Command::new(
+                        "sort:name",
+                        crate::localization::t(cx, "app.cmd.sort_name"),
+                    )
+                    .icon(IconName::ArrowDownUp),
+                    Command::new(
+                        "sort:modified",
+                        crate::localization::t(cx, "app.cmd.sort_modified"),
+                    )
+                    .icon(IconName::Clock),
+                    Command::new(
+                        "sort:captured",
+                        crate::localization::t(cx, "app.cmd.sort_captured"),
+                    )
+                    .icon(IconName::Camera),
+                    Command::new(
+                        "sort:size",
+                        crate::localization::t(cx, "app.cmd.sort_size"),
+                    )
+                    .icon(IconName::FileImage),
+                    Command::new(
+                        "sort:resolution",
+                        crate::localization::t(cx, "app.cmd.sort_resolution"),
+                    )
+                    .icon(IconName::Maximize2),
+                    Command::new(
+                        "sort:star",
+                        crate::localization::t(cx, "app.cmd.sort_star"),
+                    )
+                    .icon(IconName::Star),
+                    Command::new(
+                        "sort:fav",
+                        crate::localization::t(cx, "app.cmd.sort_favorite"),
+                    )
+                    .icon(IconName::Heart),
+                    Command::new(
+                        "sort:rating",
+                        crate::localization::t(cx, "app.cmd.sort_rating"),
+                    )
+                    .icon(IconName::Sparkles),
+                    Command::new(
+                        "sort:toggle",
+                        crate::localization::t(cx, "app.cmd.sort_toggle"),
+                    )
+                    .icon(IconName::ArrowDownUp),
                 ],
             )
             .group(
-                "打标",
+                crate::localization::t(cx, "app.palette.group.tagging"),
                 [
-                    Command::new("tag:retag-selected", "重打标选中").icon(IconName::WandSparkles),
-                    Command::new("tag:prioritize", "提升打标优先级").icon(IconName::ArrowUp),
-                    Command::new("tag:queue-toggle", "暂停 / 继续打标").icon(IconName::Pause),
+                    Command::new(
+                        "tag:retag-selected",
+                        crate::localization::t(cx, "app.cmd.retag_selected"),
+                    )
+                    .icon(IconName::WandSparkles),
+                    Command::new(
+                        "tag:prioritize",
+                        crate::localization::t(cx, "app.cmd.prioritize_tagging"),
+                    )
+                    .icon(IconName::ArrowUp),
+                    Command::new(
+                        "tag:queue-toggle",
+                        crate::localization::t(cx, "app.cmd.toggle_tagging_queue"),
+                    )
+                    .icon(IconName::Pause),
                 ],
             )
             .group(
-                "图库",
+                crate::localization::t(cx, "app.palette.group.library"),
                 [
-                    Command::new("scan:rescan", "重新扫描图库").icon(IconName::RefreshCw),
-                    Command::new("scan:retry", "重试失败的打标").icon(IconName::WandSparkles),
-                    Command::new("view:folder", "添加文件夹").icon(IconName::FolderOpen),
+                    Command::new(
+                        "scan:rescan",
+                        crate::localization::t(cx, "app.cmd.rescan"),
+                    )
+                    .icon(IconName::RefreshCw),
+                    Command::new(
+                        "scan:retry",
+                        crate::localization::t(cx, "app.cmd.retry_tagging"),
+                    )
+                    .icon(IconName::WandSparkles),
+                    Command::new(
+                        "view:folder",
+                        crate::localization::t(cx, "app.cmd.add_folder"),
+                    )
+                    .icon(IconName::FolderOpen),
                 ],
             )
             .group(
-                "图库运维",
+                crate::localization::t(cx, "app.palette.group.maintenance"),
                 [
-                    Command::new("library:remove-selected", "从图库移除选中（不删磁盘）")
-                        .icon(IconName::Trash2),
+                    Command::new(
+                        "library:remove-selected",
+                        crate::localization::t(cx, "app.cmd.remove_selected"),
+                    )
+                    .icon(IconName::Trash2),
                     Command::new(
                         "library:remove-selected-hash",
-                        "从图库移除选中并忽略内容哈希",
+                        crate::localization::t(cx, "app.cmd.remove_selected_hash"),
                     )
                     .icon(IconName::Ban),
-                    Command::new("library:open-ignores", "查看忽略列表").icon(IconName::EyeOff),
+                    Command::new(
+                        "library:open-ignores",
+                        crate::localization::t(cx, "app.cmd.open_ignores"),
+                    )
+                    .icon(IconName::EyeOff),
                 ],
             )
             .group(
-                "备份与恢复",
+                crate::localization::t(cx, "app.palette.group.backup"),
                 [
-                    Command::new("backup:now", "立即备份数据库").icon(IconName::Database),
-                    Command::new("backup:restore", "恢复数据库备份…").icon(IconName::History),
-                    Command::new("backup:cancel-pending", "取消待恢复备份")
-                        .icon(IconName::RotateCcw),
-                    Command::new("backup:settings", "打开设置 · 数据库备份")
-                        .icon(IconName::SlidersHorizontal),
+                    Command::new(
+                        "backup:now",
+                        crate::localization::t(cx, "app.cmd.backup_now"),
+                    )
+                    .icon(IconName::Database),
+                    Command::new(
+                        "backup:restore",
+                        crate::localization::t(cx, "app.cmd.backup_restore"),
+                    )
+                    .icon(IconName::History),
+                    Command::new(
+                        "backup:cancel-pending",
+                        crate::localization::t(cx, "app.cmd.cancel_pending_restore"),
+                    )
+                    .icon(IconName::RotateCcw),
+                    Command::new(
+                        "backup:settings",
+                        crate::localization::t(cx, "app.cmd.backup_settings"),
+                    )
+                    .icon(IconName::SlidersHorizontal),
                 ],
             )
             .group(
-                "组织",
+                crate::localization::t(cx, "app.palette.group.organize"),
                 [
-                    Command::new("org:new-album", "新建相册").icon(IconName::FolderPlus),
-                    Command::new("org:save-collection", "保存当前视图为智能集合")
-                        .icon(IconName::Plus),
+                    Command::new(
+                        "org:new-album",
+                        crate::localization::t(cx, "app.cmd.new_album"),
+                    )
+                    .icon(IconName::FolderPlus),
+                    Command::new(
+                        "org:save-collection",
+                        crate::localization::t(cx, "app.cmd.save_view_as_collection"),
+                    )
+                    .icon(IconName::Plus),
                 ],
             )
             .group(
-                "分组",
+                crate::localization::t(cx, "app.palette.group.group"),
                 [
-                    Command::new("group:none", "分组 · 关闭").icon(IconName::LayoutGrid),
-                    Command::new("group:modified", "分组 · 修改时间").icon(IconName::Clock),
-                    Command::new("group:captured", "分组 · 拍摄时间").icon(IconName::Camera),
-                    Command::new("group:source", "分组 · 来源").icon(IconName::FolderOpen),
-                    Command::new("group:rating", "分组 · 评级").icon(IconName::Star),
+                    Command::new(
+                        "group:none",
+                        crate::localization::t(cx, "app.cmd.group_none"),
+                    )
+                    .icon(IconName::LayoutGrid),
+                    Command::new(
+                        "group:modified",
+                        crate::localization::t(cx, "app.cmd.group_modified"),
+                    )
+                    .icon(IconName::Clock),
+                    Command::new(
+                        "group:captured",
+                        crate::localization::t(cx, "app.cmd.group_captured"),
+                    )
+                    .icon(IconName::Camera),
+                    Command::new(
+                        "group:source",
+                        crate::localization::t(cx, "app.cmd.group_source"),
+                    )
+                    .icon(IconName::FolderOpen),
+                    Command::new(
+                        "group:rating",
+                        crate::localization::t(cx, "app.cmd.group_rating"),
+                    )
+                    .icon(IconName::Star),
                 ],
             )
             .on_run(move |value, _, cx| {
@@ -1198,27 +1452,29 @@ impl Render for KanalibApp {
         });
         let save_dialog = self.save_search_open.then(|| {
             let field = window.use_keyed_state("kanalib-save-search", cx, |window, cx| {
-                TextInput::new(window, cx).placeholder("智能集合名称")
+                TextInput::new(window, cx).placeholder_key("app.save_search.placeholder")
             });
             let close = this.clone();
             let submit = this.clone();
             let filter_label = filter.label();
-            PromptDialog::new(
-                "kanalib-save-search",
-                "保存为智能集合",
-                &field,
-                move |_, cx| {
-                    let _ = close.update(cx, |app, cx| {
-                        app.save_search_open = false;
-                        cx.notify();
-                    });
-                },
-            )
-            .label(format!("当前筛选：{filter_label}；搜索词会一起保存"))
-            .submit("保存")
-            .check(|text| {
+            let title = crate::localization::t(cx, "app.save_search.title");
+            let label = crate::localization::t_args(
+                cx,
+                "app.save_search.label",
+                &[("filter", &filter_label)],
+            );
+            let name_required = crate::localization::t(cx, "app.save_search.name_required");
+            PromptDialog::new("kanalib-save-search", title, &field, move |_, cx| {
+                let _ = close.update(cx, |app, cx| {
+                    app.save_search_open = false;
+                    cx.notify();
+                });
+            })
+            .label(label)
+            .submit(crate::localization::t(cx, "app.common.save"))
+            .check(move |text| {
                 if text.trim().is_empty() {
-                    Err("名称不能为空".into())
+                    Err(name_required.clone())
                 } else {
                     Ok(())
                 }
@@ -1233,21 +1489,39 @@ impl Render for KanalibApp {
             let field = window.use_keyed_state(
                 SharedString::from(format!("kanalib-tag-field-{epoch}")),
                 cx,
-                |window, cx| TextInput::new(window, cx).placeholder("标签名"),
+                |window, cx| TextInput::new(window, cx).placeholder_key("app.tag_dialog.placeholder"),
             );
             let close = this.clone();
             let submit = this.clone();
             let count = self.tag_dialog_paths.len();
-            let title = if mode == TagDialogMode::Add {
-                "添加标签"
-            } else {
-                "移除标签"
-            };
-            let label = if mode == TagDialogMode::Add {
-                format!("作用于 {count} 张图片；空格会转为下划线")
-            } else {
-                format!("作用于 {count} 张图片；自动与手工标签都会移除")
-            };
+            let adding = mode == TagDialogMode::Add;
+            let count_text = count.to_string();
+            let title = crate::localization::t(
+                cx,
+                if adding {
+                    "app.tag_dialog.add_title"
+                } else {
+                    "app.tag_dialog.remove_title"
+                },
+            );
+            let label = crate::localization::t_args(
+                cx,
+                if adding {
+                    "app.tag_dialog.add_label"
+                } else {
+                    "app.tag_dialog.remove_label"
+                },
+                &[("n", &count_text)],
+            );
+            let submit_text = crate::localization::t(
+                cx,
+                if adding {
+                    "app.common.add"
+                } else {
+                    "app.common.remove"
+                },
+            );
+            let name_required = crate::localization::t(cx, "app.tag_dialog.name_required");
             PromptDialog::new(
                 SharedString::from(format!("kanalib-tag-dialog-{epoch}")),
                 title,
@@ -1261,14 +1535,10 @@ impl Render for KanalibApp {
                 },
             )
             .label(label)
-            .submit(if mode == TagDialogMode::Add {
-                "添加"
-            } else {
-                "移除"
-            })
-            .check(|text| {
+            .submit(submit_text)
+            .check(move |text| {
                 if normalize_tag_name(text).is_empty() {
-                    Err("标签名不能为空".into())
+                    Err(name_required.clone())
                 } else {
                     Ok(())
                 }
@@ -1285,7 +1555,8 @@ impl Render for KanalibApp {
                 SharedString::from(format!("kanalib-tag-rename-{epoch}")),
                 cx,
                 move |window, cx| {
-                    let input = cx.new(|cx| TextInput::new(window, cx).placeholder("新标签名"));
+                    let input = cx
+                        .new(|cx| TextInput::new(window, cx).placeholder_key("app.tag_rename.placeholder"));
                     let value = initial.clone();
                     input.update(cx, |input, cx| input.set_text(value, cx));
                     input
@@ -1300,9 +1571,16 @@ impl Render for KanalibApp {
                 .find(|tag| tag.name == name)
                 .map(|tag| tag.count)
                 .unwrap_or(0);
+            let count_text = count.to_string();
+            let label = crate::localization::t_args(
+                cx,
+                "app.tag_rename.label",
+                &[("name", &name), ("n", &count_text)],
+            );
+            let name_required = crate::localization::t(cx, "app.tag_dialog.name_required");
             PromptDialog::new(
                 SharedString::from(format!("kanalib-tag-rename-dialog-{epoch}")),
-                "重命名标签",
+                crate::localization::t(cx, "app.tag_rename.title"),
                 &field,
                 move |_, cx| {
                     let _ = close.update(cx, |app, cx| {
@@ -1311,13 +1589,11 @@ impl Render for KanalibApp {
                     });
                 },
             )
-            .label(format!(
-                "#{name} 影响 {count} 张图片；旧名会保留为别名，仍可搜索。"
-            ))
-            .submit("重命名")
-            .check(|text| {
+            .label(label)
+            .submit(crate::localization::t(cx, "app.tag_rename.submit"))
+            .check(move |text| {
                 if normalize_tag_name(text).is_empty() {
-                    Err("标签名不能为空".into())
+                    Err(name_required.clone())
                 } else {
                     Ok(())
                 }
@@ -1332,7 +1608,9 @@ impl Render for KanalibApp {
             let field = window.use_keyed_state(
                 SharedString::from(format!("kanalib-tag-merge-{epoch}")),
                 cx,
-                |window, cx| TextInput::new(window, cx).placeholder("目标标签名（已有或新建）"),
+                |window, cx| {
+                    TextInput::new(window, cx).placeholder_key("app.tag_merge.placeholder")
+                },
             );
             let close = this.clone();
             let submit = this.clone();
@@ -1343,9 +1621,17 @@ impl Render for KanalibApp {
                 .map(|tag| tag.count)
                 .unwrap_or(0);
             let check_source = source.clone();
+            let count_text = count.to_string();
+            let label = crate::localization::t_args(
+                cx,
+                "app.tag_merge.label",
+                &[("source", &source), ("n", &count_text)],
+            );
+            let target_required = crate::localization::t(cx, "app.tag_merge.target_required");
+            let same_name = crate::localization::t(cx, "app.tag_merge.same_name");
             PromptDialog::new(
                 SharedString::from(format!("kanalib-tag-merge-dialog-{epoch}")),
-                "合并标签",
+                crate::localization::t(cx, "app.tag_merge.title"),
                 &field,
                 move |_, cx| {
                     let _ = close.update(cx, |app, cx| {
@@ -1354,16 +1640,14 @@ impl Render for KanalibApp {
                     });
                 },
             )
-            .label(format!(
-                "将 #{source}（{count} 张）合并到目标标签；来源名会保留为别名，手工/自动标记一并合并。"
-            ))
-            .submit("合并")
+            .label(label)
+            .submit(crate::localization::t(cx, "app.tag_merge.submit"))
             .check(move |text| {
                 let name = normalize_tag_name(text);
                 if name.is_empty() {
-                    Err("目标标签名不能为空".into())
+                    Err(target_required.clone())
                 } else if name == normalize_tag_name(&check_source) {
-                    Err("目标和来源相同".into())
+                    Err(same_name.clone())
                 } else {
                     Ok(())
                 }
@@ -1376,10 +1660,15 @@ impl Render for KanalibApp {
         let remove_source_dialog = self.source_remove_confirm.clone().map(|root| {
             let close = this.clone();
             let confirm = this.clone();
+            let body = crate::localization::t_args(
+                cx,
+                "app.source_remove.body",
+                &[("path", &root.display().to_string())],
+            );
             ConfirmDialog::new(
                 "remove-source-dialog",
-                "移除来源？",
-                format!("只会从图库移除，磁盘文件不会删除：\n{}", root.display()),
+                crate::localization::t(cx, "app.source_remove.title"),
+                body,
                 move |_, cx| {
                     let _ = close.update(cx, |app, cx| {
                         app.source_remove_confirm = None;
@@ -1387,7 +1676,7 @@ impl Render for KanalibApp {
                     });
                 },
             )
-            .confirm("移除来源")
+            .confirm(crate::localization::t(cx, "app.common.remove_source"))
             .destructive()
             .on_confirm(move |_, cx| {
                 let _ = confirm.update(cx, |app, cx| app.remove_source(root.clone(), cx));
@@ -1412,7 +1701,7 @@ impl Render for KanalibApp {
             let submit = this.clone();
             PromptDialog::new(
                 SharedString::from(format!("source-rename-dialog-{epoch}")),
-                "重命名来源",
+                crate::localization::t(cx, "app.source_rename.title"),
                 &field,
                 move |_, cx| {
                     let _ = close.update(cx, |app, cx| {
@@ -1421,8 +1710,8 @@ impl Render for KanalibApp {
                     });
                 },
             )
-            .label("只改图库内显示名，不改磁盘文件夹；留空恢复文件夹名")
-            .submit("保存")
+            .label(crate::localization::t(cx, "app.source_rename.label"))
+            .submit(crate::localization::t(cx, "app.common.save"))
             .on_submit(move |text, _, cx| {
                 let _ = submit.update(cx, |app, cx| app.apply_source_rename(text, cx));
             })
@@ -1434,7 +1723,9 @@ impl Render for KanalibApp {
             let name_field = window.use_keyed_state(
                 SharedString::from(format!("remote-add-name-{epoch}")),
                 cx,
-                |window, cx| TextInput::new(window, cx).placeholder("名称（可留空，默认使用 URL）"),
+                |window, cx| {
+                    TextInput::new(window, cx).placeholder_key("app.remote_add.name_placeholder")
+                },
             );
             let url_field = window.use_keyed_state(
                 SharedString::from(format!("remote-add-url-{epoch}")),
@@ -1466,9 +1757,15 @@ impl Render for KanalibApp {
             let submit_app = this.clone();
             let submit_name = name_field.clone();
             let submit_url = url_field.clone();
+            let cancel_text = crate::localization::t(cx, "app.common.cancel");
+            let add_text = crate::localization::t(cx, "app.common.add");
+            let title = match kind {
+                RemoteAddKind::Immich => crate::localization::t(cx, "app.remote_add.title_immich"),
+                RemoteAddKind::WebDav => crate::localization::t(cx, "app.remote_add.title_webdav"),
+            };
             let dialog = Dialog::new(
                 SharedString::from(format!("remote-add-dialog-{epoch}")),
-                kind.title(),
+                title,
                 move |_, cx| {
                     close_name.update(cx, |input, cx| input.set_text(String::new(), cx));
                     close_url.update(cx, |input, cx| input.set_text(String::new(), cx));
@@ -1479,7 +1776,7 @@ impl Render for KanalibApp {
                     });
                 },
             )
-            .detail("远端来源只读；添加后可先测试连接。")
+            .detail(crate::localization::t(cx, "app.remote_add.detail"))
             .child(
                 div()
                     .flex()
@@ -1489,7 +1786,7 @@ impl Render for KanalibApp {
                         div()
                             .text_xs()
                             .text_color(colors.muted)
-                            .child("名称（可留空）"),
+                            .child(crate::localization::t(cx, "app.remote_add.name_label")),
                     )
                     .child(Input::new(&name_field).clearable()),
             )
@@ -1502,7 +1799,7 @@ impl Render for KanalibApp {
                         div()
                             .text_xs()
                             .text_color(colors.muted)
-                            .child("Base URL（http/https）"),
+                            .child(crate::localization::t(cx, "app.remote_add.url_label")),
                     )
                     .child(Input::new(&url_field).clearable().invalid(url_invalid)),
             );
@@ -1516,7 +1813,7 @@ impl Render for KanalibApp {
                 .action(move |close| {
                     Button::new(
                         SharedString::from(format!("remote-add-cancel-{epoch}")),
-                        "取消",
+                        cancel_text,
                     )
                     .variant(ButtonVariant::Ghost)
                     .on_click(move |_, window, cx| close(window, cx))
@@ -1527,7 +1824,7 @@ impl Render for KanalibApp {
                     let submit_url = submit_url.clone();
                     Button::new(
                         SharedString::from(format!("remote-add-submit-{epoch}")),
-                        "添加",
+                        add_text,
                     )
                     .primary()
                     .disabled(!ready)
@@ -1554,22 +1851,42 @@ impl Render for KanalibApp {
                 .clone();
             let epoch = self.remote_sources.api_key_epoch;
             let hint = RemoteAddKind::from_kind(info.kind);
-            let placeholder = hint
-                .map(|kind| kind.credential_placeholder())
-                .unwrap_or("凭据；已保存值不会回显");
             let field = window.use_keyed_state(
                 SharedString::from(format!("remote-api-key-{epoch}")),
                 cx,
-                move |window, cx| TextInput::new(window, cx).placeholder(placeholder),
+                move |window, cx| match hint {
+                    Some(RemoteAddKind::Immich) => {
+                        TextInput::new(window, cx).placeholder_key("app.remote_key.immich_placeholder")
+                    }
+                    Some(RemoteAddKind::WebDav) => {
+                        TextInput::new(window, cx).placeholder_key("app.remote_key.webdav_placeholder")
+                    }
+                    None => TextInput::new(window, cx).placeholder_key("app.remote_key.placeholder"),
+                },
             );
             let close = this.clone();
             let close_field = field.clone();
             let submit = this.clone();
             let submit_id = id;
+            let kind_label: String = match hint {
+                Some(RemoteAddKind::Immich) => {
+                    crate::localization::t(cx, "app.remote_key.immich_label")
+                }
+                Some(RemoteAddKind::WebDav) => {
+                    crate::localization::t(cx, "app.remote_key.webdav_label")
+                }
+                None => crate::localization::t(cx, "app.remote_key.kind_fallback"),
+            }
+            .to_string();
+            let label = crate::localization::t_args(
+                cx,
+                "app.remote_key.label",
+                &[("kind", &kind_label), ("name", &info.name)],
+            );
             Some(
                 PromptDialog::new(
                     SharedString::from(format!("remote-api-key-dialog-{epoch}")),
-                    "设置网络来源凭据",
+                    crate::localization::t(cx, "app.remote_key.title"),
                     &field,
                     move |_, cx| {
                         close_field.update(cx, |input, cx| input.set_text(String::new(), cx));
@@ -1579,12 +1896,8 @@ impl Render for KanalibApp {
                         });
                     },
                 )
-                .label(format!(
-                    "{}「{}」；留空保存表示不修改，已保存值不会回显；凭据存入系统凭据库。",
-                    hint.map(|kind| kind.credential_label()).unwrap_or("凭据"),
-                    info.name
-                ))
-                .submit("保存凭据")
+                .label(label)
+                .submit(crate::localization::t(cx, "app.remote_key.submit"))
                 .on_submit(move |text, _, cx| {
                     let _ =
                         submit.update(cx, |app, cx| app.save_remote_api_key(submit_id, text, cx));
@@ -1599,15 +1912,25 @@ impl Render for KanalibApp {
                 .iter()
                 .find(|info| info.id == Some(id))
                 .map(|info| info.name.clone())
-                .unwrap_or_else(|| format!("来源 #{id}"));
+                .unwrap_or_else(|| {
+                    crate::localization::t_args(
+                        cx,
+                        "app.remote_remove.fallback_name",
+                        &[("id", &id.to_string())],
+                    )
+                    .to_string()
+                });
             let close = this.clone();
             let confirm = this.clone();
+            let body = crate::localization::t_args(
+                cx,
+                "app.remote_remove.body",
+                &[("name", &name)],
+            );
             ConfirmDialog::new(
                 "remove-remote-source-dialog",
-                "移除网络来源？",
-                format!(
-                    "将从图库移除「{name}」及其远端资产记录。\n远端服务器上的文件不会删除，本地图库不受影响。"
-                ),
+                crate::localization::t(cx, "app.remote_remove.title"),
+                body,
                 move |_, cx| {
                     let _ = close.update(cx, |app, cx| {
                         app.remote_sources.remove_confirm = None;
@@ -1615,7 +1938,7 @@ impl Render for KanalibApp {
                     });
                 },
             )
-            .confirm("移除来源")
+            .confirm(crate::localization::t(cx, "app.common.remove_source"))
             .destructive()
             .on_confirm(move |_, cx| {
                 let _ = confirm.update(cx, |app, cx| app.remove_remote_source(id, cx));
@@ -1625,13 +1948,15 @@ impl Render for KanalibApp {
         let rescan_dialog = self.rescan_confirm.map(|origin| {
             let close = this.clone();
             let confirm = this.clone();
+            let body = crate::localization::t_args(
+                cx,
+                "app.rescan.body",
+                &[("n", &dedup_similar_count.to_string())],
+            );
             ConfirmDialog::new(
                 "rescan-dialog",
-                "重新扫描图库？",
-                format!(
-                    "重新扫描会重新索引图库，并清空当前相似扫描结果。\n当前有 {} 组相似图片结果。",
-                    dedup_similar_count
-                ),
+                crate::localization::t(cx, "app.rescan.title"),
+                body,
                 move |_, cx| {
                     let _ = close.update(cx, |app, cx| {
                         app.rescan_confirm = None;
@@ -1639,7 +1964,7 @@ impl Render for KanalibApp {
                     });
                 },
             )
-            .confirm("重新扫描图库")
+            .confirm(crate::localization::t(cx, "app.rescan.confirm"))
             .destructive()
             .on_confirm(move |_, cx| {
                 let _ = confirm.update(cx, |app, cx| app.perform_rescan(origin, cx));
@@ -1651,12 +1976,15 @@ impl Render for KanalibApp {
         let cache_cleanup_dialog = self.cache_cleanup_confirm.map(|count| {
             let close = this.clone();
             let confirm = this.clone();
+            let body = crate::localization::t_args(
+                cx,
+                "app.cache_cleanup.body",
+                &[("n", &count.to_string())],
+            );
             ConfirmDialog::new(
                 "cache-cleanup-dialog",
-                "清理孤儿缩略图？",
-                format!(
-                    "将删除 {count} 个不再对应图库资产的缩略图缓存文件。\n只清理缓存，不会删除原图或改动数据库；扫描进行中会拒绝执行。"
-                ),
+                crate::localization::t(cx, "app.cache_cleanup.title"),
+                body,
                 move |_, cx| {
                     let _ = close.update(cx, |app, cx| {
                         app.cache_cleanup_confirm = None;
@@ -1664,7 +1992,7 @@ impl Render for KanalibApp {
                     });
                 },
             )
-            .confirm("清理缓存")
+            .confirm(crate::localization::t(cx, "app.cache_cleanup.confirm"))
             .destructive()
             .on_confirm(move |_, cx| {
                 let _ = confirm.update(cx, |app, cx| {
@@ -1677,13 +2005,15 @@ impl Render for KanalibApp {
         let restore_dialog = self.restore_confirm.clone().map(|candidate| {
             let close = this.clone();
             let confirm = this.clone();
+            let body = crate::localization::t_args(
+                cx,
+                "app.restore.body",
+                &[("path", &candidate.display().to_string())],
+            );
             ConfirmDialog::new(
                 "restore-backup-dialog",
-                "恢复数据库备份？",
-                format!(
-                    "将用以下备份替换当前图库数据库：\n{}\n\n恢复前会自动创建当前库的安全备份；恢复在重启 Kanalib 后应用。",
-                    candidate.display()
-                ),
+                crate::localization::t(cx, "app.restore.title"),
+                body,
                 move |_, cx| {
                     let _ = close.update(cx, |app, cx| {
                         app.restore_confirm = None;
@@ -1691,7 +2021,7 @@ impl Render for KanalibApp {
                     });
                 },
             )
-            .confirm("暂存恢复")
+            .confirm(crate::localization::t(cx, "app.restore.confirm"))
             .destructive()
             .on_confirm(move |_, cx| {
                 let _ = confirm.update(cx, |app, cx| {
@@ -1706,12 +2036,15 @@ impl Render for KanalibApp {
             let confirm = this.clone();
             let count = pending.paths.len();
             let scope = pending.scope;
+            let body = crate::localization::t_args(
+                cx,
+                "app.retag.body",
+                &[("scope", scope), ("n", &count.to_string())],
+            );
             ConfirmDialog::new(
                 "tag-retag-dialog",
-                "重打标？",
-                format!(
-                    "将对{scope} {count} 张图片重打标：已有候选的按当前阈值重算，缺候选的入队；手工标签会保留。"
-                ),
+                crate::localization::t(cx, "app.retag.title"),
+                body,
                 move |_, cx| {
                     let _ = close.update(cx, |app, cx| {
                         app.tag_retag_confirm = None;
@@ -1719,7 +2052,7 @@ impl Render for KanalibApp {
                     });
                 },
             )
-            .confirm("开始重打标")
+            .confirm(crate::localization::t(cx, "app.retag.confirm"))
             .on_confirm(move |_, cx| {
                 let _ = confirm.update(cx, |app, cx| {
                     if let Some(pending) = app.tag_retag_confirm.take() {
@@ -1738,14 +2071,17 @@ impl Render for KanalibApp {
                 .iter()
                 .map(|root| source_label(root, &source_aliases))
                 .collect::<Vec<_>>()
-                .join("、");
+                .join(crate::localization::t(cx, "app.common.list_separator").as_ref());
             let count = pending.paths.len();
+            let body = crate::localization::t_args(
+                cx,
+                "app.cleanup_missing.body",
+                &[("n", &count.to_string()), ("roots", &roots)],
+            );
             ConfirmDialog::new(
                 "cleanup-missing-dialog",
-                "移除缺失图片记录？",
-                format!(
-                    "最近一次完整扫描未在磁盘上找到 {count} 张图片。\n来源：{roots}\n\n确认后只会从图库移除这些记录，不会删除磁盘文件。\n如果来源是移动硬盘或网络盘，请先取消并恢复连接。"
-                ),
+                crate::localization::t(cx, "app.cleanup_missing.title"),
+                body,
                 move |_, cx| {
                     let _ = close.update(cx, |app, cx| {
                         app.state.cancel_pending_cleanup();
@@ -1753,14 +2089,20 @@ impl Render for KanalibApp {
                     });
                 },
             )
-            .confirm("移除记录")
+            .confirm(crate::localization::t(cx, "app.cleanup_missing.confirm"))
             .destructive()
             .on_confirm(move |_, cx| {
                 let _ = confirm.update(cx, |app, cx| {
                     match app.state.confirm_pending_cleanup() {
                         Ok(_) => app.clear_multi_selection(),
                         Err(error) => {
-                            app.state.set_error(format!("清理缺失记录失败：{error:#}"));
+                            let message = crate::localization::t_args(
+                                cx,
+                                "app.cleanup_missing.failed",
+                                &[("error", &format!("{error:#}"))],
+                            )
+                            .to_string();
+                            app.state.set_error(message);
                         }
                     }
                     cx.notify();
@@ -1772,17 +2114,20 @@ impl Render for KanalibApp {
             let close = this.clone();
             let confirm = this.clone();
             let count = request.paths.len();
-            let hash_note = if request.remember_hash {
-                "\n\n同时忽略这些图片的内容哈希：同内容副本重扫时也不会重新导入。"
+            let note = if request.remember_hash {
+                crate::localization::t(cx, "app.remove_assets.hash_note")
             } else {
-                "\n\n同时忽略这些路径：重扫不会重新导入；可在设置页的忽略列表恢复。"
+                crate::localization::t(cx, "app.remove_assets.path_note")
             };
+            let body = crate::localization::t_args(
+                cx,
+                "app.remove_assets.body",
+                &[("n", &count.to_string()), ("note", note.as_ref())],
+            );
             ConfirmDialog::new(
                 "remove-assets-dialog",
-                "从图库移除？",
-                format!(
-                    "将从图库移除 {count} 张图片。{hash_note}\n只删除图库记录，磁盘文件原样保留。"
-                ),
+                crate::localization::t(cx, "app.remove_assets.title"),
+                body,
                 move |_, cx| {
                     let _ = close.update(cx, |app, cx| {
                         app.remove_assets_confirm = None;
@@ -1790,7 +2135,7 @@ impl Render for KanalibApp {
                     });
                 },
             )
-            .confirm("从图库移除")
+            .confirm(crate::localization::t(cx, "app.remove_assets.confirm"))
             .destructive()
             .on_confirm(move |_, cx| {
                 let _ = confirm.update(cx, |app, cx| app.confirm_remove_from_library(cx));
@@ -1801,36 +2146,61 @@ impl Render for KanalibApp {
             let DropPrompt::AddSources { dirs, parents } = prompt;
             let mut lines = Vec::new();
             if !dirs.is_empty() {
-                lines.push(format!("添加 {} 个文件夹为来源：", dirs.len()));
+                lines.push(
+                    crate::localization::t_args(
+                        cx,
+                        "app.drop.add_dirs",
+                        &[("n", &dirs.len().to_string())],
+                    )
+                    .to_string(),
+                );
                 for dir in dirs.iter().take(4) {
                     lines.push(format!("· {}", dir.display()));
                 }
                 if dirs.len() > 4 {
-                    lines.push(format!("· …另有 {} 个", dirs.len() - 4));
+                    lines.push(
+                        crate::localization::t_args(
+                            cx,
+                            "app.drop.more",
+                            &[("n", &(dirs.len() - 4).to_string())],
+                        )
+                        .to_string(),
+                    );
                 }
             }
             if !parents.is_empty() {
                 if !lines.is_empty() {
                     lines.push(String::new());
                 }
-                lines.push(format!(
-                    "为来源外的 {} 张图片添加所在文件夹：",
-                    parents.len()
-                ));
+                lines.push(
+                    crate::localization::t_args(
+                        cx,
+                        "app.drop.add_parents",
+                        &[("n", &parents.len().to_string())],
+                    )
+                    .to_string(),
+                );
                 for path in parents.iter().take(4) {
                     lines.push(format!("· {}", path.display()));
                 }
                 if parents.len() > 4 {
-                    lines.push(format!("· …另有 {} 个", parents.len() - 4));
+                    lines.push(
+                        crate::localization::t_args(
+                            cx,
+                            "app.drop.more",
+                            &[("n", &(parents.len() - 4).to_string())],
+                        )
+                        .to_string(),
+                    );
                 }
             }
             lines.push(String::new());
-            lines.push("只建立索引，不复制、不移动磁盘文件。".to_string());
+            lines.push(crate::localization::t(cx, "app.drop.index_note").to_string());
             let close = this.clone();
             let confirm = this.clone();
             ConfirmDialog::new(
                 "drop-import-dialog",
-                "拖拽导入？",
+                crate::localization::t(cx, "app.drop.title"),
                 lines.join("\n"),
                 move |_, cx| {
                     let _ = close.update(cx, |app, cx| {
@@ -1839,7 +2209,7 @@ impl Render for KanalibApp {
                     });
                 },
             )
-            .confirm("添加为来源")
+            .confirm(crate::localization::t(cx, "app.drop.confirm"))
             .on_confirm(move |_, cx| {
                 let _ = confirm.update(cx, |app, cx| app.confirm_drop_prompt(cx));
             })
@@ -1870,17 +2240,20 @@ impl Render for KanalibApp {
                             .text_lg()
                             .font_weight(FontWeight::SEMIBOLD)
                             .text_color(colors.fg)
-                            .child("松开以导入到图库"),
+                            .child(crate::localization::t(cx, "app.drop.overlay_title")),
                     )
-                    .child(div().text_xs().text_color(colors.muted).child(
-                        "文件夹 → 添加为来源 · 来源内的图片 → 定位选中 · 其他图片 → 询问父目录",
-                    ))
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(colors.muted)
+                            .child(crate::localization::t(cx, "app.drop.overlay_hint")),
+                    )
                     .into_any_element()
             });
         let source_context_menu = self.source_menu.as_ref().map(|state| {
             ContextMenu::new(
                 "source-context-global",
-                source_menu(&state.root, this.clone()),
+                source_menu(&state.root, this.clone(), cx),
             )
             .manual(Some((state.request, state.position)))
             .child(div().size(px(0.)))
@@ -2184,21 +2557,22 @@ impl KanalibApp {
         let query = self.last_search.clone();
         let view = self.current_saved_search_view();
         match self.state.update_saved_search(id, &filter, &query, &view) {
-            Ok(saved) => push_toast(
-                &self.toaster,
-                cx,
-                format!(
-                    "已用当前视图更新「{}」（筛选/搜索/排序/视图/窗格）",
-                    saved.name
-                ),
-                Severity::Success,
-            ),
-            Err(error) => push_toast(
-                &self.toaster,
-                cx,
-                format!("更新智能集合失败：{error:#}"),
-                Severity::Danger,
-            ),
+            Ok(saved) => {
+                let message = crate::localization::t_args(
+                    cx,
+                    "app.saved_search.updated",
+                    &[("name", &saved.name)],
+                );
+                push_toast(&self.toaster, cx, message, Severity::Success);
+            }
+            Err(error) => {
+                let message = crate::localization::t_args(
+                    cx,
+                    "app.saved_search.update_failed",
+                    &[("error", &format!("{error:#}"))],
+                );
+                push_toast(&self.toaster, cx, message, Severity::Danger);
+            }
         }
         cx.notify();
     }
@@ -2215,22 +2589,26 @@ impl KanalibApp {
             .map(|saved| saved.pinned)
             .unwrap_or(false);
         match self.state.set_saved_search_pinned(id, !pinned) {
-            Ok(saved) => push_toast(
-                &self.toaster,
-                cx,
-                if saved.pinned {
-                    format!("已置顶「{}」，重启后保持", saved.name)
-                } else {
-                    format!("已取消置顶「{}」", saved.name)
-                },
-                Severity::Success,
-            ),
-            Err(error) => push_toast(
-                &self.toaster,
-                cx,
-                format!("置顶失败：{error:#}"),
-                Severity::Danger,
-            ),
+            Ok(saved) => {
+                let message = crate::localization::t_args(
+                    cx,
+                    if saved.pinned {
+                        "app.saved_search.pinned"
+                    } else {
+                        "app.saved_search.unpinned"
+                    },
+                    &[("name", &saved.name)],
+                );
+                push_toast(&self.toaster, cx, message, Severity::Success);
+            }
+            Err(error) => {
+                let message = crate::localization::t_args(
+                    cx,
+                    "app.saved_search.pin_failed",
+                    &[("error", &format!("{error:#}"))],
+                );
+                push_toast(&self.toaster, cx, message, Severity::Danger);
+            }
         }
         cx.notify();
     }
@@ -2247,24 +2625,25 @@ impl KanalibApp {
         }
         let target = target as usize;
         if searches[index].pinned != searches[target].pinned {
-            push_toast(
-                &self.toaster,
-                cx,
-                "置顶集合与普通集合不能互相跨越；先取消置顶再移动",
-                Severity::Warning,
-            );
+            let message = crate::localization::t(cx, "app.saved_search.cross_pinned");
+            push_toast(&self.toaster, cx, message, Severity::Warning);
             return;
         }
         let mut ordered = searches.iter().map(|saved| saved.id).collect::<Vec<_>>();
         ordered.swap(index, target);
         match self.state.reorder_saved_searches(&ordered) {
-            Ok(()) => push_toast(&self.toaster, cx, "已调整智能集合顺序", Severity::Success),
-            Err(error) => push_toast(
-                &self.toaster,
-                cx,
-                format!("调整顺序失败：{error:#}"),
-                Severity::Danger,
-            ),
+            Ok(()) => {
+                let message = crate::localization::t(cx, "app.saved_search.reordered");
+                push_toast(&self.toaster, cx, message, Severity::Success);
+            }
+            Err(error) => {
+                let message = crate::localization::t_args(
+                    cx,
+                    "app.saved_search.reorder_failed",
+                    &[("error", &format!("{error:#}"))],
+                );
+                push_toast(&self.toaster, cx, message, Severity::Danger);
+            }
         }
         cx.notify();
     }
@@ -2281,12 +2660,12 @@ impl KanalibApp {
         {
             Ok(saved) => {
                 self.save_search_open = false;
-                push_toast(
-                    &self.toaster,
+                let message = crate::localization::t_args(
                     cx,
-                    format!("已保存智能集合「{}」", saved.name),
-                    Severity::Success,
+                    "app.saved_search.saved",
+                    &[("name", &saved.name)],
                 );
+                push_toast(&self.toaster, cx, message, Severity::Success);
             }
             Err(error) => {
                 if error
@@ -2300,12 +2679,12 @@ impl KanalibApp {
                         Severity::Warning,
                     );
                 } else {
-                    push_toast(
-                        &self.toaster,
+                    let message = crate::localization::t_args(
                         cx,
-                        format!("保存失败：{error:#}"),
-                        Severity::Danger,
+                        "app.saved_search.save_failed",
+                        &[("error", &format!("{error:#}"))],
                     );
+                    push_toast(&self.toaster, cx, message, Severity::Danger);
                 }
             }
         }
@@ -3002,10 +3381,11 @@ impl KanalibApp {
 
     pub(crate) fn choose_folder(&mut self, cx: &mut Context<Self>) {
         let weak = cx.entity().downgrade();
+        let title = crate::localization::t(cx, "app.folder.add_title").to_string();
         // 同步 rfd 会开嵌套消息循环，GPUI 的 RefCell 在鼠标回调里仍被借用，导致闪退。
         cx.spawn(async move |_, cx| {
             let Some(handles) = rfd::AsyncFileDialog::new()
-                .set_title("添加图库文件夹")
+                .set_title(title)
                 .pick_folders()
                 .await
             else {
@@ -3021,23 +3401,23 @@ impl KanalibApp {
             let _ = weak.update(cx, |app, cx| {
                 match app.state.add_roots(folders) {
                     Ok(0) => {
-                        push_toast(&app.toaster, cx, "所选文件夹已在图库中", Severity::Warning);
+                        { let __i18n_toast = crate::localization::t(cx, "app.folder.already"); push_toast(&app.toaster, cx, __i18n_toast, Severity::Warning); }
                         return;
                     }
-                    Ok(added) => push_toast(
-                        &app.toaster,
-                        cx,
-                        format!("已添加 {added} 个来源"),
-                        Severity::Success,
-                    ),
-                    Err(error) => {
-                        app.state.set_error(format!("添加文件夹失败：{error:#}"));
-                        push_toast(
-                            &app.toaster,
+                    Ok(added) => { let __i18n_toast_0 = crate::localization::t_args(
                             cx,
-                            format!("添加文件夹失败：{error:#}"),
-                            Severity::Danger,
-                        );
+                            "app.folder.added",
+                            &[("n", &added.to_string())],
+                        ); push_toast(&app.toaster, cx, __i18n_toast_0, Severity::Success) },
+                    Err(error) => {
+                        let message = crate::localization::t_args(
+                            cx,
+                            "app.folder.failed",
+                            &[("error", &format!("{error:#}"))],
+                        )
+                        .to_string();
+                        app.state.set_error(message.clone());
+                        push_toast(&app.toaster, cx, message, Severity::Danger);
                         return;
                     }
                 }
@@ -3122,7 +3502,13 @@ impl KanalibApp {
             }
             Err(error) => {
                 log::warn!("retry failed: {error:#}");
-                self.state.set_error(format!("重试失败: {error:#}"));
+                let message = crate::localization::t_args(
+                    cx,
+                    "app.retry.failed",
+                    &[("error", &format!("{error:#}"))],
+                )
+                .to_string();
+                self.state.set_error(message);
             }
         }
         cx.notify();
@@ -3148,20 +3534,17 @@ impl KanalibApp {
     pub(crate) fn refresh_pending_restore_hint(&mut self, cx: &mut Context<Self>) {
         match self.state.backup_status().pending_restore {
             Some(pending) => {
-                let message = format!(
-                    "待恢复备份：{} · 重启 Kanalib 后生效；可在设置页「数据库备份」取消",
-                    pending.candidate.display()
-                );
+                let message = crate::localization::t_args(
+                    cx,
+                    "app.restore_pending.message",
+                    &[("path", &pending.candidate.display().to_string())],
+                )
+                .to_string();
                 let changed = self.pending_restore_hint.as_deref() != Some(message.as_str());
                 self.pending_restore_hint = Some(message.clone());
                 if changed {
                     self.settings_notice = Some(message.clone());
-                    push_toast(
-                        &self.toaster,
-                        cx,
-                        "检测到待恢复备份：重启后生效，可在设置页取消",
-                        Severity::Warning,
-                    );
+                    { let __i18n_toast = crate::localization::t(cx, "app.restore_pending.toast"); push_toast(&self.toaster, cx, __i18n_toast, Severity::Warning); }
                 }
             }
             None => self.pending_restore_hint = None,
@@ -3403,28 +3786,28 @@ impl KanalibApp {
     pub(crate) fn apply_favorite(&mut self, favorite: bool, cx: &mut Context<Self>) {
         let paths = self.selected_paths();
         if paths.is_empty() {
-            push_toast(&self.toaster, cx, "先选择图片", Severity::Warning);
+            { let __i18n_toast_1 = crate::localization::t(cx, "app.common.no_selection"); push_toast(&self.toaster, cx, __i18n_toast_1, Severity::Warning) };
             return;
         }
         match self.state.set_favorite(&paths, favorite) {
-            Ok(updated) => push_toast(
-                &self.toaster,
-                cx,
-                if favorite {
-                    format!("已收藏 {updated} 张")
-                } else {
-                    format!("已取消收藏 {updated} 张")
-                },
-                Severity::Success,
-            ),
-            Err(error) => {
-                self.state.set_error(format!("收藏失败：{error:#}"));
-                push_toast(
-                    &self.toaster,
+            Ok(updated) => { let __i18n_toast_2 = crate::localization::t_args(
                     cx,
-                    format!("收藏失败：{error:#}"),
-                    Severity::Danger,
-                );
+                    if favorite {
+                        "app.favorite.added"
+                    } else {
+                        "app.favorite.removed"
+                    },
+                    &[("n", &updated.to_string())],
+                ); push_toast(&self.toaster, cx, __i18n_toast_2, Severity::Success) },
+            Err(error) => {
+                let message = crate::localization::t_args(
+                    cx,
+                    "app.favorite.failed",
+                    &[("error", &format!("{error:#}"))],
+                )
+                .to_string();
+                self.state.set_error(message.clone());
+                push_toast(&self.toaster, cx, message, Severity::Danger);
             }
         }
         let leaving_favorites =
@@ -3473,28 +3856,32 @@ impl KanalibApp {
     pub(crate) fn apply_star(&mut self, star: u8, cx: &mut Context<Self>) {
         let paths = self.selected_paths();
         if paths.is_empty() {
-            push_toast(&self.toaster, cx, "先选择图片", Severity::Warning);
+            { let __i18n_toast = crate::localization::t(cx, "app.common.no_selection"); push_toast(&self.toaster, cx, __i18n_toast, Severity::Warning); }
             return;
         }
         match self.state.set_star(&paths, star) {
-            Ok(updated) => push_toast(
-                &self.toaster,
-                cx,
-                if star == 0 {
-                    format!("已清除 {updated} 张的星级")
+            Ok(updated) => { let __i18n_toast_3 = if star == 0 {
+                    crate::localization::t_args(
+                        cx,
+                        "app.star.cleared",
+                        &[("n", &updated.to_string())],
+                    )
                 } else {
-                    format!("已设置 {updated} 张为 {star} 星")
-                },
-                Severity::Success,
-            ),
+                    crate::localization::t_args(
+                        cx,
+                        "app.star.set",
+                        &[("n", &updated.to_string()), ("star", &star.to_string())],
+                    )
+                }; push_toast(&self.toaster, cx, __i18n_toast_3, Severity::Success) },
             Err(error) => {
-                self.state.set_error(format!("设置星级失败：{error:#}"));
-                push_toast(
-                    &self.toaster,
+                let message = crate::localization::t_args(
                     cx,
-                    format!("设置星级失败：{error:#}"),
-                    Severity::Danger,
-                );
+                    "app.star.failed",
+                    &[("error", &format!("{error:#}"))],
+                )
+                .to_string();
+                self.state.set_error(message.clone());
+                push_toast(&self.toaster, cx, message, Severity::Danger);
             }
         }
         cx.notify();
@@ -3568,7 +3955,7 @@ impl KanalibApp {
             paths.dedup();
         }
         if paths.is_empty() {
-            push_toast(&self.toaster, cx, "没有可导出的图片", Severity::Warning);
+            { let __i18n_toast = crate::localization::t(cx, "app.export.empty"); push_toast(&self.toaster, cx, __i18n_toast, Severity::Warning); }
             return;
         }
         let assets = {
@@ -3584,7 +3971,7 @@ impl KanalibApp {
                 .collect::<Vec<_>>()
         };
         if assets.is_empty() {
-            push_toast(&self.toaster, cx, "没有可导出的图片", Severity::Warning);
+            { let __i18n_toast_4 = crate::localization::t(cx, "app.export.empty"); push_toast(&self.toaster, cx, __i18n_toast_4, Severity::Warning) };
             return;
         }
         let content = match export_format {
@@ -3592,12 +3979,11 @@ impl KanalibApp {
             ExportFormat::Json => match export::to_json(&assets) {
                 Ok(content) => content,
                 Err(error) => {
-                    push_toast(
-                        &self.toaster,
-                        cx,
-                        format!("生成 JSON 失败：{error:#}"),
-                        Severity::Danger,
-                    );
+                    { let __i18n_toast_5 = crate::localization::t_args(
+                            cx,
+                            "app.export.json_failed",
+                            &[("error", &format!("{error:#}"))],
+                        ); push_toast(&self.toaster, cx, __i18n_toast_5, Severity::Danger) };
                     return;
                 }
             },
@@ -3619,18 +4005,16 @@ impl KanalibApp {
             let result = std::fs::write(&path, content);
             let _ = weak.update(cx, |_, cx| {
                 match result {
-                    Ok(()) => push_toast(
-                        &toaster,
-                        cx,
-                        format!("已导出 {count} 张 · {}", format_bytes(bytes)),
-                        Severity::Success,
-                    ),
-                    Err(error) => push_toast(
-                        &toaster,
-                        cx,
-                        format!("导出失败：{error:#}"),
-                        Severity::Danger,
-                    ),
+                    Ok(()) => { let __i18n_toast_6 = crate::localization::t_args(
+                            cx,
+                            "app.export.done",
+                            &[("n", &count.to_string()), ("size", &format_bytes(bytes))],
+                        ); push_toast(&toaster, cx, __i18n_toast_6, Severity::Success) },
+                    Err(error) => { let __i18n_toast_7 = crate::localization::t_args(
+                            cx,
+                            "app.export.failed",
+                            &[("error", &format!("{error:#}"))],
+                        ); push_toast(&toaster, cx, __i18n_toast_7, Severity::Danger) },
                 }
                 cx.notify();
             });
@@ -3641,7 +4025,7 @@ impl KanalibApp {
     pub(crate) fn copy_selected_prompt(&mut self, cx: &mut Context<Self>) {
         let paths = self.selected_paths();
         if paths.is_empty() {
-            push_toast(&self.toaster, cx, "先选择图片", Severity::Warning);
+            { let __i18n_toast_8 = crate::localization::t(cx, "app.common.no_selection"); push_toast(&self.toaster, cx, __i18n_toast_8, Severity::Warning) };
             return;
         }
         let targets = paths.iter().map(PathBuf::as_path).collect::<HashSet<_>>();
@@ -3660,27 +4044,21 @@ impl KanalibApp {
             prompts
         };
         if prompts.is_empty() {
-            push_toast(
-                &self.toaster,
-                cx,
-                "所选图片没有可复制的标签",
-                Severity::Warning,
-            );
+            { let __i18n_toast_9 = crate::localization::t(cx, "app.copy.prompt_empty"); push_toast(&self.toaster, cx, __i18n_toast_9, Severity::Warning) };
             return;
         }
         cx.write_to_clipboard(ClipboardItem::new_string(prompts.join("\n\n")));
-        push_toast(
-            &self.toaster,
-            cx,
-            format!("已复制 {} 张图片的 Prompt", prompts.len()),
-            Severity::Success,
-        );
+        { let __i18n_toast_10 = crate::localization::t_args(
+                cx,
+                "app.copy.prompt_done",
+                &[("n", &prompts.len().to_string())],
+            ); push_toast(&self.toaster, cx, __i18n_toast_10, Severity::Success) };
     }
 
     pub(crate) fn copy_selected_paths(&mut self, cx: &mut Context<Self>) {
         let mut paths = self.selected_paths();
         if paths.is_empty() {
-            push_toast(&self.toaster, cx, "先选择图片", Severity::Warning);
+            { let __i18n_toast_11 = crate::localization::t(cx, "app.common.no_selection"); push_toast(&self.toaster, cx, __i18n_toast_11, Severity::Warning) };
             return;
         }
         paths.sort();
@@ -3690,23 +4068,17 @@ impl KanalibApp {
             .collect::<Vec<_>>()
             .join("\n");
         cx.write_to_clipboard(ClipboardItem::new_string(text));
-        push_toast(
-            &self.toaster,
-            cx,
-            format!("已复制 {} 条路径", paths.len()),
-            Severity::Success,
-        );
+        { let __i18n_toast_12 = crate::localization::t_args(
+                cx,
+                "app.copy.paths_done",
+                &[("n", &paths.len().to_string())],
+            ); push_toast(&self.toaster, cx, __i18n_toast_12, Severity::Success) };
     }
 
     /// F-068：把单张图片写入剪贴板（PNG + CF_DIB）；失败回退复制路径。
     pub(crate) fn copy_image_path(&mut self, path: PathBuf, cx: &mut Context<Self>) {
         match crate::platform::copy_image_to_clipboard(&path) {
-            Ok(()) => push_toast(
-                &self.toaster,
-                cx,
-                "已复制图片到剪贴板（PNG / DIB）",
-                Severity::Success,
-            ),
+            Ok(()) => { let __i18n_toast_13 = crate::localization::t(cx, "app.copy.image_done"); push_toast(&self.toaster, cx, __i18n_toast_13, Severity::Success) },
             Err(error) => {
                 let message = crate::platform::image_copy_fallback_message(&path, &error);
                 cx.write_to_clipboard(ClipboardItem::new_string(path.display().to_string()));
@@ -3731,12 +4103,11 @@ impl KanalibApp {
     ) {
         if let Err(error) = self.state.set_setting(key, value.as_ref()) {
             log::warn!("save setting {key}: {error:#}");
-            push_toast(
-                &self.toaster,
-                cx,
-                format!("设置保存失败：{error:#}"),
-                Severity::Danger,
-            );
+            { let __i18n_toast_14 = crate::localization::t_args(
+                    cx,
+                    "app.settings.save_failed",
+                    &[("error", &format!("{error:#}"))],
+                ); push_toast(&self.toaster, cx, __i18n_toast_14, Severity::Danger) };
         }
     }
 
@@ -3907,7 +4278,8 @@ impl KanalibApp {
             "library:remove-selected-hash" => self.request_remove_from_library(true, cx),
             "library:open-ignores" => {
                 self.open_settings(cx);
-                self.settings_notice = Some("忽略列表位于设置页底部「忽略列表」".to_string());
+                self.settings_notice =
+                    Some(crate::localization::t(cx, "app.notice.ignores_location").to_string());
                 cx.notify();
             }
             // F-061：命令面板接入备份/恢复；具体实现与设置页共用同一套方法。
@@ -3917,7 +4289,7 @@ impl KanalibApp {
             "backup:settings" => {
                 self.open_settings(cx);
                 self.settings_notice =
-                    Some("数据库备份、自动备份计划与恢复入口位于「数据库备份」".to_string());
+                    Some(crate::localization::t(cx, "app.notice.backup_location").to_string());
                 cx.notify();
             }
             "org:new-album" => {
@@ -3943,7 +4315,7 @@ impl KanalibApp {
         cx.notify();
     }
 
-    pub(crate) fn sort_menu(&self, this: &Entity<Self>) -> Menu {
+    pub(crate) fn sort_menu(&self, this: &Entity<Self>, cx: &App) -> Menu {
         let menu = |this: &Entity<Self>, mode: SortMode| {
             let this = this.clone();
             MenuItem::radio(mode.label(), self.sort == mode).on_click(move |_, cx| {
@@ -3963,44 +4335,61 @@ impl KanalibApp {
             .item(menu(this, SortMode::Rating))
             .separator()
             .item(
-                MenuItem::radio("升序", self.sort_ascending).on_click(move |_, cx| {
+                MenuItem::radio(
+                    crate::localization::t(cx, "app.sort.ascending"),
+                    self.sort_ascending,
+                )
+                .on_click(move |_, cx| {
                     let _ = ascending.update(cx, |app, cx| app.set_sort_ascending(true, cx));
                 }),
             )
             .item(
-                MenuItem::radio("降序", !self.sort_ascending).on_click(move |_, cx| {
+                MenuItem::radio(
+                    crate::localization::t(cx, "app.sort.descending"),
+                    !self.sort_ascending,
+                )
+                .on_click(move |_, cx| {
                     let _ = descending.update(cx, |app, cx| app.set_sort_ascending(false, cx));
                 }),
             )
     }
 
-    pub(crate) fn display_menu(&self, this: &Entity<Self>) -> Menu {
+    pub(crate) fn display_menu(&self, this: &Entity<Self>, cx: &App) -> Menu {
         let sidebar = this.clone();
         let extensions = this.clone();
         let group = self.group_menu(this);
         Menu::new()
             .item(
-                MenuItem::check("侧栏", self.show_sidebar)
-                    .icon(IconName::PanelLeft)
-                    .on_click(move |_, cx| {
-                        let _ = sidebar
-                            .update(cx, |app, cx| app.set_show_sidebar(!app.show_sidebar, cx));
-                    }),
+                MenuItem::check(
+                    crate::localization::t(cx, "app.display.sidebar"),
+                    self.show_sidebar,
+                )
+                .icon(IconName::PanelLeft)
+                .on_click(move |_, cx| {
+                    let _ = sidebar
+                        .update(cx, |app, cx| app.set_show_sidebar(!app.show_sidebar, cx));
+                }),
             )
             .item(
-                MenuItem::check("显示文件扩展名", self.show_extensions)
-                    .icon(IconName::FileType)
-                    .on_click(move |_, cx| {
-                        let _ = extensions.update(cx, |app, cx| {
-                            app.set_show_extensions(!app.show_extensions, cx)
-                        });
-                    }),
+                MenuItem::check(
+                    crate::localization::t(cx, "app.display.extensions"),
+                    self.show_extensions,
+                )
+                .icon(IconName::FileType)
+                .on_click(move |_, cx| {
+                    let _ = extensions.update(cx, |app, cx| {
+                        app.set_show_extensions(!app.show_extensions, cx)
+                    });
+                }),
             )
             .separator()
-            .item(MenuItem::submenu("分组", group))
+            .item(MenuItem::submenu(
+                crate::localization::t(cx, "app.display.group"),
+                group,
+            ))
     }
 
-    pub(crate) fn view_menu(&self, this: &Entity<Self>) -> Menu {
+    pub(crate) fn view_menu(&self, this: &Entity<Self>, cx: &App) -> Menu {
         let mut menu = Menu::new();
         for mode in ViewMode::ALL {
             let this = this.clone();
@@ -4015,37 +4404,49 @@ impl KanalibApp {
         }
         let details = this.clone();
         let preview = this.clone();
-        let display = self.display_menu(this);
+        let display = self.display_menu(this, cx);
         menu.separator()
             .item(
-                MenuItem::radio("详细信息窗格", self.pane_mode == PaneMode::Details)
-                    .icon(IconName::PanelRight)
-                    .on_click(move |_, cx| {
-                        let _ = details
-                            .update(cx, |app, cx| app.toggle_pane_mode(PaneMode::Details, cx));
-                    }),
+                MenuItem::radio(
+                    crate::localization::t(cx, "app.view.pane_details"),
+                    self.pane_mode == PaneMode::Details,
+                )
+                .icon(IconName::PanelRight)
+                .on_click(move |_, cx| {
+                    let _ = details
+                        .update(cx, |app, cx| app.toggle_pane_mode(PaneMode::Details, cx));
+                }),
             )
             .item(
-                MenuItem::radio("预览窗格", self.pane_mode == PaneMode::Preview)
-                    .icon(IconName::Image)
-                    .on_click(move |_, cx| {
-                        let _ = preview
-                            .update(cx, |app, cx| app.toggle_pane_mode(PaneMode::Preview, cx));
-                    }),
+                MenuItem::radio(
+                    crate::localization::t(cx, "app.view.pane_preview"),
+                    self.pane_mode == PaneMode::Preview,
+                )
+                .icon(IconName::Image)
+                .on_click(move |_, cx| {
+                    let _ = preview
+                        .update(cx, |app, cx| app.toggle_pane_mode(PaneMode::Preview, cx));
+                }),
             )
             .separator()
-            .item(MenuItem::submenu("分组", self.group_menu(this)))
-            .item(MenuItem::submenu("显示", display))
+            .item(MenuItem::submenu(
+                crate::localization::t(cx, "app.display.group"),
+                self.group_menu(this),
+            ))
+            .item(MenuItem::submenu(
+                crate::localization::t(cx, "app.view.display"),
+                display,
+            ))
     }
 
-    pub(crate) fn export_menu(&self, this: &Entity<Self>) -> Menu {
+    pub(crate) fn export_menu(&self, this: &Entity<Self>, cx: &App) -> Menu {
         let selected_csv = this.clone();
         let selected_json = this.clone();
         let view_csv = this.clone();
         let view_json = this.clone();
         Menu::new()
             .item(
-                MenuItem::new("选中 · CSV")
+                MenuItem::new(crate::localization::t(cx, "app.export_menu.selected_csv"))
                     .icon(IconName::Download)
                     .on_click(move |_, cx| {
                         let _ = selected_csv.update(cx, |app, cx| {
@@ -4054,7 +4455,7 @@ impl KanalibApp {
                     }),
             )
             .item(
-                MenuItem::new("选中 · JSON")
+                MenuItem::new(crate::localization::t(cx, "app.export_menu.selected_json"))
                     .icon(IconName::Download)
                     .on_click(move |_, cx| {
                         let _ = selected_json.update(cx, |app, cx| {
@@ -4064,7 +4465,7 @@ impl KanalibApp {
             )
             .separator()
             .item(
-                MenuItem::new("当前视图 · CSV")
+                MenuItem::new(crate::localization::t(cx, "app.export_menu.view_csv"))
                     .icon(IconName::Download)
                     .on_click(move |_, cx| {
                         let _ = view_csv.update(cx, |app, cx| {
@@ -4073,7 +4474,7 @@ impl KanalibApp {
                     }),
             )
             .item(
-                MenuItem::new("当前视图 · JSON")
+                MenuItem::new(crate::localization::t(cx, "app.export_menu.view_json"))
                     .icon(IconName::Download)
                     .on_click(move |_, cx| {
                         let _ = view_json.update(cx, |app, cx| {
@@ -4116,7 +4517,7 @@ impl KanalibApp {
             DropdownMenu::new(
                 "library-sort",
                 crate::localization::t(cx, "titlebar.sort"),
-                self.sort_menu(this),
+                self.sort_menu(this, cx),
             )
                 .icon(IconName::ArrowDownUp)
                 .variant(ButtonVariant::Ghost)
@@ -4125,7 +4526,7 @@ impl KanalibApp {
             DropdownMenu::new(
                 "library-view",
                 crate::localization::t(cx, "titlebar.view"),
-                self.view_menu(this),
+                self.view_menu(this, cx),
             )
                 .icon(IconName::LayoutGrid)
                 .variant(ButtonVariant::Ghost)
@@ -4134,7 +4535,7 @@ impl KanalibApp {
             DropdownMenu::new(
                 "library-export",
                 crate::localization::t(cx, "titlebar.export"),
-                self.export_menu(this),
+                self.export_menu(this, cx),
             )
                 .icon(IconName::Download)
                 .variant(ButtonVariant::Ghost)
@@ -4182,15 +4583,17 @@ impl KanalibApp {
                 &[("n", &history_count)],
             ));
         let syntax_menu = Menu::new()
-            .item(MenuItem::new("自由文本：空格分隔，全部满足").disabled(true))
-            .item(MenuItem::new("tag:风景 / #风景 · character: · copyright:").disabled(true))
-            .item(MenuItem::new("style: · meta: · rating:").disabled(true))
-            .item(MenuItem::new("name:cover · path:草图 · group:崩坏").disabled(true))
-            .item(MenuItem::new("size:>10mb · width:>=4000 · height: · ratio:").disabled(true))
-            .item(MenuItem::new("date:2026-10 · date:>=2026-10-01").disabled(true))
-            .item(MenuItem::new("star:>=3 · is:fav · is:failed · is:damaged").disabled(true))
-            .item(MenuItem::new("is:tagged / is:untagged · dup:true").disabled(true))
-            .item(MenuItem::new("-tag:草图 排除 · 回车记录最近查询").disabled(true));
+            .item(
+                MenuItem::new(crate::localization::t(cx, "app.syntax.free_text")).disabled(true),
+            )
+            .item(MenuItem::new(crate::localization::t(cx, "app.syntax.tag")).disabled(true))
+            .item(MenuItem::new(crate::localization::t(cx, "app.syntax.style")).disabled(true))
+            .item(MenuItem::new(crate::localization::t(cx, "app.syntax.name")).disabled(true))
+            .item(MenuItem::new(crate::localization::t(cx, "app.syntax.size")).disabled(true))
+            .item(MenuItem::new(crate::localization::t(cx, "app.syntax.date")).disabled(true))
+            .item(MenuItem::new(crate::localization::t(cx, "app.syntax.flags")).disabled(true))
+            .item(MenuItem::new(crate::localization::t(cx, "app.syntax.is")).disabled(true))
+            .item(MenuItem::new(crate::localization::t(cx, "app.syntax.exclude")).disabled(true));
         let syntax_help = OverflowMenu::new("search-syntax-help", syntax_menu)
             .icon(IconName::CircleHelp)
             .tooltip(crate::localization::t(cx, "titlebar.syntax_help"));
@@ -4261,15 +4664,18 @@ impl KanalibApp {
         if library {
             let this_tag_return = this.clone();
             let tag_return = self.tag_return_pending.then(|| {
-                Button::new("tag-return", "标签管理")
-                    .icon(IconName::ArrowLeft)
-                    .size(ControlSize::Sm)
-                    .variant(ButtonVariant::Ghost)
-                    .on_click(move |_, _, cx| {
-                        let _ = this_tag_return.update(cx, |app, cx| {
-                            app.return_to_tag_manager(cx);
-                        });
-                    })
+                Button::new(
+                    "tag-return",
+                    crate::localization::t(cx, "app.titlebar.back_to_tags"),
+                )
+                .icon(IconName::ArrowLeft)
+                .size(ControlSize::Sm)
+                .variant(ButtonVariant::Ghost)
+                .on_click(move |_, _, cx| {
+                    let _ = this_tag_return.update(cx, |app, cx| {
+                        app.return_to_tag_manager(cx);
+                    });
+                })
             });
             left = left.child(
                 div()
@@ -4292,7 +4698,11 @@ impl KanalibApp {
                             .text_sm()
                             .font_weight(FontWeight::NORMAL)
                             .text_color(colors.muted)
-                            .child(format!("{visible} 张")),
+                            .child(crate::localization::t_args(
+                                cx,
+                                "app.titlebar.visible_count",
+                                &[("n", &visible.to_string())],
+                            )),
                     ),
             );
         } else {
@@ -4430,20 +4840,18 @@ impl KanalibApp {
             }
         }
         if existing > 0 {
-            push_toast(
-                &self.toaster,
-                cx,
-                format!("{existing} 个路径已在图库来源中"),
-                Severity::Warning,
-            );
+            { let __i18n_toast_15 = crate::localization::t_args(
+                    cx,
+                    "app.drop.existing",
+                    &[("n", &existing.to_string())],
+                ); push_toast(&self.toaster, cx, __i18n_toast_15, Severity::Warning) };
         }
         if unsupported > 0 {
-            push_toast(
-                &self.toaster,
-                cx,
-                format!("{unsupported} 个路径不是支持的图片格式"),
-                Severity::Warning,
-            );
+            { let __i18n_toast_16 = crate::localization::t_args(
+                    cx,
+                    "app.drop.unsupported",
+                    &[("n", &unsupported.to_string())],
+                ); push_toast(&self.toaster, cx, __i18n_toast_16, Severity::Warning) };
         }
         if !dirs.is_empty() || !parents.is_empty() {
             self.drop_prompt = Some(DropPrompt::AddSources { dirs, parents });
@@ -4473,14 +4881,16 @@ impl KanalibApp {
             return;
         }
         match self.state.add_roots(targets) {
-            Ok(0) => push_toast(&self.toaster, cx, "所选文件夹已在图库中", Severity::Warning),
+            Ok(0) => {
+                let __i18n_toast = crate::localization::t(cx, "app.folder.already");
+                push_toast(&self.toaster, cx, __i18n_toast, Severity::Warning)
+            },
             Ok(added) => {
-                push_toast(
-                    &self.toaster,
-                    cx,
-                    format!("已添加 {added} 个来源并开始扫描"),
-                    Severity::Success,
-                );
+                { let __i18n_toast_17 = crate::localization::t_args(
+                        cx,
+                        "app.drop.added_and_scanning",
+                        &[("n", &added.to_string())],
+                    ); push_toast(&self.toaster, cx, __i18n_toast_17, Severity::Success) };
                 if let Some(search) = &self.search_input {
                     search.update(cx, |input, cx| input.set_text("", cx));
                 }
@@ -4498,13 +4908,14 @@ impl KanalibApp {
                 self.grid_scroll.scroll_to_item(0, ScrollStrategy::Top);
             }
             Err(error) => {
-                self.state.set_error(format!("添加来源失败：{error:#}"));
-                push_toast(
-                    &self.toaster,
+                let message = crate::localization::t_args(
                     cx,
-                    format!("添加来源失败：{error:#}"),
-                    Severity::Danger,
-                );
+                    "app.drop.failed",
+                    &[("error", &format!("{error:#}"))],
+                )
+                .to_string();
+                self.state.set_error(message.clone());
+                push_toast(&self.toaster, cx, message, Severity::Danger);
             }
         }
         cx.notify();
@@ -4533,12 +4944,7 @@ impl KanalibApp {
                 .collect::<Vec<_>>()
         };
         if found.is_empty() {
-            push_toast(
-                &self.toaster,
-                cx,
-                "图片尚未入库（可能已被忽略），请先重扫来源",
-                Severity::Warning,
-            );
+            { let __i18n_toast = crate::localization::t(cx, "app.locate.not_indexed"); push_toast(&self.toaster, cx, __i18n_toast, Severity::Warning); }
             cx.notify();
             return;
         }
@@ -4562,19 +4968,17 @@ impl KanalibApp {
             });
         })
         .detach();
-        push_toast(
-            &self.toaster,
-            cx,
-            format!("已定位 {} 张图片", found.len()),
-            Severity::Success,
-        );
-        if missing > 0 {
-            push_toast(
-                &self.toaster,
+        { let __i18n_toast_18 = crate::localization::t_args(
                 cx,
-                format!("另有 {missing} 张未入库（可能已被忽略）"),
-                Severity::Warning,
-            );
+                "app.locate.done",
+                &[("n", &found.len().to_string())],
+            ); push_toast(&self.toaster, cx, __i18n_toast_18, Severity::Success) };
+        if missing > 0 {
+            { let __i18n_toast_19 = crate::localization::t_args(
+                    cx,
+                    "app.locate.missing",
+                    &[("n", &missing.to_string())],
+                ); push_toast(&self.toaster, cx, __i18n_toast_19, Severity::Warning) };
         }
         cx.notify();
     }
@@ -4588,7 +4992,7 @@ impl KanalibApp {
     ) {
         let mut paths = self.selected_paths();
         if paths.is_empty() {
-            push_toast(&self.toaster, cx, "先选择图片", Severity::Warning);
+            { let __i18n_toast_20 = crate::localization::t(cx, "app.common.no_selection"); push_toast(&self.toaster, cx, __i18n_toast_20, Severity::Warning) };
             return;
         }
         paths.sort();
@@ -4620,21 +5024,21 @@ impl KanalibApp {
                 self.clear_multi_selection();
                 self.state.select(None);
                 self.auto_select_pending = true;
-                push_toast(
-                    &self.toaster,
-                    cx,
-                    format!("已从图库移除 {removed} 张 · 磁盘文件未删除"),
-                    Severity::Success,
-                );
+                { let __i18n_toast_21 = crate::localization::t_args(
+                        cx,
+                        "app.remove_assets.removed",
+                        &[("n", &removed.to_string())],
+                    ); push_toast(&self.toaster, cx, __i18n_toast_21, Severity::Success) };
             }
             Err(error) => {
-                self.state.set_error(format!("从图库移除失败：{error:#}"));
-                push_toast(
-                    &self.toaster,
+                let message = crate::localization::t_args(
                     cx,
-                    format!("从图库移除失败：{error:#}"),
-                    Severity::Danger,
-                );
+                    "app.remove_assets.failed",
+                    &[("error", &format!("{error:#}"))],
+                )
+                .to_string();
+                self.state.set_error(message.clone());
+                push_toast(&self.toaster, cx, message, Severity::Danger);
             }
         }
         cx.notify();
@@ -4672,14 +5076,17 @@ impl KanalibApp {
         };
         let glob = glob.trim();
         if glob.is_empty() {
-            draft.notice = Some("排除规则不能为空".to_string());
+            draft.notice = Some(crate::localization::t(cx, "app.filter.empty_rule").to_string());
         } else if draft.config.exclude_globs.iter().any(|item| item == glob) {
-            draft.notice = Some(format!("规则已存在：{glob}"));
+            draft.notice = Some(
+                crate::localization::t_args(cx, "app.filter.exists", &[("glob", glob)]).to_string(),
+            );
         } else {
             draft.config.exclude_globs.push(glob.to_string());
             draft.impact = None;
             draft.confirm_remove = false;
-            draft.notice = Some("已加入草稿；点击「预览命中」由核心校验并统计。".to_string());
+            draft.notice =
+                Some(crate::localization::t(cx, "app.filter.draft_added").to_string());
         }
         cx.notify();
     }
@@ -4692,7 +5099,8 @@ impl KanalibApp {
             draft.config.exclude_globs.remove(index);
             draft.impact = None;
             draft.confirm_remove = false;
-            draft.notice = Some("已从草稿移除该规则（尚未保存）".to_string());
+            draft.notice =
+                Some(crate::localization::t(cx, "app.filter.draft_removed").to_string());
         }
         cx.notify();
     }
@@ -4721,7 +5129,7 @@ impl KanalibApp {
         else {
             return;
         };
-        match filter_limits(min_text, max_text) {
+        match filter_limits(min_text, max_text, cx) {
             Ok((min, max)) => {
                 config.min_bytes = min;
                 config.max_bytes = max;
@@ -4738,16 +5146,29 @@ impl KanalibApp {
             draft.confirm_remove = false;
             match result {
                 Ok(impact) => {
-                    draft.notice = Some(format!(
-                        "预览：已入库 {} 张 · 命中排除 {} 张 · 保留 {} 张（保存前不会生效）",
-                        impact.indexed,
-                        impact.excluded.len(),
-                        impact.kept
-                    ));
+                    draft.notice = Some(
+                        crate::localization::t_args(
+                            cx,
+                            "app.filter.preview",
+                            &[
+                                ("indexed", &impact.indexed.to_string()),
+                                ("excluded", &impact.excluded.len().to_string()),
+                                ("kept", &impact.kept.to_string()),
+                            ],
+                        )
+                        .to_string(),
+                    );
                     draft.impact = Some(impact);
                 }
                 Err(error) => {
-                    draft.notice = Some(format!("规则无效：{error:#}"));
+                    draft.notice = Some(
+                        crate::localization::t_args(
+                            cx,
+                            "app.filter.invalid",
+                            &[("error", &format!("{error:#}"))],
+                        )
+                        .to_string(),
+                    );
                     draft.impact = None;
                 }
             }
@@ -4772,7 +5193,7 @@ impl KanalibApp {
         }) else {
             return;
         };
-        match filter_limits(min_text, max_text) {
+        match filter_limits(min_text, max_text, cx) {
             Ok((min, max)) => {
                 config.min_bytes = min;
                 config.max_bytes = max;
@@ -4790,15 +5211,26 @@ impl KanalibApp {
                 draft.config = config;
                 match impact {
                     Ok(impact) => {
-                        draft.notice = Some(format!(
-                            "确认从图库移出 {} 张记录？只删 DB，磁盘文件保留；再次点击「确认移出」执行。",
-                            impact.excluded.len()
-                        ));
+                        draft.notice = Some(
+                            crate::localization::t_args(
+                                cx,
+                                "app.filter.confirm_remove",
+                                &[("n", &impact.excluded.len().to_string())],
+                            )
+                            .to_string(),
+                        );
                         draft.impact = Some(impact);
                         draft.confirm_remove = true;
                     }
                     Err(error) => {
-                        draft.notice = Some(format!("规则无效：{error:#}"));
+                        draft.notice = Some(
+                            crate::localization::t_args(
+                                cx,
+                                "app.filter.invalid",
+                                &[("error", &format!("{error:#}"))],
+                            )
+                            .to_string(),
+                        );
                         draft.impact = None;
                         draft.confirm_remove = false;
                     }
@@ -4819,39 +5251,48 @@ impl KanalibApp {
                     draft.impact = Some(apply.impact.clone());
                     draft.confirm_remove = false;
                     draft.notice = Some(if remove {
-                        format!(
-                            "已保存规则并从图库移出 {} 张（磁盘文件未删除）；重扫后这些文件仍会被规则排除。",
-                            apply.removed
+                        crate::localization::t_args(
+                            cx,
+                            "app.filter.saved_removed",
+                            &[("n", &apply.removed.to_string())],
                         )
+                        .to_string()
                     } else {
-                        format!(
-                            "已保存规则；已入库命中 {} 张保留记录，后续扫描会跳过。",
-                            apply.impact.excluded.len()
+                        crate::localization::t_args(
+                            cx,
+                            "app.filter.saved_kept",
+                            &[("n", &apply.impact.excluded.len().to_string())],
                         )
+                        .to_string()
                     });
                 }
-                push_toast(
-                    &self.toaster,
-                    cx,
-                    if remove {
-                        format!("排除规则已保存 · 移出 {} 张记录", apply.removed)
+                { let __i18n_toast_22 = if remove {
+                        crate::localization::t_args(
+                            cx,
+                            "app.filter.toast_removed",
+                            &[("n", &apply.removed.to_string())],
+                        )
                     } else {
-                        "排除规则已保存 · 保留命中记录".to_string()
-                    },
-                    Severity::Success,
-                );
+                        crate::localization::t(cx, "app.filter.toast_kept")
+                    }; push_toast(&self.toaster, cx, __i18n_toast_22, Severity::Success) };
             }
             Err(error) => {
                 if let Some(draft) = self.scan_filter_draft.as_mut() {
-                    draft.notice = Some(format!("保存失败：{error:#}"));
+                    draft.notice = Some(
+                        crate::localization::t_args(
+                            cx,
+                            "app.filter.save_notice_failed",
+                            &[("error", &format!("{error:#}"))],
+                        )
+                        .to_string(),
+                    );
                     draft.confirm_remove = false;
                 }
-                push_toast(
-                    &self.toaster,
-                    cx,
-                    format!("保存排除规则失败：{error:#}"),
-                    Severity::Danger,
-                );
+                { let __i18n_toast_23 = crate::localization::t_args(
+                        cx,
+                        "app.filter.save_failed",
+                        &[("error", &format!("{error:#}"))],
+                    ); push_toast(&self.toaster, cx, __i18n_toast_23, Severity::Danger) };
             }
         }
         cx.notify();
@@ -4860,7 +5301,8 @@ impl KanalibApp {
     pub(crate) fn cancel_scan_filter_remove(&mut self, cx: &mut Context<Self>) {
         if let Some(draft) = self.scan_filter_draft.as_mut() {
             draft.confirm_remove = false;
-            draft.notice = Some("已取消移出；规则仍可继续编辑".to_string());
+            draft.notice =
+                Some(crate::localization::t(cx, "app.filter.remove_cancelled").to_string());
         }
         cx.notify();
     }
@@ -4881,18 +5323,33 @@ impl KanalibApp {
     ) {
         match self.state.add_ignored_glob(&root, &pattern) {
             Ok(true) => {
-                let message = format!("已添加忽略规则 · {pattern}（只影响后续扫描，不删除文件）");
+                let message = crate::localization::t_args(
+                    cx,
+                    "app.ignore.added",
+                    &[("pattern", &pattern)],
+                )
+                .to_string();
                 self.draft_notice(message.clone());
                 self.settings_notice = Some(message);
-                push_toast(&self.toaster, cx, "已添加忽略规则", Severity::Success);
+                { let __i18n_toast = crate::localization::t(cx, "app.ignore.added_toast"); push_toast(&self.toaster, cx, __i18n_toast, Severity::Success); }
             }
             Ok(false) => {
-                let message = format!("忽略规则已存在：{pattern}");
+                let message = crate::localization::t_args(
+                    cx,
+                    "app.ignore.exists",
+                    &[("pattern", &pattern)],
+                )
+                .to_string();
                 self.draft_notice(message.clone());
                 self.settings_notice = Some(message);
             }
             Err(error) => {
-                let message = format!("忽略规则无效：{error:#}");
+                let message = crate::localization::t_args(
+                    cx,
+                    "app.ignore.invalid",
+                    &[("error", &format!("{error:#}"))],
+                )
+                .to_string();
                 self.draft_notice(message.clone());
                 self.settings_notice = Some(message);
             }
@@ -4903,12 +5360,24 @@ impl KanalibApp {
     pub(crate) fn restore_ignored_paths(&mut self, paths: Vec<PathBuf>, cx: &mut Context<Self>) {
         match self.state.restore_ignored_paths(&paths) {
             Ok(restored) => {
-                let message = format!("已恢复 {restored} 条路径忽略项 · 重扫后重新导入");
+                let message = crate::localization::t_args(
+                    cx,
+                    "app.ignore.restored_paths",
+                    &[("n", &restored.to_string())],
+                )
+                .to_string();
                 self.settings_notice = Some(message.clone());
                 push_toast(&self.toaster, cx, message, Severity::Success);
             }
             Err(error) => {
-                self.settings_notice = Some(format!("恢复忽略路径失败：{error:#}"));
+                self.settings_notice = Some(
+                    crate::localization::t_args(
+                        cx,
+                        "app.ignore.restore_paths_failed",
+                        &[("error", &format!("{error:#}"))],
+                    )
+                    .to_string(),
+                );
             }
         }
         cx.notify();
@@ -4917,12 +5386,24 @@ impl KanalibApp {
     pub(crate) fn restore_ignored_hashes(&mut self, hashes: Vec<String>, cx: &mut Context<Self>) {
         match self.state.restore_ignored_hashes(&hashes) {
             Ok(restored) => {
-                let message = format!("已恢复 {restored} 条哈希忽略项 · 重扫后重新导入");
+                let message = crate::localization::t_args(
+                    cx,
+                    "app.ignore.restored_hashes",
+                    &[("n", &restored.to_string())],
+                )
+                .to_string();
                 self.settings_notice = Some(message.clone());
                 push_toast(&self.toaster, cx, message, Severity::Success);
             }
             Err(error) => {
-                self.settings_notice = Some(format!("恢复哈希忽略项失败：{error:#}"));
+                self.settings_notice = Some(
+                    crate::localization::t_args(
+                        cx,
+                        "app.ignore.restore_hashes_failed",
+                        &[("error", &format!("{error:#}"))],
+                    )
+                    .to_string(),
+                );
             }
         }
         cx.notify();
@@ -4936,15 +5417,34 @@ impl KanalibApp {
     ) {
         match self.state.restore_ignored_glob(&root, &pattern) {
             Ok(true) => {
-                let message = format!("已恢复忽略规则 · {pattern} · 重扫后重新导入");
+                let message = crate::localization::t_args(
+                    cx,
+                    "app.ignore.restored_glob",
+                    &[("pattern", &pattern)],
+                )
+                .to_string();
                 self.settings_notice = Some(message.clone());
                 push_toast(&self.toaster, cx, message, Severity::Success);
             }
             Ok(false) => {
-                self.settings_notice = Some(format!("忽略规则不存在：{pattern}"));
+                self.settings_notice = Some(
+                    crate::localization::t_args(
+                        cx,
+                        "app.ignore.missing",
+                        &[("pattern", &pattern)],
+                    )
+                    .to_string(),
+                );
             }
             Err(error) => {
-                self.settings_notice = Some(format!("恢复忽略规则失败：{error:#}"));
+                self.settings_notice = Some(
+                    crate::localization::t_args(
+                        cx,
+                        "app.ignore.restore_glob_failed",
+                        &[("error", &format!("{error:#}"))],
+                    )
+                    .to_string(),
+                );
             }
         }
         cx.notify();
@@ -4972,9 +5472,14 @@ impl KanalibApp {
             }
         }
         let message = if restored > 0 {
-            format!("已恢复 {restored} 条忽略项 · 重扫后重新导入")
+            crate::localization::t_args(
+                cx,
+                "app.ignore.restored_all",
+                &[("n", &restored.to_string())],
+            )
+            .to_string()
         } else {
-            "忽略列表已经是空的".to_string()
+            crate::localization::t(cx, "app.ignore.empty").to_string()
         };
         self.settings_notice = Some(message.clone());
         push_toast(&self.toaster, cx, message, Severity::Success);
@@ -5067,13 +5572,31 @@ fn classify_drop_path(
 }
 
 /// 解析规则编辑器的最小/最大字节输入；空串表示不限制。
-fn filter_limits(min_text: &str, max_text: &str) -> Result<(Option<u64>, Option<u64>), String> {
-    let min = parse_optional_bytes(min_text, "最小大小")?;
-    let max = parse_optional_bytes(max_text, "最大大小")?;
+fn filter_limits(
+    min_text: &str,
+    max_text: &str,
+    cx: &App,
+) -> Result<(Option<u64>, Option<u64>), String> {
+    let parse = |text: &str, label_key: &str| -> Result<Option<u64>, String> {
+        let trimmed = text.trim();
+        if trimmed.is_empty() {
+            return Ok(None);
+        }
+        trimmed.parse::<u64>().map(Some).map_err(|_| {
+            crate::localization::t_args(
+                cx,
+                "app.filter.bytes_invalid",
+                &[("label", &crate::localization::t(cx, label_key))],
+            )
+            .to_string()
+        })
+    };
+    let min = parse(min_text, "app.filter.min_label")?;
+    let max = parse(max_text, "app.filter.max_label")?;
     if let (Some(min), Some(max)) = (min, max)
         && min > max
     {
-        return Err("最小大小不能大于最大大小".to_string());
+        return Err(crate::localization::t(cx, "app.filter.order").to_string());
     }
     Ok((min, max))
 }

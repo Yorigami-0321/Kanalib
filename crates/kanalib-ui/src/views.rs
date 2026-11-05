@@ -72,10 +72,11 @@ pub(crate) fn asset_row_shell(
     height: f32,
     divider: bool,
     content: AnyElement,
+    cx: &App,
 ) -> impl IntoElement {
     let path = asset.path.clone();
     let title = asset.title();
-    let menu = asset_context_menu(asset, &this);
+    let menu = asset_context_menu(asset, &this, cx);
     let this_click = this.clone();
     let path_click = path.clone();
     let focus_click = focus.clone();
@@ -122,24 +123,25 @@ pub(crate) fn asset_row_shell(
         )
 }
 
-pub(crate) fn row_meta(asset: &Asset) -> String {
-    let rating = asset.rating.to_uppercase();
+pub(crate) fn row_meta(asset: &Asset, cx: &App) -> String {
+    let code = asset.rating.to_uppercase();
     let star = asset.star;
     let tag_count = asset
         .all_tags()
         .filter(|tag| matches!(tag.category.as_str(), "general" | "manual"))
         .count();
-    let rating = if rating.is_empty() {
-        "未评级".to_string()
+    let rating = if code.is_empty() {
+        crate::localization::t(cx, "views.rating.none").to_string()
     } else {
-        format!("评级 {rating}")
+        crate::localization::t_args(cx, "views.rating.value", &[("rating", &code)]).to_string()
     };
     let star = if star > 0 {
         format!(" · ★ {star}")
     } else {
         String::new()
     };
-    format!("{rating}{star} · {tag_count} 标签")
+    let tags = crate::localization::t_args(cx, "views.tag_count", &[("n", &tag_count.to_string())]);
+    format!("{rating}{star} · {tags}")
 }
 
 pub(crate) fn display_name(asset: &Asset, show_extensions: bool) -> String {
@@ -153,35 +155,33 @@ pub(crate) fn display_name(asset: &Asset, show_extensions: bool) -> String {
         .unwrap_or_else(|| asset.title())
 }
 
-pub(crate) fn asset_context_menu(asset: &Asset, this: &Entity<KanalibApp>) -> Menu {
+pub(crate) fn asset_context_menu(asset: &Asset, this: &Entity<KanalibApp>, cx: &App) -> Menu {
     let path = asset.path.clone();
     let favorite = asset.favorite;
     let star_menu = {
         let mut menu = Menu::new();
-        for (value, label) in [
-            (1u8, "1 星"),
-            (2, "2 星"),
-            (3, "3 星"),
-            (4, "4 星"),
-            (5, "5 星"),
-        ] {
+        for (value, stars) in [(1u8, "1"), (2, "2"), (3, "3"), (4, "4"), (5, "5")] {
             let this = this.clone();
             let path = path.clone();
             menu = menu.item(
-                MenuItem::new(label)
-                    .keys(value.to_string())
-                    .on_click(move |_, cx| {
-                        let _ = this.update(cx, |app, cx| {
-                            app.select_single_path(path.clone(), cx);
-                            app.apply_star(value, cx);
-                        });
-                    }),
+                MenuItem::new(crate::localization::t_args(
+                    cx,
+                    "views.star.value",
+                    &[("n", stars)],
+                ))
+                .keys(value.to_string())
+                .on_click(move |_, cx| {
+                    let _ = this.update(cx, |app, cx| {
+                        app.select_single_path(path.clone(), cx);
+                        app.apply_star(value, cx);
+                    });
+                }),
             );
         }
         let this = this.clone();
         let path = path.clone();
         menu.separator().item(
-            MenuItem::new("清除星级")
+            MenuItem::new(crate::localization::t(cx, "views.star.clear"))
                 .keys("0")
                 .on_click(move |_, cx| {
                     let _ = this.update(cx, |app, cx| {
@@ -210,11 +210,11 @@ pub(crate) fn asset_context_menu(asset: &Asset, this: &Entity<KanalibApp>) -> Me
     let reveal_this = this.clone();
     let video = asset.is_video();
     let remote = is_remote_asset(&path);
-    const REMOTE_DISABLED_REASON: &str = "远端只读来源没有本地文件，无法访问本地路径";
+    let remote_reason = crate::localization::t(cx, "views.menu.remote_readonly");
     let open_label = if video {
-        "用系统播放器打开"
+        crate::localization::t(cx, "views.menu.open_video")
     } else {
-        "打开文件"
+        crate::localization::t(cx, "views.menu.open_file")
     };
     let open_icon = if video {
         IconName::Play
@@ -223,7 +223,7 @@ pub(crate) fn asset_context_menu(asset: &Asset, this: &Entity<KanalibApp>) -> Me
     };
     Menu::new()
         .item(
-            MenuItem::new("快速查看")
+            MenuItem::new(crate::localization::t(cx, "views.menu.quick_view"))
                 .icon(IconName::Maximize2)
                 .keys("enter")
                 .on_click(move |_, cx| {
@@ -234,7 +234,7 @@ pub(crate) fn asset_context_menu(asset: &Asset, this: &Entity<KanalibApp>) -> Me
                 }),
         )
         .item(
-            MenuItem::new("查找相似")
+            MenuItem::new(crate::localization::t(cx, "views.menu.find_similar"))
                 .icon(IconName::Search)
                 .on_click(move |_, cx| {
                     let _ = similar_this.update(cx, |app, cx| {
@@ -243,27 +243,34 @@ pub(crate) fn asset_context_menu(asset: &Asset, this: &Entity<KanalibApp>) -> Me
                 }),
         )
         .item(
-            MenuItem::new("对比选中（2–4 张）")
+            MenuItem::new(crate::localization::t(cx, "views.menu.compare"))
                 .icon(IconName::Columns2)
                 .on_click(move |_, cx| {
                     let _ = compare_this.update(cx, |app, cx| app.open_compare_selected(cx));
                 }),
         )
         .item(
-            MenuItem::new(if favorite { "取消收藏" } else { "收藏" })
-                .icon(IconName::Heart)
-                .keys("f")
-                .on_click(move |_, cx| {
-                    let _ = favorite_this.update(cx, |app, cx| {
-                        app.select_single_path(favorite_path.clone(), cx);
-                        app.toggle_favorite(cx);
-                    });
-                }),
+            MenuItem::new(if favorite {
+                crate::localization::t(cx, "views.menu.unfavorite")
+            } else {
+                crate::localization::t(cx, "views.menu.favorite")
+            })
+            .icon(IconName::Heart)
+            .keys("f")
+            .on_click(move |_, cx| {
+                let _ = favorite_this.update(cx, |app, cx| {
+                    app.select_single_path(favorite_path.clone(), cx);
+                    app.toggle_favorite(cx);
+                });
+            }),
         )
-        .item(MenuItem::submenu("星级", star_menu))
+        .item(MenuItem::submenu(
+            crate::localization::t(cx, "views.menu.stars"),
+            star_menu,
+        ))
         .separator()
         .item(
-            MenuItem::new("复制 Prompt")
+            MenuItem::new(crate::localization::t(cx, "views.menu.copy_prompt"))
                 .icon(IconName::ClipboardCheck)
                 .on_click(move |_, cx| {
                     let _ = prompt_this.update(cx, |app, cx| {
@@ -273,7 +280,7 @@ pub(crate) fn asset_context_menu(asset: &Asset, this: &Entity<KanalibApp>) -> Me
                 }),
         )
         .item(
-            MenuItem::new("复制路径")
+            MenuItem::new(crate::localization::t(cx, "views.menu.copy_path"))
                 .icon(IconName::Copy)
                 .on_click(move |_, cx| {
                     let _ = paths_this.update(cx, |app, cx| {
@@ -283,7 +290,7 @@ pub(crate) fn asset_context_menu(asset: &Asset, this: &Entity<KanalibApp>) -> Me
                 }),
         )
         .item(
-            MenuItem::new("复制图片")
+            MenuItem::new(crate::localization::t(cx, "views.menu.copy_image"))
                 .icon(IconName::Image)
                 .on_click(move |_, cx| {
                     let _ = image_this.update(cx, |app, cx| {
@@ -296,22 +303,28 @@ pub(crate) fn asset_context_menu(asset: &Asset, this: &Entity<KanalibApp>) -> Me
             MenuItem::new(open_label)
                 .icon(open_icon)
                 .disabled(remote)
-                .disabled_reason(REMOTE_DISABLED_REASON)
+                .disabled_reason(remote_reason.clone())
                 .on_click(move |_, cx| {
                     if let Err(error) = open_asset_with_system(&open_file) {
+                        let message = crate::localization::t_args(
+                            cx,
+                            "views.menu.open_failed",
+                            &[("error", &error)],
+                        )
+                        .to_string();
                         let _ = open_this.update(cx, |app, cx| {
                             // F-073 6.2：toast 之外还要有常驻的就地说明。
-                            app.state.set_ui_error(format!("打开文件失败：{error}"));
+                            app.state.set_ui_error(message);
                             push_toast(&app.toaster, cx, error, Severity::Danger);
                         });
                     }
                 }),
         )
         .item(
-            MenuItem::new("在资源管理器中显示")
+            MenuItem::new(crate::localization::t(cx, "views.menu.reveal"))
                 .icon(IconName::FolderOpen)
                 .disabled(remote)
-                .disabled_reason(REMOTE_DISABLED_REASON)
+                .disabled_reason(remote_reason)
                 .on_click(move |_, cx| {
                     if !can_touch_local_file(&reveal_file) {
                         let _ = reveal_this.update(cx, |app, cx| {
@@ -337,22 +350,29 @@ impl KanalibApp {
         scanning: bool,
         width: Pixels,
         colors: UiColors,
+        cx: &App,
     ) -> impl IntoElement {
         let star_menu = {
-            let menu_item = |this: &Entity<Self>, star: u8, label: &'static str| {
+            let menu_item = |this: &Entity<Self>, star: u8, label: SharedString| {
                 let this = this.clone();
                 MenuItem::new(label).on_click(move |_, cx| {
                     let _ = this.update(cx, |app, cx| app.apply_star(star, cx));
                 })
             };
+            let star_value =
+                |star: &str| crate::localization::t_args(cx, "views.star.value", &[("n", star)]);
             Menu::new()
-                .item(menu_item(this, 1, "1 星"))
-                .item(menu_item(this, 2, "2 星"))
-                .item(menu_item(this, 3, "3 星"))
-                .item(menu_item(this, 4, "4 星"))
-                .item(menu_item(this, 5, "5 星"))
+                .item(menu_item(this, 1, star_value("1")))
+                .item(menu_item(this, 2, star_value("2")))
+                .item(menu_item(this, 3, star_value("3")))
+                .item(menu_item(this, 4, star_value("4")))
+                .item(menu_item(this, 5, star_value("5")))
                 .separator()
-                .item(menu_item(this, 0, "清除星级"))
+                .item(menu_item(
+                    this,
+                    0,
+                    crate::localization::t(cx, "views.star.clear"),
+                ))
         };
 
         let tag_menu = {
@@ -360,7 +380,7 @@ impl KanalibApp {
             let remove = this.clone();
             Menu::new()
                 .item(
-                    MenuItem::new("添加标签…")
+                    MenuItem::new(crate::localization::t(cx, "views.tags.add"))
                         .icon(IconName::Tag)
                         .on_click(move |_, cx| {
                             let _ = add
@@ -368,7 +388,7 @@ impl KanalibApp {
                         }),
                 )
                 .item(
-                    MenuItem::new("移除标签…")
+                    MenuItem::new(crate::localization::t(cx, "views.tags.remove"))
                         .icon(IconName::X)
                         .on_click(move |_, cx| {
                             let _ = remove.update(cx, |app, cx| {
@@ -377,7 +397,7 @@ impl KanalibApp {
                         }),
                 )
         };
-        let export_menu = self.export_menu(this);
+        let export_menu = self.export_menu(this, cx);
         let is_grid = self.view_mode.is_grid();
         let columns = if is_grid {
             grid_columns(width.as_f32(), self.view_mode.min_width())
@@ -407,33 +427,36 @@ impl KanalibApp {
         let grid: AnyElement = if rows_for_list.is_empty() {
             let this_empty = this.clone();
             let action = (!roots_empty && !scanning).then(|| {
-                Button::new("library-empty-reset", "清除筛选")
-                    .size(ControlSize::Sm)
-                    .on_click(move |_, _, cx| {
-                        let _ = this_empty.update(cx, |app, cx| {
-                            app.apply_search_text(String::new(), cx);
-                            app.set_filter(Filter::All, cx);
-                        });
-                    })
-                    .into_any_element()
+                Button::new(
+                    "library-empty-reset",
+                    crate::localization::t(cx, "views.empty.clear_filters"),
+                )
+                .size(ControlSize::Sm)
+                .on_click(move |_, _, cx| {
+                    let _ = this_empty.update(cx, |app, cx| {
+                        app.apply_search_text(String::new(), cx);
+                        app.set_filter(Filter::All, cx);
+                    });
+                })
+                .into_any_element()
             });
             let (icon, title, description) = if roots_empty {
                 (
                     IconName::FolderOpen,
-                    "还没有图库文件夹",
-                    "点击侧栏「添加文件夹」或拖入文件夹开始。",
+                    crate::localization::t(cx, "views.empty.no_roots.title"),
+                    crate::localization::t(cx, "views.empty.no_roots.description"),
                 )
             } else if scanning {
                 (
                     IconName::RefreshCw,
-                    "正在扫描图片",
-                    "扫描完成后缩略图会出现在这里。",
+                    crate::localization::t(cx, "views.empty.scanning.title"),
+                    crate::localization::t(cx, "views.empty.scanning.description"),
                 )
             } else {
                 (
                     IconName::SearchX,
-                    "没有符合筛选的图片",
-                    "清除筛选或调整搜索条件后再试。",
+                    crate::localization::t(cx, "views.empty.no_results.title"),
+                    crate::localization::t(cx, "views.empty.no_results.description"),
                 )
             };
             empty_state(icon, title, description, action, colors)
@@ -454,6 +477,7 @@ impl KanalibApp {
                 sort_mode,
                 sort_ascending,
                 colors,
+                cx,
             )
         } else if is_grid {
             let this_for_list = this.clone();
@@ -461,7 +485,7 @@ impl KanalibApp {
             let focus_for_list = self.grid_focus.clone();
             let selection_for_list = selection.clone();
             let prefer_large = self.view_mode.prefers_large_thumb();
-            uniform_list("asset-grid", row_count, move |range, _, _| {
+            uniform_list("asset-grid", row_count, move |range, _, cx| {
                 let Ok(assets) = assets_for_list.read() else {
                     return Vec::new();
                 };
@@ -493,6 +517,7 @@ impl KanalibApp {
                                 colors,
                                 prefer_large,
                                 show_extensions,
+                                cx,
                             ));
                         }
                         line
@@ -514,7 +539,7 @@ impl KanalibApp {
                 ViewMode::Content => "asset-content",
                 _ => "asset-list",
             };
-            let list = uniform_list(list_id, row_count, move |range, _, _| {
+            let list = uniform_list(list_id, row_count, move |range, _, cx| {
                 let Ok(assets) = assets_for_list.read() else {
                     return Vec::new();
                 };
@@ -531,18 +556,21 @@ impl KanalibApp {
                                 show_extensions,
                                 &thumb_cache_for_list,
                                 colors,
+                                cx,
                             ),
                             ViewMode::Content => content_row_content(
                                 asset,
                                 show_extensions,
                                 &thumb_cache_for_list,
                                 colors,
+                                cx,
                             ),
                             _ => list_row_content(
                                 asset,
                                 show_extensions,
                                 &thumb_cache_for_list,
                                 colors,
+                                cx,
                             ),
                         };
                         asset_row_shell(
@@ -554,6 +582,7 @@ impl KanalibApp {
                             row_height,
                             view_mode == ViewMode::Details,
                             content,
+                            cx,
                         )
                         .into_any_element()
                     })
@@ -576,6 +605,7 @@ impl KanalibApp {
                         sort_mode,
                         sort_ascending,
                         colors,
+                        cx,
                     ))
                     .child(list)
                     .into_any_element()
@@ -625,59 +655,86 @@ impl KanalibApp {
                                 .text_xs()
                                 .font_weight(FontWeight::SEMIBOLD)
                                 .text_color(colors.fg)
-                                .child(format!("已选 {} 张", selection.len())),
+                                .child(crate::localization::t_args(
+                                    cx,
+                                    "views.bulk.selected",
+                                    &[("n", &selection.len().to_string())],
+                                )),
                         )
                         .child(
-                            Button::new("bulk-favorite", "收藏")
-                                .size(ControlSize::Sm)
-                                .icon(IconName::Heart)
-                                .on_click(move |_, _, cx| {
-                                    let _ =
-                                        this_fav.update(cx, |app, cx| app.apply_favorite(true, cx));
-                                }),
+                            Button::new(
+                                "bulk-favorite",
+                                crate::localization::t(cx, "views.menu.favorite"),
+                            )
+                            .size(ControlSize::Sm)
+                            .icon(IconName::Heart)
+                            .on_click(move |_, _, cx| {
+                                let _ = this_fav.update(cx, |app, cx| app.apply_favorite(true, cx));
+                            }),
                         )
                         .child(
-                            Button::new("bulk-unfavorite", "取消收藏")
-                                .size(ControlSize::Sm)
-                                .on_click(move |_, _, cx| {
-                                    let _ = this_unfav
-                                        .update(cx, |app, cx| app.apply_favorite(false, cx));
-                                }),
+                            Button::new(
+                                "bulk-unfavorite",
+                                crate::localization::t(cx, "views.menu.unfavorite"),
+                            )
+                            .size(ControlSize::Sm)
+                            .on_click(move |_, _, cx| {
+                                let _ =
+                                    this_unfav.update(cx, |app, cx| app.apply_favorite(false, cx));
+                            }),
                         )
                         .child(
-                            DropdownMenu::new("bulk-star", "星级", star_menu)
-                                .icon(IconName::Star)
-                                .variant(ButtonVariant::Ghost),
+                            DropdownMenu::new(
+                                "bulk-star",
+                                crate::localization::t(cx, "views.menu.stars"),
+                                star_menu,
+                            )
+                            .icon(IconName::Star)
+                            .variant(ButtonVariant::Ghost),
                         )
                         .child(
-                            DropdownMenu::new("bulk-tags", "标签", tag_menu)
-                                .icon(IconName::Tag)
-                                .variant(ButtonVariant::Ghost),
+                            DropdownMenu::new(
+                                "bulk-tags",
+                                crate::localization::t(cx, "views.bulk.tags"),
+                                tag_menu,
+                            )
+                            .icon(IconName::Tag)
+                            .variant(ButtonVariant::Ghost),
                         )
                         .child(
-                            Button::new("bulk-copy-prompt", "复制 Prompt")
-                                .size(ControlSize::Sm)
-                                .on_click(move |_, _, cx| {
-                                    let _ = this_prompt
-                                        .update(cx, |app, cx| app.copy_selected_prompt(cx));
-                                }),
+                            Button::new(
+                                "bulk-copy-prompt",
+                                crate::localization::t(cx, "views.menu.copy_prompt"),
+                            )
+                            .size(ControlSize::Sm)
+                            .on_click(move |_, _, cx| {
+                                let _ =
+                                    this_prompt.update(cx, |app, cx| app.copy_selected_prompt(cx));
+                            }),
                         )
                         .child(
-                            Button::new("bulk-copy-paths", "复制路径")
-                                .size(ControlSize::Sm)
-                                .on_click(move |_, _, cx| {
-                                    let _ = this_paths
-                                        .update(cx, |app, cx| app.copy_selected_paths(cx));
-                                }),
+                            Button::new(
+                                "bulk-copy-paths",
+                                crate::localization::t(cx, "views.menu.copy_path"),
+                            )
+                            .size(ControlSize::Sm)
+                            .on_click(move |_, _, cx| {
+                                let _ =
+                                    this_paths.update(cx, |app, cx| app.copy_selected_paths(cx));
+                            }),
                         )
                         .child(
-                            DropdownMenu::new("bulk-export", "导出", export_menu)
-                                .icon(IconName::Download)
-                                .variant(ButtonVariant::Ghost),
+                            DropdownMenu::new(
+                                "bulk-export",
+                                crate::localization::t(cx, "titlebar.export"),
+                                export_menu,
+                            )
+                            .icon(IconName::Download)
+                            .variant(ButtonVariant::Ghost),
                         ),
                 )
                 .child(
-                    Button::new("bulk-clear", "取消选择")
+                    Button::new("bulk-clear", crate::localization::t(cx, "views.bulk.clear"))
                         .size(ControlSize::Sm)
                         .on_click(move |_, _, cx| {
                             let _ = this_bulk_clear.update(cx, |app, cx| app.clear_selection(cx));
@@ -712,7 +769,11 @@ impl KanalibApp {
                     .bg(colors.sunken)
                     .text_xs()
                     .text_color(colors.warning)
-                    .child(format!("搜索条件提示：{}", search_warnings.join("；")))
+                    .child(crate::localization::t_args(
+                        cx,
+                        "views.search_warnings",
+                        &[("warnings", &search_warnings.join("；"))],
+                    ))
             }))
             .child(grid_area)
     }
@@ -736,6 +797,7 @@ impl KanalibApp {
         sort_mode: SortMode,
         sort_ascending: bool,
         colors: UiColors,
+        cx: &App,
     ) -> AnyElement {
         let reveal_row = self.pending_reveal_group.take().and_then(|key| {
             layout
@@ -755,7 +817,7 @@ impl KanalibApp {
         let row_this = this.clone();
         let row_thumb = item.clone();
         let row_focus = focus.clone();
-        let render_row: RowRender = Rc::new(move |display_row, _window, _cx| {
+        let render_row: RowRender = Rc::new(move |display_row, _window, cx| {
             let Some((group_index, local_row)) = row_layout.content_row_of_display(display_row)
             else {
                 return div().into_any_element();
@@ -792,6 +854,7 @@ impl KanalibApp {
                         colors,
                         prefer_large,
                         show_extensions,
+                        cx,
                     ));
                 }
                 line.into_any_element()
@@ -809,11 +872,12 @@ impl KanalibApp {
                         show_extensions,
                         &row_thumb,
                         colors,
+                        cx,
                     ),
                     ViewMode::Content => {
-                        content_row_content(asset, show_extensions, &row_thumb, colors)
+                        content_row_content(asset, show_extensions, &row_thumb, colors, cx)
                     }
-                    _ => list_row_content(asset, show_extensions, &row_thumb, colors),
+                    _ => list_row_content(asset, show_extensions, &row_thumb, colors, cx),
                 };
                 asset_row_shell(
                     asset,
@@ -824,18 +888,20 @@ impl KanalibApp {
                     row_height,
                     view_mode == ViewMode::Details,
                     content,
+                    cx,
                 )
                 .into_any_element()
             }
         });
         let header_layout = layout.clone();
         let header_this = this.clone();
-        let render_header: HeaderRender = Rc::new(move |group_index, pinned, _window, _cx| {
+        let render_header: HeaderRender = Rc::new(move |group_index, pinned, _window, cx| {
             group_header(
                 &header_layout.groups[group_index],
                 pinned,
                 &header_this,
                 colors,
+                cx,
             )
         });
         let list_id = match view_mode {
@@ -869,6 +935,7 @@ impl KanalibApp {
                     sort_mode,
                     sort_ascending,
                     colors,
+                    cx,
                 ))
                 .child(list)
                 .into_any_element()

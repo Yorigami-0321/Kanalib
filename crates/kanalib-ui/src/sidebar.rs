@@ -21,24 +21,24 @@ pub(crate) const SIDEBAR_SECTIONS: [&str; 8] = [
     "organize",
 ];
 
-/// F-070 方案 A：设置页分区导航，顺序与 `render_settings` 的 15 个 `*_section` 一致，
+/// F-070 方案 A：设置页分区导航，值为目录键；顺序与 `render_settings` 的 15 个 `*_section` 一致，
 /// 下标同时用作 `ScrollHandle::scroll_to_top_of_item` 的锚点索引。
 pub(crate) const SETTINGS_SECTIONS: [&str; 15] = [
-    "打标与队列",
-    "低置信度审核",
-    "本地来源",
-    "网络来源",
-    "去重保护路径",
-    "相似图片",
-    "数据与缓存",
-    "数据库备份",
-    "诊断信息",
-    "任务队列",
-    "键盘与鼠标",
-    "安全规则",
-    "扫描进度与摘要",
-    "排除与忽略规则",
-    "忽略列表",
+    "sidebar.settings.section.tagging",
+    "sidebar.settings.section.review",
+    "sidebar.settings.section.local_sources",
+    "sidebar.settings.section.remote_sources",
+    "sidebar.settings.section.protected_paths",
+    "sidebar.settings.section.similar",
+    "sidebar.settings.section.data",
+    "sidebar.settings.section.backup",
+    "sidebar.settings.section.diagnostics",
+    "sidebar.settings.section.jobs",
+    "sidebar.settings.section.input",
+    "sidebar.settings.section.safety",
+    "sidebar.settings.section.scan",
+    "sidebar.settings.section.exclusions",
+    "sidebar.settings.section.ignored",
 ];
 
 /// F-070 方案 A：每个侧栏上下文各自的可折叠分区。
@@ -105,7 +105,8 @@ pub(crate) fn canonicalize_org_name(name: &str) -> String {
     name.trim().to_string()
 }
 
-/// 同名冲突提示统一文案；判定始终来自核心 `DuplicateNameError`，不看错误字符串。
+/// 同名冲突提示的旧文案；app.rs 保存集合仍调用，侧栏相册/集合改走 `sidebar.org.name_taken`。
+/// 判定始终来自核心 `DuplicateNameError`，不看错误字符串。
 pub(crate) fn duplicate_name_message(name: &str) -> String {
     format!(
         "名称「{}」已被占用；未覆盖已有条目，请换一个名称",
@@ -216,23 +217,43 @@ pub(crate) fn source_row(
     status: Option<SourceScanStatus>,
     this: Entity<KanalibApp>,
     colors: UiColors,
+    cx: &App,
 ) -> impl IntoElement {
     let filter = Filter::Source(root.clone());
     let this_click = this.clone();
     let this_right = this.clone();
     let root_right = root.clone();
+    let path = root.display().to_string();
     let (status_text, status_color) = match &status {
-        Some(status) if !status.online => ("离线", colors.danger),
-        Some(status) if status.error.is_some() => ("错误", colors.warning),
-        _ => ("", colors.subtle),
+        Some(status) if !status.online => (
+            crate::localization::t(cx, "sidebar.source.offline"),
+            colors.danger,
+        ),
+        Some(status) if status.error.is_some() => (
+            crate::localization::t(cx, "sidebar.source.error"),
+            colors.warning,
+        ),
+        _ => (SharedString::default(), colors.subtle),
     };
-    let aria = match (
-        status_text,
-        status.as_ref().and_then(|status| status.error.as_deref()),
-    ) {
-        ("", _) => root.display().to_string(),
-        (text, Some(error)) => format!("{}（{text}：{error}）", root.display()),
-        (text, None) => format!("{}（{text}）", root.display()),
+    let error = status.as_ref().and_then(|status| status.error.as_deref());
+    let aria = match (status_text.is_empty(), error) {
+        (true, _) => path.clone(),
+        (false, Some(error)) => crate::localization::t_args(
+            cx,
+            "sidebar.source.aria_error",
+            &[
+                ("path", &path),
+                ("text", status_text.as_ref()),
+                ("error", error),
+            ],
+        )
+        .to_string(),
+        (false, None) => crate::localization::t_args(
+            cx,
+            "sidebar.source.aria_status",
+            &[("path", &path), ("text", status_text.as_ref())],
+        )
+        .to_string(),
     };
     let mut row = div()
         .id(id)
@@ -283,7 +304,12 @@ pub(crate) fn source_row(
                     .items_center()
                     .gap(px(3.))
                     .child(div().size(px(6.)).rounded_full().bg(status_color))
-                    .child(div().text_xs().text_color(status_color).child(status_text))
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(status_color)
+                            .child(status_text.clone()),
+                    )
             }))
             .child(
                 div()
@@ -304,7 +330,7 @@ pub(crate) fn source_row(
     )
 }
 
-pub(crate) fn source_menu(root: &Path, this: Entity<KanalibApp>) -> Menu {
+pub(crate) fn source_menu(root: &Path, this: Entity<KanalibApp>, cx: &App) -> Menu {
     let rename_this = this.clone();
     let rename_root = root.to_path_buf();
     let remove_this = this.clone();
@@ -315,7 +341,7 @@ pub(crate) fn source_menu(root: &Path, this: Entity<KanalibApp>) -> Menu {
     let remote = crate::format::is_remote_asset(root);
     Menu::new()
         .item(
-            MenuItem::new("重命名…")
+            MenuItem::new(crate::localization::t(cx, "sidebar.menu.rename"))
                 .icon(IconName::Pencil)
                 .on_click(move |_, cx| {
                     let _ = rename_this.update(cx, |app, cx| {
@@ -324,7 +350,7 @@ pub(crate) fn source_menu(root: &Path, this: Entity<KanalibApp>) -> Menu {
                 }),
         )
         .item(
-            MenuItem::new("重新扫描此来源")
+            MenuItem::new(crate::localization::t(cx, "sidebar.source.rescan"))
                 .icon(IconName::RefreshCw)
                 .on_click(move |_, cx| {
                     let _ = rescan_this.update(cx, |app, cx| {
@@ -333,15 +359,15 @@ pub(crate) fn source_menu(root: &Path, this: Entity<KanalibApp>) -> Menu {
                 }),
         )
         .item(
-            MenuItem::new("在资源管理器中打开")
+            MenuItem::new(crate::localization::t(cx, "sidebar.source.reveal"))
                 .icon(IconName::FolderOpen)
                 .disabled(remote)
-                .disabled_reason("网络来源只读，没有可打开的本地文件夹")
+                .disabled_reason(crate::localization::t(cx, "sidebar.source.reveal_remote"))
                 .on_click(move |_, _| reveal_path(&reveal_root)),
         )
         .separator()
         .item(
-            MenuItem::new("移除来源…")
+            MenuItem::new(crate::localization::t(cx, "sidebar.source.remove"))
                 .icon(IconName::Trash2)
                 .on_click(move |_, cx| {
                     let _ = remove_this.update(cx, |app, cx| {
@@ -450,10 +476,16 @@ impl KanalibApp {
     pub(crate) fn rescan_source(&mut self, root: PathBuf, cx: &mut Context<Self>) {
         match self.state.rescan_root(root.clone()) {
             Ok(()) => {
-                self.settings_notice = Some("已开始重新扫描…".to_string());
+                self.settings_notice =
+                    Some(crate::localization::t(cx, "sidebar.source.rescan_started").to_string());
             }
             Err(error) => {
-                let message = format!("重新扫描失败：{error:#}");
+                let message = crate::localization::t_args(
+                    cx,
+                    "sidebar.source.rescan_failed",
+                    &[("error", &format!("{error:#}"))],
+                )
+                .to_string();
                 self.settings_notice = Some(message.clone());
                 push_toast(&self.toaster, cx, message, Severity::Danger);
             }
@@ -468,19 +500,21 @@ impl KanalibApp {
                 self.source_remove_confirm = None;
                 self.clear_multi_selection();
                 self.auto_select_pending = true;
-                push_toast(
-                    &self.toaster,
+                let message = crate::localization::t_args(
                     cx,
-                    format!("已移除来源，磁盘文件未删除（{removed} 张资产移出视图）"),
-                    Severity::Success,
+                    "sidebar.source.removed",
+                    &[("removed", &removed.to_string())],
                 );
+                push_toast(&self.toaster, cx, message, Severity::Success);
             }
-            Err(error) => push_toast(
-                &self.toaster,
-                cx,
-                format!("移除来源失败：{error:#}"),
-                Severity::Danger,
-            ),
+            Err(error) => {
+                let message = crate::localization::t_args(
+                    cx,
+                    "sidebar.source.remove_failed",
+                    &[("error", &format!("{error:#}"))],
+                );
+                push_toast(&self.toaster, cx, message, Severity::Danger);
+            }
         }
         cx.notify();
     }
@@ -498,23 +532,25 @@ impl KanalibApp {
         match self.state.set_source_alias(&root, alias) {
             Ok(()) => {
                 self.source_rename = None;
-                push_toast(
-                    &self.toaster,
-                    cx,
-                    if alias.trim().is_empty() {
-                        "已恢复来源默认名称".to_string()
-                    } else {
-                        format!("已将来源重命名为 {}", alias.trim())
-                    },
-                    Severity::Success,
-                );
+                let message = if alias.trim().is_empty() {
+                    crate::localization::t(cx, "sidebar.source.renamed_default")
+                } else {
+                    crate::localization::t_args(
+                        cx,
+                        "sidebar.source.renamed",
+                        &[("name", alias.trim())],
+                    )
+                };
+                push_toast(&self.toaster, cx, message, Severity::Success);
             }
-            Err(error) => push_toast(
-                &self.toaster,
-                cx,
-                format!("重命名来源失败：{error:#}"),
-                Severity::Danger,
-            ),
+            Err(error) => {
+                let message = crate::localization::t_args(
+                    cx,
+                    "sidebar.source.rename_failed",
+                    &[("error", &format!("{error:#}"))],
+                );
+                push_toast(&self.toaster, cx, message, Severity::Danger);
+            }
         }
         cx.notify();
     }
@@ -692,7 +728,7 @@ impl KanalibApp {
                             .pb(px(4.))
                             .text_xs()
                             .text_color(colors.subtle)
-                            .child("还没有图库文件夹"),
+                            .child(crate::localization::t(cx, "sidebar.sources.empty")),
                     );
                 } else {
                     for root in roots {
@@ -716,6 +752,7 @@ impl KanalibApp {
                             status,
                             this.clone(),
                             colors,
+                            cx,
                         ));
                     }
                 }
@@ -914,7 +951,8 @@ impl KanalibApp {
                                 )),
                         ),
                     );
-                    let mut category_chips = div().flex().flex_wrap().gap(px(3.)).px(px(8.)).pb(px(4.));
+                    let mut category_chips =
+                        div().flex().flex_wrap().gap(px(3.)).px(px(8.)).pb(px(4.));
                     for (key, label) in [
                         (
                             "general",
@@ -979,8 +1017,9 @@ impl KanalibApp {
                     if self.tag_pane_sort_name {
                         pane_tags.sort_by(|a, b| a.name.cmp(&b.name));
                     } else {
-                        pane_tags
-                            .sort_by(|a, b| b.count.cmp(&a.count).then_with(|| a.name.cmp(&b.name)));
+                        pane_tags.sort_by(|a, b| {
+                            b.count.cmp(&a.count).then_with(|| a.name.cmp(&b.name))
+                        });
                     }
                     let total = pane_tags.len();
                     let limit = if self.tag_pane_expanded { 200 } else { 10 };
@@ -1115,7 +1154,7 @@ impl KanalibApp {
                     .child(
                         IconButton::new("save-saved-search", IconName::Plus)
                             .size(ControlSize::Sm)
-                            .tooltip("保存当前视图为智能集合")
+                            .tooltip(crate::localization::t(cx, "sidebar.collections.save"))
                             .on_click(move |_, _, cx| {
                                 let _ = this_save_search.update(cx, |app, cx| {
                                     app.save_search_open = true;
@@ -1133,11 +1172,11 @@ impl KanalibApp {
                             .pb(px(4.))
                             .text_xs()
                             .text_color(colors.subtle)
-                            .child("保存筛选、搜索与排序，随时回来"),
+                            .child(crate::localization::t(cx, "sidebar.collections.empty")),
                     );
                 } else {
                     for saved in saved_searches {
-                        body = body.child(self.saved_search_row(saved, search, this, colors));
+                        body = body.child(self.saved_search_row(saved, search, this, colors, cx));
                     }
                 }
             }
@@ -1160,7 +1199,7 @@ impl KanalibApp {
                     .child(
                         IconButton::new("new-album", IconName::FolderPlus)
                             .size(ControlSize::Sm)
-                            .tooltip("新建相册")
+                            .tooltip(crate::localization::t(cx, "sidebar.albums.new"))
                             .on_click(move |_, _, cx| {
                                 let _ = this_new_album.update(cx, |app, cx| {
                                     app.open_org_dialog(OrgDialog::NewAlbum, cx);
@@ -1176,11 +1215,11 @@ impl KanalibApp {
                             .pb(px(4.))
                             .text_xs()
                             .text_color(colors.subtle)
-                            .child("新建相册把选中图片归档，不移动磁盘文件"),
+                            .child(crate::localization::t(cx, "sidebar.albums.empty")),
                     );
                 } else {
                     for album in &albums {
-                        body = body.child(self.album_row(album, selected_count, this, colors));
+                        body = body.child(self.album_row(album, selected_count, this, colors, cx));
                     }
                 }
             }
@@ -1228,17 +1267,22 @@ impl KanalibApp {
                     div().w_full().child(
                         Input::new(tag_manager_search)
                             .clearable()
-                            .least("搜索全部标签"),
+                            .least(crate::localization::t(cx, "sidebar.tags_nav.search")),
                     ),
                 )
-                .child(
-                    div()
-                        .text_xs()
-                        .text_color(colors.subtle)
-                        .child(format!(
-                            "共 {total} 个标签 · 0 使用 {unused} · 低频 {low_frequency} · 仅自动 {auto_only} · 已屏蔽 {blocked_count}"
-                        )),
-                );
+                .child(div().text_xs().text_color(colors.subtle).child(
+                    crate::localization::t_args(
+                        cx,
+                        "sidebar.tags_nav.summary",
+                        &[
+                            ("total", &total.to_string()),
+                            ("unused", &unused.to_string()),
+                            ("low_frequency", &low_frequency.to_string()),
+                            ("auto_only", &auto_only.to_string()),
+                            ("blocked", &blocked_count.to_string()),
+                        ],
+                    ),
+                ));
             for filter in crate::tags::TagManagerFilter::ALL {
                 let count = match filter {
                     crate::tags::TagManagerFilter::All => total,
@@ -1280,12 +1324,16 @@ impl KanalibApp {
                 div()
                     .text_xs()
                     .text_color(colors.subtle)
-                    .child("只排序/筛选展示，不会自动删除标签"),
+                    .child(crate::localization::t(cx, "sidebar.tags_nav.note")),
             )
             .child(
-                DropdownMenu::new("sidebar-tag-sort", "排序", sort_menu)
-                    .icon(IconName::ArrowDownUp)
-                    .variant(ButtonVariant::Ghost),
+                DropdownMenu::new(
+                    "sidebar-tag-sort",
+                    crate::localization::t(cx, "sidebar.tags_nav.sort"),
+                    sort_menu,
+                )
+                .icon(IconName::ArrowDownUp)
+                .variant(ButtonVariant::Ghost),
             )
             .into_any_element()
         };
@@ -1303,14 +1351,14 @@ impl KanalibApp {
                     div()
                         .text_xs()
                         .text_color(colors.subtle)
-                        .child("分区导航"),
+                        .child(crate::localization::t(cx, "sidebar.settings.nav")),
                 );
             for (index, label) in SETTINGS_SECTIONS.iter().enumerate() {
                 let this = this.clone();
                 nav = nav.child(
                     Button::new(
                         SharedString::from(format!("settings-nav-{index}")),
-                        *label,
+                        crate::localization::t(cx, *label),
                     )
                     .size(ControlSize::Sm)
                     .variant(ButtonVariant::Ghost)
@@ -1341,42 +1389,47 @@ impl KanalibApp {
                     div()
                         .text_xs()
                         .text_color(colors.subtle)
-                        .child("重复项模式"),
+                        .child(crate::localization::t(cx, "sidebar.dedup.mode")),
                 )
                 .child(
-                    Button::new("sidebar-dedup-exact", "完全重复")
-                        .size(ControlSize::Sm)
-                        .variant(if similar {
-                            ButtonVariant::Ghost
-                        } else {
-                            ButtonVariant::Primary
-                        })
-                        .on_click(move |_, _, cx| {
-                            let _ = this_exact.update(cx, |app, cx| {
-                                app.open_dedup_mode(GroupKind::Exact, cx)
-                            });
-                        }),
+                    Button::new(
+                        "sidebar-dedup-exact",
+                        crate::localization::t(cx, "sidebar.dedup.exact"),
+                    )
+                    .size(ControlSize::Sm)
+                    .variant(if similar {
+                        ButtonVariant::Ghost
+                    } else {
+                        ButtonVariant::Primary
+                    })
+                    .on_click(move |_, _, cx| {
+                        let _ = this_exact
+                            .update(cx, |app, cx| app.open_dedup_mode(GroupKind::Exact, cx));
+                    }),
                 )
                 .child(
-                    Button::new("sidebar-dedup-similar", "相似图片")
-                        .size(ControlSize::Sm)
-                        .variant(if similar {
-                            ButtonVariant::Primary
-                        } else {
-                            ButtonVariant::Ghost
-                        })
-                        .on_click(move |_, _, cx| {
-                            let _ = this_similar.update(cx, |app, cx| {
-                                app.open_dedup_mode(GroupKind::Similar, cx)
-                            });
-                        }),
+                    Button::new(
+                        "sidebar-dedup-similar",
+                        crate::localization::t(cx, "sidebar.dedup.similar"),
+                    )
+                    .size(ControlSize::Sm)
+                    .variant(if similar {
+                        ButtonVariant::Primary
+                    } else {
+                        ButtonVariant::Ghost
+                    })
+                    .on_click(move |_, _, cx| {
+                        let _ = this_similar
+                            .update(cx, |app, cx| app.open_dedup_mode(GroupKind::Similar, cx));
+                    }),
                 )
-                .child(
-                    div()
-                        .text_xs()
-                        .text_color(colors.subtle)
-                        .child(format!("待审 {dedup_pending} 组；切图与评审在内容区完成")),
-                )
+                .child(div().text_xs().text_color(colors.subtle).child(
+                    crate::localization::t_args(
+                        cx,
+                        "sidebar.dedup.pending",
+                        &[("n", &dedup_pending.to_string())],
+                    ),
+                ))
                 .into_any_element()
         };
         let body: AnyElement = match ctx {
@@ -1407,32 +1460,34 @@ impl KanalibApp {
         if ctx == SidebarContext::Library {
             more_menu = more_menu
                 .item(
-                    MenuItem::new("添加文件夹")
+                    MenuItem::new(crate::localization::t(cx, "sidebar.more.add_folder"))
                         .icon(IconName::FolderOpen)
                         .on_click(move |_, cx| {
                             let _ = this_choose.update(cx, |app, cx| app.choose_folder(cx));
                         }),
                 )
                 .item(
-                    MenuItem::new("重新扫描图库")
+                    MenuItem::new(crate::localization::t(cx, "sidebar.more.rescan"))
                         .icon(IconName::RefreshCw)
                         .on_click(move |_, cx| {
                             let _ = this_rescan.update(cx, |app, cx| app.rescan(cx));
                         }),
                 );
             if scanning {
-                more_menu = more_menu.item(MenuItem::new("停止扫描").icon(IconName::Square).on_click(
-                    move |_, cx| {
-                        let _ = this_stop.update(cx, |app, cx| {
-                            app.state.stop();
-                            cx.notify();
-                        });
-                    },
-                ));
+                more_menu = more_menu.item(
+                    MenuItem::new(crate::localization::t(cx, "sidebar.more.stop_scan"))
+                        .icon(IconName::Square)
+                        .on_click(move |_, cx| {
+                            let _ = this_stop.update(cx, |app, cx| {
+                                app.state.stop();
+                                cx.notify();
+                            });
+                        }),
+                );
             }
             if counts.failed > 0 {
                 more_menu = more_menu.item(
-                    MenuItem::new("重试失败")
+                    MenuItem::new(crate::localization::t(cx, "sidebar.more.retry_failed"))
                         .icon(IconName::RotateCcw)
                         .on_click(move |_, cx| {
                             let _ = this_retry.update(cx, |app, cx| app.retry_failed(cx));
@@ -1440,7 +1495,7 @@ impl KanalibApp {
                 );
             }
             more_menu = more_menu.separator().item(
-                MenuItem::new("全部折叠")
+                MenuItem::new(crate::localization::t(cx, "sidebar.more.collapse_all"))
                     .icon(IconName::ChevronsUpDown)
                     .on_click(move |_, cx| {
                         let _ =
@@ -1450,7 +1505,7 @@ impl KanalibApp {
         } else {
             // F-070 方案 A：上下文侧栏没有资源管理器分区，溢出菜单只保留返回图库。
             more_menu = more_menu.item(
-                MenuItem::new("返回图库")
+                MenuItem::new(crate::localization::t(cx, "common.back_to_library"))
                     .icon(IconName::Library)
                     .on_click(move |_, cx| {
                         let _ = this_library.update(cx, |app, cx| {
@@ -1487,13 +1542,16 @@ impl KanalibApp {
                             .font_weight(FontWeight::SEMIBOLD)
                             .child(screen_title),
                     )
-                    .child(OverflowMenu::new("sidebar-more", more_menu).tooltip("侧栏操作")),
+                    .child(
+                        OverflowMenu::new("sidebar-more", more_menu)
+                            .tooltip(crate::localization::t(cx, "sidebar.more.tooltip")),
+                    ),
             )
             .child(body)
             .child(
                 div()
                     .id("sidebar-resize")
-                    .aria_label("调整侧栏宽度")
+                    .aria_label(crate::localization::t(cx, "sidebar.resize"))
                     .absolute()
                     .right(px(-3.))
                     .top_0()
@@ -1568,7 +1626,7 @@ impl KanalibApp {
         let activity = div()
             .id("activity-bar")
             .role(Role::Toolbar)
-            .aria_label("活动栏")
+            .aria_label(crate::localization::t(cx, "sidebar.activity"))
             .w(px(ACTIVITY_BAR_WIDTH))
             .flex_none()
             .h_full()
@@ -1714,6 +1772,7 @@ impl KanalibApp {
         search: &Entity<TextInput>,
         this: &Entity<Self>,
         colors: UiColors,
+        cx: &App,
     ) -> AnyElement {
         let id = saved.id;
         let name = saved.name.clone();
@@ -1736,7 +1795,7 @@ impl KanalibApp {
         let rename_name = name.clone();
         let menu = Menu::new()
             .item(
-                MenuItem::new("用当前视图更新")
+                MenuItem::new(crate::localization::t(cx, "sidebar.collections.update"))
                     .icon(IconName::RefreshCw)
                     .on_click(move |_, cx| {
                         let _ = menu_update.update(cx, |app, cx| {
@@ -1745,7 +1804,7 @@ impl KanalibApp {
                     }),
             )
             .item(
-                MenuItem::new("重命名…")
+                MenuItem::new(crate::localization::t(cx, "sidebar.menu.rename"))
                     .icon(IconName::Pencil)
                     .on_click(move |_, cx| {
                         let dialog = OrgDialog::RenameSavedSearch {
@@ -1756,17 +1815,21 @@ impl KanalibApp {
                     }),
             )
             .item(
-                MenuItem::new(if pinned { "取消置顶" } else { "置顶" })
-                    .icon(IconName::Pin)
-                    .on_click(move |_, cx| {
-                        let _ = menu_pin.update(cx, |app, cx| {
-                            app.toggle_saved_search_pin(id, cx);
-                        });
-                    }),
+                MenuItem::new(if pinned {
+                    crate::localization::t(cx, "sidebar.collections.unpin")
+                } else {
+                    crate::localization::t(cx, "sidebar.collections.pin")
+                })
+                .icon(IconName::Pin)
+                .on_click(move |_, cx| {
+                    let _ = menu_pin.update(cx, |app, cx| {
+                        app.toggle_saved_search_pin(id, cx);
+                    });
+                }),
             )
             .separator()
             .item(
-                MenuItem::new("上移")
+                MenuItem::new(crate::localization::t(cx, "sidebar.collections.move_up"))
                     .icon(IconName::ArrowUp)
                     .on_click(move |_, cx| {
                         let _ = menu_up.update(cx, |app, cx| {
@@ -1775,7 +1838,7 @@ impl KanalibApp {
                     }),
             )
             .item(
-                MenuItem::new("下移")
+                MenuItem::new(crate::localization::t(cx, "sidebar.collections.move_down"))
                     .icon(IconName::ArrowDown)
                     .on_click(move |_, cx| {
                         let _ = menu_down.update(cx, |app, cx| {
@@ -1785,7 +1848,7 @@ impl KanalibApp {
             )
             .separator()
             .item(
-                MenuItem::new("删除")
+                MenuItem::new(crate::localization::t(cx, "sidebar.collections.delete"))
                     .icon(IconName::Trash2)
                     .on_click(move |_, cx| {
                         let _ = menu_delete.update(cx, |app, cx| {
@@ -1847,7 +1910,7 @@ impl KanalibApp {
             )
             .child(
                 OverflowMenu::new(SharedString::from(format!("saved-search-menu-{id}")), menu)
-                    .tooltip("管理智能集合"),
+                    .tooltip(crate::localization::t(cx, "sidebar.collections.manage")),
             )
             .into_any_element()
     }
@@ -1859,6 +1922,7 @@ impl KanalibApp {
         selected_count: usize,
         this: &Entity<Self>,
         colors: UiColors,
+        cx: &App,
     ) -> AnyElement {
         let id = album.id;
         let name = album.name.clone();
@@ -1871,28 +1935,36 @@ impl KanalibApp {
         let delete_name = name.clone();
         let menu = Menu::new()
             .item(
-                MenuItem::new(format!("把选中加入（{selected_count} 张）"))
-                    .icon(IconName::FolderPlus)
-                    .disabled(selected_count == 0)
-                    .on_click(move |_, cx| {
-                        let _ = add.update(cx, |app, cx| {
-                            app.add_selection_to_album(id, cx);
-                        });
-                    }),
+                MenuItem::new(crate::localization::t_args(
+                    cx,
+                    "sidebar.albums.add_selection",
+                    &[("n", &selected_count.to_string())],
+                ))
+                .icon(IconName::FolderPlus)
+                .disabled(selected_count == 0)
+                .on_click(move |_, cx| {
+                    let _ = add.update(cx, |app, cx| {
+                        app.add_selection_to_album(id, cx);
+                    });
+                }),
             )
             .item(
-                MenuItem::new(format!("从相册移出选中（{selected_count} 张）"))
-                    .icon(IconName::FolderOpen)
-                    .disabled(selected_count == 0)
-                    .on_click(move |_, cx| {
-                        let _ = remove.update(cx, |app, cx| {
-                            app.remove_selection_from_album(id, cx);
-                        });
-                    }),
+                MenuItem::new(crate::localization::t_args(
+                    cx,
+                    "sidebar.albums.remove_selection",
+                    &[("n", &selected_count.to_string())],
+                ))
+                .icon(IconName::FolderOpen)
+                .disabled(selected_count == 0)
+                .on_click(move |_, cx| {
+                    let _ = remove.update(cx, |app, cx| {
+                        app.remove_selection_from_album(id, cx);
+                    });
+                }),
             )
             .separator()
             .item(
-                MenuItem::new("重命名…")
+                MenuItem::new(crate::localization::t(cx, "sidebar.menu.rename"))
                     .icon(IconName::Pencil)
                     .on_click(move |_, cx| {
                         let dialog = OrgDialog::RenameAlbum {
@@ -1903,7 +1975,7 @@ impl KanalibApp {
                     }),
             )
             .item(
-                MenuItem::new("删除相册…")
+                MenuItem::new(crate::localization::t(cx, "sidebar.albums.delete"))
                     .icon(IconName::Trash2)
                     .on_click(move |_, cx| {
                         let dialog = OrgDialog::DeleteAlbum {
@@ -1930,7 +2002,11 @@ impl KanalibApp {
                     .tab_index(0)
                     .focus(move |style| style.bg(colors.hover))
                     .role(Role::Button)
-                    .aria_label(format!("相册 {name}"))
+                    .aria_label(crate::localization::t_args(
+                        cx,
+                        "sidebar.albums.aria",
+                        &[("name", &name)],
+                    ))
                     .flex_1()
                     .min_w(px(0.))
                     .flex()
@@ -1962,7 +2038,7 @@ impl KanalibApp {
             )
             .child(
                 OverflowMenu::new(SharedString::from(format!("album-menu-{id}")), menu)
-                    .tooltip("管理相册"),
+                    .tooltip(crate::localization::t(cx, "sidebar.albums.manage")),
             )
             .into_any_element()
     }
@@ -1976,19 +2052,21 @@ impl KanalibApp {
     ) -> Option<AnyElement> {
         let dialog = self.org_dialog.clone()?;
         let epoch = self.org_dialog_epoch;
-        let mut prompt = |title: &'static str,
+        let mut prompt = |title: SharedString,
                           placeholder: &'static str,
                           initial: String,
                           label: String,
-                          submit_label: &'static str,
+                          submit_label: SharedString,
                           target: OrgDialog,
                           close: Entity<Self>,
-                          submit: Entity<Self>| {
+                          submit: Entity<Self>,
+                          cx: &mut Context<Self>| {
             let holder = window.use_keyed_state(
                 SharedString::from(format!("kanalib-org-field-{epoch}")),
                 cx,
                 move |window, cx| {
-                    let input = cx.new(|cx| TextInput::new(window, cx).placeholder(placeholder));
+                    let input =
+                        cx.new(|cx| TextInput::new(window, cx).placeholder_key(placeholder));
                     if !initial.is_empty() {
                         input.update(cx, |input, cx| input.set_text(initial, cx));
                     }
@@ -1996,6 +2074,7 @@ impl KanalibApp {
                 },
             );
             let field = holder.read(cx).clone();
+            let empty_name = crate::localization::t(cx, "sidebar.org.name_required");
             PromptDialog::new(
                 SharedString::from(format!("kanalib-org-dialog-{epoch}")),
                 title,
@@ -2009,9 +2088,9 @@ impl KanalibApp {
             )
             .label(label)
             .submit(submit_label)
-            .check(|text| {
+            .check(move |text| {
                 if canonicalize_org_name(text).is_empty() {
-                    Err("名称不能为空".into())
+                    Err(empty_name.clone())
                 } else {
                     Ok(())
                 }
@@ -2025,44 +2104,50 @@ impl KanalibApp {
         };
         Some(match dialog.clone() {
             OrgDialog::RenameSavedSearch { name, .. } => prompt(
-                "重命名智能集合",
-                "智能集合名称",
+                crate::localization::t(cx, "sidebar.org.rename_saved_title"),
+                "sidebar.org.saved_name",
                 name,
-                "重命名不改集合 ID，图标与排序保持不变".into(),
-                "保存",
+                crate::localization::t(cx, "sidebar.org.rename_saved_note").to_string(),
+                crate::localization::t(cx, "sidebar.org.save"),
                 dialog,
                 this.clone(),
                 this.clone(),
+                cx,
             ),
             OrgDialog::NewAlbum => prompt(
-                "新建相册",
-                "相册名称",
+                crate::localization::t(cx, "sidebar.albums.new"),
+                "sidebar.org.album_name",
                 String::new(),
-                "相册只记录图片归属，不移动、不复制磁盘文件".into(),
-                "新建",
+                crate::localization::t(cx, "sidebar.org.new_album_note").to_string(),
+                crate::localization::t(cx, "sidebar.org.create"),
                 dialog,
                 this.clone(),
                 this.clone(),
+                cx,
             ),
             OrgDialog::RenameAlbum { name, .. } => prompt(
-                "重命名相册",
-                "相册名称",
+                crate::localization::t(cx, "sidebar.org.rename_album_title"),
+                "sidebar.org.album_name",
                 name,
-                "重命名不改相册 ID，已归入的图片保持不变".into(),
-                "保存",
+                crate::localization::t(cx, "sidebar.org.rename_album_note").to_string(),
+                crate::localization::t(cx, "sidebar.org.save"),
                 dialog,
                 this.clone(),
                 this.clone(),
+                cx,
             ),
             OrgDialog::DeleteAlbum { id, name, count } => {
                 let close = this.clone();
                 let confirm = this.clone();
+                let message = crate::localization::t_args(
+                    cx,
+                    "sidebar.org.delete_message",
+                    &[("name", &name), ("count", &count.to_string())],
+                );
                 ConfirmDialog::new(
                     SharedString::from(format!("kanalib-delete-album-{epoch}")),
-                    "删除相册？",
-                    format!(
-                        "将删除相册「{name}」与它的归属关系（{count} 张）。\n图片仍保留在图库和磁盘上，不会被删除。"
-                    ),
+                    crate::localization::t(cx, "sidebar.org.delete_title"),
+                    message,
                     move |_, cx| {
                         let _ = close.update(cx, |app, cx| {
                             app.org_dialog = None;
@@ -2070,7 +2155,7 @@ impl KanalibApp {
                         });
                     },
                 )
-                .confirm("删除相册")
+                .confirm(crate::localization::t(cx, "sidebar.org.delete_album"))
                 .destructive()
                 .on_confirm(move |_, cx| {
                     let _ = confirm.update(cx, |app, cx| app.delete_album(id, &name, cx));
@@ -2088,7 +2173,8 @@ impl KanalibApp {
     ) {
         let name = canonicalize_org_name(text);
         if name.is_empty() {
-            push_toast(&self.toaster, cx, "名称不能为空", Severity::Warning);
+            let message = crate::localization::t(cx, "sidebar.org.name_required");
+            push_toast(&self.toaster, cx, message, Severity::Warning);
             return;
         }
         match dialog {
@@ -2110,28 +2196,28 @@ impl KanalibApp {
         match self.state.rename_saved_search(id, name) {
             Ok(saved) => {
                 self.org_dialog = None;
-                push_toast(
-                    &self.toaster,
+                let message = crate::localization::t_args(
                     cx,
-                    format!("已将智能集合重命名为「{}」（ID 不变）", saved.name),
-                    Severity::Success,
+                    "sidebar.saved.renamed",
+                    &[("name", &saved.name)],
                 );
+                push_toast(&self.toaster, cx, message, Severity::Success);
             }
             Err(error) => {
                 if error.downcast_ref::<DuplicateNameError>().is_some() {
-                    push_toast(
-                        &self.toaster,
+                    let message = crate::localization::t_args(
                         cx,
-                        duplicate_name_message(name),
-                        Severity::Warning,
+                        "sidebar.org.name_taken",
+                        &[("name", name.trim())],
                     );
+                    push_toast(&self.toaster, cx, message, Severity::Warning);
                 } else {
-                    push_toast(
-                        &self.toaster,
+                    let message = crate::localization::t_args(
                         cx,
-                        format!("重命名智能集合失败：{error:#}"),
-                        Severity::Danger,
+                        "sidebar.saved.rename_failed",
+                        &[("error", &format!("{error:#}"))],
                     );
+                    push_toast(&self.toaster, cx, message, Severity::Danger);
                 }
             }
         }
@@ -2142,28 +2228,28 @@ impl KanalibApp {
         match self.state.create_collection(name) {
             Ok(album) => {
                 self.org_dialog = None;
-                push_toast(
-                    &self.toaster,
+                let message = crate::localization::t_args(
                     cx,
-                    format!("已新建相册「{}」", album.name),
-                    Severity::Success,
+                    "sidebar.albums.created",
+                    &[("name", &album.name)],
                 );
+                push_toast(&self.toaster, cx, message, Severity::Success);
             }
             Err(error) => {
                 if error.downcast_ref::<DuplicateNameError>().is_some() {
-                    push_toast(
-                        &self.toaster,
+                    let message = crate::localization::t_args(
                         cx,
-                        duplicate_name_message(name),
-                        Severity::Warning,
+                        "sidebar.org.name_taken",
+                        &[("name", name.trim())],
                     );
+                    push_toast(&self.toaster, cx, message, Severity::Warning);
                 } else {
-                    push_toast(
-                        &self.toaster,
+                    let message = crate::localization::t_args(
                         cx,
-                        format!("新建相册失败：{error:#}"),
-                        Severity::Danger,
+                        "sidebar.albums.create_failed",
+                        &[("error", &format!("{error:#}"))],
                     );
+                    push_toast(&self.toaster, cx, message, Severity::Danger);
                 }
             }
         }
@@ -2174,28 +2260,28 @@ impl KanalibApp {
         match self.state.rename_collection(id, name) {
             Ok(album) => {
                 self.org_dialog = None;
-                push_toast(
-                    &self.toaster,
+                let message = crate::localization::t_args(
                     cx,
-                    format!("已将相册重命名为「{}」（ID 不变）", album.name),
-                    Severity::Success,
+                    "sidebar.albums.renamed",
+                    &[("name", &album.name)],
                 );
+                push_toast(&self.toaster, cx, message, Severity::Success);
             }
             Err(error) => {
                 if error.downcast_ref::<DuplicateNameError>().is_some() {
-                    push_toast(
-                        &self.toaster,
+                    let message = crate::localization::t_args(
                         cx,
-                        duplicate_name_message(name),
-                        Severity::Warning,
+                        "sidebar.org.name_taken",
+                        &[("name", name.trim())],
                     );
+                    push_toast(&self.toaster, cx, message, Severity::Warning);
                 } else {
-                    push_toast(
-                        &self.toaster,
+                    let message = crate::localization::t_args(
                         cx,
-                        format!("重命名相册失败：{error:#}"),
-                        Severity::Danger,
+                        "sidebar.albums.rename_failed",
+                        &[("error", &format!("{error:#}"))],
                     );
+                    push_toast(&self.toaster, cx, message, Severity::Danger);
                 }
             }
         }
@@ -2206,19 +2292,18 @@ impl KanalibApp {
         match self.state.delete_collection(id) {
             Ok(()) => {
                 self.org_dialog = None;
-                push_toast(
-                    &self.toaster,
-                    cx,
-                    format!("已删除相册「{name}」；图片仍在图库，仅移除了归属关系"),
-                    Severity::Success,
-                );
+                let message =
+                    crate::localization::t_args(cx, "sidebar.albums.deleted", &[("name", name)]);
+                push_toast(&self.toaster, cx, message, Severity::Success);
             }
-            Err(error) => push_toast(
-                &self.toaster,
-                cx,
-                format!("删除相册失败：{error:#}"),
-                Severity::Danger,
-            ),
+            Err(error) => {
+                let message = crate::localization::t_args(
+                    cx,
+                    "sidebar.albums.delete_failed",
+                    &[("error", &format!("{error:#}"))],
+                );
+                push_toast(&self.toaster, cx, message, Severity::Danger);
+            }
         }
         cx.notify();
     }
@@ -2226,7 +2311,8 @@ impl KanalibApp {
     pub(crate) fn add_selection_to_album(&mut self, id: i64, cx: &mut Context<Self>) {
         let paths = self.selected_paths();
         if paths.is_empty() {
-            push_toast(&self.toaster, cx, "先在网格里选择图片", Severity::Warning);
+            let message = crate::localization::t(cx, "sidebar.albums.select_first");
+            push_toast(&self.toaster, cx, message, Severity::Warning);
             return;
         }
         self.add_paths_to_album(id, paths, cx);
@@ -2240,26 +2326,42 @@ impl KanalibApp {
     ) {
         let wanted = paths.len();
         match self.state.add_assets_to_collection(id, &paths) {
-            Ok(added) => push_toast(
-                &self.toaster,
-                cx,
-                if added == 0 {
-                    format!("没有新增：{wanted} 张已在相册中或不在图库")
+            Ok(added) => {
+                let message = if added == 0 {
+                    crate::localization::t_args(
+                        cx,
+                        "sidebar.albums.add_none",
+                        &[("wanted", &wanted.to_string())],
+                    )
                 } else {
-                    format!("已加入相册 {added} 张（选中 {wanted} 张）")
-                },
-                if added == 0 {
-                    Severity::Warning
-                } else {
-                    Severity::Success
-                },
-            ),
-            Err(error) => push_toast(
-                &self.toaster,
-                cx,
-                format!("加入相册失败：{error:#}"),
-                Severity::Danger,
-            ),
+                    crate::localization::t_args(
+                        cx,
+                        "sidebar.albums.added",
+                        &[
+                            ("added", &added.to_string()),
+                            ("wanted", &wanted.to_string()),
+                        ],
+                    )
+                };
+                push_toast(
+                    &self.toaster,
+                    cx,
+                    message,
+                    if added == 0 {
+                        Severity::Warning
+                    } else {
+                        Severity::Success
+                    },
+                );
+            }
+            Err(error) => {
+                let message = crate::localization::t_args(
+                    cx,
+                    "sidebar.albums.add_failed",
+                    &[("error", &format!("{error:#}"))],
+                );
+                push_toast(&self.toaster, cx, message, Severity::Danger);
+            }
         }
         cx.notify();
     }
@@ -2267,7 +2369,8 @@ impl KanalibApp {
     pub(crate) fn remove_selection_from_album(&mut self, id: i64, cx: &mut Context<Self>) {
         let paths = self.selected_paths();
         if paths.is_empty() {
-            push_toast(&self.toaster, cx, "先在网格里选择图片", Severity::Warning);
+            let message = crate::localization::t(cx, "sidebar.albums.select_first");
+            push_toast(&self.toaster, cx, message, Severity::Warning);
             return;
         }
         self.remove_paths_from_album(id, paths, cx);
@@ -2281,26 +2384,42 @@ impl KanalibApp {
     ) {
         let wanted = paths.len();
         match self.state.remove_assets_from_collection(id, &paths) {
-            Ok(removed) => push_toast(
-                &self.toaster,
-                cx,
-                if removed == 0 {
-                    format!("没有移出：{wanted} 张不在该相册中")
+            Ok(removed) => {
+                let message = if removed == 0 {
+                    crate::localization::t_args(
+                        cx,
+                        "sidebar.albums.remove_none",
+                        &[("wanted", &wanted.to_string())],
+                    )
                 } else {
-                    format!("已从相册移出 {removed} 张（选中 {wanted} 张）")
-                },
-                if removed == 0 {
-                    Severity::Warning
-                } else {
-                    Severity::Success
-                },
-            ),
-            Err(error) => push_toast(
-                &self.toaster,
-                cx,
-                format!("移出相册失败：{error:#}"),
-                Severity::Danger,
-            ),
+                    crate::localization::t_args(
+                        cx,
+                        "sidebar.albums.removed",
+                        &[
+                            ("removed", &removed.to_string()),
+                            ("wanted", &wanted.to_string()),
+                        ],
+                    )
+                };
+                push_toast(
+                    &self.toaster,
+                    cx,
+                    message,
+                    if removed == 0 {
+                        Severity::Warning
+                    } else {
+                        Severity::Success
+                    },
+                );
+            }
+            Err(error) => {
+                let message = crate::localization::t_args(
+                    cx,
+                    "sidebar.albums.remove_failed",
+                    &[("error", &format!("{error:#}"))],
+                );
+                push_toast(&self.toaster, cx, message, Severity::Danger);
+            }
         }
         cx.notify();
     }
@@ -2312,26 +2431,31 @@ impl KanalibApp {
         cx: &mut Context<Self>,
     ) {
         match self.state.remove_assets_from_collection(id, &[path]) {
-            Ok(removed) => push_toast(
-                &self.toaster,
-                cx,
-                if removed == 0 {
-                    "这张图片不在该相册中".to_string()
+            Ok(removed) => {
+                let message = if removed == 0 {
+                    crate::localization::t(cx, "sidebar.albums.not_in_album")
                 } else {
-                    "已从相册移出 1 张".to_string()
-                },
-                if removed == 0 {
-                    Severity::Warning
-                } else {
-                    Severity::Success
-                },
-            ),
-            Err(error) => push_toast(
-                &self.toaster,
-                cx,
-                format!("移出相册失败：{error:#}"),
-                Severity::Danger,
-            ),
+                    crate::localization::t(cx, "sidebar.albums.removed_one")
+                };
+                push_toast(
+                    &self.toaster,
+                    cx,
+                    message,
+                    if removed == 0 {
+                        Severity::Warning
+                    } else {
+                        Severity::Success
+                    },
+                );
+            }
+            Err(error) => {
+                let message = crate::localization::t_args(
+                    cx,
+                    "sidebar.albums.remove_failed",
+                    &[("error", &format!("{error:#}"))],
+                );
+                push_toast(&self.toaster, cx, message, Severity::Danger);
+            }
         }
         cx.notify();
     }
@@ -2351,7 +2475,10 @@ mod tests {
 
     #[test]
     fn sidebar_contexts_have_separate_persist_keys() {
-        assert_eq!(SidebarContext::Library.persist_key(), "ui.sidebar_collapsed");
+        assert_eq!(
+            SidebarContext::Library.persist_key(),
+            "ui.sidebar_collapsed"
+        );
         let keys = SidebarContext::all()
             .iter()
             .map(|ctx| ctx.persist_key())

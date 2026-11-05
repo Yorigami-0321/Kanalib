@@ -7,6 +7,7 @@ pub(crate) fn content_row_content(
     show_extensions: bool,
     thumb_cache: &Entity<ThumbCache>,
     colors: UiColors,
+    cx: &App,
 ) -> AnyElement {
     let title = display_name(asset, show_extensions);
     let error = asset
@@ -87,20 +88,33 @@ pub(crate) fn content_row_content(
                             if star > 0 {
                                 format!("★ {star}")
                             } else {
-                                "未评级".to_string()
+                                crate::localization::t(cx, "views.rating.none").to_string()
                             }
                         } else if star > 0 {
-                            format!("评级 {rating} · ★ {star}")
+                            format!(
+                                "{} · ★ {star}",
+                                crate::localization::t_args(
+                                    cx,
+                                    "views.rating.value",
+                                    &[("rating", &rating)],
+                                )
+                            )
                         } else {
-                            format!("评级 {rating}")
+                            crate::localization::t_args(
+                                cx,
+                                "views.rating.value",
+                                &[("rating", &rating)],
+                            )
+                            .to_string()
                         }),
                 )
-                .child(
-                    div()
-                        .text_xs()
-                        .text_color(colors.subtle)
-                        .child(format!("{tag_count} 标签")),
-                ),
+                .child(div().text_xs().text_color(colors.subtle).child(
+                    crate::localization::t_args(
+                        cx,
+                        "views.tag_count",
+                        &[("n", &tag_count.to_string())],
+                    ),
+                )),
         )
         .into_any_element()
 }

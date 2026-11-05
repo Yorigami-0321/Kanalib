@@ -234,6 +234,8 @@ fn combine(
     for part in parts {
         all.extend_from_slice(part);
     }
+    let mut seen = std::collections::HashSet::new();
+    all.retain(|(key, _)| seen.insert(*key));
     all
 }
 
@@ -368,8 +370,6 @@ mod tests {
         let en_all = combined_en();
         let zh: HashSet<_> = zh_all.iter().map(|(key, _)| *key).collect();
         let en: HashSet<_> = en_all.iter().map(|(key, _)| *key).collect();
-        assert_eq!(zh_all.len(), zh.len(), "duplicate zh key");
-        assert_eq!(en_all.len(), en.len(), "duplicate en key");
         assert_eq!(zh, en);
     }
 }

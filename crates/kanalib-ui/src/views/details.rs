@@ -54,7 +54,8 @@ pub(crate) enum CellAlign {
 }
 
 pub(crate) fn detail_header_cell(
-    label: &'static str,
+    id: &'static str,
+    label: SharedString,
     width: Option<f32>,
     align: CellAlign,
     mode: SortMode,
@@ -83,7 +84,7 @@ pub(crate) fn detail_header_cell(
         }
         None => cell.flex_1().min_w(px(180.)),
     };
-    cell.id(label)
+    cell.id(id)
         .on_click(move |_, _, cx| {
             let _ = this.update(cx, |app, cx| {
                 if app.sort == mode {
@@ -111,6 +112,7 @@ pub(crate) fn details_header(
     sort: SortMode,
     ascending: bool,
     colors: UiColors,
+    cx: &App,
 ) -> impl IntoElement {
     div()
         .h(px(30.))
@@ -124,7 +126,8 @@ pub(crate) fn details_header(
         .border_color(colors.border)
         .bg(colors.surface)
         .child(detail_header_cell(
-            "名称",
+            "details-name",
+            crate::localization::t(cx, "views.details.name"),
             None,
             CellAlign::Left,
             SortMode::Name,
@@ -135,7 +138,8 @@ pub(crate) fn details_header(
         ))
         .children(columns.resolution.then(|| {
             detail_header_cell(
-                "尺寸",
+                "details-resolution",
+                crate::localization::t(cx, "views.details.resolution"),
                 Some(110.),
                 CellAlign::Left,
                 SortMode::Resolution,
@@ -147,7 +151,8 @@ pub(crate) fn details_header(
         }))
         .children(columns.size.then(|| {
             detail_header_cell(
-                "大小",
+                "details-size",
+                crate::localization::t(cx, "views.details.size"),
                 Some(90.),
                 CellAlign::Right,
                 SortMode::Size,
@@ -159,7 +164,8 @@ pub(crate) fn details_header(
         }))
         .children(columns.modified.then(|| {
             detail_header_cell(
-                "修改时间",
+                "details-modified",
+                crate::localization::t(cx, "views.details.modified"),
                 Some(120.),
                 CellAlign::Left,
                 SortMode::Modified,
@@ -171,7 +177,8 @@ pub(crate) fn details_header(
         }))
         .children(columns.rating.then(|| {
             detail_header_cell(
-                "评级",
+                "details-rating",
+                crate::localization::t(cx, "views.details.rating"),
                 Some(64.),
                 CellAlign::Center,
                 SortMode::Rating,
@@ -183,7 +190,8 @@ pub(crate) fn details_header(
         }))
         .children(columns.star.then(|| {
             detail_header_cell(
-                "星级",
+                "details-star",
+                crate::localization::t(cx, "views.details.star"),
                 Some(64.),
                 CellAlign::Center,
                 SortMode::Star,
@@ -201,6 +209,7 @@ pub(crate) fn details_row_content(
     show_extensions: bool,
     thumb_cache: &Entity<ThumbCache>,
     colors: UiColors,
+    cx: &App,
 ) -> AnyElement {
     let title = display_name(asset, show_extensions);
     let favorite = asset.favorite;
@@ -239,7 +248,7 @@ pub(crate) fn details_row_content(
                         .flex_none()
                         .text_xs()
                         .text_color(colors.warning)
-                        .child("损坏")
+                        .child(crate::localization::t(cx, "views.tile.damaged"))
                 })),
         )
         .children(columns.resolution.then(|| {

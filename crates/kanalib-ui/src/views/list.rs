@@ -6,6 +6,7 @@ pub(crate) fn list_row_content(
     show_extensions: bool,
     thumb_cache: &Entity<ThumbCache>,
     colors: UiColors,
+    cx: &App,
 ) -> AnyElement {
     let title = display_name(asset, show_extensions);
     let favorite = asset.favorite;
@@ -37,14 +38,14 @@ pub(crate) fn list_row_content(
                 .rounded(px(3.))
                 .text_xs()
                 .text_color(colors.warning)
-                .child("损坏")
+                .child(crate::localization::t(cx, "views.tile.damaged"))
         }))
         .child(
             div()
                 .flex_none()
                 .text_xs()
                 .text_color(colors.subtle)
-                .child(row_meta(asset)),
+                .child(row_meta(asset, cx)),
         )
         .into_any_element()
 }

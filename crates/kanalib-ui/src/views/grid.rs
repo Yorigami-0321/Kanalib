@@ -12,6 +12,7 @@ pub(crate) fn tile(
     colors: UiColors,
     prefer_large: bool,
     show_extensions: bool,
+    cx: &App,
 ) -> impl IntoElement {
     let path = asset.path.clone();
     let thumb = if prefer_large {
@@ -56,8 +57,12 @@ pub(crate) fn tile(
             .duration_secs
             .map(crate::format::format_duration);
         let label = match duration {
-            Some(duration) => format!("视频 · {duration}"),
-            None => "视频".to_string(),
+            Some(duration) => crate::localization::t_args(
+                cx,
+                "views.tile.video_duration",
+                &[("duration", &duration)],
+            ),
+            None => crate::localization::t(cx, "views.tile.video"),
         };
         div()
             .absolute()
@@ -71,7 +76,7 @@ pub(crate) fn tile(
             .text_color(colors.fg)
             .child(label)
     });
-    let menu = asset_context_menu(&asset, &this);
+    let menu = asset_context_menu(&asset, &this, cx);
     let this_click = this.clone();
     let path_click = path.clone();
     let focus_click = focus.clone();
@@ -157,7 +162,7 @@ pub(crate) fn tile(
                         .bg(colors.backdrop)
                         .text_xs()
                         .text_color(colors.warning)
-                        .child("损坏")
+                        .child(crate::localization::t(cx, "views.tile.damaged"))
                 }))
                 .children(has_error.then(|| {
                     div()
@@ -170,7 +175,7 @@ pub(crate) fn tile(
                         .bg(colors.backdrop)
                         .text_xs()
                         .text_color(colors.danger)
-                        .child("失败")
+                        .child(crate::localization::t(cx, "views.tile.failed"))
                 })),
         )
         .child(
@@ -192,21 +197,29 @@ pub(crate) fn tile(
                     if star > 0 {
                         format!("★ {star}")
                     } else {
-                        "未评级".to_string()
+                        crate::localization::t(cx, "views.rating.none").to_string()
                     }
                 } else if star > 0 {
-                    format!("评级 {rating} · ★ {star}")
+                    format!(
+                        "{} · ★ {star}",
+                        crate::localization::t_args(
+                            cx,
+                            "views.rating.value",
+                            &[("rating", &rating)],
+                        )
+                    )
                 } else {
-                    format!("评级 {rating}")
+                    crate::localization::t_args(cx, "views.rating.value", &[("rating", &rating)])
+                        .to_string()
                 },
             ))
-            .child(
-                div()
-                    .flex_none()
-                    .text_xs()
-                    .text_color(colors.subtle)
-                    .child(format!("{tag_count} 标签")),
-            ),
+            .child(div().flex_none().text_xs().text_color(colors.subtle).child(
+                crate::localization::t_args(
+                    cx,
+                    "views.tag_count",
+                    &[("n", &tag_count.to_string())],
+                ),
+            )),
     );
 
     div()
