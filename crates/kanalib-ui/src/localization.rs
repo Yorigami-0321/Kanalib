@@ -1,6 +1,8 @@
 use ely_gpui_component::i18n::{self, I18n};
 use gpui::{App, SharedString};
 
+mod extra;
+
 /// 项目侧语言设置键；保存在 settings JSON，与 vendor 内置目录分离。
 pub(crate) const LOCALE_SETTING: &str = "ui.locale";
 
@@ -224,11 +226,62 @@ pub(crate) const EN_US: &[(&str, &str)] = &[
 ];
 
 /// 安装项目目录并保留 vendor 内置表作为未迁移键与组件默认值的来源。
+fn combine(
+    base: &[(&'static str, &'static str)],
+    parts: &[&'static [(&'static str, &'static str)]],
+) -> Vec<(&'static str, &'static str)> {
+    let mut all = base.to_vec();
+    for part in parts {
+        all.extend_from_slice(part);
+    }
+    all
+}
+
+pub(crate) fn combined_zh() -> Vec<(&'static str, &'static str)> {
+    combine(
+        ZH_CN,
+        &[
+            extra::app::ZH,
+            extra::compare::ZH,
+            extra::dedup::ZH,
+            extra::inspector::ZH,
+            extra::misc::ZH,
+            extra::settings::ZH,
+            extra::sidebar::ZH,
+            extra::status::ZH,
+            extra::tags::ZH,
+            extra::viewer::ZH,
+            extra::views::ZH,
+        ],
+    )
+}
+
+pub(crate) fn combined_en() -> Vec<(&'static str, &'static str)> {
+    combine(
+        EN_US,
+        &[
+            extra::app::EN,
+            extra::compare::EN,
+            extra::dedup::EN,
+            extra::inspector::EN,
+            extra::misc::EN,
+            extra::settings::EN,
+            extra::sidebar::EN,
+            extra::status::EN,
+            extra::tags::EN,
+            extra::viewer::EN,
+            extra::views::EN,
+        ],
+    )
+}
+
 pub(crate) fn install(cx: &mut App) {
+    let zh = combined_zh();
+    let en = combined_en();
     cx.set_global(
         I18n::new("zh-CN")
-            .catalog("zh-CN", ZH_CN)
-            .catalog("en-US", EN_US),
+            .catalog("zh-CN", &zh)
+            .catalog("en-US", &en),
     );
 }
 
@@ -311,9 +364,12 @@ mod tests {
 
     #[test]
     fn catalogs_hold_the_same_keys() {
-        let zh: HashSet<_> = ZH_CN.iter().map(|(key, _)| *key).collect();
-        let en: HashSet<_> = EN_US.iter().map(|(key, _)| *key).collect();
+        let zh_all = combined_zh();
+        let en_all = combined_en();
+        let zh: HashSet<_> = zh_all.iter().map(|(key, _)| *key).collect();
+        let en: HashSet<_> = en_all.iter().map(|(key, _)| *key).collect();
+        assert_eq!(zh_all.len(), zh.len(), "duplicate zh key");
+        assert_eq!(en_all.len(), en.len(), "duplicate en key");
         assert_eq!(zh, en);
-        assert_eq!(ZH_CN.len(), EN_US.len());
     }
 }

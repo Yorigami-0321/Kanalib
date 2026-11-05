@@ -1,0 +1,11 @@
+pub(crate) mod app;
+pub(crate) mod compare;
+pub(crate) mod dedup;
+pub(crate) mod inspector;
+pub(crate) mod misc;
+pub(crate) mod settings;
+pub(crate) mod sidebar;
+pub(crate) mod status;
+pub(crate) mod tags;
+pub(crate) mod viewer;
+pub(crate) mod views;
