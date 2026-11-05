@@ -520,11 +520,11 @@ impl KanalibApp {
                 0,
                 if large_fallback {
                     format!(
-                        "原图约 {megapixels:.2} MP，超过 {} MP 阈值 · 已使用快速预览；切换「原图」可强制加载",
+                        "原图 {megapixels:.2} MP > {} MP · 快速预览；点「原图」强制加载",
                         LARGE_IMAGE_PIXEL_LIMIT / 1_000_000
                     )
                 } else {
-                    format!("原图约 {megapixels:.2} MP，加载可能较慢/占用内存")
+                    format!("原图 {megapixels:.2} MP · 加载可能较慢/占内存")
                 },
             );
         }
