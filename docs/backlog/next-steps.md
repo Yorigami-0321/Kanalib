@@ -63,7 +63,7 @@
 - [x] F-011 侧栏标签面（chips/搜索/排序/查看图片在标签页验收中覆盖）
 - [x] F-025 低频/0 使用筛选与计数（低频 30156、0 使用 0；无自动删除入口）
 - [x] F-067 撤销（3 星 → 底栏「可撤销」→ 已撤销 toast → DB star 归 0；证据 `f067_after_star.png`、`f067_after_undo.png`）
-- [ ] F-020 别名合并 GUI 提交链路（对话框可开、字段可见；UIA Invoke 与 Enter 均只关闭对话框、未完成合并；核心 `db::tests::renaming_and_merging_tags_keep_aliases_and_fts` 通过）
+- [ ] F-020 别名合并 GUI 提交链路（对话框可开、字段可见；UIA Invoke/Enter/直接点击「合并」均只关闭对话框、DB 无变化，空目标时也无校验提示，按待排查记录；核心 `db::tests::renaming_and_merging_tags_keep_aliases_and_fts` 通过）
 
 **F-071 / F-072**
 

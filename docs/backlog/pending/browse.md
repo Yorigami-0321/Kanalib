@@ -266,7 +266,7 @@
 - 3 万标签（2026-11-04 续）：在 `.kanalib/accept_f070_tags30k` 复制同一 10k 库并插入 30,000 个通用标签（共 30,268）与 30,871 条使用记录。标签页首屏可见行 152ms，工作集 133MB；搜索 `stress_30000` → 1 条 513ms（含 12 字符键入约 360ms）；宽查询 `stress_1` 过滤后列表滚动 12 格正常换行，工作集 121MB，无卡顿/崩溃。侧栏只有固定分类 chips 与「有使用」列表（默认 10、更多 200），30k 不改变 chip 行数。截图 `tags30k_initial.png`、`tags30k_search_exact.png`、`tags30k_search_broad.png`、`tags30k_scrolled2.png`，日志 `tags30k_walk.log`。
 - 发现并修复（2026-11-04）：去重页评审区头部在 1024 逻辑宽下 4 个按钮横向溢出（最大 399px），1200 逻辑宽仍溢出 2 个（最大 135px）。`dedup.rs` 头部改为 `detail_width < 720px` 时纵向布局、标题截断、按钮换行；修复后 1024/1200 均 `h-overflow=0`，截图 `重复项_*.png` 已重采。
 - F-067 撤销（2026-11-04 续）：选中 `anime_girl_backup.png` 按 3 星后底栏出现「撤销「设置 3 星」· 可撤销 1」，点击后 toast「已撤销 · 设置 3 星」、网格与检查器星级清空，DB `star` 回到 0。证据 `f067_after_star.png`、`f067_after_undo.png`。
-- 仍未验：1440/1920 逻辑宽（副屏逻辑宽仅 1280，需改 DPI 或占用主屏）；Shift+Tab（窗口内合成 Shift 修饰不进入 gpui `current_modifiers`，结果仍正向，需真实键盘）；Esc 分层除「查看图片→返回」外的其它路径；F-020 GUI 完成链路（对话框可打开、目标输入与「合并/取消」可见；UIA Invoke、Enter 与直接点击「合并」均只关闭对话框、DB 无变化，需排查是合成输入焦点问题还是对话框提交缺陷；核心语义由 `db::tests::renaming_and_merging_tags_keep_aliases_and_fts` 覆盖并通过）；查看器/对话框/命令面板/Toast 截图；侧栏宽度拖拽。F-011 侧栏标签面与 F-025 低频/0 使用筛选已在标签页验收中覆盖。以上不写成通过。
+- 仍未验：1440/1920 逻辑宽（副屏逻辑宽仅 1280，需改 DPI 或占用主屏）；Shift+Tab（窗口内合成 Shift 修饰不进入 gpui `current_modifiers`，结果仍正向，需真实键盘）；Esc 分层除「查看图片→返回」外的其它路径；F-020 GUI 完成链路（对话框可打开、目标输入与「合并/取消」可见；UIA Invoke、Enter 与直接点击「合并」均只关闭对话框、DB 无变化；最后一次在目标输入为空时点「合并」也直接关闭且无错误提示，需排查对话框提交/校验链路，不能只归因于合成输入；核心语义由 `db::tests::renaming_and_merging_tags_keep_aliases_and_fts` 覆盖并通过）；查看器/对话框/命令面板/Toast 截图；侧栏宽度拖拽。F-011 侧栏标签面与 F-025 低频/0 使用筛选已在标签页验收中覆盖。以上不写成通过。
 
 ## F-071 活动栏与标题栏控制收敛
 
