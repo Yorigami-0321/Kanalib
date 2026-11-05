@@ -731,7 +731,7 @@ impl KanalibApp {
             if self.sidebar_section_open("filters") {
                 body = body.child(filter_row(
                     SharedString::from("filter-all"),
-                    "全部图片".into(),
+                    crate::localization::t(cx, "sidebar.filter.all").to_string(),
                     counts.total,
                     library && *filter == Filter::All,
                     Filter::All,
@@ -741,7 +741,7 @@ impl KanalibApp {
                 ));
                 body = body.child(filter_row(
                     SharedString::from("filter-untagged"),
-                    "未打标".into(),
+                    crate::localization::t(cx, "sidebar.filter.untagged").to_string(),
                     counts.untagged,
                     library && *filter == Filter::Untagged,
                     Filter::Untagged,
@@ -751,7 +751,7 @@ impl KanalibApp {
                 ));
                 body = body.child(filter_row(
                     SharedString::from("filter-favorites"),
-                    "收藏".into(),
+                    crate::localization::t(cx, "sidebar.filter.favorites").to_string(),
                     counts.favorites,
                     library && *filter == Filter::Favorites,
                     Filter::Favorites,
@@ -762,7 +762,7 @@ impl KanalibApp {
                 if counts.failed > 0 {
                     body = body.child(filter_row(
                         SharedString::from("filter-failed"),
-                        "失败".into(),
+                        crate::localization::t(cx, "sidebar.filter.failed").to_string(),
                         counts.failed,
                         library && filter == &Filter::Failed,
                         Filter::Failed,
@@ -774,7 +774,7 @@ impl KanalibApp {
                 if counts.damaged > 0 {
                     body = body.child(filter_row(
                         SharedString::from("filter-damaged"),
-                        "损坏".into(),
+                        crate::localization::t(cx, "sidebar.filter.damaged").to_string(),
                         counts.damaged,
                         library && filter == &Filter::Damaged,
                         Filter::Damaged,
@@ -797,7 +797,12 @@ impl KanalibApp {
                     for (rating, count) in counts.ratings.iter() {
                         body = body.child(filter_row(
                             SharedString::from(format!("filter-rating-{rating}")),
-                            format!("评级 {rating}"),
+                            crate::localization::t_args(
+                                cx,
+                                "sidebar.filter.rating",
+                                &[("rating", rating)],
+                            )
+                            .to_string(),
                             *count,
                             library && filter == &Filter::Rating(rating.clone()),
                             Filter::Rating(rating.clone()),
@@ -860,9 +865,9 @@ impl KanalibApp {
                             IconButton::new("tag-pane-sort", IconName::ArrowDownUp)
                                 .size(ControlSize::Sm)
                                 .tooltip(if self.tag_pane_sort_name {
-                                    "按使用次数排序"
+                                    crate::localization::t(cx, "sidebar.tags.sort_usage")
                                 } else {
-                                    "按名称排序"
+                                    crate::localization::t(cx, "sidebar.tags.sort_name")
                                 })
                                 .on_click(move |_, _, cx| {
                                     let _ = this_tag_sort.update(cx, |app, cx| {
@@ -874,7 +879,7 @@ impl KanalibApp {
                         .child(
                             IconButton::new("tag-pane-manage", IconName::SlidersHorizontal)
                                 .size(ControlSize::Sm)
-                                .tooltip("标签管理")
+                                .tooltip(crate::localization::t(cx, "sidebar.tags.manage"))
                                 .on_click(move |_, _, cx| {
                                     let _ = this_tag_manage.update(cx, |app, cx| {
                                         app.open_tag_manager(cx);
@@ -888,9 +893,14 @@ impl KanalibApp {
                         .pb(px(SPACE_1))
                         .text_xs()
                         .text_color(colors.subtle)
-                        .child(format!(
-                            "有使用 {used_tag_count} / 共 {} / 已屏蔽 {blocked_tag_count}",
-                            tag_vocab.len()
+                        .child(crate::localization::t_args(
+                            cx,
+                            "sidebar.tags.summary",
+                            &[
+                                ("used", &used_tag_count.to_string()),
+                                ("total", &tag_vocab.len().to_string()),
+                                ("blocked", &blocked_tag_count.to_string()),
+                            ],
                         )),
                 );
                 if self.sidebar_section_open("tags") {
@@ -898,17 +908,38 @@ impl KanalibApp {
                         div().px(px(8.)).pb(px(4.)).child(
                             Input::new(tag_search)
                                 .clearable()
-                                .least("筛选标签（有使用）"),
+                                .least(crate::localization::t(
+                                    cx,
+                                    "sidebar.tags.search_placeholder",
+                                )),
                         ),
                     );
                     let mut category_chips = div().flex().flex_wrap().gap(px(3.)).px(px(8.)).pb(px(4.));
                     for (key, label) in [
-                        ("general", "通用"),
-                        ("character", "角色"),
-                        ("copyright", "作品"),
-                        ("style", "风格"),
-                        ("meta", "元数据"),
-                        ("manual", "手工"),
+                        (
+                            "general",
+                            crate::localization::t(cx, "sidebar.tags.category.general"),
+                        ),
+                        (
+                            "character",
+                            crate::localization::t(cx, "sidebar.tags.category.character"),
+                        ),
+                        (
+                            "copyright",
+                            crate::localization::t(cx, "sidebar.tags.category.copyright"),
+                        ),
+                        (
+                            "style",
+                            crate::localization::t(cx, "sidebar.tags.category.style"),
+                        ),
+                        (
+                            "meta",
+                            crate::localization::t(cx, "sidebar.tags.category.meta"),
+                        ),
+                        (
+                            "manual",
+                            crate::localization::t(cx, "sidebar.tags.category.manual"),
+                        ),
                     ] {
                         let this = this.clone();
                         let active = self.tag_pane_category == key;
@@ -962,9 +993,9 @@ impl KanalibApp {
                                 .text_xs()
                                 .text_color(colors.subtle)
                                 .child(if needle.is_empty() {
-                                    "这个类别还没有标签"
+                                    crate::localization::t(cx, "sidebar.tags.empty_category")
                                 } else {
-                                    "没有匹配的标签"
+                                    crate::localization::t(cx, "sidebar.tags.empty_search")
                                 }),
                         );
                     }
@@ -1047,9 +1078,13 @@ impl KanalibApp {
                                 Button::new(
                                     "tag-pane-more",
                                     if self.tag_pane_expanded {
-                                        "收起".to_string()
+                                        crate::localization::t(cx, "sidebar.tags.collapse")
                                     } else {
-                                        format!("查看更多（{total}）")
+                                        crate::localization::t_args(
+                                            cx,
+                                            "sidebar.tags.more",
+                                            &[("n", &total.to_string())],
+                                        )
                                     },
                                 )
                                 .size(ControlSize::Sm)

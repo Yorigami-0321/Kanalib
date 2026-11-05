@@ -309,8 +309,7 @@ impl Render for KanalibApp {
         let colors = UiColors::from_theme(cx);
         let this = cx.entity();
         let search = window.use_keyed_state("kanalib-search", cx, |window, cx| {
-            TextInput::new(window, cx)
-                .placeholder(crate::localization::t(cx, "titlebar.search_placeholder"))
+            TextInput::new(window, cx).placeholder_key("titlebar.search_placeholder")
         });
         if self.search_input.is_none() {
             self.search_input = Some(search.clone());
@@ -841,7 +840,7 @@ impl Render for KanalibApp {
             };
         let dedup_similar_count = dedup_similar_groups.len();
         let tag_search = window.use_keyed_state("kanalib-sidebar-tag-search", cx, |window, cx| {
-            TextInput::new(window, cx).placeholder("筛选标签（有使用）")
+            TextInput::new(window, cx).placeholder_key("sidebar.tags.search_placeholder")
         });
         let tag_query = tag_search.read(cx).text().to_string();
         // F-070 方案 A：标签管理搜索只创建一份，侧栏导航与标签页共用，避免两套状态。
