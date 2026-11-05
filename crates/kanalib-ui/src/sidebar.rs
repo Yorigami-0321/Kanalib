@@ -584,7 +584,7 @@ impl KanalibApp {
     pub(crate) fn sidebar_section_header(
         &self,
         key: &'static str,
-        title: &'static str,
+        title: SharedString,
         count: Option<usize>,
         this: &Entity<Self>,
         colors: UiColors,
@@ -596,7 +596,7 @@ impl KanalibApp {
             .tab_index(0)
             .focus(move |style| style.bg(colors.hover))
             .role(Role::Button)
-            .aria_label(title)
+            .aria_label(title.clone())
             .flex_1()
             .min_w(px(0.))
             .h(px(ROW_SM))
@@ -679,7 +679,7 @@ impl KanalibApp {
 
             body = body.child(self.sidebar_section_header(
                 "sources",
-                "来源",
+                crate::localization::t(cx, "sidebar.section.sources"),
                 Some(roots.len()),
                 this,
                 colors,
@@ -723,7 +723,7 @@ impl KanalibApp {
 
             body = body.child(self.sidebar_section_header(
                 "filters",
-                "筛选",
+                crate::localization::t(cx, "sidebar.section.filters"),
                 Some(counts.total),
                 this,
                 colors,
@@ -788,7 +788,7 @@ impl KanalibApp {
             if !counts.ratings.is_empty() {
                 body = body.child(self.sidebar_section_header(
                     "ratings",
-                    "评级",
+                    crate::localization::t(cx, "sidebar.section.ratings"),
                     Some(counts.ratings.len()),
                     this,
                     colors,
@@ -812,7 +812,7 @@ impl KanalibApp {
             if !counts.groups.is_empty() {
                 body = body.child(self.sidebar_section_header(
                     "groups",
-                    "自动归类",
+                    crate::localization::t(cx, "sidebar.section.groups"),
                     Some(counts.groups.len()),
                     this,
                     colors,
@@ -851,7 +851,7 @@ impl KanalibApp {
                         .items_center()
                         .child(self.sidebar_section_header(
                             "tags",
-                            "标签",
+                            crate::localization::t(cx, "sidebar.section.tags"),
                             Some(used_tag_count),
                             this,
                             colors,
@@ -1072,7 +1072,7 @@ impl KanalibApp {
                     .items_center()
                     .child(self.sidebar_section_header(
                         "collections",
-                        "智能集合",
+                        crate::localization::t(cx, "sidebar.section.collections"),
                         Some(saved_searches.len()),
                         this,
                         colors,
@@ -1117,7 +1117,7 @@ impl KanalibApp {
                     .items_center()
                     .child(self.sidebar_section_header(
                         "albums",
-                        "相册",
+                        crate::localization::t(cx, "sidebar.section.albums"),
                         Some(albums.len()),
                         this,
                         colors,
@@ -1152,7 +1152,7 @@ impl KanalibApp {
 
             body = body.child(self.sidebar_section_header(
                 "organize",
-                "整理",
+                crate::localization::t(cx, "sidebar.section.organize"),
                 Some(dedup_pending),
                 this,
                 colors,

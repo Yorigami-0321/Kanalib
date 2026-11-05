@@ -1917,6 +1917,7 @@ impl Render for KanalibApp {
             undo_label.as_deref(),
             window_width,
             colors,
+            cx,
         );
         let search_blur = search.clone();
         let shell =

@@ -118,6 +118,7 @@ impl KanalibApp {
         undo_label: Option<&str>,
         width: Pixels,
         colors: UiColors,
+        cx: &App,
     ) -> AnyElement {
         // 有错误时错误行会占掉大半宽度，其余项一律走紧凑写法，避免互相挤压。
         let compact = width < px(1100.) || error.is_some();
@@ -147,7 +148,7 @@ impl KanalibApp {
             }
             left = left.child(status_bar_item(
                 "status-error",
-                SharedString::from(format!("错误 · {text}")),
+                crate::localization::t_args(cx, "status.error", &[("text", &text)]),
                 colors.danger,
                 colors,
                 false,
@@ -159,7 +160,7 @@ impl KanalibApp {
             let this_stop = this.clone();
             left = left.child(status_bar_item(
                 "status-scanning",
-                SharedString::from("扫描中 · 点击停止"),
+                crate::localization::t(cx, "status.scanning_stop"),
                 colors.accent,
                 colors,
                 false,
@@ -243,7 +244,7 @@ impl KanalibApp {
             let hint = hint.clone();
             left = left.child(status_bar_item(
                 "status-pending-restore",
-                SharedString::from("待恢复备份 · 重启后生效"),
+                crate::localization::t(cx, "status.pending_restore"),
                 colors.warning,
                 colors,
                 false,
@@ -263,7 +264,7 @@ impl KanalibApp {
                     .px(px(6.))
                     .text_xs()
                     .text_color(colors.accent)
-                    .child("搜索中…"),
+                    .child(crate::localization::t(cx, "status.searching")),
             );
         }
         // F-067：有可撤销项时显示条数并可点击撤销；空栈不占位。
@@ -308,7 +309,7 @@ impl KanalibApp {
         let this_all = this.clone();
         left = left.child(status_bar_item(
             "status-total",
-            SharedString::from(format!("{} 张", counts.total)),
+            crate::localization::t_args(cx, "status.total", &[("n", &counts.total.to_string())]),
             colors.fg,
             colors,
             library && *filter == Filter::All,
@@ -322,13 +323,21 @@ impl KanalibApp {
                     .px(px(6.))
                     .text_xs()
                     .text_color(colors.subtle)
-                    .child(format!("已打标 {}", counts.tagged)),
+                    .child(crate::localization::t_args(
+                        cx,
+                        "status.tagged",
+                        &[("n", &counts.tagged.to_string())],
+                    )),
             )
             .child({
                 let this_untagged = this.clone();
                 status_bar_item(
                     "status-untagged",
-                    SharedString::from(format!("未打标 {}", counts.untagged)),
+                    crate::localization::t_args(
+                        cx,
+                        "status.untagged",
+                        &[("n", &counts.untagged.to_string())],
+                    ),
                     colors.muted,
                     colors,
                     library && *filter == Filter::Untagged,
@@ -342,7 +351,11 @@ impl KanalibApp {
             let this_failed = this.clone();
             left = left.child(status_bar_item(
                 "status-failed",
-                SharedString::from(format!("失败 {}", counts.failed)),
+                crate::localization::t_args(
+                    cx,
+                    "status.failed",
+                    &[("n", &counts.failed.to_string())],
+                ),
                 colors.danger,
                 colors,
                 library && *filter == Filter::Failed,
@@ -355,7 +368,11 @@ impl KanalibApp {
             let this_damaged = this.clone();
             left = left.child(status_bar_item(
                 "status-damaged",
-                SharedString::from(format!("损坏 {}", counts.damaged)),
+                crate::localization::t_args(
+                    cx,
+                    "status.damaged",
+                    &[("n", &counts.damaged.to_string())],
+                ),
                 colors.warning,
                 colors,
                 library && *filter == Filter::Damaged,
@@ -369,9 +386,18 @@ impl KanalibApp {
         if !compact {
             let this_queue = this.clone();
             let queue_label = if queue_pending + queue_running + queue_error == 0 {
-                "队列空闲".to_string()
+                crate::localization::t(cx, "status.queue_idle").to_string()
             } else {
-                format!("队列 等待 {queue_pending} · 运行 {queue_running} · 失败 {queue_error}")
+                crate::localization::t_args(
+                    cx,
+                    "status.queue",
+                    &[
+                        ("waiting", &queue_pending.to_string()),
+                        ("running", &queue_running.to_string()),
+                        ("failed", &queue_error.to_string()),
+                    ],
+                )
+                .to_string()
             };
             right = right.child(status_bar_item(
                 "status-queue",
@@ -393,7 +419,9 @@ impl KanalibApp {
                 SharedString::from(
                     device
                         .map(str::to_string)
-                        .unwrap_or_else(|| "推理设备 · 未加载".to_string()),
+                        .unwrap_or_else(|| {
+                            crate::localization::t(cx, "status.device_missing").to_string()
+                        }),
                 ),
                 colors.subtle,
                 colors,
@@ -409,7 +437,7 @@ impl KanalibApp {
             .tab_index(0)
             .focus(move |style| style.bg(colors.hover))
             .role(Role::Button)
-            .aria_label("命令面板 (Ctrl+K)")
+            .aria_label(crate::localization::t(cx, "status.palette_shortcut"))
             .h_full()
             .px(px(6.))
             .flex()
@@ -430,7 +458,12 @@ impl KanalibApp {
                     .color(colors.muted),
             )
             .children(
-                (!compact).then(|| div().text_xs().text_color(colors.muted).child("命令面板")),
+                (!compact).then(|| {
+                    div()
+                        .text_xs()
+                        .text_color(colors.muted)
+                        .child(crate::localization::t(cx, "status.palette"))
+                }),
             )
             .children(
                 (!compact).then(|| div().text_xs().text_color(colors.subtle).child("Ctrl+K")),
