@@ -513,21 +513,6 @@ impl KanalibApp {
         if remote {
             hint_parts.push("远端只读 · 未下载原图".into());
         }
-        if large_image {
-            let megapixels = image_megapixels(width, height);
-            // 提示行右对齐并截断，超大图警告必须放在最前，否则会被键位提示挤掉。
-            hint_parts.insert(
-                0,
-                if large_fallback {
-                    format!(
-                        "原图 {megapixels:.2} MP > {} MP · 快速预览；点「原图」强制加载",
-                        LARGE_IMAGE_PIXEL_LIMIT / 1_000_000
-                    )
-                } else {
-                    format!("原图 {megapixels:.2} MP · 加载可能较慢/占内存")
-                },
-            );
-        }
         match mode {
             ViewerSourceMode::Original => hint_parts.push("原图直读（未做色彩转换）".into()),
             ViewerSourceMode::QuickPreview if can_original && !large_fallback => {
@@ -616,6 +601,67 @@ impl KanalibApp {
         let source_button = this.clone();
         let prev_button = this.clone();
         let next_button = this.clone();
+        let large_notice = large_image.then(|| {
+            let megapixels = image_megapixels(width, height);
+            let notice_this = this.clone();
+            let to_original = mode != ViewerSourceMode::Original;
+            let label = if large_fallback {
+                format!(
+                    "原图 {megapixels:.2} MP 超过 {} MP 阈值，已使用快速预览。",
+                    LARGE_IMAGE_PIXEL_LIMIT / 1_000_000
+                )
+            } else if mode == ViewerSourceMode::Original {
+                format!("原图 {megapixels:.2} MP，加载可能较慢/占用内存。")
+            } else {
+                let current = if mode == ViewerSourceMode::ColorManaged {
+                    "色彩管理"
+                } else {
+                    "快速预览"
+                };
+                format!("原图 {megapixels:.2} MP，当前使用{current}。")
+            };
+            div()
+                .id("viewer-large-notice")
+                .flex_none()
+                .px(px(SPACE_3))
+                .py(px(8.))
+                .flex()
+                .items_center()
+                .gap(px(SPACE_2))
+                .bg(colors.surface)
+                .border_b_1()
+                .border_color(colors.border)
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w(px(0.))
+                        .text_xs()
+                        .text_color(colors.muted)
+                        .child(label),
+                )
+                .child(
+                    Button::new(
+                        "viewer-large-source",
+                        if to_original {
+                            "加载原图"
+                        } else {
+                            "快速预览"
+                        },
+                    )
+                    .size(ControlSize::Sm)
+                    .variant(ButtonVariant::Ghost)
+                    .on_click(move |_, _, cx| {
+                        let mode = if to_original {
+                            ViewerSourceMode::Original
+                        } else {
+                            ViewerSourceMode::QuickPreview
+                        };
+                        let _ = notice_this.update(cx, |app, cx| {
+                            app.set_viewer_source_mode(mode, cx);
+                        });
+                    }),
+                )
+        });
         Some(
             root.child(
                 div()
@@ -734,6 +780,7 @@ impl KanalibApp {
                             ),
                     ),
             )
+            .children(large_notice)
             .child(
                 div()
                     .flex_1()
