@@ -95,6 +95,23 @@ pub(crate) const ZH_CN: &[(&str, &str)] = &[
     ("scan.source", "来源 · {source}"),
     ("scan.idle_recent", "空闲 · 最近阶段 {phase}"),
     ("scan.current_scanning", "扫描中 · {progress} · 吞吐 {rate} · ETA {eta}"),
+    ("status.undo", "可撤销 {n}"),
+    ("status.undo_empty", "没有可撤销的操作"),
+    ("status.undo_aria_labeled", "撤销「{label}」· {base} · Ctrl+Z"),
+    ("status.undo_aria", "{base} · Ctrl+Z"),
+    ("status.undo_done", "已撤销 · {label}"),
+    ("status.undo_failed", "撤销失败：{error}"),
+    ("status.undo_status", "已撤销「{label}」· 涉及 {n} 张"),
+    ("undo.favorite", "收藏"),
+    ("undo.unfavorite", "取消收藏"),
+    ("undo.clear_stars", "清除星级"),
+    ("undo.set_stars", "设置 {n} 星"),
+    ("undo.add_tag", "添加标签 #{name}"),
+    ("undo.remove_tag", "移除标签 #{name}"),
+    ("group.original", "原创"),
+    ("group.non_anime", "非动漫/实景"),
+    ("group.screenshots", "截图/文本"),
+    ("group.work", "作品: {name}"),
     ("common.back_to_library", "返回图库"),
 ];
 
@@ -186,6 +203,23 @@ pub(crate) const EN_US: &[(&str, &str)] = &[
     ("scan.source", "Source · {source}"),
     ("scan.idle_recent", "Idle · last phase {phase}"),
     ("scan.current_scanning", "Scanning · {progress} · {rate} · ETA {eta}"),
+    ("status.undo", "Undo {n}"),
+    ("status.undo_empty", "Nothing to undo"),
+    ("status.undo_aria_labeled", "Undo “{label}” · {base} · Ctrl+Z"),
+    ("status.undo_aria", "{base} · Ctrl+Z"),
+    ("status.undo_done", "Undone · {label}"),
+    ("status.undo_failed", "Undo failed: {error}"),
+    ("status.undo_status", "Undone “{label}” · {n} items affected"),
+    ("undo.favorite", "Favorite"),
+    ("undo.unfavorite", "Unfavorite"),
+    ("undo.clear_stars", "Clear rating"),
+    ("undo.set_stars", "Set {n} stars"),
+    ("undo.add_tag", "Add tag #{name}"),
+    ("undo.remove_tag", "Remove tag #{name}"),
+    ("group.original", "Original"),
+    ("group.non_anime", "Non-anime / real"),
+    ("group.screenshots", "Screenshots / text"),
+    ("group.work", "Work: {name}"),
     ("common.back_to_library", "Back to library"),
 ];
 
@@ -227,6 +261,47 @@ pub(crate) fn t(cx: &App, key: &str) -> SharedString {
 
 pub(crate) fn t_args(cx: &App, key: &str, args: &[(&str, &str)]) -> SharedString {
     i18n::text(cx, key, args)
+}
+
+/// 核心撤销栈记录的是中文动作标签；在 UI 层按固定四种语法映射，未知标签原样返回。
+pub(crate) fn undo_action_label(cx: &App, label: &str) -> String {
+    let text = match label {
+        "收藏" => t(cx, "undo.favorite"),
+        "取消收藏" => t(cx, "undo.unfavorite"),
+        "清除星级" => t(cx, "undo.clear_stars"),
+        _ => {
+            if let Some(stars) = label
+                .strip_prefix("设置 ")
+                .and_then(|rest| rest.strip_suffix(" 星"))
+            {
+                t_args(cx, "undo.set_stars", &[("n", stars)])
+            } else if let Some(name) = label.strip_prefix("添加标签 #") {
+                t_args(cx, "undo.add_tag", &[("name", name)])
+            } else if let Some(name) = label.strip_prefix("移除标签 #") {
+                t_args(cx, "undo.remove_tag", &[("name", name)])
+            } else {
+                return label.to_string();
+            }
+        }
+    };
+    text.to_string()
+}
+
+/// 自动归类名由核心生成；只映射已知固定名与「作品:」前缀，其余保留数据原文。
+pub(crate) fn localize_group_name(cx: &App, name: &str) -> String {
+    let text = match name {
+        "原创" => t(cx, "group.original"),
+        "非动漫/实景" => t(cx, "group.non_anime"),
+        "截图/文本" => t(cx, "group.screenshots"),
+        _ => {
+            if let Some(work) = name.strip_prefix("作品: ") {
+                t_args(cx, "group.work", &[("name", work)])
+            } else {
+                return name.to_string();
+            }
+        }
+    };
+    text.to_string()
 }
 
 #[cfg(test)]

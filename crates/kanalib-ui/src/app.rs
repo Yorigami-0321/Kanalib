@@ -3504,7 +3504,8 @@ impl KanalibApp {
     /// 核心已负责刷新计数、搜索索引与 revision；这里只负责提示与重绘。
     pub(crate) fn undo_last(&mut self, cx: &mut Context<Self>) {
         if !self.state.can_undo() {
-            push_toast(&self.toaster, cx, "没有可撤销的操作", Severity::Warning);
+            let message = crate::localization::t(cx, "status.undo_empty");
+            push_toast(&self.toaster, cx, message, Severity::Warning);
             return;
         }
         match self.state.undo_last() {
@@ -3521,22 +3522,33 @@ impl KanalibApp {
                     self.state.select(None);
                     self.auto_select_pending = true;
                 }
-                push_toast(
-                    &self.toaster,
+                let action = crate::localization::undo_action_label(cx, &outcome.label);
+                let message = crate::localization::t_args(
                     cx,
-                    format!("已撤销 · {}", outcome.label),
-                    Severity::Success,
+                    "status.undo_done",
+                    &[("label", &action)],
                 );
+                push_toast(&self.toaster, cx, message, Severity::Success);
+                let status = crate::localization::t_args(
+                    cx,
+                    "status.undo_status",
+                    &[
+                        ("label", &action),
+                        ("n", &outcome.affected.to_string()),
+                    ],
+                )
+                .to_string();
+                self.state.set_status(status);
                 cx.notify();
             }
             Err(error) => {
                 log::warn!("undo failed: {error:#}");
-                push_toast(
-                    &self.toaster,
+                let message = crate::localization::t_args(
                     cx,
-                    format!("撤销失败：{error:#}"),
-                    Severity::Danger,
+                    "status.undo_failed",
+                    &[("error", &format!("{error:#}"))],
                 );
+                push_toast(&self.toaster, cx, message, Severity::Danger);
             }
         }
     }

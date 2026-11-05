@@ -108,11 +108,13 @@ pub(crate) fn status_bar_item(
 }
 
 /// 可撤销条目的轻量文案；深度为 0 时不显示（返回 `None`）。
+#[cfg(test)]
 pub(crate) fn undo_status_label(depth: usize) -> Option<String> {
     (depth > 0).then(|| format!("可撤销 {depth}"))
 }
 
 /// 撤销条目的无障碍名称：带上栈顶操作名，读屏能听出将会撤销什么。
+#[cfg(test)]
 pub(crate) fn undo_status_aria(depth: usize, label: Option<&str>) -> String {
     let base = undo_status_label(depth).unwrap_or_else(|| "没有可撤销的操作".to_string());
     match label {
@@ -306,9 +308,29 @@ impl KanalibApp {
             );
         }
         // F-067：有可撤销项时显示条数并可点击撤销；空栈不占位。
-        if let Some(label) = undo_status_label(undo_depth) {
+        if undo_depth > 0 {
             let this_undo = this.clone();
-            let aria = undo_status_aria(undo_depth, undo_label);
+            let label = crate::localization::t_args(
+                cx,
+                "status.undo",
+                &[("n", &undo_depth.to_string())],
+            )
+            .to_string();
+            let action = undo_label.map(|label| crate::localization::undo_action_label(cx, label));
+            let aria = match action {
+                Some(action) => crate::localization::t_args(
+                    cx,
+                    "status.undo_aria_labeled",
+                    &[("label", &action), ("base", &label)],
+                )
+                .to_string(),
+                None => crate::localization::t_args(
+                    cx,
+                    "status.undo_aria",
+                    &[("base", &label)],
+                )
+                .to_string(),
+            };
             left = left.child(
                 div()
                     .id("status-undo")

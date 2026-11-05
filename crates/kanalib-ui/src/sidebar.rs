@@ -826,7 +826,7 @@ impl KanalibApp {
                     for (group, count) in counts.groups.iter() {
                         body = body.child(filter_row(
                             SharedString::from(format!("filter-group-{group}")),
-                            group.clone(),
+                            crate::localization::localize_group_name(cx, group),
                             *count,
                             library && filter == &Filter::Group(group.clone()),
                             Filter::Group(group.clone()),

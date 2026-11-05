@@ -3270,6 +3270,13 @@ impl AppState {
         self.shared.lock().unwrap().error = Some(message);
     }
 
+    /// UI 层本地化状态覆盖；用于把核心写入的中文瞬态状态替换成当前语言文案。
+    pub fn set_status(&self, status: String) {
+        let mut shared = self.shared.lock().unwrap();
+        shared.status = status;
+        shared.error = None;
+    }
+
     /// 文件已进回收站后删除图库记录；失败时明确告知“文件已移动、记录未删除”，
     /// 不把部分完成伪装成整体失败。
     fn delete_trashed_records(&self, db: &Db, moved: &[PathBuf]) -> Result<()> {
