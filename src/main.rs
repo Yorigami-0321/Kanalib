@@ -11,7 +11,6 @@ use std::sync::atomic::AtomicBool;
 
 use ely_gpui_component::{
     Assets,
-    i18n::I18n,
     theme::{Mode, Theme},
 };
 use gpui::{App, AppContext as _, Bounds, TitlebarOptions, WindowBounds, WindowOptions, px, size};
@@ -402,7 +401,7 @@ fn main() {
         .with_assets(Assets)
         .run(move |cx: &mut App| {
             ely_gpui_component::init(cx).expect("Ely failed to start");
-            cx.set_global(I18n::new("zh-CN"));
+            kanalib_ui::install_i18n(cx);
             Theme::set_mode_now(Mode::Dark, cx);
             Theme::update(cx, |theme| {
                 theme.font_family = "Microsoft YaHei UI".into();

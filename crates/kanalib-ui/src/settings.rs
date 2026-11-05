@@ -7,6 +7,7 @@ use crate::status_bar::{format_scan_summary, scan_phase_label, scan_progress_cou
 use crate::tags::group_reviews_by_asset;
 use crate::theme::*;
 use crate::*;
+use ely_gpui_component::buttons::SegmentedControl;
 use kanalib_core::sources::{SourceInfo, SourceKind};
 
 pub(crate) const SETTINGS_MAX_WIDTH: f32 = 1080.;
@@ -1172,6 +1173,7 @@ impl KanalibApp {
                 TextInput::new(window, cx).placeholder("glob 或文件夹路径，如 **/原图/**")
             });
         let this_back = this.clone();
+        let this_locale = this.clone();
         let this_refresh_cache = this.clone();
         let this_cleanup_cache = this.clone();
         let this_budget_less = this.clone();
@@ -3996,22 +3998,64 @@ impl KanalibApp {
                                 div()
                                     .text_lg()
                                     .font_weight(FontWeight::SEMIBOLD)
-                                    .child("设置"),
+                                    .child(crate::localization::t(cx, "settings.title")),
                             )
                             .child(
                                 div()
                                     .text_xs()
                                     .text_color(colors.muted)
-                                    .child("数据、去重与安全"),
+                                    .child(crate::localization::t(cx, "settings.subtitle")),
                             ),
                     )
                     .child(
-                        Button::new("settings-back", "返回图库").on_click(move |_, _, cx| {
-                            let _ = this_back.update(cx, |app, cx| {
-                                app.screen = Screen::Library;
-                                cx.notify();
-                            });
-                        }),
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(px(SPACE_2))
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(colors.muted)
+                                    .child(crate::localization::t(cx, "settings.language")),
+                            )
+                            .child(
+                                SegmentedControl::new(
+                                    "settings-locale",
+                                    crate::localization::current(cx),
+                                )
+                                .size(ControlSize::Sm)
+                                .segment("zh-CN", "中文", None)
+                                .segment("en-US", "English", None)
+                                .on_change(move |value, _, cx| {
+                                    let tag = value.to_string();
+                                    let _ = this_locale.update(cx, |app, cx| {
+                                        if let Err(error) = app.state.set_setting(
+                                            crate::localization::LOCALE_SETTING,
+                                            &tag,
+                                        ) {
+                                            push_toast(
+                                                &app.toaster,
+                                                cx,
+                                                format!("语言设置保存失败：{error}"),
+                                                Severity::Warning,
+                                            );
+                                        }
+                                        crate::localization::set_locale(&tag, cx);
+                                    });
+                                }),
+                            )
+                            .child(
+                                Button::new(
+                                    "settings-back",
+                                    crate::localization::t(cx, "common.back_to_library"),
+                                )
+                                .on_click(move |_, _, cx| {
+                                    let _ = this_back.update(cx, |app, cx| {
+                                        app.screen = Screen::Library;
+                                        cx.notify();
+                                    });
+                                }),
+                            ),
                     ),
             )
             .children(banner)

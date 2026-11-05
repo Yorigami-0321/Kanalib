@@ -128,7 +128,7 @@ pub(crate) fn source_label(root: &Path, aliases: &HashMap<PathBuf, String>) -> S
 pub(crate) fn activity_item(
     target: ActivityTarget,
     icon: IconName,
-    label: &'static str,
+    label: SharedString,
     active: bool,
     badge: usize,
     this: Entity<KanalibApp>,
@@ -140,7 +140,7 @@ pub(crate) fn activity_item(
         .tab_index(0)
         .focus(move |style| style.bg(colors.hover))
         .role(Role::Button)
-        .aria_label(label)
+        .aria_label(label.clone())
         // F-073 6.3：纯图标控件必须同时有可读名称与悬停提示。
         .tooltip(Tooltip::text(label))
         .relative()
@@ -405,7 +405,7 @@ pub(crate) fn filter_row(
 
 pub(crate) fn dedup_row(
     id: SharedString,
-    label: &'static str,
+    label: SharedString,
     count: String,
     active: bool,
     mode: GroupKind,
@@ -417,7 +417,7 @@ pub(crate) fn dedup_row(
         .tab_index(0)
         .focus(move |style| style.bg(colors.hover))
         .role(Role::Button)
-        .aria_label(label)
+        .aria_label(label.clone())
         .flex()
         .items_center()
         .justify_between()
@@ -658,6 +658,7 @@ impl KanalibApp {
         search: &Entity<TextInput>,
         panel_width: f32,
         colors: UiColors,
+        cx: &App,
     ) -> impl IntoElement + use<> {
         let ctx = SidebarContext::from_screen(screen);
         // F-070 方案 A：资源管理器侧栏 body 独立成一段；S3/S4 为其它上下文提供各自的 body。
@@ -1159,7 +1160,7 @@ impl KanalibApp {
             if self.sidebar_section_open("organize") {
                 body = body.child(dedup_row(
                     SharedString::from("dedup-entry"),
-                    "重复项",
+                    crate::localization::t(cx, "nav.duplicates"),
                     dedup_pending.to_string(),
                     screen == Screen::Duplicates,
                     GroupKind::Exact,
@@ -1351,13 +1352,13 @@ impl KanalibApp {
         };
 
         let screen_title = match screen {
-            Screen::Similar => "查找相似",
-            Screen::Compare => "图片对比",
+            Screen::Similar => crate::localization::t(cx, "page.similar"),
+            Screen::Compare => crate::localization::t(cx, "page.compare"),
             _ => match ctx {
-                SidebarContext::Library => "资源管理器",
-                SidebarContext::Tags => "标签导航",
-                SidebarContext::Settings => "设置",
-                SidebarContext::Duplicates => "重复项",
+                SidebarContext::Library => crate::localization::t(cx, "sidebar.explorer"),
+                SidebarContext::Tags => crate::localization::t(cx, "sidebar.tags_nav"),
+                SidebarContext::Settings => crate::localization::t(cx, "sidebar.settings"),
+                SidebarContext::Duplicates => crate::localization::t(cx, "sidebar.duplicates"),
             },
         };
 
@@ -1554,7 +1555,7 @@ impl KanalibApp {
                     .child(activity_item(
                         ActivityTarget::Library,
                         IconName::Library,
-                        "图库",
+                        crate::localization::t(cx, "nav.library"),
                         screen == Screen::Library,
                         library_badge,
                         this_library,
@@ -1563,7 +1564,7 @@ impl KanalibApp {
                     .child(activity_item(
                         ActivityTarget::Duplicates,
                         IconName::Copy,
-                        "重复项",
+                        crate::localization::t(cx, "nav.duplicates"),
                         screen == Screen::Duplicates,
                         dedup_pending,
                         this_duplicates,
@@ -1572,7 +1573,7 @@ impl KanalibApp {
                     .child(activity_item(
                         ActivityTarget::Tags,
                         IconName::Tag,
-                        "标签",
+                        crate::localization::t(cx, "nav.tags"),
                         screen == Screen::Tags,
                         0,
                         this_tags,
@@ -1593,7 +1594,7 @@ impl KanalibApp {
                         } else {
                             IconName::Moon
                         },
-                        "主题",
+                        crate::localization::t(cx, "nav.theme"),
                         false,
                         0,
                         this_theme,
@@ -1602,7 +1603,7 @@ impl KanalibApp {
                     .child(activity_item(
                         ActivityTarget::Settings,
                         IconName::Settings,
-                        "设置",
+                        crate::localization::t(cx, "nav.settings"),
                         screen == Screen::Settings,
                         0,
                         this_settings,

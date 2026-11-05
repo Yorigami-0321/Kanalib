@@ -43,6 +43,12 @@ use kanalib_core::model::{
 use kanalib_core::state::{AppState, CacheStats};
 
 pub use app::KanalibApp;
+
+/// 安装项目侧 i18n 目录（zh-CN / en-US），供主程序在 GPUI 启动时调用。
+pub fn install_i18n(cx: &mut App) {
+    localization::install(cx);
+}
+
 pub use platform::{
     MIN_WINDOW_HEIGHT, MIN_WINDOW_WIDTH, ResolvedWindowState, WINDOW_STATE_DIR, WINDOW_STATE_FILE,
     WindowState, WorkArea, window_state_path,
@@ -55,6 +61,7 @@ mod components;
 mod dedup;
 mod format;
 mod inspector;
+mod localization;
 mod platform;
 mod search;
 mod settings;

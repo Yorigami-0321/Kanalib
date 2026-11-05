@@ -309,7 +309,8 @@ impl Render for KanalibApp {
         let colors = UiColors::from_theme(cx);
         let this = cx.entity();
         let search = window.use_keyed_state("kanalib-search", cx, |window, cx| {
-            TextInput::new(window, cx).placeholder("搜索 / tag: / character: / size:>10mb")
+            TextInput::new(window, cx)
+                .placeholder(crate::localization::t(cx, "titlebar.search_placeholder"))
         });
         if self.search_input.is_none() {
             self.search_input = Some(search.clone());
@@ -867,6 +868,7 @@ impl Render for KanalibApp {
                 &search,
                 panel_width.as_f32(),
                 colors,
+                cx,
             )
             .into_any_element()
         } else {
@@ -2481,6 +2483,7 @@ impl KanalibApp {
             ),
         ]);
         let state = AppState::new(folder);
+        crate::localization::apply_saved(&state, cx);
         let initial_selected = state.shared.lock().unwrap().selected.clone();
         let sort = state
             .setting("ui.sort")
@@ -4098,17 +4101,29 @@ impl KanalibApp {
             px(220.)
         };
         let sort = library.then(|| {
-            DropdownMenu::new("library-sort", "排序", self.sort_menu(this))
+            DropdownMenu::new(
+                "library-sort",
+                crate::localization::t(cx, "titlebar.sort"),
+                self.sort_menu(this),
+            )
                 .icon(IconName::ArrowDownUp)
                 .variant(ButtonVariant::Ghost)
         });
         let view = library.then(|| {
-            DropdownMenu::new("library-view", "查看", self.view_menu(this))
+            DropdownMenu::new(
+                "library-view",
+                crate::localization::t(cx, "titlebar.view"),
+                self.view_menu(this),
+            )
                 .icon(IconName::LayoutGrid)
                 .variant(ButtonVariant::Ghost)
         });
         let export = library.then(|| {
-            DropdownMenu::new("library-export", "导出", self.export_menu(this))
+            DropdownMenu::new(
+                "library-export",
+                crate::localization::t(cx, "titlebar.export"),
+                self.export_menu(this),
+            )
                 .icon(IconName::Download)
                 .variant(ButtonVariant::Ghost)
         });
@@ -4116,7 +4131,10 @@ impl KanalibApp {
         let history_menu = {
             let mut menu = Menu::new();
             if self.search_history.is_empty() {
-                menu = menu.item(MenuItem::new("还没有最近查询").disabled(true));
+                menu = menu.item(
+                    MenuItem::new(crate::localization::t(cx, "titlebar.history_empty"))
+                        .disabled(true),
+                );
             }
             for query in &self.search_history {
                 let this = this.clone();
@@ -4134,7 +4152,7 @@ impl KanalibApp {
             if !self.search_history.is_empty() {
                 let this = this.clone();
                 menu = menu.separator().item(
-                    MenuItem::new("清空最近查询")
+                    MenuItem::new(crate::localization::t(cx, "titlebar.history_clear"))
                         .icon(IconName::X)
                         .on_click(move |_, cx| {
                             let _ = this.update(cx, |app, cx| app.clear_search_history(cx));
@@ -4143,9 +4161,14 @@ impl KanalibApp {
             }
             menu
         };
+        let history_count = self.search_history.len().to_string();
         let history = OverflowMenu::new("search-history", history_menu)
             .icon(IconName::History)
-            .tooltip(format!("最近查询 {}", self.search_history.len()));
+            .tooltip(crate::localization::t_args(
+                cx,
+                "titlebar.history",
+                &[("n", &history_count)],
+            ));
         let syntax_menu = Menu::new()
             .item(MenuItem::new("自由文本：空格分隔，全部满足").disabled(true))
             .item(MenuItem::new("tag:风景 / #风景 · character: · copyright:").disabled(true))
@@ -4158,7 +4181,7 @@ impl KanalibApp {
             .item(MenuItem::new("-tag:草图 排除 · 回车记录最近查询").disabled(true));
         let syntax_help = OverflowMenu::new("search-syntax-help", syntax_menu)
             .icon(IconName::CircleHelp)
-            .tooltip("搜索语法帮助");
+            .tooltip(crate::localization::t(cx, "titlebar.syntax_help"));
         let search_field = library.then(|| {
             let this_escape = this.clone();
             let search_escape = search.clone();
@@ -4194,7 +4217,10 @@ impl KanalibApp {
                     div().flex_1().min_w(px(0.)).child(
                         Input::new(search)
                             .clearable()
-                            .least("搜索 / tag: / character: / size:>10mb"),
+                            .least(crate::localization::t(
+                                cx,
+                                "titlebar.search_placeholder",
+                            )),
                     ),
                 )
                 .child(history)
@@ -4259,12 +4285,12 @@ impl KanalibApp {
             );
         } else {
             let label = match self.screen {
-                Screen::Tags => "标签管理",
-                Screen::Settings => "设置",
-                Screen::Duplicates => "重复项",
-                Screen::Similar => "查找相似",
-                Screen::Compare => "图片对比",
-                Screen::Library => "",
+                Screen::Tags => crate::localization::t(cx, "page.tags"),
+                Screen::Settings => crate::localization::t(cx, "page.settings"),
+                Screen::Duplicates => crate::localization::t(cx, "page.duplicates"),
+                Screen::Similar => crate::localization::t(cx, "page.similar"),
+                Screen::Compare => crate::localization::t(cx, "page.compare"),
+                Screen::Library => SharedString::from(""),
             };
             left = left.child(
                 div()
