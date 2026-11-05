@@ -828,7 +828,7 @@ impl Render for KanalibApp {
 
         let filter_title = match &filter {
             Filter::Source(root) => source_label(root, &source_aliases),
-            _ => filter.label(),
+            _ => crate::localization::filter_label(cx, &filter),
         };
         let dedup_pending_total = dedup_exact_summary.pending
             + if similar_scanned {
@@ -984,6 +984,7 @@ impl Render for KanalibApp {
                         &source_aliases,
                         inspector_width,
                         colors,
+                        cx,
                     )
                     .into_any_element(),
                 PaneMode::Details | PaneMode::Hidden => self
@@ -994,6 +995,7 @@ impl Render for KanalibApp {
                         &source_aliases,
                         inspector_width,
                         colors,
+                        cx,
                     )
                     .into_any_element(),
             });
@@ -1456,7 +1458,7 @@ impl Render for KanalibApp {
             });
             let close = this.clone();
             let submit = this.clone();
-            let filter_label = filter.label();
+            let filter_label = crate::localization::filter_label(cx, &filter);
             let title = crate::localization::t(cx, "app.save_search.title");
             let label = crate::localization::t_args(
                 cx,

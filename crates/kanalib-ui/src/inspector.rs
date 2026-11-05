@@ -1,9 +1,11 @@
 use crate::app::{KanalibApp, prompt_for, push_toast};
 use crate::format::*;
+use crate::localization::{localize_group_name, t, t_args};
 use crate::sidebar::source_label;
 use crate::theme::*;
 use crate::*;
 
+/// 媒体错误的中文说明；views/content 与单元测试共用这一签名，暂不走目录。
 pub(crate) fn friendly_media_error(message: &str) -> String {
     let text = message.to_lowercase();
     if (text.contains("psd") || text.contains("photoshop"))
@@ -13,9 +15,9 @@ pub(crate) fn friendly_media_error(message: &str) -> String {
             || text.contains("decoder")
             || text.contains("not supported"))
     {
-        "PSD 需要 FFmpeg 解码；未检测到 FFmpeg 时只有哈希与尺寸，无法生成缩略图".to_string()
+        if crate::localization::is_english() { "PSD requires FFmpeg; without it only the hash and dimensions are available, so no thumbnail can be generated".to_string() } else { "PSD 需要 FFmpeg 解码；未检测到 FFmpeg 时只有哈希与尺寸，无法生成缩略图".to_string() }
     } else if text.contains("heic") || text.contains("heif") || text.contains("libheif") {
-        "HEIC/HEIF 未接入，当前版本不支持该格式".to_string()
+        if crate::localization::is_english() { "HEIC/HEIF is not supported in this version".to_string() } else { "HEIC/HEIF 未接入，当前版本不支持该格式".to_string() }
     } else if text.contains("avif")
         && (text.contains("unsupported")
             || text.contains("unknown format")
@@ -23,24 +25,24 @@ pub(crate) fn friendly_media_error(message: &str) -> String {
             || text.contains("decoder")
             || text.contains("cannot identify"))
     {
-        "AVIF 需要 FFmpeg 解码；未检测到 FFmpeg 时无法生成缩略图".to_string()
+        if crate::localization::is_english() { "AVIF requires FFmpeg; without it no thumbnail can be generated".to_string() } else { "AVIF 需要 FFmpeg 解码；未检测到 FFmpeg 时无法生成缩略图".to_string() }
     } else if text.contains("ffmpeg") || text.contains("dav1d") {
-        "FFmpeg 解码失败，缩略图与打标可能不可用".to_string()
+        if crate::localization::is_english() { "FFmpeg decoding failed; thumbnails and tagging may be unavailable".to_string() } else { "FFmpeg 解码失败，缩略图与打标可能不可用".to_string() }
     } else if text.contains("truncated") || text.contains("unexpected end of file") {
-        "文件不完整（图片数据被截断）".to_string()
+        if crate::localization::is_english() { "The file is incomplete (image data is truncated)".to_string() } else { "文件不完整（图片数据被截断）".to_string() }
     } else if text.contains("cannot identify image file") || text.contains("unidentifiedimageerror")
     {
-        "无法识别的图片，文件可能已损坏".to_string()
+        if crate::localization::is_english() { "Unrecognized image; the file may be damaged".to_string() } else { "无法识别的图片，文件可能已损坏".to_string() }
     } else if text.contains("decompression bomb") {
-        "图片尺寸超出安全上限".to_string()
+        if crate::localization::is_english() { "The image exceeds the safe size limit".to_string() } else { "图片尺寸超出安全上限".to_string() }
     } else if text.contains("unsupported") || text.contains("unknown format") {
-        "不支持的图片编码".to_string()
+        if crate::localization::is_english() { "Unsupported image codec".to_string() } else { "不支持的图片编码".to_string() }
     } else {
         message.to_string()
     }
 }
 
-/// 扩展名对应的友好格式名；未知扩展名回退为大写原名。
+/// 扩展名对应的友好格式名；未知扩展名回退为大写原名。format 详情与测试共用这一签名。
 pub(crate) fn friendly_format_label(path: &Path) -> String {
     let ext = path
         .extension()
@@ -77,19 +79,19 @@ pub(crate) fn friendly_format_label(path: &Path) -> String {
         "dng" | "cr2" | "cr3" | "nef" | "arw" | "raf" | "orf" | "rw2" | "pef" | "srw" | "x3f" => {
             "RAW".to_string()
         }
-        "" => "未知格式".to_string(),
+        "" => if crate::localization::is_english() { "Unknown format".to_string() } else { "未知格式".to_string() },
         other => other.to_uppercase(),
     }
 }
 
 /// 解码能力提示：AVIF/PSD 需要 FFmpeg；GIF/WebP 内置解码但动画只取首帧；
-/// HEIC/RAW 明确未接入，不写成“内置解码”。
+/// HEIC/RAW 明确未接入，不写成“内置解码”。测试固定了这一签名与中文断言。
 pub(crate) fn format_capability_note(path: &Path) -> String {
     if crate::format::unsupported_format_note(path).is_some() {
-        return "未接入（当前版本不支持扫描/解码）".to_string();
+        return if crate::localization::is_english() { "Not supported (this version cannot scan/decode it)".to_string() } else { "未接入（当前版本不支持扫描/解码）".to_string() };
     }
     if kanalib_core::model::is_video(path) {
-        return "首帧缩略图 · 系统播放器".to_string();
+        return if crate::localization::is_english() { "First-frame thumbnail · system player".to_string() } else { "首帧缩略图 · 系统播放器".to_string() };
     }
     let ext = path
         .extension()
@@ -98,22 +100,35 @@ pub(crate) fn format_capability_note(path: &Path) -> String {
     if is_ffmpeg_only(path) {
         let available = kanalib_core::ffmpeg::available();
         let mut note = if available {
-            "需要 FFmpeg 解码".to_string()
+            if crate::localization::is_english() { "Requires FFmpeg".to_string() } else { "需要 FFmpeg 解码".to_string() }
         } else {
-            "需要 FFmpeg 解码 · 当前未检测到 FFmpeg".to_string()
+            if crate::localization::is_english() { "Requires FFmpeg · FFmpeg not detected".to_string() } else { "需要 FFmpeg 解码 · 当前未检测到 FFmpeg".to_string() }
         };
         if ext == "psd" {
-            note.push_str(" · 仅合成图");
+            note.push_str(if crate::localization::is_english() { " · composite only" } else { " · 仅合成图" });
         }
         note
     } else if crate::format::is_animation_container(path) {
-        "内置解码 · 动画仅首帧".to_string()
+        if crate::localization::is_english() { "Built-in decoder · first frame only".to_string() } else { "内置解码 · 动画仅首帧".to_string() }
     } else {
-        "内置解码".to_string()
+        if crate::localization::is_english() { "Built-in decoder".to_string() } else { "内置解码".to_string() }
     }
 }
 
-pub(crate) fn exif_panel(asset: &Asset, colors: UiColors) -> Option<AnyElement> {
+/// 标签分类的界面名；目录未登记的分类原样显示其数据键。
+fn tag_category_label(cx: &App, category: &str) -> SharedString {
+    match category {
+        "general" => t(cx, "inspector.tags.category.general"),
+        "character" => t(cx, "inspector.tags.category.character"),
+        "copyright" => t(cx, "inspector.tags.category.copyright"),
+        "style" => t(cx, "inspector.tags.category.style"),
+        "meta" => t(cx, "inspector.tags.category.meta"),
+        "rating" => t(cx, "inspector.tags.category.rating"),
+        other => SharedString::from(other.to_string()),
+    }
+}
+
+pub(crate) fn exif_panel(asset: &Asset, colors: UiColors, cx: &App) -> Option<AnyElement> {
     let meta = serde_json::from_str::<kanalib_core::media::ExifData>(&asset.metadata_json)
         .unwrap_or_default();
     let video = asset.is_video();
@@ -123,16 +138,21 @@ pub(crate) fn exif_panel(asset: &Asset, colors: UiColors) -> Option<AnyElement> 
     }
     let video_facts = video
         .then(|| video_fact_rows(&video_meta(&asset.metadata_json), asset.width, asset.height));
-    let mut rows: Vec<(&'static str, String)> = Vec::new();
+    let mut rows: Vec<(SharedString, String)> = Vec::new();
     if let Some(captured) = asset.captured_at {
-        rows.push(("拍摄时间", format_date(captured)));
+        rows.push((t(cx, "inspector.exif.captured_at"), format_date(captured)));
     }
-    rows.extend(video_facts.unwrap_or_default());
+    rows.extend(
+        video_facts
+            .unwrap_or_default()
+            .into_iter()
+            .map(|(label, value)| (SharedString::from(label), value)),
+    );
     if !meta.camera.is_empty() {
-        rows.push(("相机", meta.camera));
+        rows.push((t(cx, "inspector.exif.camera"), meta.camera));
     }
     if !meta.lens.is_empty() {
-        rows.push(("镜头", meta.lens));
+        rows.push((t(cx, "inspector.exif.lens"), meta.lens));
     }
     let exposure = [
         (!meta.iso.is_empty()).then(|| format!("ISO {}", meta.iso.trim())),
@@ -145,7 +165,7 @@ pub(crate) fn exif_panel(asset: &Asset, colors: UiColors) -> Option<AnyElement> 
     .collect::<Vec<_>>()
     .join(" · ");
     if !exposure.is_empty() {
-        rows.push(("曝光", exposure));
+        rows.push((t(cx, "inspector.exif.exposure"), exposure));
     }
     Some(
         div()
@@ -161,9 +181,9 @@ pub(crate) fn exif_panel(asset: &Asset, colors: UiColors) -> Option<AnyElement> 
                     .font_weight(FontWeight::SEMIBOLD)
                     .text_color(colors.subtle)
                     .child(if video {
-                        "视频信息"
+                        t(cx, "inspector.exif.video_title")
                     } else {
-                        "拍摄信息"
+                        t(cx, "inspector.exif.photo_title")
                     }),
             )
             .children(rows.into_iter().map(|(label, value)| {
@@ -200,6 +220,7 @@ impl KanalibApp {
         source_aliases: &HashMap<PathBuf, String>,
         width: Pixels,
         colors: UiColors,
+        cx: &App,
     ) -> impl IntoElement {
         let content: AnyElement = if let Some(asset) = selected {
             let preview: AnyElement = match asset.thumb.as_ref().or(Some(&asset.path)) {
@@ -216,7 +237,7 @@ impl KanalibApp {
                     .justify_center()
                     .text_xs()
                     .text_color(colors.subtle)
-                    .child("无预览")
+                    .child(t(cx, "inspector.no_preview"))
                     .into_any_element(),
             };
             let this_quick = this.clone();
@@ -224,12 +245,12 @@ impl KanalibApp {
             let open_toaster = self.toaster.clone();
             let open_state = self.state.clone();
             let open_remote = is_remote_asset(&asset.path);
-            let open_label = if open_remote {
-                "远端只读"
+            let open_label: SharedString = if open_remote {
+                t(cx, "inspector.open.remote")
             } else if asset.is_video() {
-                "用系统播放器打开"
+                t(cx, "inspector.open.video")
             } else {
-                "打开文件"
+                t(cx, "inspector.open.file")
             };
             let similar_this = this.clone();
             let similar_path = asset.path.clone();
@@ -237,6 +258,7 @@ impl KanalibApp {
             let favorite = asset.favorite;
             let star = asset.star;
             let rating = asset.rating.to_uppercase();
+            let source_text = source_label(&asset.library_root, source_aliases);
             div()
                 .flex()
                 .flex_col()
@@ -259,16 +281,17 @@ impl KanalibApp {
                         .truncate()
                         .text_xs()
                         .text_color(colors.subtle)
-                        .child(format!(
-                            "来源 · {}",
-                            source_label(&asset.library_root, source_aliases)
+                        .child(t_args(
+                            cx,
+                            "inspector.info.source",
+                            &[("source", source_text.as_str())],
                         )),
                 )
                 .children(open_remote.then(|| {
                     div()
                         .text_xs()
                         .text_color(colors.warning)
-                        .child(REMOTE_READONLY_NOTE)
+                        .child(t(cx, "inspector.remote_readonly_note"))
                 }))
                 .child(
                     div()
@@ -287,17 +310,18 @@ impl KanalibApp {
                                         .size(IconSize::Xs)
                                         .color(colors.danger),
                                 )
-                                .child("收藏")
+                                .child(t(cx, "inspector.favorite.badge"))
                         }))
                         .child(if star > 0 {
                             format!("★ {star}")
                         } else {
-                            "未设星级".to_string()
+                            t(cx, "inspector.info.stars_none").to_string()
                         })
                         .child(if rating.is_empty() {
-                            "未评级".to_string()
+                            t(cx, "inspector.info.rating_none").to_string()
                         } else {
-                            format!("评级 {rating}")
+                            t_args(cx, "inspector.info.rating", &[("rating", rating.as_str())])
+                                .to_string()
                         }),
                 )
                 .child(
@@ -306,7 +330,7 @@ impl KanalibApp {
                         .items_center()
                         .gap(px(6.))
                         .child(
-                            Button::new("preview-quick-view", "快速查看")
+                            Button::new("preview-quick-view", t(cx, "inspector.action.quick_view"))
                                 .size(ControlSize::Sm)
                                 .icon(IconName::Maximize2)
                                 .on_click(move |_, _, cx| {
@@ -315,28 +339,38 @@ impl KanalibApp {
                                 }),
                         )
                         .child(
-                        Button::new("preview-open-file", open_label)
-                            .size(ControlSize::Sm)
-                            .disabled(open_remote)
-                            .on_click(move |_, _, cx| {
-                                if let Err(error) = open_asset_with_system(&path_for_open) {
-                                    open_state.set_ui_error(format!("打开文件失败：{error}"));
-                                    push_toast(&open_toaster, cx, error, Severity::Danger);
-                                }
-                            }),
-                        )
-                        .child(
-                            Button::new("preview-find-similar", "查找相似")
+                            Button::new("preview-open-file", open_label)
                                 .size(ControlSize::Sm)
-                                .icon(IconName::Search)
+                                .disabled(open_remote)
                                 .on_click(move |_, _, cx| {
-                                    let _ = similar_this.update(cx, |app, cx| {
-                                        app.open_similar(similar_path.clone(), cx);
-                                    });
+                                    if let Err(error) = open_asset_with_system(&path_for_open) {
+                                        open_state.set_ui_error(
+                                            t_args(
+                                                cx,
+                                                "inspector.open.failed",
+                                                &[("error", error.as_str())],
+                                            )
+                                            .to_string(),
+                                        );
+                                        push_toast(&open_toaster, cx, error, Severity::Danger);
+                                    }
                                 }),
                         )
                         .child(
-                            Button::new("preview-compare", "对比选中")
+                            Button::new(
+                                "preview-find-similar",
+                                t(cx, "inspector.action.find_similar"),
+                            )
+                            .size(ControlSize::Sm)
+                            .icon(IconName::Search)
+                            .on_click(move |_, _, cx| {
+                                let _ = similar_this.update(cx, |app, cx| {
+                                    app.open_similar(similar_path.clone(), cx);
+                                });
+                            }),
+                        )
+                        .child(
+                            Button::new("preview-compare", t(cx, "inspector.action.compare"))
                                 .size(ControlSize::Sm)
                                 .icon(IconName::Columns2)
                                 .on_click(move |_, _, cx| {
@@ -353,12 +387,12 @@ impl KanalibApp {
                 .gap(px(6.))
                 .text_sm()
                 .text_color(colors.muted)
-                .child("选择一张图片")
+                .child(t(cx, "inspector.empty.select"))
                 .child(
                     div()
                         .text_xs()
                         .text_color(colors.subtle)
-                        .child("预览窗格只显示大图与基础信息。"),
+                        .child(t(cx, "inspector.empty.preview_hint")),
                 )
                 .into_any_element()
         };
@@ -376,7 +410,12 @@ impl KanalibApp {
             .gap(px(8.))
             .id("preview-inspector-scroll")
             .overflow_y_scroll()
-            .child(div().text_sm().font_weight(FontWeight::BOLD).child("预览"))
+            .child(
+                div()
+                    .text_sm()
+                    .font_weight(FontWeight::BOLD)
+                    .child(t(cx, "inspector.preview.title")),
+            )
             .child(content)
     }
 
@@ -388,6 +427,7 @@ impl KanalibApp {
         source_aliases: &HashMap<PathBuf, String>,
         width: Pixels,
         colors: UiColors,
+        cx: &App,
     ) -> impl IntoElement {
         let state = self.state.clone();
         let this = this.clone();
@@ -406,7 +446,7 @@ impl KanalibApp {
                     .justify_center()
                     .text_xs()
                     .text_color(colors.subtle)
-                    .child("无预览")
+                    .child(t(cx, "inspector.no_preview"))
                     .into_any_element(),
             };
 
@@ -460,7 +500,7 @@ impl KanalibApp {
                 SharedString::from(format!("manual-tags-{}", path.display())),
                 manual_names,
             )
-            .placeholder("添加标签，输入以补全全部词表")
+            .placeholder(t(cx, "inspector.tags.placeholder"))
             .check(|value| !normalize_tag_name(value).is_empty())
             .suggestions(suggestions)
             .on_typing(move |typed, _, cx| {
@@ -506,22 +546,20 @@ impl KanalibApp {
                     }
                 }
                 if let Some(error) = failure {
-                    manual_state.set_error(format!("标签操作失败：{error}"));
-                    push_toast(
-                        &manual_toaster,
+                    let message = t_args(
                         cx,
-                        format!("标签操作失败：{error}"),
-                        Severity::Danger,
-                    );
+                        "inspector.tags.update_failed",
+                        &[("error", error.as_str())],
+                    )
+                    .to_string();
+                    manual_state.set_error(message.clone());
+                    push_toast(&manual_toaster, cx, message, Severity::Danger);
                 } else if changed > 0 {
-                    push_toast(&manual_toaster, cx, "标签已更新", Severity::Success);
+                    let message = t(cx, "inspector.tags.updated");
+                    push_toast(&manual_toaster, cx, message, Severity::Success);
                 } else if !added.is_empty() || !removed.is_empty() {
-                    push_toast(
-                        &manual_toaster,
-                        cx,
-                        "标签已存在或无需变更",
-                        Severity::Warning,
-                    );
+                    let message = t(cx, "inspector.tags.unchanged");
+                    push_toast(&manual_toaster, cx, message, Severity::Warning);
                 }
                 let _ = manual_this.update(cx, |_, cx| cx.notify());
             });
@@ -550,7 +588,7 @@ impl KanalibApp {
                         .text_xs()
                         .font_weight(FontWeight::SEMIBOLD)
                         .text_color(colors.subtle)
-                        .child(category.to_string()),
+                        .child(tag_category_label(cx, category)),
                 );
                 for hit in hits {
                     let filter = Filter::Tag(hit.tag.clone());
@@ -608,7 +646,7 @@ impl KanalibApp {
                                             IconName::X,
                                         )
                                         .size(ControlSize::Sm)
-                                        .tooltip("移除标签")
+                                        .tooltip(t(cx, "inspector.tags.remove"))
                                         .on_click(
                                             move |_, _, cx| {
                                                 cx.stop_propagation();
@@ -616,26 +654,41 @@ impl KanalibApp {
                                                     std::slice::from_ref(&remove_path),
                                                     &remove_tag,
                                                 ) {
-                                                    Ok(updated) => push_toast(
-                                                        &remove_toaster,
-                                                        cx,
-                                                        if updated > 0 {
-                                                            format!("已移除标签 #{remove_tag}")
+                                                    Ok(updated) => {
+                                                        let message = if updated > 0 {
+                                                            t_args(
+                                                                cx,
+                                                                "inspector.tags.removed",
+                                                                &[("name", remove_tag.as_str())],
+                                                            )
                                                         } else {
-                                                            "没有可移除的标签".to_string()
-                                                        },
-                                                        if updated > 0 {
-                                                            Severity::Success
-                                                        } else {
-                                                            Severity::Warning
-                                                        },
-                                                    ),
-                                                    Err(error) => push_toast(
-                                                        &remove_toaster,
-                                                        cx,
-                                                        format!("移除标签失败：{error:#}"),
-                                                        Severity::Danger,
-                                                    ),
+                                                            t(cx, "inspector.tags.none_removed")
+                                                        };
+                                                        push_toast(
+                                                            &remove_toaster,
+                                                            cx,
+                                                            message,
+                                                            if updated > 0 {
+                                                                Severity::Success
+                                                            } else {
+                                                                Severity::Warning
+                                                            },
+                                                        )
+                                                    }
+                                                    Err(error) => {
+                                                        let error_text = format!("{error:#}");
+                                                        let message = t_args(
+                                                            cx,
+                                                            "inspector.tags.remove_failed",
+                                                            &[("error", error_text.as_str())],
+                                                        );
+                                                        push_toast(
+                                                            &remove_toaster,
+                                                            cx,
+                                                            message,
+                                                            Severity::Danger,
+                                                        )
+                                                    }
                                                 }
                                                 let _ = remove_this.update(cx, |_, cx| cx.notify());
                                             },
@@ -650,12 +703,12 @@ impl KanalibApp {
             let open_toaster = self.toaster.clone();
             let open_state = self.state.clone();
             let open_remote = is_remote_asset(&path);
-            let open_label = if open_remote {
-                "远端只读"
+            let open_label: SharedString = if open_remote {
+                t(cx, "inspector.open.remote")
             } else if asset.is_video() {
-                "用系统播放器打开"
+                t(cx, "inspector.open.video")
             } else {
-                "打开文件"
+                t(cx, "inspector.open.file")
             };
             let open = Button::new("open-file", open_label)
                 .size(ControlSize::Sm)
@@ -663,7 +716,10 @@ impl KanalibApp {
                 .on_click(move |_, _, cx| {
                     if let Err(error) = open_asset_with_system(&path_for_open) {
                         // F-073 6.2：toast 之外还要有常驻的就地说明。
-                        open_state.set_ui_error(format!("打开文件失败：{error}"));
+                        open_state.set_ui_error(
+                            t_args(cx, "inspector.open.failed", &[("error", error.as_str())])
+                                .to_string(),
+                        );
                         push_toast(&open_toaster, cx, error, Severity::Danger);
                     }
                 });
@@ -673,19 +729,28 @@ impl KanalibApp {
             let animation_toaster = self.toaster.clone();
             let animation_state = self.state.clone();
             let animation_button = animation_open.then(|| {
-                Button::new("inspector-open-animation", "用系统应用播放")
-                    .size(ControlSize::Sm)
-                    .icon(IconName::Play)
-                    .on_click(move |_, _, cx| {
-                        if let Err(error) = open_asset_with_system(&animation_path) {
-                            animation_state
-                                .set_ui_error(format!("用系统应用播放失败：{error}"));
-                            push_toast(&animation_toaster, cx, error, Severity::Danger);
-                        }
-                    })
+                Button::new(
+                    "inspector-open-animation",
+                    t(cx, "inspector.action.play_system"),
+                )
+                .size(ControlSize::Sm)
+                .icon(IconName::Play)
+                .on_click(move |_, _, cx| {
+                    if let Err(error) = open_asset_with_system(&animation_path) {
+                        animation_state.set_ui_error(
+                            t_args(
+                                cx,
+                                "inspector.action.play_failed",
+                                &[("error", error.as_str())],
+                            )
+                            .to_string(),
+                        );
+                        push_toast(&animation_toaster, cx, error, Severity::Danger);
+                    }
+                })
             });
             let this_quick = this.clone();
-            let quick = Button::new("quick-view", "快速查看")
+            let quick = Button::new("quick-view", t(cx, "inspector.action.quick_view"))
                 .size(ControlSize::Sm)
                 .icon(IconName::Maximize2)
                 .on_click(move |_, _, cx| {
@@ -693,16 +758,19 @@ impl KanalibApp {
                 });
             let similar_this = this.clone();
             let similar_path = path.clone();
-            let find_similar = Button::new("inspector-find-similar", "查找相似")
-                .size(ControlSize::Sm)
-                .icon(IconName::Search)
-                .on_click(move |_, _, cx| {
-                    let _ = similar_this.update(cx, |app, cx| {
-                        app.open_similar(similar_path.clone(), cx);
-                    });
+            let find_similar = Button::new(
+                "inspector-find-similar",
+                t(cx, "inspector.action.find_similar"),
+            )
+            .size(ControlSize::Sm)
+            .icon(IconName::Search)
+            .on_click(move |_, _, cx| {
+                let _ = similar_this.update(cx, |app, cx| {
+                    app.open_similar(similar_path.clone(), cx);
                 });
+            });
             let compare_this = this.clone();
-            let compare = Button::new("inspector-compare", "对比选中")
+            let compare = Button::new("inspector-compare", t(cx, "inspector.action.compare"))
                 .size(ControlSize::Sm)
                 .icon(IconName::Columns2)
                 .on_click(move |_, _, cx| {
@@ -715,7 +783,11 @@ impl KanalibApp {
             let favorite_path = path.clone();
             let mut favorite_button = Button::new(
                 SharedString::from(format!("inspector-favorite-{}", path.display())),
-                if favorite { "已收藏" } else { "收藏" },
+                if favorite {
+                    t(cx, "inspector.favorite.marked")
+                } else {
+                    t(cx, "inspector.favorite.add")
+                },
             )
             .size(ControlSize::Sm)
             .icon(IconName::Heart)
@@ -724,26 +796,24 @@ impl KanalibApp {
                     .set_favorite(std::slice::from_ref(&favorite_path), !favorite)
                 {
                     Ok(updated) => {
-                        push_toast(
-                            &favorite_toaster,
-                            cx,
-                            if favorite {
-                                format!("已取消收藏 {updated} 张")
-                            } else {
-                                format!("已收藏 {updated} 张")
-                            },
-                            Severity::Success,
-                        );
+                        let count = updated.to_string();
+                        let message = if favorite {
+                            t_args(cx, "inspector.favorite.removed", &[("n", count.as_str())])
+                        } else {
+                            t_args(cx, "inspector.favorite.added", &[("n", count.as_str())])
+                        };
+                        push_toast(&favorite_toaster, cx, message, Severity::Success);
                         true
                     }
                     Err(error) => {
-                        favorite_state.set_error(format!("收藏失败：{error:#}"));
-                        push_toast(
-                            &favorite_toaster,
+                        let error_text = format!("{error:#}");
+                        let message = t_args(
                             cx,
-                            format!("收藏失败：{error:#}"),
-                            Severity::Danger,
+                            "inspector.favorite.failed",
+                            &[("error", error_text.as_str())],
                         );
+                        favorite_state.set_error(message.to_string());
+                        push_toast(&favorite_toaster, cx, message, Severity::Danger);
                         false
                     }
                 };
@@ -768,24 +838,29 @@ impl KanalibApp {
             )
             .on_change(move |value, _, cx| {
                 match star_state.set_star(std::slice::from_ref(&star_path), value) {
-                    Ok(updated) => push_toast(
-                        &star_toaster,
-                        cx,
-                        if value == 0 {
-                            format!("已清除 {updated} 张的星级")
+                    Ok(updated) => {
+                        let count = updated.to_string();
+                        let message = if value == 0 {
+                            t_args(cx, "inspector.rating.cleared", &[("n", count.as_str())])
                         } else {
-                            format!("已设置 {updated} 张为 {value} 星")
-                        },
-                        Severity::Success,
-                    ),
+                            let stars = value.to_string();
+                            t_args(
+                                cx,
+                                "inspector.rating.set",
+                                &[("n", count.as_str()), ("stars", stars.as_str())],
+                            )
+                        };
+                        push_toast(&star_toaster, cx, message, Severity::Success);
+                    }
                     Err(error) => {
-                        star_state.set_error(format!("设置星级失败：{error:#}"));
-                        push_toast(
-                            &star_toaster,
+                        let error_text = format!("{error:#}");
+                        let message = t_args(
                             cx,
-                            format!("设置星级失败：{error:#}"),
-                            Severity::Danger,
+                            "inspector.rating.failed",
+                            &[("error", error_text.as_str())],
                         );
+                        star_state.set_error(message.to_string());
+                        push_toast(&star_toaster, cx, message, Severity::Danger);
                     }
                 }
                 let _ = star_this.update(cx, |_, cx| cx.notify());
@@ -800,30 +875,29 @@ impl KanalibApp {
                 })
                 .count();
             let prompt_toaster = self.toaster.clone();
-            let copy_prompt = Button::new("copy-prompt", "复制 Prompt")
+            let copy_prompt = Button::new("copy-prompt", t(cx, "inspector.copy.prompt"))
                 .size(ControlSize::Sm)
                 .disabled(prompt_empty)
                 .on_click(move |_, _, cx| {
                     cx.write_to_clipboard(ClipboardItem::new_string(prompt.clone()));
-                    push_toast(
-                        &prompt_toaster,
-                        cx,
-                        format!("已复制 {prompt_count} 个标签"),
-                        Severity::Success,
-                    );
+                    let count = prompt_count.to_string();
+                    let message =
+                        t_args(cx, "inspector.copy.prompt_done", &[("n", count.as_str())]);
+                    push_toast(&prompt_toaster, cx, message, Severity::Success);
                 });
             let copy_path_text = path.display().to_string();
             let copy_path_toaster = self.toaster.clone();
-            let copy_path = Button::new("copy-path", "复制路径")
+            let copy_path = Button::new("copy-path", t(cx, "inspector.copy.path"))
                 .size(ControlSize::Sm)
                 .icon(IconName::Copy)
                 .on_click(move |_, _, cx| {
                     cx.write_to_clipboard(ClipboardItem::new_string(copy_path_text.clone()));
-                    push_toast(&copy_path_toaster, cx, "已复制文件路径", Severity::Success);
+                    let message = t(cx, "inspector.copy.path_done");
+                    push_toast(&copy_path_toaster, cx, message, Severity::Success);
                 });
             let copy_image_this = this.clone();
             let copy_image_path = path.clone();
-            let copy_image = Button::new("copy-image", "复制图片")
+            let copy_image = Button::new("copy-image", t(cx, "inspector.copy.image"))
                 .size(ControlSize::Sm)
                 .icon(IconName::Image)
                 .on_click(move |_, _, cx| {
@@ -834,33 +908,47 @@ impl KanalibApp {
 
             let has_issue = asset.error.is_some() || asset.damage.is_some();
             let issue = has_issue.then(|| {
-                let repair = Button::new("repair-asset", "容错重解")
+                let repair = Button::new("repair-asset", t(cx, "inspector.issue.repair"))
                     .size(ControlSize::Sm)
                     .on_click(move |_, _, cx| {
                         let path = repair_path.clone();
                         let _ = repair_this.update(cx, |app, cx| {
                             if let Err(error) = app.state.repair_asset(path) {
-                                app.state.set_error(format!("修复失败：{error:#}"));
+                                let error_text = format!("{error:#}");
+                                app.state.set_error(
+                                    t_args(
+                                        cx,
+                                        "inspector.issue.repair_failed",
+                                        &[("error", error_text.as_str())],
+                                    )
+                                    .to_string(),
+                                );
                             }
                             cx.notify();
                         });
                     });
-                let export = Button::new("export-repair", "导出修复副本…")
+                let export_title = t(cx, "inspector.issue.export_title").to_string();
+                let png_filter = t(cx, "inspector.issue.export_png").to_string();
+                let jpeg_filter = t(cx, "inspector.issue.export_jpeg").to_string();
+                let export = Button::new("export-repair", t(cx, "inspector.issue.export"))
                     .size(ControlSize::Sm)
                     .on_click(move |_, _, cx| {
                         let state = export_state.clone();
                         let path = export_path.clone();
                         let weak = export_this.downgrade();
+                        let export_title = export_title.clone();
+                        let png_filter = png_filter.clone();
+                        let jpeg_filter = jpeg_filter.clone();
                         cx.spawn(async move |cx| {
                             let stem = path
                                 .file_stem()
                                 .map(|value| value.to_string_lossy().to_string())
                                 .unwrap_or_else(|| "image".to_string());
                             let mut dialog = rfd::AsyncFileDialog::new()
-                                .set_title("导出修复副本")
+                                .set_title(export_title)
                                 .set_file_name(format!("{stem}-repaired.png"))
-                                .add_filter("PNG 图片", &["png"])
-                                .add_filter("JPEG 图片", &["jpg", "jpeg"]);
+                                .add_filter(png_filter, &["png"])
+                                .add_filter(jpeg_filter, &["jpg", "jpeg"]);
                             if let Some(parent) = path.parent() {
                                 dialog = dialog.set_directory(parent);
                             }
@@ -871,7 +959,15 @@ impl KanalibApp {
                             let result = state.export_repaired_copy(path.clone(), output);
                             let _ = weak.update(cx, |app, cx| {
                                 if let Err(error) = result {
-                                    app.state.set_error(format!("导出修复副本失败：{error:#}"));
+                                    let error_text = format!("{error:#}");
+                                    app.state.set_error(
+                                        t_args(
+                                            cx,
+                                            "inspector.issue.export_failed",
+                                            &[("error", error_text.as_str())],
+                                        )
+                                        .to_string(),
+                                    );
                                 }
                                 cx.notify();
                             });
@@ -890,7 +986,7 @@ impl KanalibApp {
                             .text_xs()
                             .font_weight(FontWeight::SEMIBOLD)
                             .text_color(colors.subtle)
-                            .child("文件异常"),
+                            .child(t(cx, "inspector.issue.title")),
                     );
                 if let Some(damage) = &asset.damage {
                     panel = panel.child(
@@ -901,19 +997,19 @@ impl KanalibApp {
                     );
                 }
                 if let Some(error) = &asset.error {
-                    panel = panel.child(
-                        div()
-                            .text_xs()
-                            .text_color(colors.danger)
-                            .child(format!("打标失败：{}", friendly_media_error(error))),
-                    );
+                    let detail = friendly_media_error(error);
+                    panel = panel.child(div().text_xs().text_color(colors.danger).child(t_args(
+                        cx,
+                        "inspector.issue.tagging_failed",
+                        &[("error", detail.as_str())],
+                    )));
                 }
                 panel
                     .child(
                         div()
                             .text_xs()
                             .text_color(colors.subtle)
-                            .child("修复只重建预览并重新打标，不改动原文件；导出会另存为新文件。"),
+                            .child(t(cx, "inspector.issue.hint")),
                     )
                     .child(
                         div()
@@ -938,7 +1034,7 @@ impl KanalibApp {
                             .text_xs()
                             .font_weight(FontWeight::SEMIBOLD)
                             .text_color(colors.subtle)
-                            .child("所属相册"),
+                            .child(t(cx, "inspector.album.section")),
                     )
                     .children((!albums.is_empty()).then(|| {
                         let mut menu = Menu::new();
@@ -968,7 +1064,7 @@ impl KanalibApp {
                             )),
                             menu,
                         )
-                        .tooltip("加入相册")
+                        .tooltip(t(cx, "inspector.album.add"))
                     })),
             );
             if albums.is_empty() {
@@ -976,7 +1072,7 @@ impl KanalibApp {
                     div()
                         .text_xs()
                         .text_color(colors.subtle)
-                        .child("未加入相册；用「加入相册」菜单归档，不移动文件"),
+                        .child(t(cx, "inspector.album.empty")),
                 );
             } else {
                 let mut chips = div().flex().flex_wrap().gap(px(4.));
@@ -1010,7 +1106,7 @@ impl KanalibApp {
                                     IconName::X,
                                 )
                                 .size(ControlSize::Sm)
-                                .tooltip("从该相册移出")
+                                .tooltip(t(cx, "inspector.album.remove"))
                                 .on_click(move |_, _, cx| {
                                     let path = remove_path.clone();
                                     let _ = remove_this.update(cx, |app, cx| {
@@ -1022,6 +1118,41 @@ impl KanalibApp {
                 }
                 album_section = album_section.child(chips);
             }
+
+            let rating_text = if asset.rating.is_empty() {
+                t(cx, "inspector.info.rating_none").to_string()
+            } else {
+                asset.rating.clone()
+            };
+            let group_text = localize_group_name(cx, &asset.group);
+            let source_text = source_label(&asset.library_root, source_aliases);
+            let format_text = friendly_format_label(&asset.path);
+            let capability_text = format_capability_note(&asset.path);
+            let sha_line = match (&asset.sha1, &asset.blake3) {
+                (Some(sha1), Some(blake3)) => {
+                    let phash_note = match asset.phash {
+                        Some(phash) => format!(" · pHash {phash:016x}"),
+                        None if crate::format::unsupported_format_note(&asset.path).is_some() => {
+                            format!(" · {}", t(cx, "inspector.hash.phash_unsupported"))
+                        }
+                        None if asset
+                            .path
+                            .extension()
+                            .is_some_and(|ext| ext.eq_ignore_ascii_case("psd")) =>
+                        {
+                            format!(" · {}", t(cx, "inspector.hash.phash_psd"))
+                        }
+                        None => format!(" · {}", t(cx, "inspector.hash.phash_failed")),
+                    };
+                    format!(
+                        "SHA1 {} · B3 {}{}",
+                        &sha1[..12.min(sha1.len())],
+                        &blake3[..8.min(blake3.len())],
+                        phash_note
+                    )
+                }
+                _ => t(cx, "inspector.hash.none").to_string(),
+            };
 
             div()
                 .flex()
@@ -1036,14 +1167,7 @@ impl KanalibApp {
                 )
                 .child(div().text_xs().text_color(colors.muted).child(format!(
                     "{} × {} · {} · {}",
-                    asset.width,
-                    asset.height,
-                    if asset.rating.is_empty() {
-                        "未评级"
-                    } else {
-                        asset.rating.as_str()
-                    },
-                    asset.group
+                    asset.width, asset.height, rating_text, group_text
                 )))
                 .child(div().text_xs().text_color(colors.subtle).child(format!(
                     "{} · {}",
@@ -1055,16 +1179,17 @@ impl KanalibApp {
                         .truncate()
                         .text_xs()
                         .text_color(colors.subtle)
-                        .child(format!(
-                            "来源 · {}",
-                            source_label(&asset.library_root, source_aliases)
+                        .child(t_args(
+                            cx,
+                            "inspector.info.source",
+                            &[("source", source_text.as_str())],
                         )),
                 )
                 .children(open_remote.then(|| {
                     div()
                         .text_xs()
                         .text_color(colors.warning)
-                        .child(REMOTE_READONLY_NOTE)
+                        .child(t(cx, "inspector.remote_readonly_note"))
                 }))
                 .child(
                     div()
@@ -1078,10 +1203,13 @@ impl KanalibApp {
                                 colors.subtle
                             },
                         )
-                        .child(format!(
-                            "格式 · {} · {}",
-                            friendly_format_label(&asset.path),
-                            format_capability_note(&asset.path)
+                        .child(t_args(
+                            cx,
+                            "inspector.info.format",
+                            &[
+                                ("format", format_text.as_str()),
+                                ("note", capability_text.as_str()),
+                            ],
                         )),
                 )
                 .children(crate::format::format_limits_note(&asset.path).map(|note| {
@@ -1092,33 +1220,8 @@ impl KanalibApp {
                         .child(note)
                 }))
                 .child(album_section)
-                .children(exif_panel(asset, colors))
-                .child(div().text_xs().text_color(colors.subtle).child(
-                    match (&asset.sha1, &asset.blake3) {
-                        (Some(sha1), Some(blake3)) => format!(
-                            "SHA1 {} · B3 {}{}",
-                            &sha1[..12.min(sha1.len())],
-                            &blake3[..8.min(blake3.len())],
-                            match asset.phash {
-                                Some(phash) => format!(" · pHash {phash:016x}"),
-                                None if crate::format::unsupported_format_note(&asset.path)
-                                    .is_some() =>
-                                {
-                                    " · pHash 未计算（该格式未接入）".to_string()
-                                }
-                                None if asset
-                                    .path
-                                    .extension()
-                                    .is_some_and(|ext| ext.eq_ignore_ascii_case("psd")) =>
-                                {
-                                    " · pHash 未计算（PSD 不参与相似去重）".to_string()
-                                }
-                                None => " · pHash 未计算（解码失败）".to_string(),
-                            }
-                        ),
-                        _ => "内容哈希未计算".to_string(),
-                    },
-                ))
+                .children(exif_panel(asset, colors, cx))
+                .child(div().text_xs().text_color(colors.subtle).child(sha_line))
                 .children(issue)
                 .child(
                     div()
@@ -1137,7 +1240,12 @@ impl KanalibApp {
                         .flex()
                         .items_center()
                         .justify_between()
-                        .child(div().text_xs().text_color(colors.subtle).child("个人星级"))
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(colors.subtle)
+                                .child(t(cx, "inspector.rating.label")),
+                        )
                         .child(rating_control),
                 )
                 .child(
@@ -1155,7 +1263,7 @@ impl KanalibApp {
                         .text_xs()
                         .font_weight(FontWeight::SEMIBOLD)
                         .text_color(colors.subtle)
-                        .child("手工标签（回车添加，自动保存）"),
+                        .child(t(cx, "inspector.tags.manual_heading")),
                 )
                 .child(manual_input)
                 .child(
@@ -1164,7 +1272,7 @@ impl KanalibApp {
                         .text_xs()
                         .font_weight(FontWeight::SEMIBOLD)
                         .text_color(colors.subtle)
-                        .child("自动标签（点击筛选，× 移除）"),
+                        .child(t(cx, "inspector.tags.auto_heading")),
                 )
                 .child(tags)
                 .into_any_element()
@@ -1175,12 +1283,12 @@ impl KanalibApp {
                 .gap(px(6.))
                 .text_sm()
                 .text_color(colors.muted)
-                .child("选择一张图片")
+                .child(t(cx, "inspector.empty.select"))
                 .child(
                     div()
                         .text_xs()
                         .text_color(colors.subtle)
-                        .child("自动标签与分类来自本地 PixAI Tagger。"),
+                        .child(t(cx, "inspector.empty.details_hint")),
                 )
                 .into_any_element()
         };
@@ -1202,7 +1310,7 @@ impl KanalibApp {
                 div()
                     .text_sm()
                     .font_weight(FontWeight::BOLD)
-                    .child("检查器"),
+                    .child(t(cx, "inspector.title")),
             )
             .child(content)
     }
@@ -1247,7 +1355,7 @@ mod tests {
     fn format_capability_note_marks_ffmpeg_only_formats() {
         assert_eq!(
             super::format_capability_note(Path::new("a.png")),
-            "内置解码".to_string()
+            if crate::localization::is_english() { "Built-in decoder".to_string() } else { "内置解码".to_string() }
         );
         assert!(super::format_capability_note(Path::new("a.avif")).contains("需要 FFmpeg 解码"));
         let psd = super::format_capability_note(Path::new("a.PSD"));

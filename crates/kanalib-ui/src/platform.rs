@@ -276,11 +276,11 @@ pub(crate) fn open_recycle_bin() -> Result<(), String> {
             .arg(argument)
             .spawn()
             .map(|_| ())
-            .map_err(|error| format!("启动资源管理器失败：{error}"))
+            .map_err(|error| if crate::localization::is_english() { format!("Failed to launch Explorer: {error}") } else { format!("启动资源管理器失败：{error}") })
     }
     #[cfg(not(target_os = "windows"))]
     {
-        Err("当前平台没有 Windows 回收站".to_string())
+        Err(if crate::localization::is_english() { "No Windows Recycle Bin on this platform".to_string() } else { "当前平台没有 Windows 回收站".to_string() })
     }
 }
 
@@ -298,12 +298,12 @@ pub(crate) fn image_copy_fallback_message(path: &Path, error: &str) -> String {
 /// 自下而上的 32 位 BGRA 行。纯函数，便于在任意平台单测。
 pub(crate) fn dib_from_rgba(width: u32, height: u32, rgba: &[u8]) -> Result<Vec<u8>, String> {
     if width == 0 || height == 0 {
-        return Err("图片尺寸为空".to_string());
+        return Err(if crate::localization::is_english() { "Image dimensions are empty".to_string() } else { "图片尺寸为空".to_string() });
     }
     let expected = (width as usize)
         .checked_mul(height as usize)
         .and_then(|pixels| pixels.checked_mul(4))
-        .ok_or_else(|| "图片尺寸过大".to_string())?;
+        .ok_or_else(|| if crate::localization::is_english() { "Image dimensions are too large".to_string() } else { "图片尺寸过大".to_string() })?;
     if rgba.len() < expected {
         return Err(format!(
             "RGBA 数据不足：需要 {expected} 字节，实际 {}",
@@ -338,16 +338,16 @@ pub(crate) fn dib_from_rgba(width: u32, height: u32, rgba: &[u8]) -> Result<Vec<
 /// 解码图片并写入剪贴板；解码失败由调用方回退为复制路径。
 pub(crate) fn copy_image_to_clipboard(path: &Path) -> Result<(), String> {
     if crate::format::is_remote_asset(path) {
-        return Err(crate::format::REMOTE_READONLY_NOTE.to_string());
+        return Err(crate::format::remote_readonly_note().to_string());
     }
-    let image = image::open(path).map_err(|error| format!("无法解码图片：{error}"))?;
+    let image = image::open(path).map_err(|error| if crate::localization::is_english() { format!("Cannot decode image: {error}") } else { format!("无法解码图片：{error}") })?;
     let rgba = image.to_rgba8();
     let (width, height) = rgba.dimensions();
     let dib = dib_from_rgba(width, height, rgba.as_raw())?;
     let mut png = Vec::new();
     image
         .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
-        .map_err(|error| format!("PNG 编码失败：{error}"))?;
+        .map_err(|error| if crate::localization::is_english() { format!("PNG encoding failed: {error}") } else { format!("PNG 编码失败：{error}") })?;
     #[cfg(target_os = "windows")]
     {
         windows_clipboard::write_image(&dib, &png)
@@ -355,7 +355,7 @@ pub(crate) fn copy_image_to_clipboard(path: &Path) -> Result<(), String> {
     #[cfg(not(target_os = "windows"))]
     {
         let _ = (dib, png);
-        Err("当前平台不支持写入图片剪贴板".to_string())
+        Err(if crate::localization::is_english() { "Writing images to the clipboard is not supported on this platform".to_string() } else { "当前平台不支持写入图片剪贴板".to_string() })
     }
 }
 
@@ -392,16 +392,16 @@ mod windows_clipboard {
 
     fn alloc(bytes: &[u8]) -> Result<Handle, String> {
         if bytes.is_empty() {
-            return Err("剪贴板数据为空".to_string());
+            return Err(if crate::localization::is_english() { "Clipboard data is empty".to_string() } else { "剪贴板数据为空".to_string() });
         }
         let handle = unsafe { GlobalAlloc(GMEM_MOVEABLE, bytes.len()) };
         if handle.is_null() {
-            return Err("分配剪贴板内存失败".to_string());
+            return Err(if crate::localization::is_english() { "Failed to allocate clipboard memory".to_string() } else { "分配剪贴板内存失败".to_string() });
         }
         let pointer = unsafe { GlobalLock(handle) };
         if pointer.is_null() {
             unsafe { GlobalFree(handle) };
-            return Err("锁定剪贴板内存失败".to_string());
+            return Err(if crate::localization::is_english() { "Failed to lock clipboard memory".to_string() } else { "锁定剪贴板内存失败".to_string() });
         }
         unsafe {
             std::ptr::copy_nonoverlapping(bytes.as_ptr(), pointer as *mut u8, bytes.len());
@@ -413,7 +413,7 @@ mod windows_clipboard {
     pub(crate) fn write_image(dib: &[u8], png: &[u8]) -> Result<(), String> {
         let png_format = unsafe { RegisterClipboardFormatW(wide("PNG").as_ptr()) };
         if png_format == 0 {
-            return Err("注册 PNG 剪贴板格式失败".to_string());
+            return Err(if crate::localization::is_english() { "Failed to register the PNG clipboard format".to_string() } else { "注册 PNG 剪贴板格式失败".to_string() });
         }
         // 剪贴板可能被其它程序短暂占用；最多重试 5 次（约 75ms）。
         let mut opened = false;
@@ -425,17 +425,17 @@ mod windows_clipboard {
             std::thread::sleep(Duration::from_millis(15));
         }
         if !opened {
-            return Err("剪贴板被其他程序占用".to_string());
+            return Err(if crate::localization::is_english() { "The clipboard is in use by another application".to_string() } else { "剪贴板被其他程序占用".to_string() });
         }
         let result = (|| {
             if unsafe { EmptyClipboard() } == 0 {
-                return Err("清空剪贴板失败".to_string());
+                return Err(if crate::localization::is_english() { "Failed to empty the clipboard".to_string() } else { "清空剪贴板失败".to_string() });
             }
             for (format, bytes) in [(CF_DIB, dib), (png_format, png)] {
                 let handle = alloc(bytes)?;
                 if unsafe { SetClipboardData(format, handle) }.is_null() {
                     unsafe { GlobalFree(handle) };
-                    return Err("写入剪贴板失败".to_string());
+                    return Err(if crate::localization::is_english() { "Failed to write to the clipboard".to_string() } else { "写入剪贴板失败".to_string() });
                 }
             }
             Ok(())

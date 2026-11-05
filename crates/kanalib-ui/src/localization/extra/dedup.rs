@@ -290,6 +290,12 @@ pub(crate) const ZH: &[(&str, &str)] = &[
         "改动阈值只影响预览与扫描，不清空已审核状态；所有操作都不删除磁盘文件。",
     ),
     ("dedup.filter.placeholder", "筛选组（名称 / 路径 / size:>10mb）"),
+    ("dedup.reason.tags_most", "标签最多（{n} 个）"),
+    ("dedup.reason.tags_tied", "标签最多（并列 {n} 个）"),
+    ("dedup.reason.resolution", "分辨率最高"),
+    ("dedup.reason.earliest", "最早导入"),
+    ("dedup.reason.shortest_path", "路径最短"),
+    ("dedup.reason.protected", "保护路径"),
 ];
 
 pub(crate) const EN: &[(&str, &str)] = &[
@@ -653,4 +659,10 @@ pub(crate) const EN: &[(&str, &str)] = &[
         "Changing the threshold only affects preview and scanning; reviews stay and no files on disk are deleted.",
     ),
     ("dedup.filter.placeholder", "Filter groups (name / path / size:>10mb)"),
+    ("dedup.reason.tags_most", "Most tags ({n})"),
+    ("dedup.reason.tags_tied", "Most tags ({n} tied)"),
+    ("dedup.reason.resolution", "Highest resolution"),
+    ("dedup.reason.earliest", "Earliest import"),
+    ("dedup.reason.shortest_path", "Shortest path"),
+    ("dedup.reason.protected", "Protected path"),
 ];

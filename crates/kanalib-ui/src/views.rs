@@ -328,7 +328,7 @@ pub(crate) fn asset_context_menu(asset: &Asset, this: &Entity<KanalibApp>, cx: &
                 .on_click(move |_, cx| {
                     if !can_touch_local_file(&reveal_file) {
                         let _ = reveal_this.update(cx, |app, cx| {
-                            push_toast(&app.toaster, cx, REMOTE_READONLY_NOTE, Severity::Warning);
+                            push_toast(&app.toaster, cx, remote_readonly_note(), Severity::Warning);
                         });
                         return;
                     }

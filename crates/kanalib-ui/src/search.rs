@@ -292,11 +292,11 @@ impl KanalibApp {
 
     pub(crate) fn delete_saved_search(&mut self, id: i64, cx: &mut Context<Self>) {
         match self.state.delete_saved_search(id) {
-            Ok(()) => push_toast(&self.toaster, cx, "已删除智能集合", Severity::Success),
+            Ok(()) => push_toast(&self.toaster, cx, if crate::localization::is_english() { "Smart collection deleted" } else { "已删除智能集合" }, Severity::Success),
             Err(error) => push_toast(
                 &self.toaster,
                 cx,
-                format!("删除智能集合失败：{error:#}"),
+                if crate::localization::is_english() { format!("Failed to delete smart collection: {error:#}") } else { format!("删除智能集合失败：{error:#}") },
                 Severity::Danger,
             ),
         }
@@ -382,7 +382,7 @@ impl KanalibApp {
                     .flex_none()
                     .text_xs()
                     .text_color(colors.subtle)
-                    .child("查询"),
+                    .child(if crate::localization::is_english() { "Query" } else { "查询" }),
             );
         for (index, token) in tokens.into_iter().enumerate() {
             let this = this.clone();
@@ -421,7 +421,7 @@ impl KanalibApp {
                 .flex_none()
                 .text_xs()
                 .text_color(colors.subtle)
-                .child("回车记录到最近查询 · 语法见搜索框右侧 ?"),
+                .child(if crate::localization::is_english() { "Enter to save to recent searches · syntax help via ? beside the search box" } else { "回车记录到最近查询 · 语法见搜索框右侧 ?" }),
         );
         Some(row.into_any_element())
     }

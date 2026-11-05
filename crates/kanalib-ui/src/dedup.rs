@@ -5,6 +5,32 @@ use crate::localization::{t, t_args};
 use crate::theme::*;
 use crate::views::GRID_CONTEXT;
 use crate::*;
+
+/// 核心生成的中文建议原因在 UI 层映射；未知原因保留原文。
+fn localize_dedup_reason(cx: &App, reason: &str) -> String {
+    let reason = reason.trim();
+    if let Some(n) = reason
+        .strip_prefix("标签最多（并列 ")
+        .and_then(|rest| rest.strip_suffix(" 个）"))
+    {
+        return t_args(cx, "dedup.reason.tags_tied", &[("n", n)]).to_string();
+    }
+    if let Some(n) = reason
+        .strip_prefix("标签最多（")
+        .and_then(|rest| rest.strip_suffix(" 个）"))
+    {
+        return t_args(cx, "dedup.reason.tags_most", &[("n", n)]).to_string();
+    }
+    let key = match reason {
+        "分辨率最高" => Some("dedup.reason.resolution"),
+        "最早导入" => Some("dedup.reason.earliest"),
+        "路径最短" => Some("dedup.reason.shortest_path"),
+        "保护路径" => Some("dedup.reason.protected"),
+        _ => None,
+    };
+    key.map(|key| t(cx, key).to_string())
+        .unwrap_or_else(|| reason.to_string())
+}
 use ely_gpui_component::overlays::Dialog;
 use kanalib_core::model::{SimilarHit, SimilarThresholdPreview};
 
@@ -565,11 +591,14 @@ pub(crate) fn dedup_group_row(
                         )
                         .child(
                             div().truncate().text_xs().text_color(colors.subtle).child(
-                                t_args(
-                                    cx,
-                                    "dedup.row.reclaim",
-                                    &[("bytes", &reclaimable), ("reason", &group.suggested_reason)],
-                                )
+                                {
+                                    let reason = localize_dedup_reason(cx, &group.suggested_reason);
+                                    t_args(
+                                        cx,
+                                        "dedup.row.reclaim",
+                                        &[("bytes", &reclaimable), ("reason", &reason)],
+                                    )
+                                }
                                 .to_string(),
                             ),
                         ),
@@ -801,11 +830,14 @@ pub(crate) fn dedup_asset_card(
                         .child(if is_keeper {
                             t(cx, "dedup.card.keeper_current").to_string()
                         } else if is_suggested {
-                            t_args(
-                                cx,
-                                "dedup.card.recommended_reason",
-                                &[("reason", &group.suggested_reason)],
-                            )
+                            {
+                                let reason = localize_dedup_reason(cx, &group.suggested_reason);
+                                t_args(
+                                    cx,
+                                    "dedup.card.recommended_reason",
+                                    &[("reason", &reason)],
+                                )
+                            }
                             .to_string()
                         } else if editable {
                             t(cx, "dedup.card.click_to_keep").to_string()
@@ -1110,7 +1142,7 @@ pub(crate) fn dedup_diff(
         .child(
             div()
                 .text_color(colors.warning)
-                .child(group.suggested_reason.clone()),
+                .child(localize_dedup_reason(cx, &group.suggested_reason)),
         );
 
     div()
@@ -1983,7 +2015,10 @@ impl KanalibApp {
                             cx,
                             "dedup.detail.meta",
                             &[
-                                ("reason", &group.suggested_reason),
+                                (
+                                    "reason",
+                                    &localize_dedup_reason(cx, &group.suggested_reason),
+                                ),
                                 ("bytes", &format_bytes(reclaimable)),
                                 (
                                     "keeper",

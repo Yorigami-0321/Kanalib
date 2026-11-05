@@ -1,5 +1,6 @@
 use ely_gpui_component::i18n::{self, I18n};
 use gpui::{App, SharedString};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 mod extra;
 
@@ -277,7 +278,15 @@ pub(crate) fn combined_en() -> Vec<(&'static str, &'static str)> {
     )
 }
 
+static ENGLISH: AtomicBool = AtomicBool::new(false);
+
+/// 无法注入 `cx` 的纯标签/格式化 helper 用进程级语言开关。
+pub(crate) fn is_english() -> bool {
+    ENGLISH.load(Ordering::Relaxed)
+}
+
 pub(crate) fn install(cx: &mut App) {
+    ENGLISH.store(false, Ordering::Relaxed);
     let zh = combined_zh();
     let en = combined_en();
     cx.set_global(
@@ -293,6 +302,7 @@ pub(crate) fn is_supported(tag: &str) -> bool {
 
 pub(crate) fn set_locale(tag: &str, cx: &mut App) {
     if is_supported(tag) {
+        ENGLISH.store(tag == "en-US", Ordering::Relaxed);
         I18n::set_locale(tag, cx);
     } else {
         log::warn!("i18n: unsupported project locale {tag}; keeping current");
@@ -314,6 +324,25 @@ pub(crate) fn t(cx: &App, key: &str) -> SharedString {
     i18n::text(cx, key, &[])
 }
 
+
+/// 核心 `Filter::label` 是中文数据；UI 渲染时用目录映射，数据值保留原文。
+pub(crate) fn filter_label(cx: &App, filter: &kanalib_core::model::Filter) -> String {
+    use kanalib_core::model::Filter;
+    match filter {
+        Filter::All => t(cx, "sidebar.filter.all").to_string(),
+        Filter::Untagged => t(cx, "sidebar.filter.untagged").to_string(),
+        Filter::Failed => t(cx, "sidebar.filter.failed").to_string(),
+        Filter::Damaged => t(cx, "sidebar.filter.damaged").to_string(),
+        Filter::Favorites => t(cx, "sidebar.filter.favorites").to_string(),
+        Filter::Rating(rating) => t_args(cx, "sidebar.filter.rating", &[("rating", rating)]).to_string(),
+        Filter::Group(group) => localize_group_name(cx, group),
+        Filter::Tag(tag) => format!("#{tag}"),
+        Filter::Source(path) => path
+            .file_name()
+            .map(|name| name.to_string_lossy().to_string())
+            .unwrap_or_else(|| path.display().to_string()),
+    }
+}
 pub(crate) fn t_args(cx: &App, key: &str, args: &[(&str, &str)]) -> SharedString {
     i18n::text(cx, key, args)
 }

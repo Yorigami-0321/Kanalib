@@ -1,5 +1,6 @@
 use crate::app::{KanalibApp, push_toast};
 use crate::format::*;
+use crate::localization::{t, t_args};
 use crate::theme::*;
 use crate::*;
 use gpui::{Bounds, Point};
@@ -86,12 +87,12 @@ pub(crate) fn zoom_about(
 
 #[derive(Clone, Debug)]
 pub(crate) struct CompareRow {
-    pub(crate) label: &'static str,
+    pub(crate) label: SharedString,
     pub(crate) values: Vec<String>,
     pub(crate) same: bool,
 }
 
-fn push_row(rows: &mut Vec<CompareRow>, label: &'static str, values: Vec<String>) {
+fn push_row(rows: &mut Vec<CompareRow>, label: SharedString, values: Vec<String>) {
     let same = values
         .first()
         .is_some_and(|first| values.iter().all(|value| value == first));
@@ -103,16 +104,25 @@ fn push_row(rows: &mut Vec<CompareRow>, label: &'static str, values: Vec<String>
 }
 
 /// 对比栏与差异表共用的元数据行；`same` 为 true 的行在表里弱化。
-pub(crate) fn compare_metadata_rows(assets: &[Asset]) -> Vec<CompareRow> {
+pub(crate) fn compare_metadata_rows_text(cx: &App, assets: &[Asset]) -> Vec<CompareRow> {
+    metadata_rows_with(assets, |key: &str, args: &[(&str, &str)]| {
+        t_args(cx, key, args).to_string()
+    })
+}
+
+fn metadata_rows_with(
+    assets: &[Asset],
+    tr: impl Fn(&str, &[(&str, &str)]) -> String,
+) -> Vec<CompareRow> {
     let mut rows = Vec::new();
     push_row(
         &mut rows,
-        "尺寸",
+        tr("compare.field.size", &[]).into(),
         assets
             .iter()
             .map(|asset| {
                 if asset.width == 0 || asset.height == 0 {
-                    "未知".to_string()
+                    tr("compare.value.unknown", &[])
                 } else {
                     format!("{}×{}", asset.width, asset.height)
                 }
@@ -121,7 +131,7 @@ pub(crate) fn compare_metadata_rows(assets: &[Asset]) -> Vec<CompareRow> {
     );
     push_row(
         &mut rows,
-        "文件大小",
+        tr("compare.field.bytes", &[]).into(),
         assets
             .iter()
             .map(|asset| format_bytes(asset.bytes))
@@ -129,7 +139,7 @@ pub(crate) fn compare_metadata_rows(assets: &[Asset]) -> Vec<CompareRow> {
     );
     push_row(
         &mut rows,
-        "格式",
+        tr("compare.field.format", &[]).into(),
         assets
             .iter()
             .map(|asset| {
@@ -143,20 +153,20 @@ pub(crate) fn compare_metadata_rows(assets: &[Asset]) -> Vec<CompareRow> {
     );
     push_row(
         &mut rows,
-        "拍摄时间",
+        tr("compare.field.captured", &[]).into(),
         assets
             .iter()
             .map(|asset| {
                 asset
                     .captured_at
                     .map(format_date)
-                    .unwrap_or_else(|| "未记录".to_string())
+                    .unwrap_or_else(|| tr("compare.value.not_recorded", &[]))
             })
             .collect(),
     );
     push_row(
         &mut rows,
-        "修改时间",
+        tr("compare.field.modified", &[]).into(),
         assets
             .iter()
             .map(|asset| format_date(asset.mtime))
@@ -164,26 +174,26 @@ pub(crate) fn compare_metadata_rows(assets: &[Asset]) -> Vec<CompareRow> {
     );
     push_row(
         &mut rows,
-        "星级",
+        tr("compare.field.star", &[]).into(),
         assets
             .iter()
             .map(|asset| {
                 if asset.star > 0 {
                     format!("★ {}", asset.star)
                 } else {
-                    "未设".to_string()
+                    tr("compare.value.star_unset", &[])
                 }
             })
             .collect(),
     );
     push_row(
         &mut rows,
-        "评级",
+        tr("compare.field.rating", &[]).into(),
         assets
             .iter()
             .map(|asset| {
                 if asset.rating.is_empty() {
-                    "未评级".to_string()
+                    tr("compare.value.unrated", &[])
                 } else {
                     asset.rating.to_uppercase()
                 }
@@ -192,7 +202,7 @@ pub(crate) fn compare_metadata_rows(assets: &[Asset]) -> Vec<CompareRow> {
     );
     push_row(
         &mut rows,
-        "标签",
+        tr("compare.field.tags", &[]).into(),
         assets
             .iter()
             .map(|asset| {
@@ -202,24 +212,43 @@ pub(crate) fn compare_metadata_rows(assets: &[Asset]) -> Vec<CompareRow> {
                     .map(|hit| hit.tag.clone())
                     .collect::<Vec<_>>()
                     .join(" / ");
-                let count = asset.all_tags().count();
+                let count = asset.all_tags().count().to_string();
                 if top.is_empty() {
-                    format!("{count} 个")
+                    tr("compare.value.tag_count", &[("n", &count)])
                 } else {
-                    format!("{count} 个 · {top}")
+                    tr(
+                        "compare.value.tag_count_top",
+                        &[("n", &count), ("top", &top)],
+                    )
                 }
             })
             .collect(),
     );
     push_row(
         &mut rows,
-        "路径",
+        tr("compare.field.path", &[]).into(),
         assets
             .iter()
             .map(|asset| asset.path.display().to_string())
             .collect(),
     );
     rows
+}
+
+/// 测试用中文快照；界面文本走 `compare.*` 目录。
+#[cfg(test)]
+fn compare_metadata_rows(assets: &[Asset]) -> Vec<CompareRow> {
+    let catalog = crate::localization::combined_zh();
+    metadata_rows_with(assets, |key: &str, args: &[(&str, &str)]| {
+        let mut text = match catalog.iter().find(|(candidate, _)| *candidate == key) {
+            Some((_, template)) => (*template).to_string(),
+            None => key.to_string(),
+        };
+        for &(name, value) in args {
+            text = text.replace(&format!("{{{name}}}"), value);
+        }
+        text
+    })
 }
 
 impl KanalibApp {
@@ -241,12 +270,15 @@ impl KanalibApp {
         };
         let requested = selected.len();
         if requested < COMPARE_MIN_ITEMS {
-            push_toast(
-                &self.toaster,
+            let message = t_args(
                 cx,
-                format!("先选中 {COMPARE_MIN_ITEMS}–{COMPARE_MAX_ITEMS} 张图片再对比"),
-                Severity::Warning,
+                "compare.toast.select_hint",
+                &[
+                    ("min", &COMPARE_MIN_ITEMS.to_string()),
+                    ("max", &COMPARE_MAX_ITEMS.to_string()),
+                ],
             );
+            push_toast(&self.toaster, cx, message, Severity::Warning);
             return;
         }
         let order = if self.screen == Screen::Similar {
@@ -282,36 +314,32 @@ impl KanalibApp {
             }
         }
         if items.len() < COMPARE_MIN_ITEMS {
-            push_toast(
-                &self.toaster,
-                cx,
-                "选中的图片已不在图库中，无法对比",
-                Severity::Warning,
-            );
+            let message = t(cx, "compare.toast.selection_gone");
+            push_toast(&self.toaster, cx, message, Severity::Warning);
             return;
         }
         let truncated = requested > COMPARE_MAX_ITEMS;
         let origin = self.screen;
         self.start_compare(items, None, origin, cx);
         if truncated {
-            push_toast(
-                &self.toaster,
+            let message = t_args(
                 cx,
-                format!("最多同时对比 {COMPARE_MAX_ITEMS} 张，已取前 {COMPARE_MAX_ITEMS} 张"),
-                Severity::Info,
+                "compare.toast.truncated",
+                &[("max", &COMPARE_MAX_ITEMS.to_string())],
             );
+            push_toast(&self.toaster, cx, message, Severity::Info);
         }
     }
 
     /// 去重详情入口：组内 2–4 张；更多时取前 4 张。
     pub(crate) fn open_compare_group(&mut self, group: &DuplicateGroup, cx: &mut Context<Self>) {
         if group.assets.len() < COMPARE_MIN_ITEMS {
-            push_toast(
-                &self.toaster,
+            let message = t_args(
                 cx,
-                "组内至少要有 2 张才能对比",
-                Severity::Warning,
+                "compare.toast.group_too_small",
+                &[("min", &COMPARE_MIN_ITEMS.to_string())],
             );
+            push_toast(&self.toaster, cx, message, Severity::Warning);
             return;
         }
         let items = group
@@ -328,12 +356,15 @@ impl KanalibApp {
         let total = group.assets.len();
         self.start_compare(items, keeper, Screen::Duplicates, cx);
         if truncated {
-            push_toast(
-                &self.toaster,
+            let message = t_args(
                 cx,
-                format!("组内 {total} 张，仅对比前 {COMPARE_MAX_ITEMS} 张"),
-                Severity::Info,
+                "compare.toast.group_truncated",
+                &[
+                    ("total", &total.to_string()),
+                    ("max", &COMPARE_MAX_ITEMS.to_string()),
+                ],
             );
+            push_toast(&self.toaster, cx, message, Severity::Info);
         }
     }
 
@@ -463,7 +494,7 @@ impl KanalibApp {
                 .justify_center()
                 .text_sm()
                 .text_color(colors.muted)
-                .child("没有可对比的图片")
+                .child(t(cx, "compare.empty"))
                 .into_any_element();
         }
         let count = self.compare_items.len();
@@ -494,14 +525,12 @@ impl KanalibApp {
             } else {
                 estimated_stage
             };
-            panes.push(
-                self.render_compare_pane(
-                    this, asset, index, count, &stage, &drag, stage_size, colors,
-                ),
-            );
+            panes.push(self.render_compare_pane(
+                cx, this, asset, index, count, &stage, &drag, stage_size, colors,
+            ));
         }
         let keeper = self.compare_keeper.clone();
-        let rows = compare_metadata_rows(&self.compare_items);
+        let rows = compare_metadata_rows_text(cx, &self.compare_items);
         let diff_rows = rows.iter().filter(|row| !row.same).count();
 
         let close_button = this.clone();
@@ -518,16 +547,16 @@ impl KanalibApp {
         let pan_up = this.clone();
         let pan_down = this.clone();
         let back_label = match self.compare_origin {
-            Screen::Similar => "返回结果",
-            Screen::Duplicates => "返回重复项",
-            Screen::Tags => "返回标签",
-            Screen::Settings => "返回设置",
-            _ => "返回图库",
+            Screen::Similar => t(cx, "compare.back.similar"),
+            Screen::Duplicates => t(cx, "compare.back.duplicates"),
+            Screen::Tags => t(cx, "compare.back.tags"),
+            Screen::Settings => t(cx, "compare.back.settings"),
+            _ => t(cx, "common.back_to_library"),
         };
         let zoom_label = if self.compare_zoom <= ZOOM_MIN + 1e-3 {
-            "适配".to_string()
+            t(cx, "compare.zoom.fit")
         } else {
-            format!("×{:.2}", self.compare_zoom)
+            SharedString::from(format!("×{:.2}", self.compare_zoom))
         };
 
         let header = div()
@@ -560,14 +589,14 @@ impl KanalibApp {
                             .flex_none()
                             .text_sm()
                             .font_weight(FontWeight::SEMIBOLD)
-                            .child(format!("图片对比 · {count} 张")),
+                            .child(t_args(cx, "compare.title", &[("n", &count.to_string())])),
                     )
                     .child(
                         div()
                             .truncate()
                             .text_xs()
                             .text_color(colors.subtle)
-                            .child("同步缩放/平移 · 绿色边框 = 保留项"),
+                            .child(t(cx, "compare.subtitle")),
                     ),
             )
             .child(
@@ -577,7 +606,7 @@ impl KanalibApp {
                     .items_center()
                     .gap(px(4.))
                     .child(
-                        Button::new("compare-fit", "适应")
+                        Button::new("compare-fit", t(cx, "compare.action.fit"))
                             .size(ControlSize::Sm)
                             .variant(ButtonVariant::Ghost)
                             .on_click(move |_, _, cx| {
@@ -587,7 +616,7 @@ impl KanalibApp {
                     .child(
                         IconButton::new("compare-zoom-out", IconName::ZoomOut)
                             .size(ControlSize::Sm)
-                            .tooltip("缩小 (-)")
+                            .tooltip(t(cx, "compare.tooltip.zoom_out"))
                             .on_click(move |_, _, cx| {
                                 let _ = zoom_out
                                     .update(cx, |app, cx| app.compare_zoom_by((0., 0.), 0.8, cx));
@@ -606,7 +635,7 @@ impl KanalibApp {
                     .child(
                         IconButton::new("compare-zoom-in", IconName::ZoomIn)
                             .size(ControlSize::Sm)
-                            .tooltip("放大 (+)")
+                            .tooltip(t(cx, "compare.tooltip.zoom_in"))
                             .on_click(move |_, _, cx| {
                                 let _ = zoom_in
                                     .update(cx, |app, cx| app.compare_zoom_by((0., 0.), 1.25, cx));
@@ -616,9 +645,9 @@ impl KanalibApp {
                         Button::new(
                             "compare-source",
                             if self.compare_original {
-                                "预览图"
+                                t(cx, "compare.source.preview")
                             } else {
-                                "原图"
+                                t(cx, "compare.source.original")
                             },
                         )
                         .size(ControlSize::Sm)
@@ -640,7 +669,8 @@ impl KanalibApp {
             .py(px(PANE_PADDING))
             .children(panes);
 
-        let diff = self.render_compare_diff(&self.compare_items, &rows, keeper.as_deref(), colors);
+        let diff =
+            self.render_compare_diff(cx, &self.compare_items, &rows, keeper.as_deref(), colors);
 
         div()
             .id("kanalib-compare")
@@ -657,14 +687,12 @@ impl KanalibApp {
                 let _ = close_action.update(cx, |app, cx| app.close_compare(cx));
             })
             .on_action(move |_: &CompareZoomIn, _, cx| {
-                let _ = zoom_in_action.update(cx, |app, cx| {
-                    app.compare_zoom_by((0., 0.), 1.25, cx)
-                });
+                let _ =
+                    zoom_in_action.update(cx, |app, cx| app.compare_zoom_by((0., 0.), 1.25, cx));
             })
             .on_action(move |_: &CompareZoomOut, _, cx| {
-                let _ = zoom_out_action.update(cx, |app, cx| {
-                    app.compare_zoom_by((0., 0.), 0.8, cx)
-                });
+                let _ =
+                    zoom_out_action.update(cx, |app, cx| app.compare_zoom_by((0., 0.), 0.8, cx));
             })
             .on_action(move |_: &CompareFit, _, cx| {
                 let _ = fit_action.update(cx, |app, cx| app.compare_fit(cx));
@@ -690,9 +718,13 @@ impl KanalibApp {
                     .pb(px(4.))
                     .text_xs()
                     .text_color(colors.subtle)
-                    .child(format!(
-                        "差异 {diff_rows} 项 · 相同 {} 项 · 保留标记只影响本次对比，不删除或移动文件；Esc 返回",
-                        rows.len().saturating_sub(diff_rows)
+                    .child(t_args(
+                        cx,
+                        "compare.summary",
+                        &[
+                            ("diff", &diff_rows.to_string()),
+                            ("same", &rows.len().saturating_sub(diff_rows).to_string()),
+                        ],
                     )),
             )
             .child(diff)
@@ -701,6 +733,7 @@ impl KanalibApp {
 
     fn render_compare_pane(
         &self,
+        cx: &App,
         this: &Entity<Self>,
         asset: &Asset,
         index: usize,
@@ -854,7 +887,7 @@ impl KanalibApp {
                     .bg(colors.success_subtle)
                     .text_xs()
                     .text_color(colors.success)
-                    .child("保留")
+                    .child(t(cx, "compare.badge.keeper"))
             }))
             .child(
                 div()
@@ -876,27 +909,32 @@ impl KanalibApp {
             .map(|ext| ext.to_string_lossy().to_uppercase())
             .unwrap_or_else(|| "?".to_string());
         let dimensions = if asset.width == 0 || asset.height == 0 {
-            "尺寸未知".to_string()
+            t(cx, "compare.pane.dimensions_unknown").to_string()
         } else {
             format!("{}×{}", asset.width, asset.height)
         };
         let rating = if asset.rating.is_empty() {
-            "未评级".to_string()
+            t(cx, "compare.pane.rating_none").to_string()
         } else {
-            format!("评级 {}", asset.rating.to_uppercase())
+            t_args(
+                cx,
+                "compare.pane.rating",
+                &[("rating", &asset.rating.to_uppercase())],
+            )
+            .to_string()
         };
         let star = if asset.star > 0 {
             format!("★ {}", asset.star)
         } else {
-            "未设星级".to_string()
+            t(cx, "compare.pane.star_none").to_string()
         };
         let tags = asset.all_tags().count();
         let keeper_button = Button::new(
             SharedString::from(format!("compare-keeper-{index}")),
             if is_keeper {
-                "取消保留"
+                t(cx, "compare.action.unmark_keeper")
             } else {
-                "标记保留"
+                t(cx, "compare.action.mark_keeper")
             },
         )
         .size(ControlSize::Sm)
@@ -959,7 +997,15 @@ impl KanalibApp {
                             .truncate()
                             .text_xs()
                             .text_color(colors.subtle)
-                            .child(format!("{star} · {rating} · {tags} 标签")),
+                            .child(t_args(
+                                cx,
+                                "compare.pane.meta",
+                                &[
+                                    ("star", &star),
+                                    ("rating", &rating),
+                                    ("tags", &tags.to_string()),
+                                ],
+                            )),
                     )
                     .child(
                         div()
@@ -977,9 +1023,9 @@ impl KanalibApp {
                                         colors.subtle
                                     })
                                     .child(if is_keeper {
-                                        "当前保留项（仅标记）"
+                                        t(cx, "compare.pane.keeper_current")
                                     } else {
-                                        "仅标记，不改文件"
+                                        t(cx, "compare.pane.keeper_hint")
                                     }),
                             )
                             .child(keeper_button),
@@ -990,6 +1036,7 @@ impl KanalibApp {
 
     fn render_compare_diff(
         &self,
+        cx: &App,
         assets: &[Asset],
         rows: &[CompareRow],
         keeper: Option<&Path>,
@@ -1009,10 +1056,11 @@ impl KanalibApp {
                     .py(px(4.))
                     .text_xs()
                     .text_color(colors.subtle)
-                    .child("字段"),
+                    .child(t(cx, "compare.diff.field")),
             )
             .children(assets.iter().map(|asset| {
                 let is_keeper = keeper == Some(asset.path.as_path());
+                let name = asset.title();
                 div()
                     .flex_1()
                     .min_w(px(0.))
@@ -1026,9 +1074,9 @@ impl KanalibApp {
                         colors.subtle
                     })
                     .child(if is_keeper {
-                        format!("{} · 保留", asset.title())
+                        t_args(cx, "compare.diff.keeper_name", &[("name", &name)])
                     } else {
-                        asset.title()
+                        SharedString::from(name)
                     })
             }));
         let table = div()
@@ -1056,7 +1104,7 @@ impl KanalibApp {
                             .py(px(4.))
                             .text_xs()
                             .text_color(label_color)
-                            .child(row.label),
+                            .child(row.label.clone()),
                     )
                     .children(row.values.iter().map(|value| {
                         div()

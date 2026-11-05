@@ -1,5 +1,6 @@
 use crate::app::{KanalibApp, push_toast};
 use crate::components::*;
+use crate::localization::{t, t_args};
 use crate::settings::TAG_ROW_HEIGHT;
 use crate::theme::*;
 use crate::*;
@@ -23,13 +24,16 @@ pub(crate) enum TagManagerFilter {
 impl TagManagerFilter {
     pub(crate) const ALL: [Self; 4] = [Self::All, Self::Unused, Self::LowFrequency, Self::AutoOnly];
 
-    pub(crate) fn label(self) -> &'static str {
-        match self {
-            Self::All => "全部",
-            Self::Unused => "0 使用",
-            Self::LowFrequency => "低频",
-            Self::AutoOnly => "仅自动",
-        }
+    pub(crate) fn label(self, cx: &App) -> SharedString {
+        t(
+            cx,
+            match self {
+                Self::All => "tags.filter.all",
+                Self::Unused => "tags.filter.unused",
+                Self::LowFrequency => "tags.filter.low",
+                Self::AutoOnly => "tags.filter.auto",
+            },
+        )
     }
 
     pub(crate) fn slug(self) -> &'static str {
@@ -72,14 +76,17 @@ impl TagManagerSort {
         Self::ManualDesc,
     ];
 
-    pub(crate) fn label(self) -> &'static str {
-        match self {
-            Self::Default => "默认顺序",
-            Self::Name => "名称",
-            Self::UsageAsc => "使用次数（少→多）",
-            Self::UsageDesc => "使用次数（多→少）",
-            Self::ManualDesc => "手工次数（多→少）",
-        }
+    pub(crate) fn label(self, cx: &App) -> SharedString {
+        t(
+            cx,
+            match self {
+                Self::Default => "tags.sort.default",
+                Self::Name => "tags.sort.name",
+                Self::UsageAsc => "tags.sort.usage_asc",
+                Self::UsageDesc => "tags.sort.usage_desc",
+                Self::ManualDesc => "tags.sort.manual_desc",
+            },
+        )
     }
 }
 
@@ -186,7 +193,12 @@ impl KanalibApp {
                         app.tag_review_notice = None;
                     }
                     Err(error) => {
-                        let message = format!("读取待审候选失败：{error:#}");
+                        let message = t_args(
+                            cx,
+                            "tags.review.load_failed",
+                            &[("error", &format!("{error:#}"))],
+                        )
+                        .to_string();
                         log::warn!("pending tag reviews: {error:#}");
                         app.tag_review_notice = Some(message);
                     }
@@ -227,13 +239,20 @@ impl KanalibApp {
         cx: &mut Context<Self>,
     ) {
         let label = match (&tag, state) {
-            (Some(tag), TagReviewState::Accepted) => format!("接受候选 #{tag}"),
-            (Some(tag), TagReviewState::Ignored) => format!("忽略候选 #{tag}"),
-            (Some(tag), TagReviewState::Pending) => format!("恢复候选 #{tag}"),
-            (None, TagReviewState::Accepted) => "整张接受".to_string(),
-            (None, TagReviewState::Ignored) => "整张忽略".to_string(),
-            (None, TagReviewState::Pending) => "整张恢复待审".to_string(),
-        };
+            (Some(tag), TagReviewState::Accepted) => {
+                t_args(cx, "tags.review.accept", &[("tag", tag)])
+            }
+            (Some(tag), TagReviewState::Ignored) => {
+                t_args(cx, "tags.review.ignore", &[("tag", tag)])
+            }
+            (Some(tag), TagReviewState::Pending) => {
+                t_args(cx, "tags.review.restore", &[("tag", tag)])
+            }
+            (None, TagReviewState::Accepted) => t(cx, "tags.review.accept_asset"),
+            (None, TagReviewState::Ignored) => t(cx, "tags.review.ignore_asset"),
+            (None, TagReviewState::Pending) => t(cx, "tags.review.restore_asset"),
+        }
+        .to_string();
         let app_state = self.state.clone();
         let toaster = self.toaster.clone();
         let review_path = path.clone();
@@ -251,14 +270,22 @@ impl KanalibApp {
             let _ = weak.update(cx, |app, cx| {
                 match result {
                     Ok(changed) => {
-                        let message = format!("{label} · 处理 {changed} 条");
-                        app.tag_review_notice = Some(message.clone());
+                        let message = t_args(
+                            cx,
+                            "tags.review.done",
+                            &[("label", &label), ("count", &changed.to_string())],
+                        );
+                        app.tag_review_notice = Some(message.to_string());
                         push_toast(&toaster, cx, message, Severity::Success);
                         app.refresh_tag_reviews(cx);
                     }
                     Err(error) => {
-                        let message = format!("{label}失败：{error:#}");
-                        app.tag_review_notice = Some(message.clone());
+                        let message = t_args(
+                            cx,
+                            "tags.review.failed",
+                            &[("label", &label), ("error", &format!("{error:#}"))],
+                        );
+                        app.tag_review_notice = Some(message.to_string());
                         push_toast(&toaster, cx, message, Severity::Danger);
                     }
                 }
@@ -276,12 +303,8 @@ impl KanalibApp {
             Err(error) => {
                 log::warn!("list tags: {error:#}");
                 self.tag_list.clear();
-                push_toast(
-                    &self.toaster,
-                    cx,
-                    format!("读取标签失败：{error:#}"),
-                    Severity::Danger,
-                );
+                let message = t_args(cx, "tags.load_failed", &[("error", &format!("{error:#}"))]);
+                push_toast(&self.toaster, cx, message, Severity::Danger);
             }
         }
         self.screen = Screen::Tags;
@@ -315,12 +338,10 @@ impl KanalibApp {
     pub(crate) fn refresh_tag_manager(&mut self, cx: &mut Context<Self>) {
         match self.state.tag_vocabulary() {
             Ok(tags) => self.tag_list = tags,
-            Err(error) => push_toast(
-                &self.toaster,
-                cx,
-                format!("读取标签失败：{error:#}"),
-                Severity::Danger,
-            ),
+            Err(error) => {
+                let message = t_args(cx, "tags.load_failed", &[("error", &format!("{error:#}"))]);
+                push_toast(&self.toaster, cx, message, Severity::Danger);
+            }
         }
         cx.notify();
     }
@@ -328,22 +349,18 @@ impl KanalibApp {
     pub(crate) fn set_tag_blocked(&mut self, name: String, blocked: bool, cx: &mut Context<Self>) {
         log::info!("tag manager: set blocked name={name} blocked={blocked}");
         match self.state.set_tag_blocked(&name, blocked) {
-            Ok(()) => push_toast(
-                &self.toaster,
-                cx,
-                if blocked {
-                    format!("已屏蔽标签 #{name}")
+            Ok(()) => {
+                let message = if blocked {
+                    t_args(cx, "tags.block.done", &[("name", &name)])
                 } else {
-                    format!("已取消屏蔽标签 #{name}")
-                },
-                Severity::Success,
-            ),
-            Err(error) => push_toast(
-                &self.toaster,
-                cx,
-                format!("更新屏蔽失败：{error:#}"),
-                Severity::Danger,
-            ),
+                    t_args(cx, "tags.unblock.done", &[("name", &name)])
+                };
+                push_toast(&self.toaster, cx, message, Severity::Success);
+            }
+            Err(error) => {
+                let message = t_args(cx, "tags.block.failed", &[("error", &format!("{error:#}"))]);
+                push_toast(&self.toaster, cx, message, Severity::Danger);
+            }
         }
         cx.notify();
     }
@@ -392,20 +409,18 @@ impl KanalibApp {
         match self.state.rename_tag(&old, new_name) {
             Ok(affected) => {
                 self.tag_rename = None;
-                push_toast(
-                    &self.toaster,
-                    cx,
-                    format!("已重命名标签 · 影响 {affected} 张"),
-                    Severity::Success,
-                );
+                let message = t_args(cx, "tags.rename.done", &[("count", &affected.to_string())]);
+                push_toast(&self.toaster, cx, message, Severity::Success);
                 self.refresh_tag_manager(cx);
             }
-            Err(error) => push_toast(
-                &self.toaster,
-                cx,
-                format!("重命名标签失败：{error:#}"),
-                Severity::Danger,
-            ),
+            Err(error) => {
+                let message = t_args(
+                    cx,
+                    "tags.rename.failed",
+                    &[("error", &format!("{error:#}"))],
+                );
+                push_toast(&self.toaster, cx, message, Severity::Danger);
+            }
         }
         cx.notify();
     }
@@ -417,20 +432,14 @@ impl KanalibApp {
         match self.state.merge_tags(&source, target) {
             Ok(affected) => {
                 self.tag_merge = None;
-                push_toast(
-                    &self.toaster,
-                    cx,
-                    format!("已合并标签 · 影响 {affected} 张"),
-                    Severity::Success,
-                );
+                let message = t_args(cx, "tags.merge.done", &[("count", &affected.to_string())]);
+                push_toast(&self.toaster, cx, message, Severity::Success);
                 self.refresh_tag_manager(cx);
             }
-            Err(error) => push_toast(
-                &self.toaster,
-                cx,
-                format!("合并标签失败：{error:#}"),
-                Severity::Danger,
-            ),
+            Err(error) => {
+                let message = t_args(cx, "tags.merge.failed", &[("error", &format!("{error:#}"))]);
+                push_toast(&self.toaster, cx, message, Severity::Danger);
+            }
         }
         cx.notify();
     }
@@ -438,7 +447,8 @@ impl KanalibApp {
     pub(crate) fn open_tag_dialog(&mut self, mode: TagDialogMode, cx: &mut Context<Self>) {
         let paths = self.selected_paths();
         if paths.is_empty() {
-            push_toast(&self.toaster, cx, "先选择图片", Severity::Warning);
+            let message = t(cx, "tags.select_images");
+            push_toast(&self.toaster, cx, message, Severity::Warning);
             return;
         }
         self.palette_open = false;
@@ -454,7 +464,8 @@ impl KanalibApp {
         };
         let paths = self.tag_dialog_paths.clone();
         if paths.is_empty() {
-            push_toast(&self.toaster, cx, "先选择图片", Severity::Warning);
+            let message = t(cx, "tags.select_images");
+            push_toast(&self.toaster, cx, message, Severity::Warning);
             return;
         }
         let result = match mode {
@@ -462,38 +473,40 @@ impl KanalibApp {
             TagDialogMode::Remove => self.state.remove_tags(&paths, name),
         };
         match result {
-            Ok(0) => push_toast(
-                &self.toaster,
-                cx,
-                if mode == TagDialogMode::Add {
-                    "标签已存在或名称无效"
+            Ok(0) => {
+                let message = if mode == TagDialogMode::Add {
+                    t(cx, "tags.exists_or_invalid")
                 } else {
-                    "所选图片没有这个标签"
-                },
-                Severity::Warning,
-            ),
+                    t(cx, "tags.not_tagged")
+                };
+                push_toast(&self.toaster, cx, message, Severity::Warning);
+            }
             Ok(updated) => {
                 self.tag_dialog = None;
                 self.tag_dialog_paths.clear();
-                push_toast(
-                    &self.toaster,
-                    cx,
-                    if mode == TagDialogMode::Add {
-                        format!("已为 {updated} 张添加标签 #{name}")
-                    } else {
-                        format!("已从 {updated} 张移除标签 #{name}")
-                    },
-                    Severity::Success,
-                );
+                let message = if mode == TagDialogMode::Add {
+                    t_args(
+                        cx,
+                        "tags.added",
+                        &[("count", &updated.to_string()), ("name", name)],
+                    )
+                } else {
+                    t_args(
+                        cx,
+                        "tags.removed",
+                        &[("count", &updated.to_string()), ("name", name)],
+                    )
+                };
+                push_toast(&self.toaster, cx, message, Severity::Success);
             }
             Err(error) => {
-                self.state.set_error(format!("标签操作失败：{error:#}"));
-                push_toast(
-                    &self.toaster,
+                let message = t_args(
                     cx,
-                    format!("标签操作失败：{error:#}"),
-                    Severity::Danger,
+                    "tags.action_failed",
+                    &[("error", &format!("{error:#}"))],
                 );
+                self.state.set_error(message.to_string());
+                push_toast(&self.toaster, cx, message, Severity::Danger);
             }
         }
         cx.notify();
@@ -527,8 +540,9 @@ impl KanalibApp {
         let body: AnyElement = if filtered.is_empty() {
             let this_reset = this.clone();
             let search_reset = search.clone();
+            let reset_label = t(cx, "tags.reset_filter");
             let action = (total > 0).then(|| {
-                Button::new("tag-empty-reset", "重置筛选")
+                Button::new("tag-empty-reset", reset_label)
                     .size(ControlSize::Sm)
                     .on_click(move |_, _, cx| {
                         let _ = this_reset.update(cx, |app, cx| {
@@ -542,14 +556,14 @@ impl KanalibApp {
             let (icon, title, description) = if total == 0 {
                 (
                     IconName::Tag,
-                    "还没有标签",
-                    "导入图片并完成自动打标后，标签会出现在这里。",
+                    t(cx, "tags.empty.title"),
+                    t(cx, "tags.empty.description"),
                 )
             } else {
                 (
                     IconName::SearchX,
-                    "没有匹配的标签",
-                    "调整搜索或筛选条件后再试。",
+                    t(cx, "tags.no_match.title"),
+                    t(cx, "tags.no_match.description"),
                 )
             };
             empty_state(icon, title, description, action, colors)
@@ -557,7 +571,7 @@ impl KanalibApp {
             let this_list = this.clone();
             let blocked = blocked_tags.clone();
             let row_count = filtered.len();
-            uniform_list("tag-manager-list", row_count, move |range, _, _| {
+            uniform_list("tag-manager-list", row_count, move |range, _, cx| {
                 range
                     .map(|row| {
                         let tag = &filtered[row];
@@ -603,12 +617,18 @@ impl KanalibApp {
                                             .child(name),
                                     )
                                     .child(div().text_xs().text_color(colors.subtle).child(
-                                        format!(
-                                            "#{} · {} 张 · 手工 {} 次{}",
-                                            tag.category,
-                                            tag.count,
-                                            tag.manual_count,
-                                            if blocked_row { " · 已屏蔽" } else { "" }
+                                        t_args(
+                                            cx,
+                                            if blocked_row {
+                                                "tags.row.meta_blocked"
+                                            } else {
+                                                "tags.row.meta"
+                                            },
+                                            &[
+                                                ("category", &tag.category),
+                                                ("count", &tag.count.to_string()),
+                                                ("manual", &tag.manual_count.to_string()),
+                                            ],
                                         ),
                                     )),
                             )
@@ -620,7 +640,7 @@ impl KanalibApp {
                                     .child(
                                         Button::new(
                                             SharedString::from(format!("view-tag-{view_name}")),
-                                            "查看图片",
+                                            t(cx, "tags.view_assets"),
                                         )
                                         .size(ControlSize::Sm)
                                         .disabled(!has_assets)
@@ -638,7 +658,7 @@ impl KanalibApp {
                                             IconName::Pencil,
                                         )
                                         .size(ControlSize::Sm)
-                                        .tooltip("重命名")
+                                        .tooltip(t(cx, "tags.rename"))
                                         .on_click(
                                             move |_, _, cx| {
                                                 let _ = this_rename.update(cx, |app, cx| {
@@ -653,7 +673,7 @@ impl KanalibApp {
                                             IconName::Merge,
                                         )
                                         .size(ControlSize::Sm)
-                                        .tooltip("合并到其他标签")
+                                        .tooltip(t(cx, "tags.merge"))
                                         .on_click(
                                             move |_, _, cx| {
                                                 let _ = this_merge.update(cx, |app, cx| {
@@ -666,9 +686,9 @@ impl KanalibApp {
                                         Button::new(
                                             SharedString::from(format!("block-tag-{}", block_name)),
                                             if blocked_row {
-                                                "取消屏蔽"
+                                                t(cx, "tags.unblock")
                                             } else {
-                                                "屏蔽"
+                                                t(cx, "tags.block")
                                             },
                                         )
                                         .size(ControlSize::Sm)
@@ -721,17 +741,21 @@ impl KanalibApp {
                                 div()
                                     .text_lg()
                                     .font_weight(FontWeight::SEMIBOLD)
-                                    .child("标签管理"),
+                                    .child(t(cx, "tags.title")),
                             )
-                            .child(
-                                div()
-                                    .text_xs()
-                                    .text_color(colors.muted)
-                                    .truncate()
-                                    .child(format!(
-                                        "共 {total} 个标签 · 0 使用 {unused} · 低频 {low_frequency} · 仅自动 {auto_only} · 已屏蔽 {blocked_count}"
-                                    )),
-                            ),
+                            .child(div().text_xs().text_color(colors.muted).truncate().child(
+                                t_args(
+                                    cx,
+                                    "tags.summary",
+                                    &[
+                                        ("total", &total.to_string()),
+                                        ("unused", &unused.to_string()),
+                                        ("low_frequency", &low_frequency.to_string()),
+                                        ("auto_only", &auto_only.to_string()),
+                                        ("blocked", &blocked_count.to_string()),
+                                    ],
+                                ),
+                            )),
                     )
                     .child(
                         div()
@@ -740,24 +764,24 @@ impl KanalibApp {
                             .items_center()
                             .gap(px(SPACE_1_5))
                             .child(
-                                Button::new("tags-refresh", "刷新")
+                                Button::new("tags-refresh", t(cx, "tags.refresh"))
                                     .icon(IconName::RefreshCw)
                                     .on_click(move |_, _, cx| {
-                                        let _ = this_refresh.update(cx, |app, cx| {
-                                            app.refresh_tag_manager(cx)
-                                        });
+                                        let _ = this_refresh
+                                            .update(cx, |app, cx| app.refresh_tag_manager(cx));
                                     }),
                             )
                             .child(
-                                Button::new("tags-back", "返回图库")
-                                    .on_click(move |_, _, cx| {
+                                Button::new("tags-back", t(cx, "common.back_to_library")).on_click(
+                                    move |_, _, cx| {
                                         let _ = this_back.update(cx, |app, cx| {
                                             app.screen = Screen::Library;
                                             app.tag_return_pending = false;
                                             app.focus_grid_pending = true;
                                             cx.notify();
                                         });
-                                    }),
+                                    },
+                                ),
                             ),
                     ),
             )

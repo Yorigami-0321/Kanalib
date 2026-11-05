@@ -134,14 +134,14 @@ enum SortMode {
 impl SortMode {
     fn label(self) -> &'static str {
         match self {
-            Self::Name => "文件名",
-            Self::Modified => "修改时间",
-            Self::Captured => "拍摄时间",
-            Self::Size => "文件大小",
-            Self::Resolution => "分辨率",
-            Self::Star => "星级",
-            Self::Favorite => "收藏优先",
-            Self::Rating => "模型评级",
+            Self::Name => if crate::localization::is_english() { "File name" } else { "文件名" },
+            Self::Modified => if crate::localization::is_english() { "Modified" } else { "修改时间" },
+            Self::Captured => if crate::localization::is_english() { "Captured" } else { "拍摄时间" },
+            Self::Size => if crate::localization::is_english() { "File size" } else { "文件大小" },
+            Self::Resolution => if crate::localization::is_english() { "Resolution" } else { "分辨率" },
+            Self::Star => if crate::localization::is_english() { "Rating" } else { "星级" },
+            Self::Favorite => if crate::localization::is_english() { "Favorites first" } else { "收藏优先" },
+            Self::Rating => if crate::localization::is_english() { "Model rating" } else { "模型评级" },
         }
     }
 
@@ -223,12 +223,12 @@ impl ViewMode {
 
     fn label(self) -> &'static str {
         match self {
-            Self::IconsLarge => "大图标",
-            Self::IconsMedium => "中图标",
-            Self::IconsSmall => "小图标",
-            Self::List => "列表",
-            Self::Details => "详细信息",
-            Self::Content => "内容",
+            Self::IconsLarge => if crate::localization::is_english() { "Large icons" } else { "大图标" },
+            Self::IconsMedium => if crate::localization::is_english() { "Medium icons" } else { "中图标" },
+            Self::IconsSmall => if crate::localization::is_english() { "Small icons" } else { "小图标" },
+            Self::List => if crate::localization::is_english() { "List" } else { "列表" },
+            Self::Details => if crate::localization::is_english() { "Details" } else { "详细信息" },
+            Self::Content => if crate::localization::is_english() { "Content" } else { "内容" },
         }
     }
 
@@ -336,11 +336,11 @@ impl GroupMode {
 
     fn label(self) -> &'static str {
         match self {
-            Self::None => "不分组",
-            Self::Modified => "修改时间",
-            Self::Captured => "拍摄时间",
-            Self::Source => "来源",
-            Self::Rating => "评级",
+            Self::None => if crate::localization::is_english() { "No grouping" } else { "不分组" },
+            Self::Modified => if crate::localization::is_english() { "Modified" } else { "修改时间" },
+            Self::Captured => if crate::localization::is_english() { "Captured" } else { "拍摄时间" },
+            Self::Source => if crate::localization::is_english() { "Source" } else { "来源" },
+            Self::Rating => if crate::localization::is_english() { "Rating" } else { "评级" },
         }
     }
 }
@@ -454,16 +454,6 @@ enum DedupFilter {
 }
 
 impl DedupFilter {
-    fn label(self) -> &'static str {
-        match self {
-            Self::Pending => "未审",
-            Self::Ignored => "已忽略",
-            Self::Related => "相关变体",
-            Self::Done => "已保留",
-            Self::All => "全部",
-        }
-    }
-
     fn matches(self, state: ReviewState) -> bool {
         match self {
             Self::Pending => state == ReviewState::Pending,

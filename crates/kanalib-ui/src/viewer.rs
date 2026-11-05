@@ -2,8 +2,10 @@ use crate::app::{KanalibApp, push_toast};
 use crate::format::{
     is_animation_container, is_remote_asset, open_asset_with_system, video_fact_rows, video_meta,
 };
+use crate::localization::{t, t_args};
 use crate::theme::*;
 use crate::*;
+use gpui::{EntityId, View, ViewElement};
 use kanalib_core::color::{self, PreviewOutcome};
 
 pub(crate) const VIEWER_CONTEXT: &str = "KanalibViewer";
@@ -92,7 +94,7 @@ fn release_viewer_preview(path: &Path, cx: &mut App) {
     }
 }
 
-pub(crate) fn viewer_caption(asset: &Asset) -> SharedString {
+pub(crate) fn viewer_caption(cx: &App, asset: &Asset) -> SharedString {
     let general = asset
         .all_tags()
         .filter(|tag| matches!(tag.category.as_str(), "general" | "manual"))
@@ -100,7 +102,7 @@ pub(crate) fn viewer_caption(asset: &Asset) -> SharedString {
     let mut parts = vec![asset.title()];
     if asset.is_video() {
         let meta = video_meta(&asset.metadata_json);
-        parts.push("视频".into());
+        parts.push(t(cx, "viewer.caption.video").to_string());
         for (_, value) in video_fact_rows(&meta, asset.width, asset.height) {
             parts.push(value);
         }
@@ -108,15 +110,17 @@ pub(crate) fn viewer_caption(asset: &Asset) -> SharedString {
         parts.push(format!("{} × {}", asset.width, asset.height));
     }
     if is_remote_asset(&asset.path) {
-        parts.push("远端只读".into());
+        parts.push(t(cx, "viewer.caption.remote").to_string());
     }
     if asset.favorite {
-        parts.push("收藏".into());
+        parts.push(t(cx, "viewer.caption.favorite").to_string());
     }
     if asset.star > 0 {
-        parts.push(format!("{} 星", asset.star));
+        let stars = asset.star.to_string();
+        parts.push(t_args(cx, "viewer.caption.stars", &[("n", &stars)]).to_string());
     }
-    parts.push(format!("{general} 个标签"));
+    let tags = general.to_string();
+    parts.push(t_args(cx, "viewer.caption.tags", &[("n", &tags)]).to_string());
     SharedString::from(parts.join(" · "))
 }
 
@@ -135,12 +139,13 @@ impl KanalibApp {
                 if asset.path.as_path() == path {
                     at = Some(slides.len());
                 }
-                slides.push((asset.path.clone(), viewer_caption(asset)));
+                // 题注按语言在渲染期拼；这里只留标题，供资产不在列表时兜底。
+                slides.push((asset.path.clone(), asset.title().into()));
             }
             if at.is_none()
                 && let Some(asset) = assets.iter().find(|asset| asset.path.as_path() == path)
             {
-                slides = vec![(asset.path.clone(), viewer_caption(asset))];
+                slides = vec![(asset.path.clone(), asset.title().into())];
                 at = Some(0);
             }
             (slides, at)
@@ -277,12 +282,8 @@ impl KanalibApp {
                         .lock()
                         .unwrap()
                         .insert(source.to_path_buf(), ViewerPreview::Failed);
-                    push_toast(
-                        &self.toaster,
-                        cx,
-                        "无法生成 sRGB 预览，已显示缩略图",
-                        Severity::Warning,
-                    );
+                    let message = t(cx, "viewer.preview.failed");
+                    push_toast(&self.toaster, cx, message, Severity::Warning);
                     cx.notify();
                 } else {
                     viewer_previews().lock().unwrap().remove(source);
@@ -407,7 +408,10 @@ impl KanalibApp {
                 self.open_viewer_at(&path);
                 cx.notify();
             }
-            None => push_toast(&self.toaster, cx, "没有可查看的图片", Severity::Warning),
+            None => {
+                let message = t(cx, "viewer.empty.no_image");
+                push_toast(&self.toaster, cx, message, Severity::Warning);
+            }
         }
     }
 
@@ -432,8 +436,65 @@ impl KanalibApp {
         colors: UiColors,
     ) -> Option<AnyElement> {
         let (path, caption) = self.viewer_slides.get(at)?.clone();
-        let (is_video, remote, thumb, width, height) = {
-            let shared = self.state.shared.lock().unwrap();
+        Some(
+            ViewElement::new(ViewerPane {
+                this: this.clone(),
+                at,
+                count: self.viewer_slides.len(),
+                path,
+                caption,
+                state: self.state.clone(),
+                toaster: self.toaster.clone(),
+                focus: self.viewer_focus.clone(),
+                source_mode: self.viewer_source_mode,
+                large_override: self.viewer_large_override,
+                similar: self.screen == Screen::Similar,
+                colors,
+            })
+            .into_any_element(),
+        )
+    }
+}
+
+/// 查看器内容要读当前语言的文案（`t` / `t_args` 需要 `App`），而 app.rs 调
+/// `render_viewer` 时只有颜色，所以建树推迟到 gpui 交回上下文的无状态视图里。
+struct ViewerPane {
+    this: Entity<KanalibApp>,
+    at: usize,
+    count: usize,
+    path: PathBuf,
+    caption: SharedString,
+    state: Arc<AppState>,
+    toaster: Entity<Toaster>,
+    focus: FocusHandle,
+    source_mode: ViewerSourceMode,
+    large_override: bool,
+    similar: bool,
+    colors: UiColors,
+}
+
+impl View for ViewerPane {
+    fn entity_id(&self) -> Option<EntityId> {
+        None
+    }
+
+    fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
+        let ViewerPane {
+            this,
+            at,
+            count,
+            path,
+            caption,
+            state,
+            toaster,
+            focus,
+            source_mode,
+            large_override,
+            similar,
+            colors,
+        } = self;
+        let (is_video, remote, thumb, width, height, caption) = {
+            let shared = state.shared.lock().unwrap();
             let assets = shared.assets.read().unwrap();
             match assets.iter().find(|asset| asset.path == path) {
                 Some(asset) => (
@@ -442,6 +503,7 @@ impl KanalibApp {
                     asset.thumb.clone().or_else(|| asset.tile_thumb.clone()),
                     asset.width,
                     asset.height,
+                    viewer_caption(cx, asset),
                 ),
                 None => (
                     kanalib_core::model::is_video(&path),
@@ -449,6 +511,7 @@ impl KanalibApp {
                     None,
                     0,
                     0,
+                    caption,
                 ),
             }
         };
@@ -456,14 +519,13 @@ impl KanalibApp {
         let can_original = !is_video && !remote;
         let large_image = can_original && is_large_image(width, height);
         // 超大图默认回退快速预览；用户显式选「原图」后 override 置位。
-        let large_fallback = large_image
-            && self.viewer_source_mode == ViewerSourceMode::Original
-            && !self.viewer_large_override;
+        let large_fallback =
+            large_image && source_mode == ViewerSourceMode::Original && !large_override;
         let mode = if can_original {
             if large_fallback {
                 ViewerSourceMode::QuickPreview
             } else {
-                self.viewer_source_mode
+                source_mode
             }
         } else {
             ViewerSourceMode::QuickPreview
@@ -481,55 +543,56 @@ impl KanalibApp {
                 _ => thumb.clone(),
             },
         };
-        let count = self.viewer_slides.len();
         let animated = is_animation_container(&path);
         let external_path = path.clone();
-        let external_toaster = self.toaster.clone();
-        let external_state = self.state.clone();
+        let external_toaster = toaster.clone();
+        let external_state = state.clone();
         let can_external =
             (is_video || animated) && !remote && kanalib_core::open::can_open_externally(&path);
         let external_label = if is_video {
-            "用系统播放器打开"
+            t(cx, "viewer.external.open_video")
         } else {
-            "用系统应用播放"
+            t(cx, "viewer.external.open_animation")
         };
         let mut hint_parts: Vec<String> = [
-            "← → 切图",
-            "0 适应 / 1 100%",
-            "+/- 缩放",
-            "Ctrl+滚轮",
-            "拖拽平移",
-            "R 旋转",
-            "F 全屏",
+            "viewer.hint.prev_next",
+            "viewer.hint.fit",
+            "viewer.hint.zoom",
+            "viewer.hint.wheel",
+            "viewer.hint.pan",
+            "viewer.hint.rotate",
+            "viewer.hint.fullscreen",
         ]
         .into_iter()
-        .map(str::to_string)
+        .map(|key| t(cx, key).to_string())
         .collect();
         if is_video {
-            hint_parts.push("视频仅显示首帧，播放请用系统播放器".into());
+            hint_parts.push(t(cx, "viewer.hint.video_first_frame").to_string());
         } else if animated {
-            hint_parts.push("动画仅首帧，播放请用系统应用".into());
+            hint_parts.push(t(cx, "viewer.hint.animation_first_frame").to_string());
         }
         if remote {
-            hint_parts.push("远端只读 · 未下载原图".into());
+            hint_parts.push(t(cx, "viewer.hint.remote").to_string());
         }
         match mode {
-            ViewerSourceMode::Original => hint_parts.push("原图直读（未做色彩转换）".into()),
+            ViewerSourceMode::Original => {
+                hint_parts.push(t(cx, "viewer.hint.original").to_string())
+            }
             ViewerSourceMode::QuickPreview if can_original && !large_fallback => {
-                hint_parts.push("快速预览 · 缩略图".into());
+                hint_parts.push(t(cx, "viewer.hint.quick").to_string());
             }
             ViewerSourceMode::ColorManaged => match &preview {
                 Some(ViewerPreview::Ready(_)) => {
-                    hint_parts.push("色彩管理 · 已转换到 sRGB".into())
+                    hint_parts.push(t(cx, "viewer.hint.color_ready").to_string())
                 }
                 Some(ViewerPreview::Pending(_)) => {
-                    hint_parts.push("正在生成色彩管理预览".into())
+                    hint_parts.push(t(cx, "viewer.hint.color_pending").to_string())
                 }
                 Some(ViewerPreview::Failed) => {
-                    hint_parts.push("色彩管理预览失败 · 显示缩略图".into())
+                    hint_parts.push(t(cx, "viewer.hint.color_failed").to_string())
                 }
                 Some(ViewerPreview::Passthrough) => {
-                    hint_parts.push("色彩管理 · 原图为 sRGB".into())
+                    hint_parts.push(t(cx, "viewer.hint.color_srgb").to_string())
                 }
                 None => {}
             },
@@ -537,20 +600,20 @@ impl KanalibApp {
         }
         let hint = hint_parts.join(" · ");
         let empty_label = if large_fallback {
-            "原图超过阈值，快速预览不可用"
+            t(cx, "viewer.empty.large_threshold")
         } else if mode == ViewerSourceMode::Original {
-            "无法加载原图"
+            t(cx, "viewer.empty.original_failed")
         } else if mode == ViewerSourceMode::ColorManaged {
             match &preview {
-                Some(ViewerPreview::Failed) => "无法生成色彩管理预览",
-                _ => "正在生成色彩管理预览…",
+                Some(ViewerPreview::Failed) => t(cx, "viewer.empty.color_failed"),
+                _ => t(cx, "viewer.empty.color_pending"),
             }
         } else if is_video {
-            "暂无视频首帧（生成首帧需要 FFmpeg）"
+            t(cx, "viewer.empty.video_first_frame")
         } else if remote {
-            "远端资产未下载原图，暂无预览"
+            t(cx, "viewer.empty.remote")
         } else {
-            "暂无缩略图，无法快速预览"
+            t(cx, "viewer.empty.thumbnail")
         };
         let preview: AnyElement = match source {
             Some(source) => ImageViewer::new("kanalib-viewer", source).into_any_element(),
@@ -583,7 +646,7 @@ impl KanalibApp {
             .bg(colors.bg)
             .text_color(colors.fg)
             .key_context(VIEWER_CONTEXT)
-            .track_focus(&self.viewer_focus)
+            .track_focus(&focus)
             .on_action(move |_: &ViewerClose, _, cx| {
                 let _ = close.update(cx, |app, cx| app.close_viewer(cx));
             })
@@ -602,23 +665,33 @@ impl KanalibApp {
         let prev_button = this.clone();
         let next_button = this.clone();
         let large_notice = large_image.then(|| {
-            let megapixels = image_megapixels(width, height);
+            let megapixels = format!("{:.2}", image_megapixels(width, height));
             let notice_this = this.clone();
             let to_original = mode != ViewerSourceMode::Original;
             let label = if large_fallback {
-                format!(
-                    "原图 {megapixels:.2} MP 超过 {} MP 阈值，已使用快速预览。",
-                    LARGE_IMAGE_PIXEL_LIMIT / 1_000_000
+                let limit = (LARGE_IMAGE_PIXEL_LIMIT / 1_000_000).to_string();
+                t_args(
+                    cx,
+                    "viewer.notice.large_fallback",
+                    &[("megapixels", &megapixels), ("limit", &limit)],
                 )
             } else if mode == ViewerSourceMode::Original {
-                format!("原图 {megapixels:.2} MP，加载可能较慢/占用内存。")
+                t_args(
+                    cx,
+                    "viewer.notice.large_loading",
+                    &[("megapixels", &megapixels)],
+                )
             } else {
                 let current = if mode == ViewerSourceMode::ColorManaged {
-                    "色彩管理"
+                    t(cx, "viewer.source.color")
                 } else {
-                    "快速预览"
+                    t(cx, "viewer.source.quick")
                 };
-                format!("原图 {megapixels:.2} MP，当前使用{current}。")
+                t_args(
+                    cx,
+                    "viewer.notice.large_current",
+                    &[("megapixels", &megapixels), ("current", current.as_ref())],
+                )
             };
             div()
                 .id("viewer-large-notice")
@@ -643,9 +716,9 @@ impl KanalibApp {
                     Button::new(
                         "viewer-large-source",
                         if to_original {
-                            "加载原图"
+                            t(cx, "viewer.notice.load_original")
                         } else {
-                            "快速预览"
+                            t(cx, "viewer.source.quick")
                         },
                     )
                     .size(ControlSize::Sm)
@@ -662,8 +735,8 @@ impl KanalibApp {
                     }),
                 )
         });
-        Some(
-            root.child(
+        let pane: AnyElement = root
+            .child(
                 div()
                     .flex_none()
                     .h(px(VIEWER_HEADER_HEIGHT))
@@ -681,20 +754,23 @@ impl KanalibApp {
                             .items_center()
                             .gap(px(SPACE_2))
                             .child(
-                                Button::new(
-                                    "viewer-back",
-                                    if self.screen == Screen::Similar {
-                                        "返回结果"
-                                    } else {
-                                        "返回图库"
-                                    },
-                                )
-                                .icon(IconName::ChevronLeft)
-                                .size(ControlSize::Sm)
-                                .variant(ButtonVariant::Ghost)
-                                .on_click(move |_, _, cx| {
-                                    let _ = back_button.update(cx, |app, cx| app.close_viewer(cx));
-                                }),
+                                div().flex_none().child(
+                                    Button::new(
+                                        "viewer-back",
+                                        if similar {
+                                            t(cx, "viewer.header.back_similar")
+                                        } else {
+                                            t(cx, "common.back_to_library")
+                                        },
+                                    )
+                                    .icon(IconName::ChevronLeft)
+                                    .size(ControlSize::Sm)
+                                    .variant(ButtonVariant::Ghost)
+                                    .on_click(move |_, _, cx| {
+                                        let _ =
+                                            back_button.update(cx, |app, cx| app.close_viewer(cx));
+                                    }),
+                                ),
                             )
                             .child(
                                 div()
@@ -727,9 +803,9 @@ impl KanalibApp {
                                     },
                                 )
                                 .size(ControlSize::Sm)
-                                .segment("original", "原图", None)
-                                .segment("quick", "快速预览", None)
-                                .segment("color", "色彩管理", None)
+                                .segment("original", t(cx, "viewer.source.original"), None)
+                                .segment("quick", t(cx, "viewer.source.quick"), None)
+                                .segment("color", t(cx, "viewer.source.color"), None)
                                 .on_change(move |value, _, cx| {
                                     let mode = match value.as_ref() {
                                         "quick" => ViewerSourceMode::QuickPreview,
@@ -749,9 +825,14 @@ impl KanalibApp {
                                     .on_click(move |_, _, cx| {
                                         if let Err(error) = open_asset_with_system(&external_path) {
                                             // F-073 6.2：toast 之外还要有常驻的就地说明。
-                                            external_state.set_ui_error(format!(
-                                                "用系统应用打开失败：{error}"
-                                            ));
+                                            external_state.set_ui_error(
+                                                t_args(
+                                                    cx,
+                                                    "viewer.external.failed",
+                                                    &[("error", &error)],
+                                                )
+                                                .to_string(),
+                                            );
                                             push_toast(
                                                 &external_toaster,
                                                 cx,
@@ -764,7 +845,7 @@ impl KanalibApp {
                             .child(
                                 IconButton::new("viewer-fullscreen", IconName::Fullscreen)
                                     .size(ControlSize::Sm)
-                                    .tooltip("全屏 (F)")
+                                    .tooltip(t(cx, "viewer.tooltip.fullscreen"))
                                     .on_click(move |_, window, _| {
                                         window.toggle_fullscreen();
                                     }),
@@ -772,7 +853,7 @@ impl KanalibApp {
                             .child(
                                 IconButton::new("viewer-close", IconName::X)
                                     .size(ControlSize::Sm)
-                                    .tooltip("关闭 (Esc)")
+                                    .tooltip(t(cx, "viewer.tooltip.close"))
                                     .on_click(move |_, _, cx| {
                                         let _ =
                                             close_button.update(cx, |app, cx| app.close_viewer(cx));
@@ -809,7 +890,7 @@ impl KanalibApp {
                             .child(
                                 IconButton::new("viewer-prev", IconName::ChevronLeft)
                                     .size(ControlSize::Sm)
-                                    .tooltip("上一张 (←)")
+                                    .tooltip(t(cx, "viewer.tooltip.prev"))
                                     .disabled(prev_disabled)
                                     .on_click(move |_, _, cx| {
                                         let _ = prev_button
@@ -819,7 +900,7 @@ impl KanalibApp {
                             .child(
                                 IconButton::new("viewer-next", IconName::ChevronRight)
                                     .size(ControlSize::Sm)
-                                    .tooltip("下一张 (→)")
+                                    .tooltip(t(cx, "viewer.tooltip.next"))
                                     .disabled(next_disabled)
                                     .on_click(move |_, _, cx| {
                                         let _ = next_button
@@ -845,8 +926,8 @@ impl KanalibApp {
                             .child(hint),
                     ),
             )
-            .into_any_element(),
-        )
+            .into_any_element();
+        pane
     }
 }
 

@@ -120,7 +120,7 @@ pub(crate) fn remote_kind_label(kind: SourceKind) -> &'static str {
     match kind {
         SourceKind::Immich => "Immich",
         SourceKind::WebDav => "WebDAV",
-        SourceKind::Local => "本地",
+        SourceKind::Local => if crate::localization::is_english() { "Local" } else { "本地" },
     }
 }
 
@@ -128,10 +128,10 @@ pub(crate) fn remote_kind_label(kind: SourceKind) -> &'static str {
 pub(crate) fn validate_remote_url(text: &str) -> Result<String, String> {
     let trimmed = text.trim();
     if trimmed.is_empty() {
-        return Err("请输入 base URL".to_string());
+        return Err(if crate::localization::is_english() { "Enter a base URL".to_string() } else { "请输入 base URL".to_string() });
     }
     if trimmed.chars().any(char::is_whitespace) {
-        return Err("URL 不能包含空白字符".to_string());
+        return Err(if crate::localization::is_english() { "The URL cannot contain whitespace".to_string() } else { "URL 不能包含空白字符".to_string() });
     }
     let lower = trimmed.to_ascii_lowercase();
     let rest = if let Some(rest) = lower.strip_prefix("https://") {
@@ -139,11 +139,11 @@ pub(crate) fn validate_remote_url(text: &str) -> Result<String, String> {
     } else if let Some(rest) = lower.strip_prefix("http://") {
         rest
     } else {
-        return Err("URL 必须以 http:// 或 https:// 开头".to_string());
+        return Err(if crate::localization::is_english() { "The URL must start with http:// or https://".to_string() } else { "URL 必须以 http:// 或 https:// 开头".to_string() });
     };
     let host = rest.split('/').next().unwrap_or_default();
     if host.is_empty() || host.starts_with(':') {
-        return Err("URL 缺少主机名".to_string());
+        return Err(if crate::localization::is_english() { "The URL is missing a host name".to_string() } else { "URL 缺少主机名".to_string() });
     }
     Ok(trimmed.to_string())
 }
@@ -226,12 +226,12 @@ pub(crate) fn format_tag_throughput(i18n: &I18n, rate: f32) -> String {
 pub(crate) fn format_tag_eta(eta: Option<u64>) -> String {
     match eta {
         None => "—".to_string(),
-        Some(0) => "0 秒".to_string(),
-        Some(seconds) if seconds < 60 => format!("{seconds} 秒"),
+        Some(0) => if crate::localization::is_english() { "0 s".to_string() } else { "0 秒".to_string() },
+        Some(seconds) if seconds < 60 => if crate::localization::is_english() { format!("{seconds} s") } else { format!("{seconds} 秒") },
         Some(seconds) if seconds < 3_600 => {
-            format!("{} 分 {:02} 秒", seconds / 60, seconds % 60)
+            if crate::localization::is_english() { format!("{} min {:02} s", seconds / 60, seconds % 60) } else { format!("{} 分 {:02} 秒", seconds / 60, seconds % 60) }
         }
-        Some(seconds) => format!("{} 小时 {:02} 分", seconds / 3_600, (seconds % 3_600) / 60),
+        Some(seconds) => if crate::localization::is_english() { format!("{} h {:02} min", seconds / 3_600, (seconds % 3_600) / 60) } else { format!("{} 小时 {:02} 分", seconds / 3_600, (seconds % 3_600) / 60) },
     }
 }
 

@@ -227,11 +227,11 @@ fn rating_code(rating: &str) -> u8 {
 
 fn rating_title(code: u8) -> String {
     match code {
-        1 => "评级 G".to_string(),
-        2 => "评级 S".to_string(),
-        3 => "评级 Q".to_string(),
-        4 => "评级 E".to_string(),
-        _ => "未评级".to_string(),
+        1 => if crate::localization::is_english() { "Rating G".to_string() } else { "评级 G".to_string() },
+        2 => if crate::localization::is_english() { "Rating S".to_string() } else { "评级 S".to_string() },
+        3 => if crate::localization::is_english() { "Rating Q".to_string() } else { "评级 Q".to_string() },
+        4 => if crate::localization::is_english() { "Rating E".to_string() } else { "评级 E".to_string() },
+        _ => if crate::localization::is_english() { "Unrated".to_string() } else { "未评级".to_string() },
     }
 }
 

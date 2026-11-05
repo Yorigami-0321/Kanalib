@@ -108,10 +108,17 @@ pub(crate) fn canonicalize_org_name(name: &str) -> String {
 /// 同名冲突提示的旧文案；app.rs 保存集合仍调用，侧栏相册/集合改走 `sidebar.org.name_taken`。
 /// 判定始终来自核心 `DuplicateNameError`，不看错误字符串。
 pub(crate) fn duplicate_name_message(name: &str) -> String {
-    format!(
-        "名称「{}」已被占用；未覆盖已有条目，请换一个名称",
-        name.trim()
-    )
+    if crate::localization::is_english() {
+        format!(
+            "The name “{}” is already in use; the existing entry was not overwritten. Choose another name.",
+            name.trim()
+        )
+    } else {
+        format!(
+            "名称「{}」已被占用；未覆盖已有条目，请换一个名称",
+            name.trim()
+        )
+    }
 }
 
 pub(crate) fn source_label(root: &Path, aliases: &HashMap<PathBuf, String>) -> String {
@@ -1294,7 +1301,7 @@ impl KanalibApp {
                 let active = self.tag_manager_filter == filter;
                 nav = nav.child(crate::components::filter_chip(
                     SharedString::from(format!("sidebar-tag-filter-{}", filter.slug())),
-                    format!("{} {}", filter.label(), count),
+                    format!("{} {}", filter.label(cx), count),
                     active,
                     move |_, _, cx| {
                         let _ = this.update(cx, |app, cx| {
@@ -1309,7 +1316,7 @@ impl KanalibApp {
             for sort in crate::tags::TagManagerSort::ALL {
                 let this = this.clone();
                 sort_menu = sort_menu.item(
-                    MenuItem::radio(sort.label(), self.tag_manager_sort == sort).on_click(
+                    MenuItem::radio(sort.label(cx), self.tag_manager_sort == sort).on_click(
                         move |_, cx| {
                             let _ = this.update(cx, |app, cx| {
                                 app.tag_manager_sort = sort;
@@ -1778,9 +1785,9 @@ impl KanalibApp {
         let name = saved.name.clone();
         let pinned = saved.pinned;
         let detail = if saved.query.is_empty() {
-            saved.filter.label()
+            crate::localization::filter_label(cx, &saved.filter)
         } else {
-            format!("{} · {}", saved.filter.label(), saved.query)
+            format!("{} · {}", crate::localization::filter_label(cx, &saved.filter), saved.query)
         };
         let saved_for_apply = saved.clone();
         let search_for_apply = search.clone();

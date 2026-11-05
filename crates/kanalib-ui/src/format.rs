@@ -18,7 +18,11 @@ pub(crate) fn format_bytes(bytes: u64) -> String {
 
 pub(crate) fn format_date(seconds: u64) -> String {
     if seconds == 0 {
-        return "未知".to_string();
+        return if crate::localization::is_english() {
+            "Unknown".to_string()
+        } else {
+            "未知".to_string()
+        };
     }
     let days = (seconds / 86_400) as i64;
     let z = days + 719_468;
@@ -48,21 +52,32 @@ pub(crate) fn is_animation_container(path: &Path) -> bool {
 /// 统一引用核心的 `UNSUPPORTED_FORMAT_NOTE`，避免 UI 与扫描口径漂移。
 pub(crate) fn unsupported_format_note(path: &Path) -> Option<String> {
     kanalib_core::model::is_unsupported_format(path).then(|| {
-        format!(
-            "{} 当前版本不支持。{}",
-            crate::inspector::friendly_format_label(path),
-            kanalib_core::model::UNSUPPORTED_FORMAT_NOTE
-        )
+        if crate::localization::is_english() {
+            format!(
+                "{} is not supported in this version. {}",
+                crate::inspector::friendly_format_label(path),
+                kanalib_core::model::UNSUPPORTED_FORMAT_NOTE
+            )
+        } else {
+            format!(
+                "{} 当前版本不支持。{}",
+                crate::inspector::friendly_format_label(path),
+                kanalib_core::model::UNSUPPORTED_FORMAT_NOTE
+            )
+        }
     })
 }
 
 /// 格式能力边界提示；只描述本轮实测过的行为，不承诺未接入能力。
 pub(crate) fn format_limits_note(path: &Path) -> Option<String> {
     if is_animation_container(path) {
-        return Some(
+        return Some(if crate::localization::is_english() {
+            "GIF/WebP animations show only the first frame; use “Play with system app” for the full animation."
+                .to_string()
+        } else {
             "GIF/WebP 动画当前只显示首帧，不提供播放器；可用「用系统应用播放」查看完整动画。"
-                .to_string(),
-        );
+                .to_string()
+        });
     }
     if let Some(note) = unsupported_format_note(path) {
         return Some(note);
@@ -72,8 +87,13 @@ pub(crate) fn format_limits_note(path: &Path) -> Option<String> {
         .map(|value| value.to_string_lossy().to_lowercase())
         .unwrap_or_default();
     (ext == "psd").then(|| {
-        "PSD 只显示合成图：图层/智能对象不展开、Alpha 不保留、不计算 pHash（不参与相似去重），不支持 .psb。"
-            .to_string()
+        if crate::localization::is_english() {
+            "PSD shows the composite only: layers/smart objects stay collapsed, alpha is not kept, pHash is not computed (no similar dedup), and .psb is unsupported."
+                .to_string()
+        } else {
+            "PSD 只显示合成图：图层/智能对象不展开、Alpha 不保留、不计算 pHash（不参与相似去重），不支持 .psb。"
+                .to_string()
+        }
     })
 }
 
@@ -98,7 +118,11 @@ pub(crate) fn video_meta(metadata_json: &str) -> VideoMeta {
 /// 时长显示：不足 1 小时为 `mm:ss`，否则 `h:mm:ss`；未知/非法值显式写“未知”。
 pub(crate) fn format_duration(secs: f64) -> String {
     if !secs.is_finite() || secs < 0.0 {
-        return "未知".to_string();
+        return if crate::localization::is_english() {
+            "Unknown".to_string()
+        } else {
+            "未知".to_string()
+        };
     }
     let total = secs.round() as u64;
     let hours = total / 3_600;
@@ -114,7 +138,11 @@ pub(crate) fn format_duration(secs: f64) -> String {
 /// 常见视频编码的展示名；未知编码保留原名大写，空值写“未知”。
 pub(crate) fn friendly_codec_label(codec: &str) -> String {
     match codec.trim().to_ascii_lowercase().as_str() {
-        "" => "未知".to_string(),
+        "" => if crate::localization::is_english() {
+            "Unknown".to_string()
+        } else {
+            "未知".to_string()
+        },
         "h264" | "avc" => "H.264".to_string(),
         "hevc" | "h265" => "HEVC".to_string(),
         "av1" => "AV1".to_string(),
@@ -137,20 +165,26 @@ pub(crate) fn video_fact_rows(
     width: u32,
     height: u32,
 ) -> Vec<(&'static str, String)> {
+    let english = crate::localization::is_english();
+    let (duration, codec, resolution, unknown) = if english {
+        ("Duration", "Codec", "Resolution", "Unknown")
+    } else {
+        ("时长", "编码", "分辨率", "未知")
+    };
     vec![
         (
-            "时长",
+            duration,
             meta.duration_secs
                 .map(format_duration)
-                .unwrap_or_else(|| "未知".to_string()),
+                .unwrap_or_else(|| unknown.to_string()),
         ),
-        ("编码", friendly_codec_label(&meta.codec)),
+        (codec, friendly_codec_label(&meta.codec)),
         (
-            "分辨率",
+            resolution,
             if width > 0 && height > 0 {
                 format!("{width} × {height}")
             } else {
-                "未知".to_string()
+                unknown.to_string()
             },
         ),
     ]
@@ -159,6 +193,14 @@ pub(crate) fn video_fact_rows(
 /// 远端只读提示：虚拟路径没有本地原图。
 pub(crate) const REMOTE_READONLY_NOTE: &str =
     "远端只读来源：未下载原图，不能交给系统打开、在资源管理器中显示或移入回收站。";
+
+pub(crate) fn remote_readonly_note() -> &'static str {
+    if crate::localization::is_english() {
+        "Remote read-only source: the original is not downloaded, so it cannot be opened, revealed or moved to the recycle bin."
+    } else {
+        REMOTE_READONLY_NOTE
+    }
+}
 
 /// 是否为远端虚拟路径（`immich://` / `webdav://`）。
 pub(crate) fn is_remote_asset(path: &Path) -> bool {
@@ -179,34 +221,64 @@ pub(crate) fn any_remote_asset<'a>(paths: impl IntoIterator<Item = &'a Path>) ->
 /// 远端路径在这里直接拒绝，绝不调用 explorer/xdg-open。
 pub(crate) fn open_asset_with_system(path: &Path) -> Result<(), String> {
     if is_remote_asset(path) {
-        return Err(format!("{REMOTE_READONLY_NOTE}（{}）", path.display()));
+        return Err(format!("{}（{}）", remote_readonly_note(), path.display()));
     }
     let result = if kanalib_core::model::is_video(path) {
         kanalib_core::open::open_video(path)
     } else {
         kanalib_core::open::open_with_default_app(path)
     };
-    result.map_err(|error| format!("打开失败：{error:#}"))
+    result.map_err(|error| {
+        if crate::localization::is_english() {
+            format!("Open failed: {error:#}")
+        } else {
+            format!("打开失败：{error:#}")
+        }
+    })
 }
 
 /// 纯 std 相对时间；超过 30 天回退为日期。
 pub(crate) fn relative_time(seconds: u64) -> String {
     if seconds == 0 {
-        return "从未".to_string();
+        return if crate::localization::is_english() {
+            "Never".to_string()
+        } else {
+            "从未".to_string()
+        };
     }
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_secs())
         .unwrap_or(0);
     if now <= seconds {
-        return "刚刚".to_string();
+        return if crate::localization::is_english() {
+            "Just now".to_string()
+        } else {
+            "刚刚".to_string()
+        };
     }
     let diff = now - seconds;
     match diff {
-        0..=59 => "刚刚".to_string(),
-        60..=3_599 => format!("{} 分钟前", diff / 60),
-        3_600..=86_399 => format!("{} 小时前", diff / 3_600),
-        86_400..=2_591_999 => format!("{} 天前", diff / 86_400),
+        0..=59 => if crate::localization::is_english() {
+            "Just now".to_string()
+        } else {
+            "刚刚".to_string()
+        },
+        60..=3_599 => if crate::localization::is_english() {
+            format!("{} minutes ago", diff / 60)
+        } else {
+            format!("{} 分钟前", diff / 60)
+        },
+        3_600..=86_399 => if crate::localization::is_english() {
+            format!("{} hours ago", diff / 3_600)
+        } else {
+            format!("{} 小时前", diff / 3_600)
+        },
+        86_400..=2_591_999 => if crate::localization::is_english() {
+            format!("{} days ago", diff / 86_400)
+        } else {
+            format!("{} 天前", diff / 86_400)
+        },
         _ => format_date(seconds),
     }
 }
