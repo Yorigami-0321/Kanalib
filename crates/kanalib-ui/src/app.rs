@@ -910,7 +910,7 @@ impl Render for KanalibApp {
             .into_any_element()
         } else if self.screen == Screen::Settings {
             if !self.remote_sources.loaded {
-                self.refresh_remote_sources();
+                self.refresh_remote_sources(cx);
             }
             let settings_width = (window_width - sidebar_width).max(px(640.));
             self.render_settings(
@@ -3588,7 +3588,7 @@ impl KanalibApp {
         self.refresh_diagnostics();
         self.refresh_tag_settings(cx);
         self.refresh_tag_reviews(cx);
-        self.refresh_remote_sources();
+        self.refresh_remote_sources(cx);
     }
 
     /// 同步“已暂存、等待重启”的恢复请求到内存提示；只在启动/恢复/取消时调用，

@@ -12,6 +12,8 @@
   5. 上下文侧栏结构：单份标签搜索句柄、四种上下文都有分派、活动栏只在 sidebar.rs 构造。
   6. 根 FocusScope：应用根必须包 `.root()` + `.node(...)`，否则 Ely 的 Tab 焦点遍历不生效。
   7. core 状态 i18n：不得裸写 `shared.status`；所有 `notice.*` 键必须在中英文目录同时存在。
+  8. 直接 UI 文案：`.child("…")`、`push_toast(..., "…")`、`Button::new(..., "…")`
+     不得直接写中文（`is_english()` 分支除外）。
 """
 
 from __future__ import annotations
@@ -239,6 +241,37 @@ def check_core_status_i18n() -> tuple[list[str], int]:
     return problems, checks
 
 
+def check_direct_ui_text() -> tuple[list[str], int]:
+    """直接传给 UI 构造器/ toast 的中文字面量必须走目录（is_english 分支除外）。"""
+    cjk = "[\u4e00-\u9fff]"
+    patterns = {
+        "child": re.compile(r'\.child\(\s*"([^"\n]*' + cjk + r'[^"\n]*)"'),
+        "push_toast": re.compile(
+            r'push_toast\([^;]{0,300}?"([^"\n]*' + cjk + r'[^"\n]*)"', re.S
+        ),
+        "button": re.compile(
+            r'Button::new\([^;]{0,250}?,\s*"([^"\n]*' + cjk + r'[^"\n]*)"', re.S
+        ),
+    }
+    problems: list[str] = []
+    checks = 0
+    for path in sorted(UI.rglob("*.rs")):
+        rel = path.relative_to(UI).as_posix()
+        if rel.startswith("localization"):
+            continue
+        text = path.read_text(encoding="utf-8")
+        for kind, pattern in patterns.items():
+            for match in pattern.finditer(text):
+                checks += 1
+                if "is_english()" in match.group(0):
+                    continue
+                line_no = text[: match.start(1)].count("\n") + 1
+                problems.append(
+                    f"{rel}:{line_no} 直接传入中文 {kind} 文案 {match.group(1)!r}；改用 t()/t_args()"
+                )
+    return problems, checks
+
+
 def main() -> int:
     checks = [
         ("手搓 role(Role::Button) 元素（id/aria/键盘可达）", *check_role_buttons()),
@@ -248,6 +281,7 @@ def main() -> int:
         ("根 FocusScope（.root() + .node()，保证 Tab 遍历）", *check_root_focus_scope()),
         ("命令面板键位（必须真实绑定）", *check_palette_keys()),
         ("core 状态 i18n（结构化写入 + 双语键齐全）", *check_core_status_i18n()),
+        ("直接 UI 文案（不得硬编码中文）", *check_direct_ui_text()),
     ]
     failed = False
     for name, problems, count in checks:

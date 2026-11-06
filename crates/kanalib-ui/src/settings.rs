@@ -4386,7 +4386,7 @@ impl KanalibApp {
                                 div()
                                     .text_xs()
                                     .text_color(colors.subtle)
-                                    .child("忽略 glob 立即生效，可在下方「忽略列表」逐条恢复。"),
+                                    .child(t(cx, "settings.filters.ignore_note")),
                             ),
                     ),
             );
@@ -4940,7 +4940,7 @@ impl KanalibApp {
                                 .child(
                                     Button::new(
                                         SharedString::from(format!("remote-test-{id}")),
-                                        "测试连接",
+                                        t(cx, "settings.remote.test"),
                                     )
                                     .size(ControlSize::Sm)
                                     .loading(test_running)
@@ -4956,7 +4956,7 @@ impl KanalibApp {
                                 .child(
                                     Button::new(
                                         SharedString::from(format!("remote-sync-{id}")),
-                                        "立即同步",
+                                        t(cx, "settings.remote.sync"),
                                     )
                                     .size(ControlSize::Sm)
                                     .loading(sync_running)
@@ -4972,7 +4972,7 @@ impl KanalibApp {
                                 .child(
                                     Button::new(
                                         SharedString::from(format!("remote-key-{id}")),
-                                        "设置凭据",
+                                        t(cx, "settings.remote.set_credentials"),
                                     )
                                     .size(ControlSize::Sm)
                                     .disabled(busy_now)
@@ -4988,7 +4988,7 @@ impl KanalibApp {
                                     let this_clear_key = this_clear_key.clone();
                                     Button::new(
                                         SharedString::from(format!("remote-clear-key-{id}")),
-                                        "清除凭据",
+                                        t(cx, "settings.remote.clear_credentials"),
                                     )
                                     .size(ControlSize::Sm)
                                     .disabled(busy_now)
@@ -5003,7 +5003,7 @@ impl KanalibApp {
                                 .child(
                                     Button::new(
                                         SharedString::from(format!("remote-remove-{id}")),
-                                        "移除",
+                                        t(cx, "settings.common.remove"),
                                     )
                                     .size(ControlSize::Sm)
                                     .disabled(busy_now)
@@ -5033,14 +5033,17 @@ impl KanalibApp {
                         div()
                             .text_sm()
                             .font_weight(FontWeight::SEMIBOLD)
-                            .child("网络来源"),
+                            .child(t(cx, "settings.section.remote")),
                     )
                     .child(
-                        Button::new("refresh-remote-sources", "刷新")
+                        Button::new(
+                            "refresh-remote-sources",
+                            t(cx, "settings.common.refresh"),
+                        )
                             .size(ControlSize::Sm)
                             .on_click(move |_, _, cx| {
                                 let _ = this_refresh.update(cx, |app, cx| {
-                                    app.refresh_remote_sources();
+                                    app.refresh_remote_sources(cx);
                                     cx.notify();
                                 });
                             }),
@@ -5050,7 +5053,7 @@ impl KanalibApp {
                 div()
                     .text_xs()
                     .text_color(colors.muted)
-                    .child("网络来源只读；凭据保存在系统凭据库，不写入设置或日志。测试与同步在后台执行，断线不会阻塞本地图库。"),
+                    .child(t(cx, "settings.remote.desc")),
             )
             .child(rows)
             .child(
@@ -5059,7 +5062,7 @@ impl KanalibApp {
                     .flex_wrap()
                     .gap(px(6.))
                     .child(
-                        Button::new("add-immich-source", "添加 Immich")
+                        Button::new("add-immich-source", t(cx, "settings.remote.add_immich"))
                             .primary()
                             .on_click(move |_, _, cx| {
                                 let _ = this_immich.update(cx, |app, cx| {
@@ -5068,7 +5071,7 @@ impl KanalibApp {
                             }),
                     )
                     .child(
-                        Button::new("add-webdav-source", "添加 WebDAV")
+                        Button::new("add-webdav-source", t(cx, "settings.remote.add_webdav"))
                             .on_click(move |_, _, cx| {
                                 let _ = this_webdav.update(cx, |app, cx| {
                                     app.open_remote_add(RemoteAddKind::WebDav, cx)
@@ -5080,7 +5083,7 @@ impl KanalibApp {
     }
 
     /// 读取来源列表并刷新每个远端来源的凭据保存状态（系统凭据库）。
-    pub(crate) fn refresh_remote_sources(&mut self) {
+    pub(crate) fn refresh_remote_sources(&mut self, cx: &mut Context<Self>) {
         self.reload_remote_source_infos();
         let ids = self
             .remote_sources
@@ -5096,7 +5099,12 @@ impl KanalibApp {
                     credentials.insert(id, Ok(has));
                 }
                 Err(error) => {
-                    let message = format!("读取凭据状态失败：{error:#}");
+                    let message = t_args(
+                        cx,
+                        "settings.notice.remote_credentials_failed",
+                        &[("error", &format!("{error:#}"))],
+                    )
+                    .to_string();
                     credentials.insert(id, Err(message.clone()));
                     errors.push((id, message));
                 }
@@ -5176,16 +5184,34 @@ impl KanalibApp {
             Ok(info) => {
                 self.remote_sources.add_kind = None;
                 self.remote_sources.add_error = None;
-                let message = format!("已添加 {} 来源「{}」", kind.label(), info.name);
-                self.settings_notice =
-                    Some(format!("{message}；远端来源只读，建议先测试连接再同步"));
+                let message = t_args(
+                    cx,
+                    "settings.notice.remote_added",
+                    &[("kind", kind.label()), ("name", &info.name)],
+                )
+                .to_string();
+                self.settings_notice = Some(
+                    t_args(
+                        cx,
+                        "settings.notice.remote_added_hint",
+                        &[("message", &message)],
+                    )
+                    .to_string(),
+                );
                 push_toast(&self.toaster, cx, message, Severity::Success);
-                self.refresh_remote_sources();
+                self.refresh_remote_sources(cx);
                 cx.notify();
                 true
             }
             Err(error) => {
-                self.remote_sources.add_error = Some(format!("添加来源失败：{error:#}"));
+                self.remote_sources.add_error = Some(
+                    t_args(
+                        cx,
+                        "settings.notice.remote_add_failed",
+                        &[("error", &format!("{error:#}"))],
+                    )
+                    .to_string(),
+                );
                 cx.notify();
                 false
             }
@@ -5205,22 +5231,39 @@ impl KanalibApp {
     pub(crate) fn save_remote_api_key(&mut self, id: i64, api_key: &str, cx: &mut Context<Self>) {
         let key = api_key.trim();
         if key.is_empty() {
-            self.settings_notice = Some("未输入新凭据，已保留原值".to_string());
+            self.settings_notice =
+                Some(t(cx, "settings.notice.remote_key_empty").to_string());
             cx.notify();
             return;
         }
+        let fallback_name = t_args(
+            cx,
+            "app.remote_remove.fallback_name",
+            &[("id", &id.to_string())],
+        )
+        .to_string();
         let name = self
             .remote_info(id)
             .map(|info| info.name)
-            .unwrap_or_else(|| format!("来源 #{id}"));
+            .unwrap_or(fallback_name);
         match self.state.set_source_api_key(id, key) {
             Ok(()) => {
-                let message = format!("已保存 {name} 的凭据（系统凭据库）");
+                let message = t_args(
+                    cx,
+                    "settings.notice.remote_key_saved",
+                    &[("name", &name)],
+                )
+                .to_string();
                 self.settings_notice = Some(message.clone());
                 push_toast(&self.toaster, cx, message, Severity::Success);
             }
             Err(error) => {
-                let message = format!("保存凭据失败：{error:#}");
+                let message = t_args(
+                    cx,
+                    "settings.notice.remote_key_save_failed",
+                    &[("error", &format!("{error:#}"))],
+                )
+                .to_string();
                 self.settings_notice = Some(message.clone());
                 self.remote_sources.feedback.insert(
                     id,
@@ -5229,33 +5272,40 @@ impl KanalibApp {
                         severity: Severity::Danger,
                     },
                 );
-                push_toast(&self.toaster, cx, "保存凭据失败", Severity::Danger);
+                let toast = t(cx, "settings.notice.remote_key_save_failed_toast").to_string();
+                push_toast(&self.toaster, cx, toast, Severity::Danger);
             }
         }
-        self.refresh_remote_sources();
+        self.refresh_remote_sources(cx);
         cx.notify();
     }
 
     pub(crate) fn clear_remote_api_key(&mut self, id: i64, cx: &mut Context<Self>) {
         match self.state.clear_source_api_key(id) {
             Ok(()) => {
-                let message = "已清除该来源的凭据".to_string();
+                let message = t(cx, "settings.notice.remote_key_cleared").to_string();
                 self.settings_notice = Some(message.clone());
                 push_toast(&self.toaster, cx, message, Severity::Success);
             }
             Err(error) => {
-                let message = format!("清除凭据失败：{error:#}");
+                let message = t_args(
+                    cx,
+                    "settings.notice.remote_key_clear_failed",
+                    &[("error", &format!("{error:#}"))],
+                )
+                .to_string();
                 self.settings_notice = Some(message.clone());
                 push_toast(&self.toaster, cx, message, Severity::Danger);
             }
         }
-        self.refresh_remote_sources();
+        self.refresh_remote_sources(cx);
         cx.notify();
     }
 
     pub(crate) fn open_remote_remove_confirm(&mut self, id: i64, cx: &mut Context<Self>) {
         if self.remote_sources.busy.contains_key(&id) {
-            self.settings_notice = Some("该来源正在测试或同步，完成后才能移除".to_string());
+            self.settings_notice =
+                Some(t(cx, "settings.notice.remote_busy").to_string());
             cx.notify();
             return;
         }
@@ -5266,33 +5316,52 @@ impl KanalibApp {
     pub(crate) fn remove_remote_source(&mut self, id: i64, cx: &mut Context<Self>) {
         self.remote_sources.remove_confirm = None;
         if self.remote_sources.busy.contains_key(&id) {
-            self.settings_notice = Some("该来源正在测试或同步，完成后才能移除".to_string());
+            self.settings_notice =
+                Some(t(cx, "settings.notice.remote_busy").to_string());
             cx.notify();
             return;
         }
+        let fallback_name = t_args(
+            cx,
+            "app.remote_remove.fallback_name",
+            &[("id", &id.to_string())],
+        )
+        .to_string();
         let name = self
             .remote_info(id)
             .map(|info| info.name)
-            .unwrap_or_else(|| format!("来源 #{id}"));
+            .unwrap_or(fallback_name);
         match self.state.remove_remote_source(id) {
             Ok(()) => {
                 self.remote_sources.busy.remove(&id);
                 self.remote_sources.feedback.remove(&id);
                 self.remote_sources.credentials.remove(&id);
-                self.settings_notice =
-                    Some(format!("已移除来源「{name}」；远端服务器文件未受影响"));
-                push_toast(
-                    &self.toaster,
-                    cx,
-                    format!("已移除网络来源「{name}」"),
-                    Severity::Success,
+                self.settings_notice = Some(
+                    t_args(
+                        cx,
+                        "settings.notice.remote_removed",
+                        &[("name", &name)],
+                    )
+                    .to_string(),
                 );
-                self.refresh_remote_sources();
+                let toast = t_args(
+                    cx,
+                    "settings.notice.remote_removed_toast",
+                    &[("name", &name)],
+                )
+                .to_string();
+                push_toast(&self.toaster, cx, toast, Severity::Success);
+                self.refresh_remote_sources(cx);
                 self.clear_multi_selection();
                 self.auto_select_pending = true;
             }
             Err(error) => {
-                let message = format!("移除来源失败：{error:#}");
+                let message = t_args(
+                    cx,
+                    "settings.notice.remote_remove_failed",
+                    &[("error", &format!("{error:#}"))],
+                )
+                .to_string();
                 self.settings_notice = Some(message.clone());
                 self.remote_sources.feedback.insert(
                     id,
@@ -5322,7 +5391,7 @@ impl KanalibApp {
             self.remote_sources.feedback.insert(
                 id,
                 RemoteSourceFeedback {
-                    message: "尚未保存凭据；若服务器要求认证，测试会失败".to_string(),
+                    message: t(cx, "settings.notice.remote_test_no_key").to_string(),
                     severity: Severity::Warning,
                 },
             );
@@ -5331,10 +5400,17 @@ impl KanalibApp {
             id,
             RemoteBusy {
                 task: RemoteTask::Test,
-                label: "正在测试连接…".to_string(),
+                label: t(cx, "settings.remote.testing").to_string(),
             },
         );
-        self.settings_notice = Some(format!("正在测试 {} 连接…", info.name));
+        self.settings_notice = Some(
+            t_args(
+                cx,
+                "settings.notice.remote_testing",
+                &[("name", &info.name)],
+            )
+            .to_string(),
+        );
         cx.notify();
         let state = self.state.clone();
         let task = cx
@@ -5349,8 +5425,13 @@ impl KanalibApp {
                 app.remote_sources.busy.remove(&id);
                 match result {
                     Ok(status) => {
-                        let message =
-                            format!("连接成功 · {kind_label} · {} 个资产", status.asset_count);
+                        let assets = status.asset_count.to_string();
+                        let message = t_args(
+                            cx,
+                            "settings.remote.test_ok",
+                            &[("kind", kind_label), ("n", &assets)],
+                        )
+                        .to_string();
                         app.remote_sources.feedback.insert(
                             id,
                             RemoteSourceFeedback {
@@ -5358,10 +5439,22 @@ impl KanalibApp {
                                 severity: Severity::Success,
                             },
                         );
-                        app.settings_notice = Some(format!("{name}：{message}"));
+                        app.settings_notice = Some(
+                            t_args(
+                                cx,
+                                "settings.notice.remote_feedback",
+                                &[("name", &name), ("message", &message)],
+                            )
+                            .to_string(),
+                        );
                     }
                     Err(error) => {
-                        let message = format!("连接失败：{error}");
+                        let message = t_args(
+                            cx,
+                            "settings.remote.test_failed",
+                            &[("error", &error.to_string())],
+                        )
+                        .to_string();
                         app.remote_sources.feedback.insert(
                             id,
                             RemoteSourceFeedback {
@@ -5369,13 +5462,21 @@ impl KanalibApp {
                                 severity: Severity::Danger,
                             },
                         );
-                        app.settings_notice = Some(format!("{name}：{message}"));
-                        push_toast(
-                            &app.toaster,
-                            cx,
-                            format!("{name} 连接失败"),
-                            Severity::Danger,
+                        app.settings_notice = Some(
+                            t_args(
+                                cx,
+                                "settings.notice.remote_feedback",
+                                &[("name", &name), ("message", &message)],
+                            )
+                            .to_string(),
                         );
+                        let toast = t_args(
+                            cx,
+                            "settings.notice.remote_test_failed_toast",
+                            &[("name", &name)],
+                        )
+                        .to_string();
+                        push_toast(&app.toaster, cx, toast, Severity::Danger);
                     }
                 }
                 app.reload_remote_source_infos();
@@ -5398,7 +5499,7 @@ impl KanalibApp {
             self.remote_sources.feedback.insert(
                 id,
                 RemoteSourceFeedback {
-                    message: "尚未保存凭据；若服务器要求认证，同步会失败".to_string(),
+                    message: t(cx, "settings.notice.remote_sync_no_key").to_string(),
                     severity: Severity::Warning,
                 },
             );
@@ -5407,10 +5508,17 @@ impl KanalibApp {
             id,
             RemoteBusy {
                 task: RemoteTask::Sync,
-                label: "正在同步…".to_string(),
+                label: t(cx, "settings.remote.syncing").to_string(),
             },
         );
-        self.settings_notice = Some(format!("正在同步 {}…", info.name));
+        self.settings_notice = Some(
+            t_args(
+                cx,
+                "settings.notice.remote_syncing",
+                &[("name", &info.name)],
+            )
+            .to_string(),
+        );
         cx.notify();
         let state = self.state.clone();
         let task = cx
@@ -5424,13 +5532,21 @@ impl KanalibApp {
                 app.remote_sources.busy.remove(&id);
                 match result {
                     Ok(report) => {
-                        let message = format!(
-                            "同步完成 · 新增 {} · 更新 {} · 跳过 {} · 缩略图 {}",
-                            report.imported,
-                            report.updated,
-                            report.skipped,
-                            report.thumbnails_downloaded
-                        );
+                        let imported = report.imported.to_string();
+                        let updated = report.updated.to_string();
+                        let skipped = report.skipped.to_string();
+                        let thumbnails = report.thumbnails_downloaded.to_string();
+                        let message = t_args(
+                            cx,
+                            "settings.remote.sync_ok",
+                            &[
+                                ("imported", &imported),
+                                ("updated", &updated),
+                                ("skipped", &skipped),
+                                ("thumbnails", &thumbnails),
+                            ],
+                        )
+                        .to_string();
                         app.remote_sources.feedback.insert(
                             id,
                             RemoteSourceFeedback {
@@ -5438,10 +5554,22 @@ impl KanalibApp {
                                 severity: Severity::Success,
                             },
                         );
-                        app.settings_notice = Some(format!("{name}：{message}"));
+                        app.settings_notice = Some(
+                            t_args(
+                                cx,
+                                "settings.notice.remote_feedback",
+                                &[("name", &name), ("message", &message)],
+                            )
+                            .to_string(),
+                        );
                     }
                     Err(error) => {
-                        let message = format!("同步失败：{error}");
+                        let message = t_args(
+                            cx,
+                            "settings.remote.sync_failed",
+                            &[("error", &error.to_string())],
+                        )
+                        .to_string();
                         app.remote_sources.feedback.insert(
                             id,
                             RemoteSourceFeedback {
@@ -5449,13 +5577,21 @@ impl KanalibApp {
                                 severity: Severity::Danger,
                             },
                         );
-                        app.settings_notice = Some(format!("{name}：{message}"));
-                        push_toast(
-                            &app.toaster,
-                            cx,
-                            format!("{name} 同步失败"),
-                            Severity::Danger,
+                        app.settings_notice = Some(
+                            t_args(
+                                cx,
+                                "settings.notice.remote_feedback",
+                                &[("name", &name), ("message", &message)],
+                            )
+                            .to_string(),
                         );
+                        let toast = t_args(
+                            cx,
+                            "settings.notice.remote_sync_failed_toast",
+                            &[("name", &name)],
+                        )
+                        .to_string();
+                        push_toast(&app.toaster, cx, toast, Severity::Danger);
                     }
                 }
                 app.reload_remote_source_infos();
