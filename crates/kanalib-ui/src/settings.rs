@@ -1406,7 +1406,7 @@ impl KanalibApp {
         queue_pending: usize,
         queue_running: usize,
         queue_error: usize,
-        status: &str,
+        status: &kanalib_core::model::StatusMessage,
         error: Option<&str>,
         cache_hits: u64,
         cache_misses: u64,
@@ -1506,7 +1506,7 @@ impl KanalibApp {
         let notice = self
             .settings_notice
             .clone()
-            .or_else(|| Some(status.to_string()));
+            .or_else(|| Some(crate::localization::core_status(cx, status).to_string()));
         let banner = error
             .map(|message| (message.to_string(), colors.danger))
             .or_else(|| notice.map(|message| (message, colors.muted)))

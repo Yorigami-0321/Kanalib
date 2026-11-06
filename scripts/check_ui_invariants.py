@@ -11,6 +11,7 @@
   4. 命令面板展示的键位必须在 cx.bind_keys 里真实存在。
   5. 上下文侧栏结构：单份标签搜索句柄、四种上下文都有分派、活动栏只在 sidebar.rs 构造。
   6. 根 FocusScope：应用根必须包 `.root()` + `.node(...)`，否则 Ely 的 Tab 焦点遍历不生效。
+  7. core 状态 i18n：不得裸写 `shared.status`；所有 `notice.*` 键必须在中英文目录同时存在。
 """
 
 from __future__ import annotations
@@ -21,6 +22,8 @@ import sys
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 UI = ROOT / "crates" / "kanalib-ui" / "src"
+CORE = ROOT / "crates" / "kanalib-core" / "src"
+STATUS_CATALOG = UI / "localization" / "extra" / "status.rs"
 
 # 图库瓦片由根容器的 track_focus + 方向键接管，避免重复 Tab 停靠点。
 TILE_EXEMPT = {
@@ -195,6 +198,46 @@ def check_palette_keys() -> tuple[list[str], int]:
     return problems, len(shown)
 
 
+def check_core_status_i18n() -> tuple[list[str], int]:
+    """core 状态必须结构化；notice.* 键必须在中英文目录同时存在。"""
+    problems: list[str] = []
+    checks = 0
+    core_files = [CORE / "state.rs", CORE / "watch.rs", CORE / "model.rs"]
+    keys: set[str] = set()
+    for path in core_files:
+        rel = path.relative_to(ROOT).as_posix()
+        lines = lines_of(path)
+        checks += 1
+        for i, line in enumerate(lines):
+            if re.search(r"\b(?:shared|shared_status)\.status\s*=", line):
+                problems.append(
+                    f"{rel}:{i + 1} 裸写 status；必须走 set_status!/set_status_message/set_plain_status"
+                )
+        keys |= set(re.findall(r'"(notice\.[a-z0-9_.]+)"', path.read_text(encoding="utf-8")))
+
+    catalog = STATUS_CATALOG.read_text(encoding="utf-8")
+    zh_part = catalog.split("pub(crate) const EN", 1)[0]
+    en_part = "pub(crate) const EN" + catalog.split("pub(crate) const EN", 1)[1]
+    zh = set(re.findall(r'"(notice\.[a-z0-9_.]+)"', zh_part))
+    en = set(re.findall(r'"(notice\.[a-z0-9_.]+)"', en_part))
+
+    checks += 1
+    for key in sorted(keys - zh):
+        problems.append(f"core 使用的 {key} 缺中文目录")
+    for key in sorted(keys - en):
+        problems.append(f"core 使用的 {key} 缺英文目录")
+    checks += 1
+    if zh != en:
+        for key in sorted(zh - en):
+            problems.append(f"{key} 只有中文目录")
+        for key in sorted(en - zh):
+            problems.append(f"{key} 只有英文目录")
+    checks += 1
+    for key in sorted(zh - keys):
+        problems.append(f"目录中的 {key} 未被 core 使用（键名漂移？）")
+    return problems, checks
+
+
 def main() -> int:
     checks = [
         ("手搓 role(Role::Button) 元素（id/aria/键盘可达）", *check_role_buttons()),
@@ -203,6 +246,7 @@ def main() -> int:
         ("上下文侧栏结构（单搜索/四上下文/单一活动栏与菜单）", *check_sidebar_contexts()),
         ("根 FocusScope（.root() + .node()，保证 Tab 遍历）", *check_root_focus_scope()),
         ("命令面板键位（必须真实绑定）", *check_palette_keys()),
+        ("core 状态 i18n（结构化写入 + 双语键齐全）", *check_core_status_i18n()),
     ]
     failed = False
     for name, problems, count in checks:

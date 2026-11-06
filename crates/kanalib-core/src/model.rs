@@ -1302,6 +1302,93 @@ pub struct PendingCleanup {
     pub paths: HashSet<PathBuf>,
 }
 
+/// 核心写入的瞬时状态：`text` 是中文回退（headless/日志/旧调用方），
+/// `key`/`args` 供 UI 按当前语言渲染。键名使用 `notice.区域.用途`。
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct StatusMessage {
+    key: Option<&'static str>,
+    args: Vec<(&'static str, String)>,
+    text: String,
+}
+
+impl StatusMessage {
+    pub fn plain(text: impl Into<String>) -> Self {
+        Self {
+            key: None,
+            args: Vec::new(),
+            text: text.into(),
+        }
+    }
+
+    pub fn keyed(
+        key: &'static str,
+        text: impl Into<String>,
+        args: Vec<(&'static str, String)>,
+    ) -> Self {
+        Self {
+            key: Some(key),
+            args,
+            text: text.into(),
+        }
+    }
+
+    pub fn key(&self) -> Option<&'static str> {
+        self.key
+    }
+
+    pub fn args(&self) -> &[(&'static str, String)] {
+        &self.args
+    }
+
+    pub fn text(&self) -> &str {
+        &self.text
+    }
+}
+
+impl std::fmt::Display for StatusMessage {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.text)
+    }
+}
+
+impl std::ops::Deref for StatusMessage {
+    type Target = str;
+
+    fn deref(&self) -> &str {
+        &self.text
+    }
+}
+
+impl AsRef<str> for StatusMessage {
+    fn as_ref(&self) -> &str {
+        &self.text
+    }
+}
+
+impl PartialEq<&str> for StatusMessage {
+    fn eq(&self, other: &&str) -> bool {
+        self.text == *other
+    }
+}
+
+impl PartialEq<String> for StatusMessage {
+    fn eq(&self, other: &String) -> bool {
+        &self.text == other
+    }
+}
+
+impl From<&str> for StatusMessage {
+    fn from(text: &str) -> Self {
+        Self::plain(text)
+    }
+}
+
+impl From<String> for StatusMessage {
+    fn from(text: String) -> Self {
+        Self::plain(text)
+    }
+}
+
 #[derive(Debug)]
 pub struct Shared {
     pub roots: Vec<PathBuf>,
@@ -1310,7 +1397,7 @@ pub struct Shared {
     pub assets: Arc<RwLock<Vec<Asset>>>,
     pub counts: CountAccumulator,
     pub revision: u64,
-    pub status: String,
+    pub status: StatusMessage,
     pub error: Option<String>,
     pub filter: Filter,
     pub selected: Option<PathBuf>,
@@ -1344,6 +1431,25 @@ pub struct Shared {
 }
 
 impl Shared {
+    /// 结构化状态：`text` 保留中文回退，UI 按 `key` + `args` 取当前语言文案。
+    pub fn set_status(
+        &mut self,
+        key: &'static str,
+        text: impl Into<String>,
+        args: Vec<(&'static str, String)>,
+    ) {
+        self.status = StatusMessage::keyed(key, text, args);
+    }
+
+    /// 无法结构化的状态（例如备份恢复通知或 UI 已本地化覆盖）；显式清空 key。
+    pub fn set_plain_status(&mut self, text: impl Into<String>) {
+        self.status = StatusMessage::plain(text);
+    }
+
+    pub fn set_status_message(&mut self, message: StatusMessage) {
+        self.status = message;
+    }
+
     pub fn new(
         roots: Vec<PathBuf>,
         assets: Vec<Asset>,
@@ -1354,12 +1460,16 @@ impl Shared {
     ) -> Self {
         let status = if assets.is_empty() {
             if roots.is_empty() {
-                "请添加文件夹".to_string()
+                StatusMessage::keyed("notice.library.add_folder", "请添加文件夹", Vec::new())
             } else {
-                "准备扫描".to_string()
+                StatusMessage::keyed("notice.library.ready_scan", "准备扫描", Vec::new())
             }
         } else {
-            format!("已加载 {} 张图片", assets.len())
+            StatusMessage::keyed(
+                "notice.library.loaded",
+                format!("已加载 {} 张图片", assets.len()),
+                vec![("n", assets.len().to_string())],
+            )
         };
         let selected = assets.first().map(|asset| asset.path.clone());
         let counts = CountAccumulator::from_assets(&assets);

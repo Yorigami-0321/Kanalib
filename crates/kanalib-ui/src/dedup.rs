@@ -1245,7 +1245,7 @@ impl KanalibApp {
         similar_scanning: bool,
         similar_threshold: u8,
         protected_paths: &[PathBuf],
-        status: &str,
+        status: &kanalib_core::model::StatusMessage,
         error: Option<&str>,
         library_scanning: bool,
         width: Pixels,
@@ -1396,7 +1396,7 @@ impl KanalibApp {
                                         } else if similar_mode && similar_scanning {
                                             t(cx, "dedup.summary.similar_scanning").to_string()
                                         } else {
-                                            status.to_string()
+                                            crate::localization::core_status(cx, status).to_string()
                                         },
                                     ),
                                 ],

@@ -3184,7 +3184,7 @@ impl KanalibApp {
         self.schedule_search(cx);
         let weak = cx.entity().downgrade();
         self.refresh_task = Some(cx.spawn(async move |_, cx| {
-            let mut last_status = String::new();
+            let mut last_status = kanalib_core::model::StatusMessage::default();
             let mut last_scanning = false;
             let mut last_revision = 0u64;
             let mut ticks = 0u64;

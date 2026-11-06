@@ -313,11 +313,13 @@ pub(crate) fn apply_watch_batch(
         }
     }
     shared.set_queue_counts(queue.pending, queue.running, queue.error);
-    shared.status = format!(
-        "监听更新 · 变更 {} · 移除 {} · 队列 {}",
-        batch.changed.len(),
-        removed,
-        queue.pending
+    crate::state::set_status!(
+        shared,
+        "notice.source.watch_update",
+        "监听更新 · 变更 {changed} · 移除 {removed} · 队列 {queue}",
+        changed = batch.changed.len(),
+        removed = removed,
+        queue = queue.pending
     );
     let status = shared.source_status_mut(root);
     status.online = online;
@@ -360,7 +362,12 @@ pub(crate) fn mark_source_error(state: &Arc<AppState>, root: &Path, message: Str
     status.online = root.is_dir();
     status.error = Some(message.clone());
     shared.error = Some(message);
-    shared.status = format!("文件监听异常 · {}", root.display());
+    crate::state::set_status!(
+        shared,
+        "notice.source.watch_error",
+        "文件监听异常 · {path}",
+        path = root.display()
+    );
     shared.revision = shared.revision.wrapping_add(1);
 }
 

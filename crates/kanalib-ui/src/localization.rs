@@ -347,6 +347,21 @@ pub(crate) fn t_args(cx: &App, key: &str, args: &[(&str, &str)]) -> SharedString
     i18n::text(cx, key, args)
 }
 
+/// 核心写入的结构化状态：有 key 走目录，无 key 保留原文（备份通知/UI 覆盖）。
+pub(crate) fn core_status(cx: &App, status: &kanalib_core::model::StatusMessage) -> SharedString {
+    match status.key() {
+        Some(key) => {
+            let args = status
+                .args()
+                .iter()
+                .map(|(name, value)| (*name, value.as_str()))
+                .collect::<Vec<_>>();
+            t_args(cx, key, &args)
+        }
+        None => SharedString::from(status.text()),
+    }
+}
+
 /// 核心撤销栈记录的是中文动作标签；在 UI 层按固定四种语法映射，未知标签原样返回。
 pub(crate) fn undo_action_label(cx: &App, label: &str) -> String {
     let text = match label {

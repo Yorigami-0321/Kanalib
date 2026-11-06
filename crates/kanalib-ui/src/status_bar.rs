@@ -3,7 +3,7 @@ use crate::settings::format_tag_eta;
 use crate::sidebar::source_label;
 use crate::theme::*;
 use crate::*;
-use kanalib_core::model::{ScanPhase, ScanProgress, ScanSummary};
+use kanalib_core::model::{ScanPhase, ScanProgress, ScanSummary, StatusMessage};
 
 /// 扫描阶段标签；底栏与设置页共用。
 pub(crate) fn scan_phase_label(cx: &App, phase: ScanPhase) -> SharedString {
@@ -127,7 +127,7 @@ impl KanalibApp {
     pub(crate) fn render_status_bar(
         &self,
         this: &Entity<Self>,
-        status: &str,
+        status: &StatusMessage,
         error: Option<&str>,
         scanning: bool,
         device: Option<&str>,
@@ -258,7 +258,7 @@ impl KanalibApp {
                     .px(px(6.))
                     .text_xs()
                     .text_color(colors.muted)
-                    .child(status.to_string()),
+                    .child(crate::localization::core_status(cx, status)),
             );
         }
         if let Some(summary) = summary.as_ref().filter(|_| !scanning) {

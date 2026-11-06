@@ -23,8 +23,8 @@ use crate::model::{
     Asset, Collection, CountAccumulator, ExcludedAssetAction, Filter, PendingCleanup, RetagSummary,
     SavedSearch, SavedSearchView, ScanCounts, ScanFilterApply, ScanFilterConfig, ScanFilterImpact,
     ScanPhase, ScanProgress, ScanSummary, Shared, SimilarQueryResult, SimilarThresholdPreview,
-    SourceScanStatus, TagCandidateReview, TagHit, TagJobError, TagQueueStatus, TagRecomputeSummary,
-    TagReviewState, TagSummary, TagThresholds, normalize_tag_name,
+    SourceScanStatus, StatusMessage, TagCandidateReview, TagHit, TagJobError, TagQueueStatus,
+    TagRecomputeSummary, TagReviewState, TagSummary, TagThresholds, normalize_tag_name,
 };
 use crate::scan_filter::{self, CompiledIgnoreRules, IgnoreRules, ScanFilterPreview};
 use crate::sidecar::{Sidecar, project_root, repair_file};
@@ -35,6 +35,19 @@ use crate::sources::{
 };
 use crate::undo::{UndoAction, UndoEntry, UndoOutcome, UndoStack};
 use crate::watch;
+
+/// 结构化状态写入：格式化中文回退文本，同时把命名参数交给 UI 目录。
+///
+/// 只允许通过它写 `shared.status`；`check_ui_invariants.py` 会拦截裸赋值。
+macro_rules! set_status {
+    ($shared:expr, $key:literal, $fmt:literal $(, $name:ident = $value:expr)* $(,)?) => {{
+        $(let $name = $value;)*
+        let text = format!($fmt $(, $name = $name)*);
+        let args = vec![$((stringify!($name), format!("{}", $name))),*];
+        $shared.set_status($key, text, args);
+    }};
+}
+pub(crate) use set_status;
 
 #[derive(Clone, Copy, Debug, Default)]
 pub struct TrashSummary {
@@ -128,10 +141,12 @@ impl AppState {
                     applied.candidate.display(),
                     applied.safety_backup
                 );
+                let path = applied.candidate.display().to_string();
                 (
-                    Some(format!(
-                        "已应用备份 {} · 请检查图库",
-                        applied.candidate.display()
+                    Some(StatusMessage::keyed(
+                        "notice.library.restore_applied",
+                        format!("已应用备份 {path} · 请检查图库"),
+                        vec![("path", path.clone())],
                     )),
                     None,
                 )
@@ -291,7 +306,7 @@ impl AppState {
         );
         shared.sources = sources;
         if let Some(notice) = &restored_notice {
-            shared.status = notice.clone();
+            shared.set_status_message(notice.clone());
         }
         shared.saved_searches = saved_searches;
         shared.blocked_tags = blocked_tags.into_iter().collect();
@@ -413,7 +428,12 @@ impl AppState {
                     .online = online;
             }
             shared.revision = shared.revision.wrapping_add(1);
-            shared.status = format!("已添加 {} 个来源", added.len());
+            set_status!(
+                shared,
+                "notice.sources.added",
+                "已添加 {n} 个来源",
+                n = added.len()
+            );
             shared.error = None;
         }
         self.start_watching();
@@ -483,14 +503,16 @@ impl AppState {
                 queue_counts.running,
                 queue_counts.error,
             );
-            shared.status = if shared.roots.is_empty() {
-                "请添加文件夹".to_string()
+            if shared.roots.is_empty() {
+                set_status!(shared, "notice.library.add_folder", "请添加文件夹");
             } else {
-                format!(
-                    "已移除来源 · 磁盘文件未删除 · 剩余 {} 个来源",
-                    shared.roots.len()
-                )
-            };
+                set_status!(
+                    shared,
+                    "notice.sources.removed",
+                    "已移除来源 · 磁盘文件未删除 · 剩余 {sources} 个来源",
+                    sources = shared.roots.len()
+                );
+            }
             shared.error = None;
             removed
         };
@@ -550,7 +572,7 @@ impl AppState {
         if roots.is_empty() {
             let mut shared = self.shared.lock().unwrap();
             shared.scanning = false;
-            shared.status = "请添加文件夹".into();
+            set_status!(shared, "notice.library.add_folder", "请添加文件夹");
             shared.revision = shared.revision.wrapping_add(1);
             return;
         }
@@ -560,7 +582,7 @@ impl AppState {
             shared.error = None;
             shared.pending_cleanup = None;
             shared.tag_status.cancelling = false;
-            shared.status = "扫描中...".into();
+            set_status!(shared, "notice.scan.started", "扫描中...");
         }
         let state = self.clone();
         let skip_tag = std::env::var_os("KANALIB_SKIP_TAG").is_some();
@@ -600,32 +622,46 @@ impl AppState {
                 };
                 if let Some(error) = failure {
                     shared.error = Some(format!("{error:#}"));
-                    shared.status = "索引失败".into();
-                } else if summary.cancelled {
-                    shared.status = format!("已停止{suffix}");
-                } else if queue.pending > 0 {
-                    shared.status = format!(
-                        "完成 · {} 张图片 · 队列 {} 张待处理 · {} 个来源{}",
-                        shared.counts.total(),
-                        queue.pending,
-                        roots.len(),
-                        suffix
-                    );
-                } else if queue.error > 0 {
-                    shared.status = format!(
-                        "完成 · {} 张图片 · {} 个失败待处理 · {} 个来源{}",
-                        shared.counts.total(),
-                        queue.error,
-                        roots.len(),
-                        suffix
-                    );
+                    set_status!(shared, "notice.scan.failed", "索引失败");
                 } else {
-                    shared.status = format!(
-                        "完成 · {} 张图片 · {} 个来源{}",
-                        shared.counts.total(),
-                        roots.len(),
-                        suffix
-                    );
+                    let mut args = scan_summary_args(&summary);
+                    let key;
+                    let text;
+                    if summary.cancelled {
+                        key = "notice.scan.stopped_summary";
+                        text = format!("已停止{suffix}");
+                    } else if queue.pending > 0 {
+                        let total = shared.counts.total();
+                        let sources = roots.len();
+                        key = "notice.scan.complete_queue";
+                        text = format!(
+                            "完成 · {total} 张图片 · 队列 {pending} 张待处理 · {sources} 个来源{suffix}",
+                            pending = queue.pending
+                        );
+                        args.push(("total", total.to_string()));
+                        args.push(("pending", queue.pending.to_string()));
+                        args.push(("sources", sources.to_string()));
+                    } else if queue.error > 0 {
+                        let total = shared.counts.total();
+                        let sources = roots.len();
+                        key = "notice.scan.complete_errors";
+                        text = format!(
+                            "完成 · {total} 张图片 · {failed} 个失败待处理 · {sources} 个来源{suffix}",
+                            failed = queue.error
+                        );
+                        args.push(("total", total.to_string()));
+                        args.push(("queue_failed", queue.error.to_string()));
+                        args.push(("sources", sources.to_string()));
+                    } else {
+                        let total = shared.counts.total();
+                        let sources = roots.len();
+                        key = "notice.scan.complete";
+                        text = format!("完成 · {total} 张图片 · {sources} 个来源{suffix}");
+                        args.push(("total", total.to_string()));
+                        args.push(("sources", sources.to_string()));
+                    }
+                    args.push(("suffix", suffix));
+                    shared.set_status_message(StatusMessage::keyed(key, text, args));
                 }
                 shared.revision = shared.revision.wrapping_add(1);
                 drop(shared);
@@ -644,7 +680,7 @@ impl AppState {
         if roots.is_empty() {
             let mut shared = self.shared.lock().unwrap();
             shared.scanning = false;
-            shared.status = "请添加文件夹".into();
+            set_status!(shared, "notice.library.add_folder", "请添加文件夹");
             return Ok(());
         }
         {
@@ -653,7 +689,7 @@ impl AppState {
             shared.error = None;
             shared.pending_cleanup = None;
             shared.tag_status.cancelling = false;
-            shared.status = "扫描中...".into();
+            set_status!(shared, "notice.scan.started", "扫描中...");
         }
         let cancel = Arc::new(AtomicBool::new(false));
         let (summary, failure) = scan_roots(self, &roots, &cancel, skip_tag);
@@ -673,22 +709,35 @@ impl AppState {
                 ScanPhase::Done
             };
             if failure.is_none() {
-                shared.status = if summary.cancelled {
-                    format!("已停止{}", scan_summary_suffix(&summary))
+                let suffix = scan_summary_suffix(&summary);
+                let mut args = scan_summary_args(&summary);
+                if summary.cancelled {
+                    let text = format!("已停止{suffix}");
+                    args.push(("suffix", suffix));
+                    shared.set_status_message(StatusMessage::keyed(
+                        "notice.scan.stopped_summary",
+                        text,
+                        args,
+                    ));
                 } else {
-                    format!(
-                        "完成 · {} 张图片 · {} 个来源{}",
-                        shared.counts.total(),
-                        roots.len(),
-                        scan_summary_suffix(&summary)
-                    )
-                };
+                    let total = shared.counts.total();
+                    let sources = roots.len();
+                    let text = format!("完成 · {total} 张图片 · {sources} 个来源{suffix}");
+                    args.push(("total", total.to_string()));
+                    args.push(("sources", sources.to_string()));
+                    args.push(("suffix", suffix));
+                    shared.set_status_message(StatusMessage::keyed(
+                        "notice.scan.complete",
+                        text,
+                        args,
+                    ));
+                }
             }
         }
         if let Some(error) = failure {
             let mut shared = self.shared.lock().unwrap();
             shared.error = Some(format!("{error:#}"));
-            shared.status = "索引失败".into();
+            set_status!(shared, "notice.scan.failed", "索引失败");
             drop(shared);
             self.rescan_if_watch_dirty();
             return Err(error);
@@ -744,7 +793,12 @@ impl AppState {
         let mut shared = self.shared.lock().unwrap();
         shared.scan_filters = filters;
         shared.revision = shared.revision.wrapping_add(1);
-        shared.status = format!("已更新来源排除规则 · {}", root.display());
+        set_status!(
+            shared,
+            "notice.source.scan_filter_updated",
+            "已更新来源排除规则 · {path}",
+            path = root.display()
+        );
         shared.error = None;
         Ok(())
     }
@@ -821,16 +875,20 @@ impl AppState {
             shared.remove_assets(&targets);
             shared.refresh_after_removal(&targets);
             shared.error = None;
-            shared.status = format!(
-                "已保存排除规则 · 从图库移出 {} 张 · 磁盘文件未删除",
-                removed
+            set_status!(
+                shared,
+                "notice.source.scan_filter_saved_removed",
+                "已保存排除规则 · 从图库移出 {removed} 张 · 磁盘文件未删除",
+                removed = removed
             );
             shared.revision = shared.revision.wrapping_add(1);
         } else {
             let mut shared = self.shared.lock().unwrap();
-            shared.status = format!(
-                "已保存排除规则 · 已入库命中 {} 张 · 保留记录",
-                impact.excluded.len()
+            set_status!(
+                shared,
+                "notice.source.scan_filter_saved_hits",
+                "已保存排除规则 · 已入库命中 {n} 张 · 保留记录",
+                n = impact.excluded.len()
             );
             shared.error = None;
             shared.revision = shared.revision.wrapping_add(1);
@@ -903,11 +961,21 @@ impl AppState {
         shared.remove_assets(&targets);
         shared.refresh_after_removal(&targets);
         shared.error = None;
-        shared.status = if remember_hash {
-            format!("已从图库移除 {removed} 张并忽略其路径与内容哈希 · 磁盘文件未删除")
+        if remember_hash {
+            set_status!(
+                shared,
+                "notice.library.removed_ignored_hash",
+                "已从图库移除 {removed} 张并忽略其路径与内容哈希 · 磁盘文件未删除",
+                removed = removed
+            );
         } else {
-            format!("已从图库移除 {removed} 张并忽略路径 · 磁盘文件未删除")
-        };
+            set_status!(
+                shared,
+                "notice.library.removed_ignored_path",
+                "已从图库移除 {removed} 张并忽略路径 · 磁盘文件未删除",
+                removed = removed
+            );
+        }
         shared.revision = shared.revision.wrapping_add(1);
         Ok(removed)
     }
@@ -929,7 +997,12 @@ impl AppState {
         scan_filter::save_ignore_rules(&Db::open(&self.db_path)?, &rules)?;
         let mut shared = self.shared.lock().unwrap();
         shared.ignore_rules = rules;
-        shared.status = format!("已添加忽略规则 · {}", pattern.trim());
+        set_status!(
+            shared,
+            "notice.ignore.added",
+            "已添加忽略规则 · {pattern}",
+            pattern = pattern.trim()
+        );
         shared.error = None;
         shared.revision = shared.revision.wrapping_add(1);
         Ok(true)
@@ -948,7 +1021,12 @@ impl AppState {
             scan_filter::save_ignore_rules(&Db::open(&self.db_path)?, &rules)?;
             let mut shared = self.shared.lock().unwrap();
             shared.ignore_rules = rules;
-            shared.status = format!("已恢复 {restored} 条路径忽略项 · 重扫后重新导入");
+            set_status!(
+                shared,
+                "notice.ignore.restored_paths",
+                "已恢复 {restored} 条路径忽略项 · 重扫后重新导入",
+                restored = restored
+            );
             shared.error = None;
             shared.revision = shared.revision.wrapping_add(1);
         }
@@ -968,7 +1046,12 @@ impl AppState {
             scan_filter::save_ignore_rules(&Db::open(&self.db_path)?, &rules)?;
             let mut shared = self.shared.lock().unwrap();
             shared.ignore_rules = rules;
-            shared.status = format!("已恢复 {restored} 条哈希忽略项 · 重扫后重新导入");
+            set_status!(
+                shared,
+                "notice.ignore.restored_hashes",
+                "已恢复 {restored} 条哈希忽略项 · 重扫后重新导入",
+                restored = restored
+            );
             shared.error = None;
             shared.revision = shared.revision.wrapping_add(1);
         }
@@ -985,7 +1068,12 @@ impl AppState {
         scan_filter::save_ignore_rules(&Db::open(&self.db_path)?, &rules)?;
         let mut shared = self.shared.lock().unwrap();
         shared.ignore_rules = rules;
-        shared.status = format!("已恢复忽略规则 · {}", pattern.trim());
+        set_status!(
+            shared,
+            "notice.ignore.restored_glob",
+            "已恢复忽略规则 · {pattern}",
+            pattern = pattern.trim()
+        );
         shared.error = None;
         shared.revision = shared.revision.wrapping_add(1);
         Ok(true)
@@ -1017,7 +1105,7 @@ impl AppState {
             let mut shared = self.shared.lock().unwrap();
             shared.scanning = false;
             shared.error = Some("无法创建重扫线程".into());
-            shared.status = "重扫失败".into();
+            set_status!(shared, "notice.scan.rescan_failed", "重扫失败");
             shared.revision = shared.revision.wrapping_add(1);
             bail!("无法创建重扫线程");
         }
@@ -1040,7 +1128,12 @@ impl AppState {
             status.online = false;
             status.error = Some(format!("来源不可访问：{}", root.display()));
             shared.error = Some(format!("来源离线，已保留图库记录：{}", root.display()));
-            shared.status = format!("来源离线 · {}", root.display());
+            set_status!(
+                shared,
+                "notice.source.offline",
+                "来源离线 · {path}",
+                path = root.display()
+            );
             shared.revision = shared.revision.wrapping_add(1);
             bail!("来源不可访问: {}", root.display());
         }
@@ -1050,9 +1143,12 @@ impl AppState {
         }
         shared.scanning = true;
         shared.error = None;
-        shared.status = format!(
-            "重新扫描来源 · {}",
-            root.file_name()
+        set_status!(
+            shared,
+            "notice.scan.rescan_started",
+            "重新扫描来源 · {source}",
+            source = root
+                .file_name()
                 .map(|name| name.to_string_lossy().to_string())
                 .unwrap_or_else(|| root.display().to_string())
         );
@@ -1082,14 +1178,21 @@ impl AppState {
             Ok(stats) => {
                 let cancelled = stats.cancelled;
                 summary.record(root, stats.scan_counts(), stats.total_secs, cancelled, None);
-                shared.status = format!(
-                    "来源扫描完成 · {} · {} 张图片{}",
-                    root.file_name()
-                        .map(|name| name.to_string_lossy().to_string())
-                        .unwrap_or_else(|| root.display().to_string()),
-                    shared.counts.total(),
-                    scan_summary_suffix(&summary)
-                );
+                let source = root
+                    .file_name()
+                    .map(|name| name.to_string_lossy().to_string())
+                    .unwrap_or_else(|| root.display().to_string());
+                let suffix = scan_summary_suffix(&summary);
+                let total = shared.counts.total();
+                let mut args = scan_summary_args(&summary);
+                args.push(("source", source.clone()));
+                args.push(("total", total.to_string()));
+                args.push(("suffix", suffix.clone()));
+                shared.set_status_message(StatusMessage::keyed(
+                    "notice.scan.source_complete",
+                    format!("来源扫描完成 · {source} · {total} 张图片{suffix}"),
+                    args,
+                ));
                 shared.scan_progress.phase = ScanPhase::Done;
             }
             Err(error) => {
@@ -1101,7 +1204,7 @@ impl AppState {
                     Some(format!("{error:#}")),
                 );
                 shared.error = Some(format!("{error:#}"));
-                shared.status = "来源扫描失败".into();
+                set_status!(shared, "notice.scan.source_failed", "来源扫描失败");
                 shared.scan_progress.phase = ScanPhase::Failed;
             }
         }
@@ -1175,7 +1278,12 @@ impl AppState {
                     status.online = true;
                     if recovered {
                         status.error = None;
-                        shared.status = format!("来源已恢复监听 · {}", source_label(&root));
+                        set_status!(
+                            shared,
+                            "notice.source.watch_recovered",
+                            "来源已恢复监听 · {source}",
+                            source = source_label(&root)
+                        );
                         shared.revision = shared.revision.wrapping_add(1);
                     }
                 }
@@ -1192,7 +1300,12 @@ impl AppState {
                     status.online = online;
                     if status.error.as_deref() != Some(message.as_str()) {
                         status.error = Some(message);
-                        shared.status = format!("文件监听失败 · {}", root.display());
+                        set_status!(
+                            shared,
+                            "notice.source.watch_failed",
+                            "文件监听失败 · {path}",
+                            path = root.display()
+                        );
                         shared.revision = shared.revision.wrapping_add(1);
                     }
                 }
@@ -1321,9 +1434,17 @@ impl AppState {
             .collect::<Vec<_>>();
         let updated = self.apply_favorite_values(&targets, |updated| {
             if favorite {
-                format!("已收藏 {updated} 张")
+                StatusMessage::keyed(
+                    "notice.favorite.added",
+                    format!("已收藏 {updated} 张"),
+                    vec![("n", updated.to_string())],
+                )
             } else {
-                format!("已取消收藏 {updated} 张")
+                StatusMessage::keyed(
+                    "notice.favorite.removed",
+                    format!("已取消收藏 {updated} 张"),
+                    vec![("n", updated.to_string())],
+                )
             }
         })?;
         if !changes.is_empty() {
@@ -1352,9 +1473,17 @@ impl AppState {
             .collect::<Vec<_>>();
         let updated = self.apply_star_values(&targets, |updated| {
             if star == 0 {
-                format!("已清除 {updated} 张的星级")
+                StatusMessage::keyed(
+                    "notice.star.cleared",
+                    format!("已清除 {updated} 张的星级"),
+                    vec![("n", updated.to_string())],
+                )
             } else {
-                format!("已设置 {updated} 张为 {star} 星")
+                StatusMessage::keyed(
+                    "notice.star.set",
+                    format!("已设置 {updated} 张为 {star} 星"),
+                    vec![("n", updated.to_string()), ("stars", star.to_string())],
+                )
             }
         })?;
         if !changes.is_empty() {
@@ -1435,7 +1564,11 @@ impl AppState {
                 }
             }
             *revision = revision.wrapping_add(1);
-            *status = format!("已为 {updated} 张添加标签 #{name}");
+            *status = StatusMessage::keyed(
+                "notice.tags.added",
+                format!("已为 {updated} 张添加标签 #{name}"),
+                vec![("n", updated.to_string()), ("name", name.clone())],
+            );
             *error = None;
         }
         if !inserted.is_empty() {
@@ -1497,7 +1630,11 @@ impl AppState {
                 }
             }
             *revision = revision.wrapping_add(1);
-            *status = format!("已从 {updated} 张移除标签 #{name}");
+            *status = StatusMessage::keyed(
+                "notice.tags.removed",
+                format!("已从 {updated} 张移除标签 #{name}"),
+                vec![("n", updated.to_string()), ("name", name.clone())],
+            );
             *error = None;
         }
         if updated > 0 && !rows.is_empty() {
@@ -1512,7 +1649,7 @@ impl AppState {
     /// 收藏 mutation 的内部 apply；撤销复用它但不再记录新条目。
     fn apply_favorite_values<F>(&self, values: &[(PathBuf, bool)], status: F) -> Result<usize>
     where
-        F: FnOnce(usize) -> String,
+        F: FnOnce(usize) -> StatusMessage,
     {
         let updated = Db::open(&self.db_path)?.set_favorite_values(values)?;
         let targets = values
@@ -1549,7 +1686,7 @@ impl AppState {
     /// 星级 mutation 的内部 apply；撤销复用它但不再记录新条目。
     fn apply_star_values<F>(&self, values: &[(PathBuf, u8)], status: F) -> Result<usize>
     where
-        F: FnOnce(usize) -> String,
+        F: FnOnce(usize) -> StatusMessage,
     {
         let updated = Db::open(&self.db_path)?.set_star_values(values)?;
         let targets = values
@@ -1603,16 +1740,32 @@ impl AppState {
     fn apply_undo(&self, entry: &UndoEntry) -> Result<usize> {
         match &entry.action {
             UndoAction::Favorite { changes } => self.apply_favorite_values(changes, |updated| {
-                format!("已撤销「{}」· 恢复 {updated} 张收藏", entry.label)
+                StatusMessage::keyed(
+                    "notice.undo.favorite",
+                    format!("已撤销「{}」· 恢复 {updated} 张收藏", entry.label),
+                    vec![("label", entry.label.clone()), ("n", updated.to_string())],
+                )
             }),
             UndoAction::Star { changes } => self.apply_star_values(changes, |updated| {
-                format!("已撤销「{}」· 恢复 {updated} 张星级", entry.label)
+                StatusMessage::keyed(
+                    "notice.undo.star",
+                    format!("已撤销「{}」· 恢复 {updated} 张星级", entry.label),
+                    vec![("label", entry.label.clone()), ("n", updated.to_string())],
+                )
             }),
             UndoAction::ManualTagsAdded { paths, name } => {
                 let affected = Db::open(&self.db_path)?.remove_manual_tags(paths, name)?;
-                self.reload_after_tag_change(format!(
-                    "已撤销「{}」· 移除手工标签 #{name} · {affected} 张",
-                    entry.label
+                self.reload_after_tag_change(StatusMessage::keyed(
+                    "notice.undo.tag_removed",
+                    format!(
+                        "已撤销「{}」· 移除手工标签 #{name} · {affected} 张",
+                        entry.label
+                    ),
+                    vec![
+                        ("label", entry.label.clone()),
+                        ("name", name.clone()),
+                        ("n", affected.to_string()),
+                    ],
                 ))?;
                 Ok(affected)
             }
@@ -1623,9 +1776,10 @@ impl AppState {
                     .map(|row| row.path.as_path())
                     .collect::<HashSet<_>>()
                     .len();
-                self.reload_after_tag_change(format!(
-                    "已撤销「{}」· 恢复 {affected} 张的标签",
-                    entry.label
+                self.reload_after_tag_change(StatusMessage::keyed(
+                    "notice.undo.tags_restored",
+                    format!("已撤销「{}」· 恢复 {affected} 张的标签", entry.label),
+                    vec![("label", entry.label.clone()), ("n", affected.to_string())],
                 ))?;
                 Ok(affected)
             }
@@ -1696,11 +1850,21 @@ impl AppState {
         let mut shared = self.shared.lock().unwrap();
         shared.source_aliases = aliases;
         shared.revision = shared.revision.wrapping_add(1);
-        shared.status = if alias.is_empty() {
-            format!("已恢复来源默认名称 · {}", root.display())
+        if alias.is_empty() {
+            set_status!(
+                shared,
+                "notice.source.alias_reset",
+                "已恢复来源默认名称 · {path}",
+                path = root.display()
+            );
         } else {
-            format!("已重命名来源为 {alias}")
-        };
+            set_status!(
+                shared,
+                "notice.source.alias_set",
+                "已重命名来源为 {alias}",
+                alias = alias
+            );
+        }
         shared.error = None;
         Ok(())
     }
@@ -1728,16 +1892,26 @@ impl AppState {
         let mut shared = self.shared.lock().unwrap();
         shared.blocked_tags = list.into_iter().collect();
         shared.revision = shared.revision.wrapping_add(1);
-        shared.status = if blocked {
-            format!("已屏蔽标签 #{name}")
+        if blocked {
+            set_status!(
+                shared,
+                "notice.tags.blocked",
+                "已屏蔽标签 #{name}",
+                name = name
+            );
         } else {
-            format!("已取消屏蔽标签 #{name}")
-        };
+            set_status!(
+                shared,
+                "notice.tags.unblocked",
+                "已取消屏蔽标签 #{name}",
+                name = name
+            );
+        }
         shared.error = None;
         Ok(())
     }
 
-    fn reload_after_tag_change(&self, status: String) -> Result<()> {
+    fn reload_after_tag_change(&self, status: StatusMessage) -> Result<()> {
         let roots = self.all_folder_strings();
         let db = Db::open(&self.db_path)?;
         let assets = load_tile_thumbs(db.load_library(&roots)?);
@@ -1752,21 +1926,35 @@ impl AppState {
         }
         shared.tag_aliases = aliases;
         shared.revision = shared.revision.wrapping_add(1);
-        shared.status = status;
+        shared.set_status_message(status);
         shared.error = None;
         Ok(())
     }
 
     pub fn rename_tag(&self, old: &str, new: &str) -> Result<usize> {
         let affected = Db::open(&self.db_path)?.rename_tag(old, new)?;
-        self.reload_after_tag_change(format!("已重命名标签 #{old} → #{new} · 影响 {affected} 张"))?;
+        self.reload_after_tag_change(StatusMessage::keyed(
+            "notice.tags.renamed",
+            format!("已重命名标签 #{old} → #{new} · 影响 {affected} 张"),
+            vec![
+                ("old", old.to_string()),
+                ("new", new.to_string()),
+                ("n", affected.to_string()),
+            ],
+        ))?;
         Ok(affected)
     }
 
     pub fn merge_tags(&self, source: &str, target: &str) -> Result<usize> {
         let affected = Db::open(&self.db_path)?.merge_tags(source, target)?;
-        self.reload_after_tag_change(format!(
-            "已合并标签 #{source} → #{target} · 影响 {affected} 张"
+        self.reload_after_tag_change(StatusMessage::keyed(
+            "notice.tags.merged",
+            format!("已合并标签 #{source} → #{target} · 影响 {affected} 张"),
+            vec![
+                ("source", source.to_string()),
+                ("target", target.to_string()),
+                ("n", affected.to_string()),
+            ],
         ))?;
         Ok(affected)
     }
@@ -1795,7 +1983,12 @@ impl AppState {
         let mut shared = self.shared.lock().unwrap();
         shared.saved_searches = saved_searches;
         shared.revision = shared.revision.wrapping_add(1);
-        shared.status = format!("已保存智能集合「{}」", saved.name);
+        set_status!(
+            shared,
+            "notice.saved_search.saved",
+            "已保存智能集合「{name}」",
+            name = saved.name.clone()
+        );
         shared.error = None;
         Ok(saved)
     }
@@ -1808,7 +2001,12 @@ impl AppState {
         let mut shared = self.shared.lock().unwrap();
         shared.saved_searches = saved_searches;
         shared.revision = shared.revision.wrapping_add(1);
-        shared.status = format!("已重命名智能集合为「{}」", saved.name);
+        set_status!(
+            shared,
+            "notice.saved_search.renamed",
+            "已重命名智能集合为「{name}」",
+            name = saved.name.clone()
+        );
         shared.error = None;
         Ok(saved)
     }
@@ -1827,7 +2025,12 @@ impl AppState {
         let mut shared = self.shared.lock().unwrap();
         shared.saved_searches = saved_searches;
         shared.revision = shared.revision.wrapping_add(1);
-        shared.status = format!("已用当前视图更新集合「{}」", saved.name);
+        set_status!(
+            shared,
+            "notice.saved_search.updated",
+            "已用当前视图更新集合「{name}」",
+            name = saved.name.clone()
+        );
         shared.error = None;
         Ok(saved)
     }
@@ -1839,11 +2042,11 @@ impl AppState {
         let mut shared = self.shared.lock().unwrap();
         shared.saved_searches = saved_searches;
         shared.revision = shared.revision.wrapping_add(1);
-        shared.status = if pinned {
-            "已置顶智能集合".to_string()
+        if pinned {
+            set_status!(shared, "notice.saved_search.pinned", "已置顶智能集合");
         } else {
-            "已取消置顶智能集合".to_string()
-        };
+            set_status!(shared, "notice.saved_search.unpinned", "已取消置顶智能集合");
+        }
         shared.error = None;
         Ok(saved)
     }
@@ -1856,7 +2059,11 @@ impl AppState {
         let mut shared = self.shared.lock().unwrap();
         shared.saved_searches = saved_searches;
         shared.revision = shared.revision.wrapping_add(1);
-        shared.status = "已调整智能集合顺序".into();
+        set_status!(
+            shared,
+            "notice.saved_search.reordered",
+            "已调整智能集合顺序"
+        );
         shared.error = None;
         Ok(())
     }
@@ -1868,7 +2075,7 @@ impl AppState {
         let mut shared = self.shared.lock().unwrap();
         shared.saved_searches = saved_searches;
         shared.revision = shared.revision.wrapping_add(1);
-        shared.status = "已删除智能集合".into();
+        set_status!(shared, "notice.saved_search.deleted", "已删除智能集合");
         shared.error = None;
         Ok(())
     }
@@ -1882,7 +2089,12 @@ impl AppState {
         let collection = Db::open(&self.db_path)?.create_collection(name)?;
         let mut shared = self.shared.lock().unwrap();
         shared.revision = shared.revision.wrapping_add(1);
-        shared.status = format!("已新建相册「{}」", collection.name);
+        set_status!(
+            shared,
+            "notice.album.created",
+            "已新建相册「{name}」",
+            name = collection.name.clone()
+        );
         shared.error = None;
         Ok(collection)
     }
@@ -1891,7 +2103,12 @@ impl AppState {
         let collection = Db::open(&self.db_path)?.rename_collection(id, name)?;
         let mut shared = self.shared.lock().unwrap();
         shared.revision = shared.revision.wrapping_add(1);
-        shared.status = format!("已重命名相册为「{}」", collection.name);
+        set_status!(
+            shared,
+            "notice.album.renamed",
+            "已重命名相册为「{name}」",
+            name = collection.name.clone()
+        );
         shared.error = None;
         Ok(collection)
     }
@@ -1904,7 +2121,7 @@ impl AppState {
         }
         let mut shared = self.shared.lock().unwrap();
         shared.revision = shared.revision.wrapping_add(1);
-        shared.status = "已删除相册（未删除图片）".into();
+        set_status!(shared, "notice.album.deleted", "已删除相册（未删除图片）");
         shared.error = None;
         Ok(())
     }
@@ -1913,7 +2130,12 @@ impl AppState {
         let added = Db::open(&self.db_path)?.add_assets_to_collection(id, paths)?;
         let mut shared = self.shared.lock().unwrap();
         shared.revision = shared.revision.wrapping_add(1);
-        shared.status = format!("已向相册加入 {added} 张图片");
+        set_status!(
+            shared,
+            "notice.album.added",
+            "已向相册加入 {added} 张图片",
+            added = added
+        );
         shared.error = None;
         Ok(added)
     }
@@ -1922,7 +2144,12 @@ impl AppState {
         let removed = Db::open(&self.db_path)?.remove_assets_from_collection(id, paths)?;
         let mut shared = self.shared.lock().unwrap();
         shared.revision = shared.revision.wrapping_add(1);
-        shared.status = format!("已从相册移出 {removed} 张图片");
+        set_status!(
+            shared,
+            "notice.album.removed",
+            "已从相册移出 {removed} 张图片",
+            removed = removed
+        );
         shared.error = None;
         Ok(removed)
     }
@@ -1988,7 +2215,13 @@ impl AppState {
     pub fn set_category_threshold(&self, category: &str, value: f32) -> Result<f32> {
         let value = Db::open(&self.db_path)?.set_category_threshold(category, value)?;
         let mut shared = self.shared.lock().unwrap();
-        shared.status = format!("{category} 阈值已设为 {value:.3}");
+        set_status!(
+            shared,
+            "notice.tag.threshold_category",
+            "{category} 阈值已设为 {value}",
+            category = category,
+            value = format!("{value:.3}")
+        );
         shared.error = None;
         shared.revision = shared.revision.wrapping_add(1);
         Ok(value)
@@ -1997,10 +2230,22 @@ impl AppState {
     pub fn set_tag_threshold(&self, tag: &str, value: Option<f32>) -> Result<Option<f32>> {
         let value = Db::open(&self.db_path)?.set_tag_threshold(tag, value)?;
         let mut shared = self.shared.lock().unwrap();
-        shared.status = match value {
-            Some(value) => format!("标签 #{tag} 阈值已设为 {value:.3}"),
-            None => format!("标签 #{tag} 已恢复类别阈值"),
-        };
+        if let Some(value) = value {
+            set_status!(
+                shared,
+                "notice.tag.threshold_tag",
+                "标签 #{tag} 阈值已设为 {value}",
+                tag = tag,
+                value = format!("{value:.3}")
+            );
+        } else {
+            set_status!(
+                shared,
+                "notice.tag.threshold_reset",
+                "标签 #{tag} 已恢复类别阈值",
+                tag = tag
+            );
+        }
         shared.error = None;
         shared.revision = shared.revision.wrapping_add(1);
         Ok(value)
@@ -2016,9 +2261,12 @@ impl AppState {
         let summary = Db::open(&self.db_path)?.recompute_thresholds(paths)?;
         self.sync_assets(paths)?;
         let mut shared = self.shared.lock().unwrap();
-        shared.status = format!(
-            "阈值重算完成 · {} 张更新 · {} 张缺候选",
-            summary.updated, summary.skipped
+        set_status!(
+            shared,
+            "notice.tag.recomputed",
+            "阈值重算完成 · {updated} 张更新 · {skipped} 张缺候选",
+            updated = summary.updated,
+            skipped = summary.skipped
         );
         shared.error = None;
         shared.revision = shared.revision.wrapping_add(1);
@@ -2043,11 +2291,32 @@ impl AppState {
         Db::open(&self.db_path)?.review_tag_candidate(path, tag, state)?;
         self.sync_assets(&[path.to_path_buf()])?;
         let mut shared = self.shared.lock().unwrap();
-        shared.status = match state {
-            TagReviewState::Accepted => format!("已接受候选 #{tag}"),
-            TagReviewState::Ignored => format!("已忽略候选 #{tag}"),
-            TagReviewState::Pending => format!("候选 #{tag} 已恢复待审"),
-        };
+        match state {
+            TagReviewState::Accepted => {
+                set_status!(
+                    shared,
+                    "notice.tag.candidate_accepted",
+                    "已接受候选 #{tag}",
+                    tag = tag
+                );
+            }
+            TagReviewState::Ignored => {
+                set_status!(
+                    shared,
+                    "notice.tag.candidate_ignored",
+                    "已忽略候选 #{tag}",
+                    tag = tag
+                );
+            }
+            TagReviewState::Pending => {
+                set_status!(
+                    shared,
+                    "notice.tag.candidate_pending",
+                    "候选 #{tag} 已恢复待审",
+                    tag = tag
+                );
+            }
+        }
         shared.error = None;
         Ok(())
     }
@@ -2056,7 +2325,12 @@ impl AppState {
         let changed = Db::open(&self.db_path)?.review_asset_candidates(path, state)?;
         self.sync_assets(&[path.to_path_buf()])?;
         let mut shared = self.shared.lock().unwrap();
-        shared.status = format!("已批量处理 {changed} 条候选");
+        set_status!(
+            shared,
+            "notice.tag.batch_reviewed",
+            "已批量处理 {changed} 条候选",
+            changed = changed
+        );
         shared.error = None;
         Ok(changed)
     }
@@ -2072,9 +2346,12 @@ impl AppState {
         self.sync_assets(paths)?;
         let (paused, scanning) = {
             let mut shared = self.shared.lock().unwrap();
-            shared.status = format!(
-                "重打标 · {} 张按候选重算 · {} 张已入队",
-                summary.recomputed, summary.queued
+            set_status!(
+                shared,
+                "notice.tag.retag",
+                "重打标 · {recomputed} 张按候选重算 · {queued} 张已入队",
+                recomputed = summary.recomputed,
+                queued = summary.queued
             );
             shared.error = None;
             shared.revision = shared.revision.wrapping_add(1);
@@ -2105,7 +2382,11 @@ impl AppState {
         {
             let mut shared = self.shared.lock().unwrap();
             shared.pause_tag_queue();
-            shared.status = "打标已暂停 · 当前批完成后不再认领新任务".into();
+            set_status!(
+                shared,
+                "notice.tag_queue.paused",
+                "打标已暂停 · 当前批完成后不再认领新任务"
+            );
             shared.error = None;
             shared.revision = shared.revision.wrapping_add(1);
         }
@@ -2116,7 +2397,11 @@ impl AppState {
         {
             let mut shared = self.shared.lock().unwrap();
             shared.cancel_tag_queue();
-            shared.status = "正在取消打标 · 已完成结果会保留".into();
+            set_status!(
+                shared,
+                "notice.tag_queue.cancelling",
+                "正在取消打标 · 已完成结果会保留"
+            );
             shared.error = None;
             shared.revision = shared.revision.wrapping_add(1);
         }
@@ -2135,7 +2420,7 @@ impl AppState {
         if *worker {
             let mut shared = self.shared.lock().unwrap();
             shared.resume_tag_queue();
-            shared.status = "打标已在运行".into();
+            set_status!(shared, "notice.tag_queue.running", "打标已在运行");
             return Ok(());
         }
         *worker = true;
@@ -2143,7 +2428,7 @@ impl AppState {
         {
             let mut shared = self.shared.lock().unwrap();
             shared.resume_tag_queue();
-            shared.status = "继续打标...".into();
+            set_status!(shared, "notice.tag_queue.resuming", "继续打标...");
             shared.error = None;
             shared.revision = shared.revision.wrapping_add(1);
         }
@@ -2156,7 +2441,7 @@ impl AppState {
                     let mut shared = state.shared.lock().unwrap();
                     shared.tag_status.last_error = Some(format!("{error:#}"));
                     shared.tag_status.paused = true;
-                    shared.status = "打标失败，已暂停".into();
+                    set_status!(shared, "notice.tag_queue.failed_paused", "打标失败，已暂停");
                     shared.error = Some(format!("{error:#}"));
                     shared.revision = shared.revision.wrapping_add(1);
                 }
@@ -2200,11 +2485,19 @@ impl AppState {
     pub fn set_allow_cpu_tagging(&self, allow: bool) -> Result<()> {
         Db::open(&self.db_path)?.set_allow_cpu_tagging(allow)?;
         let mut shared = self.shared.lock().unwrap();
-        shared.status = if allow {
-            "已允许 CPU 慢速打标；继续队列后生效".into()
+        if allow {
+            set_status!(
+                shared,
+                "notice.tag_queue.cpu_allowed",
+                "已允许 CPU 慢速打标；继续队列后生效"
+            );
         } else {
-            "GPU 不可用时默认暂停打标".into()
-        };
+            set_status!(
+                shared,
+                "notice.tag_queue.gpu_paused",
+                "GPU 不可用时默认暂停打标"
+            );
+        }
         shared.error = None;
         shared.revision = shared.revision.wrapping_add(1);
         Ok(())
@@ -2216,7 +2509,12 @@ impl AppState {
             return;
         };
         shared.error = None;
-        shared.status = format!("已保留 {} 张缺失图片记录", pending.paths.len());
+        set_status!(
+            shared,
+            "notice.cleanup.kept",
+            "已保留 {n} 张缺失图片记录",
+            n = pending.paths.len()
+        );
         shared.revision = shared.revision.wrapping_add(1);
     }
 
@@ -2256,11 +2554,22 @@ impl AppState {
         shared.refresh_after_removal(&removed_paths);
         shared.set_queue_counts(queue.pending, queue.running, queue.error);
         shared.error = None;
-        shared.status = if kept > 0 {
-            format!("已从图库移除 {removed} 张缺失记录，保留 {kept} 张已恢复文件")
+        if kept > 0 {
+            set_status!(
+                shared,
+                "notice.cleanup.removed_kept",
+                "已从图库移除 {removed} 张缺失记录，保留 {kept} 张已恢复文件",
+                removed = removed,
+                kept = kept
+            );
         } else {
-            format!("已从图库移除 {removed} 张缺失图片记录")
-        };
+            set_status!(
+                shared,
+                "notice.cleanup.removed",
+                "已从图库移除 {removed} 张缺失图片记录",
+                removed = removed
+            );
+        }
         shared.revision = shared.revision.wrapping_add(1);
         Ok(removed)
     }
@@ -2280,7 +2589,12 @@ impl AppState {
             .unwrap_or_else(|| path.display().to_string());
         {
             let mut shared = self.shared.lock().unwrap();
-            shared.status = format!("修复中 · {label}");
+            set_status!(
+                shared,
+                "notice.repair.running",
+                "修复中 · {label}",
+                label = label.clone()
+            );
             shared.error = None;
             shared.revision = shared.revision.wrapping_add(1);
         }
@@ -2292,14 +2606,19 @@ impl AppState {
                     log::warn!("repair {}: {error:#}", thread_path.display());
                     let mut shared = state.shared.lock().unwrap();
                     shared.error = Some(format!("修复失败：{error:#}"));
-                    shared.status = format!("修复失败 · {label}");
+                    set_status!(
+                        shared,
+                        "notice.repair.failed",
+                        "修复失败 · {label}",
+                        label = label.clone()
+                    );
                     shared.revision = shared.revision.wrapping_add(1);
                 }
             });
         if spawned.is_err() {
             let mut shared = self.shared.lock().unwrap();
             shared.error = Some("无法创建修复线程".into());
-            shared.status = "修复失败".into();
+            set_status!(shared, "notice.repair.failed_plain", "修复失败");
             shared.revision = shared.revision.wrapping_add(1);
         }
         Ok(())
@@ -2343,7 +2662,11 @@ impl AppState {
         {
             let mut shared = self.shared.lock().unwrap();
             shared.upsert(asset);
-            shared.status = "预览缓存已重建 · 加载打标模型...".into();
+            set_status!(
+                shared,
+                "notice.repair.cache_rebuilt_loading",
+                "预览缓存已重建 · 加载打标模型..."
+            );
             shared.revision = shared.revision.wrapping_add(1);
         }
 
@@ -2352,7 +2675,11 @@ impl AppState {
             Err(error) => {
                 let mut shared = self.shared.lock().unwrap();
                 shared.error = Some(format!("预览已重建，但打标模型加载失败：{error:#}"));
-                shared.status = "预览已重建，打标未完成".into();
+                set_status!(
+                    shared,
+                    "notice.repair.cache_rebuilt_incomplete",
+                    "预览已重建，打标未完成"
+                );
                 shared.revision = shared.revision.wrapping_add(1);
                 return Ok(());
             }
@@ -2364,7 +2691,11 @@ impl AppState {
             } else {
                 ready.device
             });
-            shared.status = "预览已重建 · 重新打标...".into();
+            set_status!(
+                shared,
+                "notice.repair.cache_rebuilt_retag",
+                "预览已重建 · 重新打标..."
+            );
             shared.revision = shared.revision.wrapping_add(1);
         }
         let item = sidecar
@@ -2408,11 +2739,22 @@ impl AppState {
             {
                 let mut shared = self.shared.lock().unwrap();
                 shared.upsert(stored);
-                shared.status = if let Some(damage) = damage {
-                    format!("修复完成（{damage}） · {name}")
+                if let Some(damage) = damage {
+                    set_status!(
+                        shared,
+                        "notice.repair.done_damage",
+                        "修复完成（{damage}） · {name}",
+                        damage = damage,
+                        name = name
+                    );
                 } else {
-                    format!("修复完成，文件可正常读取 · {name}")
-                };
+                    set_status!(
+                        shared,
+                        "notice.repair.done",
+                        "修复完成，文件可正常读取 · {name}",
+                        name = name
+                    );
+                }
                 shared.revision = shared.revision.wrapping_add(1);
             }
         } else {
@@ -2444,7 +2786,11 @@ impl AppState {
                 let mut shared = self.shared.lock().unwrap();
                 shared.upsert(asset);
                 shared.error = Some(format!("预览已重建，但仍无法打标：{error}"));
-                shared.status = "修复未完成 · 文件仍不可完整读取".into();
+                set_status!(
+                    shared,
+                    "notice.repair.incomplete",
+                    "修复未完成 · 文件仍不可完整读取"
+                );
                 shared.revision = shared.revision.wrapping_add(1);
             }
         }
@@ -2460,7 +2806,12 @@ impl AppState {
             .unwrap_or_else(|| output.display().to_string());
         {
             let mut shared = self.shared.lock().unwrap();
-            shared.status = format!("正在导出修复副本 · {label}");
+            set_status!(
+                shared,
+                "notice.repair.exporting",
+                "正在导出修复副本 · {label}",
+                label = label.clone()
+            );
             shared.error = None;
             shared.revision = shared.revision.wrapping_add(1);
         }
@@ -2470,11 +2821,23 @@ impl AppState {
             .spawn(move || match repair_file(&path, &thread_output, None) {
                 Ok(outcome) => {
                     let mut shared = state.shared.lock().unwrap();
-                    shared.status = if let Some(damage) = outcome.damage {
-                        format!("已导出修复副本（{damage}） · {}", thread_output.display())
+                    let path = thread_output.display().to_string();
+                    if let Some(damage) = outcome.damage {
+                        set_status!(
+                            shared,
+                            "notice.repair.exported_damage",
+                            "已导出修复副本（{damage}） · {path}",
+                            damage = damage,
+                            path = path
+                        );
                     } else {
-                        format!("已导出修复副本 · {}", thread_output.display())
-                    };
+                        set_status!(
+                            shared,
+                            "notice.repair.exported",
+                            "已导出修复副本 · {path}",
+                            path = path
+                        );
+                    }
                     shared.error = None;
                     shared.revision = shared.revision.wrapping_add(1);
                 }
@@ -2482,14 +2845,14 @@ impl AppState {
                     log::warn!("export repair {}: {error:#}", path.display());
                     let mut shared = state.shared.lock().unwrap();
                     shared.error = Some(format!("导出修复副本失败：{error:#}"));
-                    shared.status = "导出修复副本失败".into();
+                    set_status!(shared, "notice.repair.export_failed", "导出修复副本失败");
                     shared.revision = shared.revision.wrapping_add(1);
                 }
             });
         if spawned.is_err() {
             let mut shared = self.shared.lock().unwrap();
             shared.error = Some("无法创建导出线程".into());
-            shared.status = "导出修复副本失败".into();
+            set_status!(shared, "notice.repair.export_failed", "导出修复副本失败");
             shared.revision = shared.revision.wrapping_add(1);
         }
         Ok(())
@@ -2520,7 +2883,12 @@ impl AppState {
         let mut shared = self.shared.lock().unwrap();
         let selected = shared.dedup.preselect(kind);
         if selected > 0 {
-            shared.status = format!("已按规则预选 {selected} 组");
+            set_status!(
+                shared,
+                "notice.dedup.preselected",
+                "已按规则预选 {selected} 组",
+                selected = selected
+            );
             shared.revision = shared.revision.wrapping_add(1);
         }
         selected
@@ -2538,12 +2906,20 @@ impl AppState {
         let mut shared = self.shared.lock().unwrap();
         shared.error = None;
         shared.revision = shared.revision.wrapping_add(1);
-        shared.status = match state {
-            ReviewState::Ignored => "已标记为不是重复".to_string(),
-            ReviewState::Related => "已标记为相关变体".to_string(),
-            ReviewState::Done => "已保留整组".to_string(),
-            ReviewState::Pending => "已重新打开此组".to_string(),
-        };
+        match state {
+            ReviewState::Ignored => {
+                set_status!(shared, "notice.dedup.marked_ignored", "已标记为不是重复");
+            }
+            ReviewState::Related => {
+                set_status!(shared, "notice.dedup.marked_related", "已标记为相关变体");
+            }
+            ReviewState::Done => {
+                set_status!(shared, "notice.dedup.marked_done", "已保留整组");
+            }
+            ReviewState::Pending => {
+                set_status!(shared, "notice.dedup.marked_reopened", "已重新打开此组");
+            }
+        }
         Ok(())
     }
 
@@ -2609,7 +2985,12 @@ impl AppState {
         shared.dedup.set_protected_paths(paths);
         shared.refresh_dedup();
         shared.error = None;
-        shared.status = format!("已添加保护路径：{}", path.display());
+        set_status!(
+            shared,
+            "notice.dedup.protected_added_path",
+            "已添加保护路径：{path}",
+            path = path.display()
+        );
         Ok(())
     }
 
@@ -2638,7 +3019,12 @@ impl AppState {
         shared.dedup.set_protected_paths(paths);
         shared.refresh_dedup();
         shared.error = None;
-        shared.status = format!("已添加保护项：{}", path.display());
+        set_status!(
+            shared,
+            "notice.dedup.protected_added_entry",
+            "已添加保护项：{path}",
+            path = path.display()
+        );
         Ok(preview)
     }
 
@@ -2683,7 +3069,12 @@ impl AppState {
         shared.dedup.set_protected_paths(paths);
         shared.refresh_dedup();
         shared.error = None;
-        shared.status = format!("已移除保护路径：{}", path.display());
+        set_status!(
+            shared,
+            "notice.dedup.protected_removed",
+            "已移除保护路径：{path}",
+            path = path.display()
+        );
         Ok(())
     }
 
@@ -3035,7 +3426,11 @@ impl AppState {
             let assets = shared.assets.read().unwrap().clone();
             if assets.len() < 2 {
                 shared.dedup.similar_scanning = false;
-                shared.status = "图片不足 2 张，无法扫描相似图片".into();
+                set_status!(
+                    shared,
+                    "notice.dedup.similar_too_few",
+                    "图片不足 2 张，无法扫描相似图片"
+                );
                 shared.revision = shared.revision.wrapping_add(1);
                 return;
             }
@@ -3046,7 +3441,13 @@ impl AppState {
             shared.dedup.similar_scanning = true;
             shared.dedup.similar_scanned = false;
             shared.dedup.similar_groups = Arc::new(Vec::new());
-            shared.status = format!("相似扫描中 · 汉明距离 ≤{threshold} · {} 张", assets.len());
+            set_status!(
+                shared,
+                "notice.dedup.similar_scanning",
+                "相似扫描中 · 汉明距离 ≤{threshold} · {n} 张",
+                threshold = threshold,
+                n = assets.len()
+            );
             shared.error = None;
             shared.revision = shared.revision.wrapping_add(1);
             (
@@ -3077,7 +3478,11 @@ impl AppState {
                 let mut shared = state.shared.lock().unwrap();
                 if shared.revision != revision {
                     shared.dedup.similar_scanning = false;
-                    shared.status = "图库已变化，请重新扫描相似图片".into();
+                    set_status!(
+                        shared,
+                        "notice.dedup.similar_stale",
+                        "图库已变化，请重新扫描相似图片"
+                    );
                     shared.revision = shared.revision.wrapping_add(1);
                     return;
                 }
@@ -3087,7 +3492,13 @@ impl AppState {
                     .filter(|group| group.state == ReviewState::Pending)
                     .count();
                 shared.dedup.set_similar_groups(groups, threshold);
-                shared.status = format!("相似扫描完成 · {count} 组 · 未审 {pending} 组");
+                set_status!(
+                    shared,
+                    "notice.dedup.similar_done",
+                    "相似扫描完成 · {groups} 组 · 未审 {pending} 组",
+                    groups = count,
+                    pending = pending
+                );
                 shared.revision = shared.revision.wrapping_add(1);
             });
         if spawned.is_err() {
@@ -3147,15 +3558,22 @@ impl AppState {
         let mut shared = self.shared.lock().unwrap();
         shared.remove_assets(&moved);
         shared.refresh_after_removal(&moved);
-        shared.status = if all_moved {
-            format!("已移入回收站 {} 张", report.moved.len())
+        if all_moved {
+            set_status!(
+                shared,
+                "notice.dedup.moved",
+                "已移入回收站 {moved} 张",
+                moved = report.moved.len()
+            );
         } else {
-            format!(
-                "已移入回收站 {} 张；{} 张仍待处理",
-                report.moved.len(),
-                report.failed.len()
-            )
-        };
+            set_status!(
+                shared,
+                "notice.dedup.moved_partial",
+                "已移入回收站 {moved} 张；{failed} 张仍待处理",
+                moved = report.moved.len(),
+                failed = report.failed.len()
+            );
+        }
         shared.error = report.error.clone();
         Ok(TrashSummary {
             groups: usize::from(all_moved),
@@ -3207,7 +3625,12 @@ impl AppState {
         }
         if paths.is_empty() {
             let mut shared = self.shared.lock().unwrap();
-            shared.status = format!("跳过 {protected_skipped} 个受保护组，没有可移入回收站的副本");
+            set_status!(
+                shared,
+                "notice.dedup.protected_skipped",
+                "跳过 {skipped} 个受保护组，没有可移入回收站的副本",
+                skipped = protected_skipped
+            );
             shared.error = None;
             return Ok(TrashSummary {
                 groups: 0,
@@ -3240,15 +3663,24 @@ impl AppState {
         let mut shared = self.shared.lock().unwrap();
         shared.remove_assets(&moved);
         shared.refresh_after_removal(&moved);
-        let mut status = format!(
-            "批量处理完成：{} 组 · 移入回收站 {} 张",
-            completed,
-            report.moved.len()
-        );
         if protected_skipped > 0 {
-            status.push_str(&format!("；跳过 {protected_skipped} 个受保护组"));
+            set_status!(
+                shared,
+                "notice.dedup.batch_done_skipped",
+                "批量处理完成：{groups} 组 · 移入回收站 {assets} 张；跳过 {skipped} 个受保护组",
+                groups = completed,
+                assets = report.moved.len(),
+                skipped = protected_skipped
+            );
+        } else {
+            set_status!(
+                shared,
+                "notice.dedup.batch_done",
+                "批量处理完成：{groups} 组 · 移入回收站 {assets} 张",
+                groups = completed,
+                assets = report.moved.len()
+            );
         }
-        shared.status = status;
         shared.error = report.error.clone();
         Ok(TrashSummary {
             groups: completed,
@@ -3261,7 +3693,7 @@ impl AppState {
     pub fn set_error(&self, message: String) {
         let mut shared = self.shared.lock().unwrap();
         shared.error = Some(message);
-        shared.status = "重试失败".into();
+        set_status!(shared, "notice.retry.failed", "重试失败");
     }
 
     /// UI 侧的瞬时操作失败：只写共享错误条，不覆盖扫描/导入状态文本。
@@ -3273,7 +3705,7 @@ impl AppState {
     /// UI 层本地化状态覆盖；用于把核心写入的中文瞬态状态替换成当前语言文案。
     pub fn set_status(&self, status: String) {
         let mut shared = self.shared.lock().unwrap();
-        shared.status = status;
+        shared.set_plain_status(status);
         shared.error = None;
     }
 
@@ -3283,7 +3715,11 @@ impl AppState {
         if let Err(error) = db.delete_assets(moved) {
             let mut shared = self.shared.lock().unwrap();
             shared.error = Some(format!("文件已移入回收站，但删除图库记录失败：{error:#}"));
-            shared.status = "回收站已移动 · 记录未删除".into();
+            set_status!(
+                shared,
+                "notice.trash.records_failed",
+                "回收站已移动 · 记录未删除"
+            );
             shared.revision = shared.revision.wrapping_add(1);
             return Err(error).context("文件已移入回收站，但删除图库记录失败");
         }
@@ -3393,7 +3829,12 @@ impl AppState {
         db.delete_source(id)?;
         self.refresh_remote_assets()?;
         let mut shared = self.shared.lock().unwrap();
-        shared.status = format!("已移除来源「{}」", record.name);
+        set_status!(
+            shared,
+            "notice.remote.removed",
+            "已移除来源「{name}」",
+            name = record.name
+        );
         shared.revision = shared.revision.wrapping_add(1);
         Ok(())
     }
@@ -3406,7 +3847,12 @@ impl AppState {
         self.credentials
             .set_secret(&info.credential_account(), api_key)?;
         let mut shared = self.shared.lock().unwrap();
-        shared.status = format!("已保存 {} 凭据（系统凭据库）", info.name);
+        set_status!(
+            shared,
+            "notice.remote.credentials_saved",
+            "已保存 {name} 凭据（系统凭据库）",
+            name = info.name
+        );
         shared.error = None;
         shared.revision = shared.revision.wrapping_add(1);
         Ok(())
@@ -3416,7 +3862,12 @@ impl AppState {
         let info = self.source_info_by_id(id)?;
         self.credentials.clear_secret(&info.credential_account())?;
         let mut shared = self.shared.lock().unwrap();
-        shared.status = format!("已清除 {} 凭据", info.name);
+        set_status!(
+            shared,
+            "notice.remote.credentials_cleared",
+            "已清除 {name} 凭据",
+            name = info.name
+        );
         shared.revision = shared.revision.wrapping_add(1);
         Ok(())
     }
@@ -3457,13 +3908,15 @@ impl AppState {
                     return Err(SourceError::from_anyhow(error));
                 }
                 let mut shared = self.shared.lock().unwrap();
-                shared.status = format!(
-                    "{} 同步完成 · 新增 {} · 更新 {} · 跳过 {} · 缩略图 {}",
-                    info.name,
-                    report.imported,
-                    report.updated,
-                    report.skipped,
-                    report.thumbnails_downloaded
+                set_status!(
+                    shared,
+                    "notice.remote.sync_done",
+                    "{name} 同步完成 · 新增 {imported} · 更新 {updated} · 跳过 {skipped} · 缩略图 {thumbs}",
+                    name = info.name,
+                    imported = report.imported,
+                    updated = report.updated,
+                    skipped = report.skipped,
+                    thumbs = report.thumbnails_downloaded
                 );
                 shared.error = None;
                 shared.revision = shared.revision.wrapping_add(1);
@@ -3472,7 +3925,13 @@ impl AppState {
             Err(error) => {
                 let mut shared = self.shared.lock().unwrap();
                 shared.error = Some(error.to_string());
-                shared.status = format!("{} 同步失败：{}", info.name, error.message);
+                set_status!(
+                    shared,
+                    "notice.remote.sync_failed",
+                    "{name} 同步失败：{message}",
+                    name = info.name,
+                    message = error.message.clone()
+                );
                 shared.revision = shared.revision.wrapping_add(1);
                 Err(error)
             }
@@ -3484,7 +3943,12 @@ impl AppState {
         let info = self.source_info_by_id(id)?;
         {
             let mut shared = self.shared.lock().unwrap();
-            shared.status = format!("正在同步 {}...", info.name);
+            set_status!(
+                shared,
+                "notice.remote.syncing",
+                "正在同步 {name}...",
+                name = info.name
+            );
             shared.error = None;
             shared.revision = shared.revision.wrapping_add(1);
         }
@@ -3499,7 +3963,11 @@ impl AppState {
         if spawned.is_err() {
             let mut shared = self.shared.lock().unwrap();
             shared.error = Some("无法创建同步线程".into());
-            shared.status = "远端来源同步失败".into();
+            set_status!(
+                shared,
+                "notice.remote.sync_failed_plain",
+                "远端来源同步失败"
+            );
             bail!("无法创建同步线程");
         }
         Ok(())
@@ -3776,11 +4244,54 @@ fn format_scan_status(progress: &ScanProgress) -> String {
     status
 }
 
+/// 结构化扫描进度状态；`text` 保持既有中文格式，`key`/`args` 供 UI 目录使用。
+fn scan_status_message(progress: &ScanProgress) -> StatusMessage {
+    let source = progress
+        .source
+        .as_deref()
+        .map(source_label)
+        .unwrap_or_else(|| "未知来源".to_string());
+    let phase = match progress.phase {
+        ScanPhase::Idle => "空闲",
+        ScanPhase::Discovering => "遍历中",
+        ScanPhase::Hashing => "哈希",
+        ScanPhase::Thumbnails => "缩略图",
+        ScanPhase::Tagging => "打标",
+        ScanPhase::Reconciling => "对账中",
+        ScanPhase::Done => "完成",
+        ScanPhase::Failed => "失败",
+    };
+    StatusMessage::keyed(
+        "notice.scan.progress",
+        format_scan_status(progress),
+        vec![
+            ("source", source),
+            ("index", progress.source_index.to_string()),
+            ("sources", progress.source_total.to_string()),
+            ("phase", phase.to_string()),
+            ("done", progress.done.to_string()),
+            ("total", progress.total.to_string()),
+            ("throughput", format!("{:.1}", progress.throughput)),
+            ("eta", progress.eta_secs.map(eta_label).unwrap_or_default()),
+        ],
+    )
+}
+
 fn scan_summary_suffix(summary: &ScanSummary) -> String {
     format!(
         " · 新增 {} · 更新 {} · 跳过 {} · 失败 {} · {:.1}s",
         summary.imported, summary.updated, summary.skipped, summary.failed, summary.elapsed_secs
     )
+}
+
+fn scan_summary_args(summary: &ScanSummary) -> Vec<(&'static str, String)> {
+    vec![
+        ("imported", summary.imported.to_string()),
+        ("updated", summary.updated.to_string()),
+        ("skipped", summary.skipped.to_string()),
+        ("failed", summary.failed.to_string()),
+        ("elapsed", format!("{:.1}", summary.elapsed_secs)),
+    ]
 }
 
 /// 扫描进度写入器：阶段切换立即发布，逐文件推进按 [`SCAN_PROGRESS_INTERVAL`] 节流。
@@ -3874,10 +4385,10 @@ impl ScanProgressReporter {
         }
         self.last_publish = Instant::now();
         let progress = self.progress();
-        let status = format_scan_status(&progress);
+        let status = scan_status_message(&progress);
         let mut shared = self.state.shared.lock().unwrap();
         shared.scan_progress = progress;
-        shared.status = status;
+        shared.set_status_message(status);
         shared.revision = shared.revision.wrapping_add(1);
     }
 
@@ -3890,7 +4401,7 @@ impl ScanProgressReporter {
         let mut shared = self.state.shared.lock().unwrap();
         shared.scan_progress = self.progress();
         shared.scan_progress.eta_secs = None;
-        shared.status = "已停止".into();
+        set_status!(shared, "notice.scan.stopped", "已停止");
         shared.revision = shared.revision.wrapping_add(1);
     }
 
@@ -3901,7 +4412,7 @@ impl ScanProgressReporter {
         let mut shared = self.state.shared.lock().unwrap();
         shared.scan_progress = self.progress();
         shared.scan_progress.eta_secs = None;
-        shared.status = "索引失败".into();
+        set_status!(shared, "notice.scan.failed", "索引失败");
         shared.revision = shared.revision.wrapping_add(1);
     }
 
@@ -3968,11 +4479,23 @@ fn scan_one_root(
     {
         let mut shared = state.shared.lock().unwrap();
         shared.scanning = true;
-        shared.status = if total > 1 {
-            format!("扫描来源 {position}/{total} · {}", source_label(root))
+        if total > 1 {
+            set_status!(
+                shared,
+                "notice.scan.source_started_multi",
+                "扫描来源 {position}/{total} · {source}",
+                position = position,
+                total = total,
+                source = source_label(root)
+            );
         } else {
-            format!("扫描来源 · {}", source_label(root))
-        };
+            set_status!(
+                shared,
+                "notice.scan.source_started",
+                "扫描来源 · {source}",
+                source = source_label(root)
+            );
+        }
         let online = root.is_dir();
         let status = shared.source_status_mut(root);
         status.root = root.to_path_buf();
@@ -4287,7 +4810,7 @@ fn prefetch_thumbnails(
             progress.throughput = index as f32 / elapsed;
             progress.eta_secs = (index > 0 && files.len() > index)
                 .then(|| ((files.len() - index) as f32 / progress.throughput).ceil() as u64);
-            shared.status = format_scan_status(&progress);
+            shared.set_status_message(scan_status_message(&progress));
             shared.scan_progress = progress;
             shared.revision = shared.revision.wrapping_add(1);
         }
@@ -4347,7 +4870,7 @@ fn prefetch_thumbnails(
         progress.throughput = done as f32 / elapsed;
         progress.eta_secs = (done > 0 && total > done)
             .then(|| ((total - done) as f32 / progress.throughput).ceil() as u64);
-        shared.status = format_scan_status(&progress);
+        shared.set_status_message(scan_status_message(&progress));
         shared.scan_progress = progress;
         shared.revision = shared.revision.wrapping_add(1);
     };
@@ -4581,7 +5104,12 @@ fn index_inner(
                     stats.removed += removed;
                     let mut shared = state.shared.lock().unwrap();
                     shared.remove_assets(&missing_set);
-                    shared.status = format!("已移除 {} 张磁盘上已不存在的图片", removed);
+                    set_status!(
+                        shared,
+                        "notice.scan.cleanup_removed",
+                        "已移除 {n} 张磁盘上已不存在的图片",
+                        n = removed
+                    );
                     shared.revision = shared.revision.wrapping_add(1);
                     log::info!(
                         "cleanup: removed {} missing assets under {}",
@@ -4607,17 +5135,29 @@ fn index_inner(
     {
         let mut shared = state.shared.lock().unwrap();
         shared.set_queue_counts(queue.pending, queue.running, queue.error);
-        shared.status = if queue.pending > 0 {
-            format!("待打标 {} 张 · 队列已恢复", queue.pending)
+        if queue.pending > 0 {
+            set_status!(
+                shared,
+                "notice.scan.tag_queue_restored",
+                "待打标 {pending} 张 · 队列已恢复",
+                pending = queue.pending
+            );
         } else if queue.error > 0 {
-            format!(
-                "完成 · {} 张图片 · {} 个失败待处理",
-                files.len(),
-                queue.error
-            )
+            set_status!(
+                shared,
+                "notice.scan.complete_errors_simple",
+                "完成 · {total} 张图片 · {failed} 个失败待处理",
+                total = files.len(),
+                failed = queue.error
+            );
         } else {
-            format!("完成 · {} 张图片，全部已打标", files.len())
-        };
+            set_status!(
+                shared,
+                "notice.scan.complete_all_tagged",
+                "完成 · {total} 张图片，全部已打标",
+                total = files.len()
+            );
+        }
     }
     if queue.pending == 0 {
         let mut shared = state.shared.lock().unwrap();
@@ -4628,10 +5168,12 @@ fn index_inner(
         stats.skipped_tagging = true;
         let mut shared = state.shared.lock().unwrap();
         shared.set_queue_counts(queue.pending, 0, queue.error);
-        shared.status = format!(
-            "完成 · {} 张图片（跳过打标，队列 {} 张待处理）",
-            files.len(),
-            queue.pending
+        set_status!(
+            shared,
+            "notice.scan.complete_skip_tag",
+            "完成 · {total} 张图片（跳过打标，队列 {pending} 张待处理）",
+            total = files.len(),
+            pending = queue.pending
         );
         shared.scanning = false;
         return Ok(());
@@ -4644,26 +5186,35 @@ fn index_inner(
         stats.skipped_tagging = true;
         let mut shared = state.shared.lock().unwrap();
         shared.set_queue_counts(queue.pending, 0, queue.error);
-        shared.status = if paused {
-            format!(
-                "完成 · {} 张图片（打标已暂停，队列 {} 张待处理）",
-                files.len(),
-                queue.pending
-            )
+        if paused {
+            set_status!(
+                shared,
+                "notice.scan.complete_tag_paused",
+                "完成 · {total} 张图片（打标已暂停，队列 {pending} 张待处理）",
+                total = files.len(),
+                pending = queue.pending
+            );
         } else {
-            format!(
-                "完成 · {} 张图片（打标已取消，队列 {} 张未处理）",
-                files.len(),
-                queue.pending
-            )
-        };
+            set_status!(
+                shared,
+                "notice.scan.complete_tag_cancelled",
+                "完成 · {total} 张图片（打标已取消，队列 {pending} 张未处理）",
+                total = files.len(),
+                pending = queue.pending
+            );
+        }
         shared.scanning = false;
         return Ok(());
     }
 
     {
         let mut shared = state.shared.lock().unwrap();
-        shared.status = format!("加载 PixAI 模型...（队列 {} 张）", queue.pending);
+        set_status!(
+            shared,
+            "notice.tag_queue.loading_model",
+            "加载 PixAI 模型...（队列 {pending} 张）",
+            pending = queue.pending
+        );
     }
     let load_start = Instant::now();
     let (mut sidecar, ready) = Sidecar::spawn()?;
@@ -4680,16 +5231,25 @@ fn index_inner(
         let mut shared = state.shared.lock().unwrap();
         shared.set_tag_device(&ready.device);
         shared.sidecar_device = Some(device_label.clone());
-        shared.status = format!("打标中 0/{} · {} 类标签", queue.pending, ready.classes);
+        set_status!(
+            shared,
+            "notice.tag_queue.started",
+            "打标中 0/{total} · {classes} 类标签",
+            total = queue.pending,
+            classes = ready.classes
+        );
     }
     if !ready.device.to_ascii_lowercase().contains("cuda") && !db.allow_cpu_tagging() {
         stats.skipped_tagging = true;
         let mut shared = state.shared.lock().unwrap();
         shared.pause_tag_queue();
         shared.set_queue_counts(queue.pending, 0, queue.error);
-        shared.status = format!(
-            "GPU 不可用（{device_label}）· 已暂停打标，队列 {} 张待处理；允许 CPU 慢速打标后可继续",
-            queue.pending
+        set_status!(
+            shared,
+            "notice.tag_queue.gpu_unavailable_scan",
+            "GPU 不可用（{device}）· 已暂停打标，队列 {pending} 张待处理；允许 CPU 慢速打标后可继续",
+            device = device_label,
+            pending = queue.pending
         );
         shared.scanning = false;
         shared.revision = shared.revision.wrapping_add(1);
@@ -5070,9 +5630,14 @@ fn process_tag_queue(
             if let Some(reporter) = reporter.as_deref_mut() {
                 shared.scan_progress = reporter.snapshot(done);
             }
-            shared.status = format!(
-                "打标中 {done}/{total} · 队列 {} · 失败 {}",
-                counts.pending, counts.error
+            set_status!(
+                shared,
+                "notice.tag_queue.progress",
+                "打标中 {done}/{total} · 队列 {pending} · 失败 {failed}",
+                done = done,
+                total = total,
+                pending = counts.pending,
+                failed = counts.error
             );
         }
         let paths = jobs.iter().map(|job| job.path.clone()).collect::<Vec<_>>();
@@ -5198,9 +5763,14 @@ fn process_tag_queue(
         let counts = db.tag_job_counts(folder)?;
         let mut shared = state.shared.lock().unwrap();
         shared.set_queue_counts(counts.pending, counts.running, counts.error);
-        shared.status = format!(
-            "打标中 {done}/{total} · 队列 {} · 失败 {}",
-            counts.pending, counts.error
+        set_status!(
+            shared,
+            "notice.tag_queue.progress",
+            "打标中 {done}/{total} · 队列 {pending} · 失败 {failed}",
+            done = done,
+            total = total,
+            pending = counts.pending,
+            failed = counts.error
         );
     }
     stats.tag_secs = tag_start.elapsed().as_secs_f64();
@@ -5218,31 +5788,48 @@ fn process_tag_queue(
         shared.scan_progress = reporter.snapshot(done);
     }
     shared.sort_assets();
-    shared.status = if cancel.load(Ordering::SeqCst) || shared.tag_status.cancelling {
+    if cancel.load(Ordering::SeqCst) || shared.tag_status.cancelling {
         shared.tag_status.cancelling = false;
-        format!(
-            "已取消 · 已完成 {done}/{total} · 队列 {} 张未处理",
-            counts.pending
-        )
+        set_status!(
+            shared,
+            "notice.tag_queue.cancelled",
+            "已取消 · 已完成 {done}/{total} · 队列 {pending} 张未处理",
+            done = done,
+            total = total,
+            pending = counts.pending
+        );
     } else if shared.tag_status.paused {
-        format!(
-            "打标已暂停 · 队列 {} 张待处理 · {} 个失败",
-            counts.pending, counts.error
-        )
+        set_status!(
+            shared,
+            "notice.tag_queue.paused_queue",
+            "打标已暂停 · 队列 {pending} 张待处理 · {failed} 个失败",
+            pending = counts.pending,
+            failed = counts.error
+        );
     } else if counts.pending > 0 {
-        format!(
-            "打标暂停 · 队列 {} 张待处理 · {} 个失败",
-            counts.pending, counts.error
-        )
+        set_status!(
+            shared,
+            "notice.tag_queue.paused_pending",
+            "打标暂停 · 队列 {pending} 张待处理 · {failed} 个失败",
+            pending = counts.pending,
+            failed = counts.error
+        );
     } else if counts.error > 0 {
-        format!(
-            "完成 · {} 张图片 · {} 个失败待处理",
-            shared.counts.total(),
-            counts.error
-        )
+        set_status!(
+            shared,
+            "notice.scan.complete_errors_simple",
+            "完成 · {total} 张图片 · {failed} 个失败待处理",
+            total = shared.counts.total(),
+            failed = counts.error
+        );
     } else {
-        format!("完成 · {} 张图片已打标", shared.counts.total())
-    };
+        set_status!(
+            shared,
+            "notice.tag_queue.complete",
+            "完成 · {total} 张图片已打标",
+            total = shared.counts.total()
+        );
+    }
     shared.scanning = false;
     Ok(())
 }
@@ -5262,7 +5849,7 @@ fn run_tag_worker(state: &Arc<AppState>) -> Result<()> {
     let roots = state.root_strings();
     if roots.is_empty() {
         let mut shared = state.shared.lock().unwrap();
-        shared.status = "没有可打标的来源".into();
+        set_status!(shared, "notice.tag_queue.no_sources", "没有可打标的来源");
         shared.revision = shared.revision.wrapping_add(1);
         return Ok(());
     }
@@ -5288,7 +5875,7 @@ fn run_tag_worker(state: &Arc<AppState>) -> Result<()> {
     }
     if total == 0 {
         let mut shared = state.shared.lock().unwrap();
-        shared.status = "没有待打标任务".into();
+        set_status!(shared, "notice.tag_queue.no_jobs", "没有待打标任务");
         shared.revision = shared.revision.wrapping_add(1);
         return Ok(());
     }
@@ -5316,8 +5903,12 @@ fn run_tag_worker(state: &Arc<AppState>) -> Result<()> {
     if !ready.device.to_ascii_lowercase().contains("cuda") && !state.allow_cpu_tagging() {
         let mut shared = state.shared.lock().unwrap();
         shared.pause_tag_queue();
-        shared.status =
-            format!("GPU 不可用（{device_label}）· 已暂停打标；允许 CPU 慢速打标后可继续");
+        set_status!(
+            shared,
+            "notice.tag_queue.gpu_unavailable_worker",
+            "GPU 不可用（{device}）· 已暂停打标；允许 CPU 慢速打标后可继续",
+            device = device_label
+        );
         shared.revision = shared.revision.wrapping_add(1);
         return Ok(());
     }
@@ -8104,7 +8695,9 @@ mod tests {
             asset.rating = "S".into();
         }
         db.update_tags(&asset).unwrap();
-        state.reload_after_tag_change("测试初始化".into()).unwrap();
+        state
+            .reload_after_tag_change(StatusMessage::plain("测试初始化"))
+            .unwrap();
     }
 
     fn favorite_count(state: &Arc<AppState>) -> usize {
@@ -8120,7 +8713,9 @@ mod tests {
             .unwrap()
             .set_favorite(std::slice::from_ref(&a), true)
             .unwrap();
-        state.reload_after_tag_change("测试初始化".into()).unwrap();
+        state
+            .reload_after_tag_change(StatusMessage::plain("测试初始化"))
+            .unwrap();
         assert_eq!(favorite_count(&state), 1);
         let revision = state.shared.lock().unwrap().revision;
 
@@ -8158,7 +8753,9 @@ mod tests {
             db.set_star(std::slice::from_ref(&a), 2).unwrap();
             db.set_star(std::slice::from_ref(&b), 5).unwrap();
         }
-        state.reload_after_tag_change("测试初始化".into()).unwrap();
+        state
+            .reload_after_tag_change(StatusMessage::plain("测试初始化"))
+            .unwrap();
 
         assert_eq!(state.set_star(&[a.clone(), b.clone()], 4).unwrap(), 2);
         assert_eq!(state.undo_depth(), 1);
@@ -8259,7 +8856,9 @@ mod tests {
             db.add_manual_tags(std::slice::from_ref(&a), "solo_manual", "manual")
                 .unwrap();
         }
-        state.reload_after_tag_change("测试初始化".into()).unwrap();
+        state
+            .reload_after_tag_change(StatusMessage::plain("测试初始化"))
+            .unwrap();
 
         // 自动标签单独移除：category/score/vocab_index 精确恢复。
         assert_eq!(
@@ -8467,7 +9066,9 @@ mod tests {
             .unwrap()
             .rename_tag("cat", "feline")
             .unwrap();
-        state.reload_after_tag_change("测试初始化".into()).unwrap();
+        state
+            .reload_after_tag_change(StatusMessage::plain("测试初始化"))
+            .unwrap();
         assert!(
             memory_asset(&state, &a)
                 .all_tags()
