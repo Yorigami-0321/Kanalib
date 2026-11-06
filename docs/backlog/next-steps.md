@@ -12,7 +12,7 @@
 | registry | 56 条：42 已实现、5 远期、9 实现中（4 个带阶段备注） |
 | 未完成 ID | F-030 / F-033 / F-036 / F-069 / F-070 / F-071 / F-072 / F-073 / F-074 |
 | 最近完成 | F-070 方案 A（S1–S5，6 个提交）；F-073 五批（菜单/确认层/状态/键位/错误反馈/键盘可达）；取证档 `unsafe` 兼容警告清理；上下文侧栏结构静态断言 |
-| 后台自验 | 编译（含 `--features frame-profiler`）、完整 debug 构建、`cargo test`、UI/bin 测试、文档自检、5 项 UI 不变量、亮暗对比度、便携包 pre-flight、headless 冒烟 —— 全部通过且**未启动窗口** |
+| 后台自验 | 编译（含 `--features frame-profiler`）、完整 debug 构建、`cargo test`、UI/bin 测试、文档自检、7 项 UI 不变量、亮暗对比度、便携包 pre-flight、headless 冒烟 —— 全部通过且**未启动窗口** |
 | GUI 验收（2026-11-04，副屏） | F-070 四种侧栏/设置锚点/标签单搜索与返回/折叠隔离/上下文菜单/Tab 顺序/3 万标签、F-073 16 张基线；发现并修复去重页窄宽头部溢出与根 FocusScope 缺失导致 Tab 不可达；证据 `.kanalib/verify_f070/` |
 
 **唯一既有失败**：`sources::tests::immich_missing_key_and_disconnect_do_not_block_local_library`
@@ -82,7 +82,7 @@
 - [x] 项目级 i18n 第四批（扫描阶段/进度/摘要/吞吐/ETA/来源；设置页当前状态模板）
 - [x] 项目级 i18n 第五批（撤销状态栏/toast/状态覆盖、自动归类固定名与「作品:」前缀）
 - [x] 项目级 i18n 第六批（UI 全量收口：设置/去重/侧栏/视图/主应用/检查器/对比/标签/查看器/搜索等；六页 English 巡检）
-- [ ] core 状态消息结构化（D4）：`shared.status` 约 120 种中文瞬态模板，需 key+args 或逐动作 UI 覆盖
+- [x] core 状态消息结构化（D4）：`Shared.status` 改为 `StatusMessage { key, args, text }`；state.rs 110 处 + watch.rs 2 处迁移，138 个 `notice.*` 键补中英文；UI `core_status` 统一渲染；headless/日志保留中文 `text`。English 实机渲染待副屏验收。
 - [ ] 1440/1920 与浮层/查看器截图基线
 - [ ] GUI 弹窗 / 菜单 / 表单 / 命令面板 UIA 与悬停验收（tooltip、loading spinner、`.invalid()` 红框、清除按钮对 150/240px 固定宽输入的挤压）
 - [ ] 渲染后 WCAG 实测（现有 `check_theme_contrast.py` 只是 token 设计值）
@@ -111,7 +111,7 @@
 | D1 | error 通用重试入口 | 6 处打开失败已「toast + 就地说明」，按钮本身可再点即天然重试；要做通用重试控件需新增布局元素或让全局 `shared.error` 携带动作，属结构设计 |
 | D2 | 项目级 i18n | 已落地第一批（2026-11-04）：zh-CN/en-US 项目目录、`ui.locale` 持久化、设置页语言切换、壳层/导航/标题栏迁移；键名 `区域.用途`；其余 1500+ 条按页面分批 |
 | D3 | F-070 方案 B | 已被方案 A 取代，建议直接关闭而非实现 |
-| D4 | core 状态消息结构化 | `shared.status` 约 120 种瞬态模板仍是中文；UI 静态文案已完成 i18n，但底栏动作/扫描/队列状态仍需 key+args 或逐动作覆盖 |
+| D4 | core 状态消息结构化 | 已按「core 结构化 key+args」落地（2026-11-06）：`StatusMessage` + `notice.*` 双语目录 + `check_ui_invariants.py` 第 7 项；剩 English 瞬态状态的真实 GUI 验收 |
 
 ## 4. 红线
 
