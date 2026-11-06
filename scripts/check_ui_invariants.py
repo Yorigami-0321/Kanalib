@@ -252,6 +252,22 @@ def check_direct_ui_text() -> tuple[list[str], int]:
         "button": re.compile(
             r'Button::new\([^;]{0,250}?,\s*"([^"\n]*' + cjk + r'[^"\n]*)"', re.S
         ),
+        "menu": re.compile(
+            r'MenuItem::new\([^;]{0,200}?"([^"\n]*' + cjk + r'[^"\n]*)"', re.S
+        ),
+        "command": re.compile(
+            r'Command::new\([^;]{0,200}?"([^"\n]*' + cjk + r'[^"\n]*)"', re.S
+        ),
+        "placeholder": re.compile(
+            r'\.(?:placeholder|least)\([^;]{0,120}?"([^"\n]*' + cjk + r'[^"\n]*)"',
+            re.S,
+        ),
+        "tooltip": re.compile(
+            r'\.tooltip\([^;]{0,120}?"([^"\n]*' + cjk + r'[^"\n]*)"', re.S
+        ),
+        "empty_state": re.compile(
+            r'empty_state\([^;]{0,300}?"([^"\n]*' + cjk + r'[^"\n]*)"', re.S
+        ),
     }
     problems: list[str] = []
     checks = 0
