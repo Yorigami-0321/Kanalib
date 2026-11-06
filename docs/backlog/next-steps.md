@@ -33,7 +33,7 @@
 
 | # | 任务 | 产物 | 代价 |
 |---|---|---|---|
-| A1 | **手动验收清单**：把散在 `pending/browse.md`、`ui-refactor.md`、`PLAN.md`、`pending/library-sources-formats.md` 的 GUI/UIA/截图/回归项整理成可勾选清单，标注每项的前台依赖与证据路径 | `docs/backlog/manual-acceptance.md`（待写） | 纯文档，零风险 |
+| A1 | **手动验收清单**：把散在 `pending/browse.md`、`ui-refactor.md`、`PLAN.md`、`pending/library-sources-formats.md` 的 GUI/UIA/截图/回归项整理成可勾选清单，标注每项的前台依赖与证据路径 | `docs/backlog/manual-acceptance.md`（2026-11-06 已建：9 个分区 + 已通过项索引 + 长耗时项） | 纯文档，零风险 |
 | A2 | 关闭已被取代的方案：F-070 方案 B 在方案 A 落地后失去意义；方案 C 的收敛项已被 A 继承 | registry / overview 的状态备注 | 纯文档 |
 | A3 | 若需要，为 A1 配「不抢前台」的静态/文件检查脚本（不 `Start-Process`、不 `SetForegroundWindow`） | `scripts/` | 纯代码 |
 
@@ -126,9 +126,9 @@
 
 | 选项 | 说明 |
 |---|---|
-| **A1 整理手动验收清单（推荐）** | 纯文档、零风险、不抢前台，方便后续逐项走 C 类 |
+| A1 整理手动验收清单 | 已完成（`docs/backlog/manual-acceptance.md`），后续按清单逐项走 C 类 |
+| D1 先出 error 重试方案 | 只出可评审方案，拍板后再动代码（当前唯一剩余 F-073 代码项） |
 | B1 启动 100k 后台全量回归 | 约 1 小时以上，纯后台；需要先确认 |
-| D1 先出 error 重试方案 | 只出可评审方案，拍板后再动代码 |
 | 暂停 | 保持现状，等用户有空做 C 类验收 |
 
 ## 6. 命令速查（全部后台可跑）
