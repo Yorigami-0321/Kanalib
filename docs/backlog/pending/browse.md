@@ -509,6 +509,7 @@
   - 未验收：English 下扫描/队列/来源/去重/修复等瞬态状态栏与设置页/去重 banner 的真实渲染（需副屏 GUI）；`notice.scan.progress` 的英文模板未实机确认（中文底栏扫描中另走结构化 `scan_progress`，该键主要作非扫描态/设置 banner 兜底）。
   - D1 UI 错误重试（2026-11-06）：新增 `KanalibApp.ui_error_retry`（错误文本 + `UiRetryAction::OpenWithSystem`）；6 处打开失败改走 `set_ui_error_with_retry`；底栏 `status-error-retry`、主图库错误条、去重 banner、设置页 banner 在错误文本匹配时显示「重试」。重试成功清除 `shared.error` 与重试态；重试失败更新为 `重试失败：{error}` 并保留入口。未改 core 错误模型/schema；扫描/同步等 core 错误继续使用各页面已有的重扫/同步按钮。`check_ui_invariants.py` 的失败分支窗口从 14 行放宽到 24 行，仍覆盖 6 处 toast + 就地说明。
   - 后台自验（D1，2026-11-06）：`cargo check --workspace` 通过；`cargo test` bin 6 + core 214 通过 / 4 忽略 + UI 73 通过；`check_ui_invariants.py` 7 项 PASS；`check_backlog_docs.sh` 通过。未做 GUI 点击/布局验收。
+  - 设置页网络来源 i18n 补漏（2026-11-06）：静态反查发现「网络来源」整段仍硬编码中文——测试连接/立即同步/设置凭据/清除凭据/移除/刷新/添加 Immich/WebDAV、只读说明，以及添加/凭据/移除/测试/同步的 notice 与 toast；对应目录键早已存在但未引用。已全部改用 `t`/`t_args`，`refresh_remote_sources` 补 `cx`；忽略 glob 提示改用 `settings.filters.ignore_note`。`check_ui_invariants.py` 新增第 8 项：直接传给 `.child`/`push_toast`/`Button::new` 的中文字面量必须走目录（`is_english()` 分支除外）。后台自验：`cargo test` 6/214/73、8 项不变量、文档自检通过；English 实机渲染未验。
 - 未迁移：vendor 内部文案与动态数据（标签名/文件名/来源名/错误原文）按设计不翻译。core 状态已结构化，但英文渲染未做 GUI 验收，不得写成已全量通过。
 - 剩余：English 状态消息实机验收、D1 重试按钮 GUI/E2E 验收、组件状态其余示例（hover/focus/pressed/selected 一致性）、设置页字段/对话框、渲染后可访问性实测、1440/1920 与浮层截图基线、Shift+Tab 与焦点全遍历、tooltip/loading 视觉验收、100k 全量性能回归；vendor 侧仍有硬编码英文的组件（视频控制/字幕等）待接入对应界面时再收 —— 已核实 Kanalib 实际用到的组件英文默认值均被业务侧覆盖；F-070 方案 A 已落地并完成副屏 GUI 验收（四种侧栏、锚点、单搜索、折叠隔离），不再列为待定。
 

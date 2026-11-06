@@ -12,7 +12,7 @@
 | registry | 56 条：42 已实现、5 远期、9 实现中（4 个带阶段备注） |
 | 未完成 ID | F-030 / F-033 / F-036 / F-069 / F-070 / F-071 / F-072 / F-073 / F-074 |
 | 最近完成 | F-070 方案 A（S1–S5，6 个提交）；F-073 五批（菜单/确认层/状态/键位/错误反馈/键盘可达）；取证档 `unsafe` 兼容警告清理；上下文侧栏结构静态断言 |
-| 后台自验 | 编译（含 `--features frame-profiler`）、完整 debug 构建、`cargo test`、UI/bin 测试、文档自检、7 项 UI 不变量、亮暗对比度、便携包 pre-flight、headless 冒烟 —— 全部通过且**未启动窗口** |
+| 后台自验 | 编译（含 `--features frame-profiler`）、完整 debug 构建、`cargo test`、UI/bin 测试、文档自检、8 项 UI 不变量、亮暗对比度、便携包 pre-flight、headless 冒烟 —— 全部通过且**未启动窗口** |
 | GUI 验收（2026-11-04，副屏） | F-070 四种侧栏/设置锚点/标签单搜索与返回/折叠隔离/上下文菜单/Tab 顺序/3 万标签、F-073 16 张基线；发现并修复去重页窄宽头部溢出与根 FocusScope 缺失导致 Tab 不可达；证据 `.kanalib/verify_f070/` |
 
 **唯一既有失败**：`sources::tests::immich_missing_key_and_disconnect_do_not_block_local_library`
