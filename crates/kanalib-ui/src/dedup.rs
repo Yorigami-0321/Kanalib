@@ -1,4 +1,4 @@
-use crate::app::{KanalibApp, push_toast};
+use crate::app::{KanalibApp, UiRetryAction, push_toast};
 use crate::components::*;
 use crate::format::*;
 use crate::localization::{t, t_args};
@@ -1799,10 +1799,17 @@ impl KanalibApp {
         let remote_note =
             has_remote_pending.then(|| (t(cx, "dedup.remote_note").to_string(), colors.warning));
         let banner: Option<AnyElement> = error
-            .map(|message| (message.to_string(), colors.danger))
-            .or_else(|| notice.map(|message| (message, colors.muted)))
-            .or(remote_note)
-            .map(|(message, color)| {
+            .map(|message| {
+                (
+                    message.to_string(),
+                    colors.danger,
+                    self.error_retry_action(message).is_some(),
+                )
+            })
+            .or_else(|| notice.map(|message| (message, colors.muted, false)))
+            .or_else(|| remote_note.map(|(message, color)| (message, color, false)))
+            .map(|(message, color, retry)| {
+                let this_retry = this.clone();
                 div()
                     .px(px(16.))
                     .py(px(7.))
@@ -1811,7 +1818,21 @@ impl KanalibApp {
                     .bg(colors.sunken)
                     .text_xs()
                     .text_color(color)
-                    .child(message)
+                    .flex()
+                    .items_center()
+                    .gap(px(8.))
+                    .child(div().flex_1().min_w(px(0.)).child(message))
+                    .children(retry.then(|| {
+                        Button::new(
+                            "dedup-error-retry",
+                            crate::localization::t(cx, "status.retry"),
+                        )
+                        .size(ControlSize::Sm)
+                        .variant(ButtonVariant::Ghost)
+                        .on_click(move |_, _, cx| {
+                            let _ = this_retry.update(cx, |app, cx| app.retry_ui_error(cx));
+                        })
+                    }))
                     .into_any_element()
             });
 
@@ -1934,16 +1955,26 @@ impl KanalibApp {
                 t(cx, "dedup.open")
             };
             let open_toaster = self.toaster.clone();
-            let open_state = self.state.clone();
+            let this_open = this.clone();
             Button::new("dedup-open", label)
                 .disabled(remote)
                 .on_click(move |_, _, cx| {
                     if let Err(error) = open_asset_with_system(&path) {
                         // F-073 6.2：去重页 banner 会把 shared.error 优先显示为 danger 就地说明。
-                        open_state.set_ui_error(
-                            t_args(cx, "dedup.open_failed", &[("error", &error.to_string())])
-                                .to_string(),
-                        );
+                        let message = t_args(
+                            cx,
+                            "dedup.open_failed",
+                            &[("error", &error.to_string())],
+                        )
+                        .to_string();
+                        let retry_path = path.clone();
+                        let _ = this_open.update(cx, |app, cx| {
+                            app.set_ui_error_with_retry(
+                                message,
+                                UiRetryAction::OpenWithSystem(retry_path),
+                                cx,
+                            );
+                        });
                         push_toast(&open_toaster, cx, error, Severity::Danger);
                     }
                 })

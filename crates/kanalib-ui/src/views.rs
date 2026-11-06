@@ -1,4 +1,4 @@
-use crate::app::{KanalibApp, push_toast};
+use crate::app::{KanalibApp, UiRetryAction, push_toast};
 use crate::components::*;
 use crate::format::*;
 use crate::platform::*;
@@ -312,9 +312,14 @@ pub(crate) fn asset_context_menu(asset: &Asset, this: &Entity<KanalibApp>, cx: &
                             &[("error", &error)],
                         )
                         .to_string();
+                        let retry_path = open_file.clone();
                         let _ = open_this.update(cx, |app, cx| {
-                            // F-073 6.2：toast 之外还要有常驻的就地说明。
-                            app.state.set_ui_error(message);
+                            // F-073 6.2：toast 之外还要有常驻的就地说明与重试。
+                            app.set_ui_error_with_retry(
+                                message,
+                                UiRetryAction::OpenWithSystem(retry_path),
+                                cx,
+                            );
                             push_toast(&app.toaster, cx, error, Severity::Danger);
                         });
                     }
@@ -750,6 +755,8 @@ impl KanalibApp {
             .flex_col()
             .children(bulk)
             .children(error.map(|message| {
+                let retry = self.error_retry_action(message).is_some();
+                let this_retry = this.clone();
                 div()
                     .mx(px(16.))
                     .mt(px(10.))
@@ -758,7 +765,21 @@ impl KanalibApp {
                     .bg(colors.sunken)
                     .text_xs()
                     .text_color(colors.danger)
-                    .child(message.to_string())
+                    .flex()
+                    .items_center()
+                    .gap(px(8.))
+                    .child(div().flex_1().min_w(px(0.)).child(message.to_string()))
+                    .children(retry.then(|| {
+                        Button::new(
+                            "library-error-retry",
+                            crate::localization::t(cx, "status.retry"),
+                        )
+                        .size(ControlSize::Sm)
+                        .variant(ButtonVariant::Ghost)
+                        .on_click(move |_, _, cx| {
+                            let _ = this_retry.update(cx, |app, cx| app.retry_ui_error(cx));
+                        })
+                    }))
             }))
             .children((!search_warnings.is_empty()).then(|| {
                 div()

@@ -1,4 +1,4 @@
-use crate::app::{KanalibApp, prompt_for, push_toast};
+use crate::app::{KanalibApp, UiRetryAction, prompt_for, push_toast};
 use crate::format::*;
 use crate::localization::{localize_group_name, t, t_args};
 use crate::sidebar::source_label;
@@ -241,9 +241,9 @@ impl KanalibApp {
                     .into_any_element(),
             };
             let this_quick = this.clone();
+            let this_open_preview = this.clone();
             let path_for_open = asset.path.clone();
             let open_toaster = self.toaster.clone();
-            let open_state = self.state.clone();
             let open_remote = is_remote_asset(&asset.path);
             let open_label: SharedString = if open_remote {
                 t(cx, "inspector.open.remote")
@@ -344,14 +344,20 @@ impl KanalibApp {
                                 .disabled(open_remote)
                                 .on_click(move |_, _, cx| {
                                     if let Err(error) = open_asset_with_system(&path_for_open) {
-                                        open_state.set_ui_error(
-                                            t_args(
+                                        let message = t_args(
+                                            cx,
+                                            "inspector.open.failed",
+                                            &[("error", error.as_str())],
+                                        )
+                                        .to_string();
+                                        let retry_path = path_for_open.clone();
+                                        let _ = this_open_preview.update(cx, |app, cx| {
+                                            app.set_ui_error_with_retry(
+                                                message,
+                                                UiRetryAction::OpenWithSystem(retry_path),
                                                 cx,
-                                                "inspector.open.failed",
-                                                &[("error", error.as_str())],
-                                            )
-                                            .to_string(),
-                                        );
+                                            );
+                                        });
                                         push_toast(&open_toaster, cx, error, Severity::Danger);
                                     }
                                 }),
@@ -701,7 +707,7 @@ impl KanalibApp {
 
             let path_for_open = path.clone();
             let open_toaster = self.toaster.clone();
-            let open_state = self.state.clone();
+            let this_open_file = this.clone();
             let open_remote = is_remote_asset(&path);
             let open_label: SharedString = if open_remote {
                 t(cx, "inspector.open.remote")
@@ -715,11 +721,21 @@ impl KanalibApp {
                 .disabled(open_remote)
                 .on_click(move |_, _, cx| {
                     if let Err(error) = open_asset_with_system(&path_for_open) {
-                        // F-073 6.2：toast 之外还要有常驻的就地说明。
-                        open_state.set_ui_error(
-                            t_args(cx, "inspector.open.failed", &[("error", error.as_str())])
-                                .to_string(),
-                        );
+                        // F-073 6.2：toast 之外还要有常驻的就地说明与重试。
+                        let message = t_args(
+                            cx,
+                            "inspector.open.failed",
+                            &[("error", error.as_str())],
+                        )
+                        .to_string();
+                        let retry_path = path_for_open.clone();
+                        let _ = this_open_file.update(cx, |app, cx| {
+                            app.set_ui_error_with_retry(
+                                message,
+                                UiRetryAction::OpenWithSystem(retry_path),
+                                cx,
+                            );
+                        });
                         push_toast(&open_toaster, cx, error, Severity::Danger);
                     }
                 });
@@ -727,7 +743,7 @@ impl KanalibApp {
             let animation_open = !open_remote && crate::format::is_animation_container(&path);
             let animation_path = path.clone();
             let animation_toaster = self.toaster.clone();
-            let animation_state = self.state.clone();
+            let this_animation = this.clone();
             let animation_button = animation_open.then(|| {
                 Button::new(
                     "inspector-open-animation",
@@ -737,14 +753,20 @@ impl KanalibApp {
                 .icon(IconName::Play)
                 .on_click(move |_, _, cx| {
                     if let Err(error) = open_asset_with_system(&animation_path) {
-                        animation_state.set_ui_error(
-                            t_args(
+                        let message = t_args(
+                            cx,
+                            "inspector.action.play_failed",
+                            &[("error", error.as_str())],
+                        )
+                        .to_string();
+                        let retry_path = animation_path.clone();
+                        let _ = this_animation.update(cx, |app, cx| {
+                            app.set_ui_error_with_retry(
+                                message,
+                                UiRetryAction::OpenWithSystem(retry_path),
                                 cx,
-                                "inspector.action.play_failed",
-                                &[("error", error.as_str())],
-                            )
-                            .to_string(),
-                        );
+                            );
+                        });
                         push_toast(&animation_toaster, cx, error, Severity::Danger);
                     }
                 })

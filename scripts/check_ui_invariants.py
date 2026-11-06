@@ -69,7 +69,8 @@ def check_open_errors() -> tuple[list[str], int]:
             if "if let Err(error) = open_asset_with_system" not in line:
                 continue
             count += 1
-            block = "\n".join(lines[i : i + 14])
+            # 失败分支还可能登记可重试动作，取 24 行仍限定在同一分支内。
+            block = "\n".join(lines[i : i + 24])
             where = f"{rel}:{i + 1}"
             if "push_toast" not in block:
                 problems.append(f"{where} 打开失败没有即时反馈 push_toast")

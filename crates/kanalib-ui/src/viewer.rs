@@ -1,4 +1,4 @@
-use crate::app::{KanalibApp, push_toast};
+use crate::app::{KanalibApp, UiRetryAction, push_toast};
 use crate::format::{
     is_animation_container, is_remote_asset, open_asset_with_system, video_fact_rows, video_meta,
 };
@@ -546,7 +546,7 @@ impl View for ViewerPane {
         let animated = is_animation_container(&path);
         let external_path = path.clone();
         let external_toaster = toaster.clone();
-        let external_state = state.clone();
+        let external_this = this.clone();
         let can_external =
             (is_video || animated) && !remote && kanalib_core::open::can_open_externally(&path);
         let external_label = if is_video {
@@ -824,15 +824,21 @@ impl View for ViewerPane {
                                     .icon(IconName::Play)
                                     .on_click(move |_, _, cx| {
                                         if let Err(error) = open_asset_with_system(&external_path) {
-                                            // F-073 6.2：toast 之外还要有常驻的就地说明。
-                                            external_state.set_ui_error(
-                                                t_args(
+                                            // F-073 6.2：toast 之外还要有常驻的就地说明与重试。
+                                            let message = t_args(
+                                                cx,
+                                                "viewer.external.failed",
+                                                &[("error", &error)],
+                                            )
+                                            .to_string();
+                                            let retry_path = external_path.clone();
+                                            let _ = external_this.update(cx, |app, cx| {
+                                                app.set_ui_error_with_retry(
+                                                    message,
+                                                    UiRetryAction::OpenWithSystem(retry_path),
                                                     cx,
-                                                    "viewer.external.failed",
-                                                    &[("error", &error)],
-                                                )
-                                                .to_string(),
-                                            );
+                                                );
+                                            });
                                             push_toast(
                                                 &external_toaster,
                                                 cx,

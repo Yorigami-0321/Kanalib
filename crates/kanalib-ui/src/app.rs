@@ -94,6 +94,18 @@ pub(crate) struct FrameProbe {
     renders: usize,
 }
 
+/// 可重试的 UI 错误：只有 `message` 与当前 `shared.error` 完全一致时才显示重试入口。
+#[derive(Clone)]
+pub(crate) struct UiErrorRetry {
+    pub(crate) message: String,
+    pub(crate) action: UiRetryAction,
+}
+
+#[derive(Clone)]
+pub(crate) enum UiRetryAction {
+    OpenWithSystem(PathBuf),
+}
+
 pub struct KanalibApp {
     pub(crate) state: Arc<AppState>,
     pub(crate) grid_scroll: UniformListScrollHandle,
@@ -138,6 +150,7 @@ pub struct KanalibApp {
     pub(crate) dedup_notice: Option<String>,
     pub(crate) rescan_confirm: Option<RescanOrigin>,
     pub(crate) settings_notice: Option<String>,
+    pub(crate) ui_error_retry: Option<UiErrorRetry>,
     pub(crate) tag_thresholds: Option<TagThresholds>,
     pub(crate) tag_queue_status: Option<TagQueueStatus>,
     pub(crate) tag_queue_signature: Option<String>,
@@ -2499,6 +2512,52 @@ impl Render for KanalibApp {
 }
 
 impl KanalibApp {
+    /// 记录可重试的 UI 错误；只有 message 与当前错误完全一致时才显示重试入口。
+    pub(crate) fn set_ui_error_with_retry(
+        &mut self,
+        message: String,
+        action: UiRetryAction,
+        cx: &mut Context<Self>,
+    ) {
+        self.state.set_ui_error(message.clone());
+        self.ui_error_retry = Some(UiErrorRetry { message, action });
+        cx.notify();
+    }
+
+    pub(crate) fn retry_ui_error(&mut self, cx: &mut Context<Self>) {
+        let Some(retry) = self.ui_error_retry.take() else {
+            return;
+        };
+        match retry.action.clone() {
+            UiRetryAction::OpenWithSystem(path) => {
+                if let Err(error) = crate::format::open_asset_with_system(&path) {
+                    let message = crate::localization::t_args(
+                        cx,
+                        "status.retry_failed",
+                        &[("error", &error)],
+                    )
+                    .to_string();
+                    self.state.set_ui_error(message.clone());
+                    self.ui_error_retry = Some(UiErrorRetry {
+                        message,
+                        action: UiRetryAction::OpenWithSystem(path),
+                    });
+                    push_toast(&self.toaster, cx, error, Severity::Danger);
+                } else {
+                    self.state.shared.lock().unwrap().error = None;
+                }
+            }
+        }
+        cx.notify();
+    }
+
+    pub(crate) fn error_retry_action(&self, message: &str) -> Option<UiRetryAction> {
+        self.ui_error_retry
+            .as_ref()
+            .filter(|retry| retry.message == message)
+            .map(|retry| retry.action.clone())
+    }
+
     /// 当前视图状态：保存/更新智能集合时一起落库。
     pub(crate) fn current_saved_search_view(&self) -> SavedSearchView {
         SavedSearchView {
@@ -2971,6 +3030,7 @@ impl KanalibApp {
             cache_cleanup_confirm: None,
             restore_confirm: None,
             settings_notice: None,
+            ui_error_retry: None,
             tag_thresholds: None,
             tag_queue_status: None,
             tag_queue_signature: None,

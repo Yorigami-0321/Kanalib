@@ -1508,9 +1508,16 @@ impl KanalibApp {
             .clone()
             .or_else(|| Some(crate::localization::core_status(cx, status).to_string()));
         let banner = error
-            .map(|message| (message.to_string(), colors.danger))
-            .or_else(|| notice.map(|message| (message, colors.muted)))
-            .map(|(message, color)| {
+            .map(|message| {
+                (
+                    message.to_string(),
+                    colors.danger,
+                    self.error_retry_action(message).is_some(),
+                )
+            })
+            .or_else(|| notice.map(|message| (message, colors.muted, false)))
+            .map(|(message, color, retry)| {
+                let this_retry = this.clone();
                 div()
                     .px(page_padding)
                     .py(px(8.))
@@ -1519,7 +1526,21 @@ impl KanalibApp {
                     .bg(colors.sunken)
                     .text_xs()
                     .text_color(color)
-                    .child(message)
+                    .flex()
+                    .items_center()
+                    .gap(px(8.))
+                    .child(div().flex_1().min_w(px(0.)).child(message))
+                    .children(retry.then(|| {
+                        Button::new(
+                            "settings-error-retry",
+                            crate::localization::t(cx, "status.retry"),
+                        )
+                        .size(ControlSize::Sm)
+                        .variant(ButtonVariant::Ghost)
+                        .on_click(move |_, _, cx| {
+                            let _ = this_retry.update(cx, |app, cx| app.retry_ui_error(cx));
+                        })
+                    }))
                     .into_any_element()
             });
 

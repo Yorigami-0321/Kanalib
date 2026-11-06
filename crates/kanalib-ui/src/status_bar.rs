@@ -178,6 +178,19 @@ impl KanalibApp {
                     let _ = this_error.update(cx, |app, cx| app.open_settings(cx));
                 },
             ));
+            if self.error_retry_action(message).is_some() {
+                let this_retry = this.clone();
+                left = left.child(status_bar_item(
+                    "status-error-retry",
+                    crate::localization::t(cx, "status.retry"),
+                    colors.accent,
+                    colors,
+                    false,
+                    move |_, _, cx| {
+                        let _ = this_retry.update(cx, |app, cx| app.retry_ui_error(cx));
+                    },
+                ));
+            }
         } else if scanning {
             let this_stop = this.clone();
             left = left.child(status_bar_item(
