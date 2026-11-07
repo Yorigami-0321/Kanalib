@@ -26,6 +26,7 @@
 | `.kanalib/accept_r8_d1` | 单资产隔离根（`retry_probe.txt`，路径在 `probe_outside` 根内）；DB 由 accept_f070_gui 复制改写 | D1 打开失败/重试链路 | 复跑先删整个 `probe_outside` 目录再启动（根离线：不弹缺失清理对话框）；触发失败后补目录+文件再点重试即成功。根在线时增删文件会触发监听刷新清掉错误条，抢在重试前 |
 | `.kanalib/accept_r9_a` | 单资产隔离根（`lib/only.png`，启动时 `lib` 不存在）；DB 由 accept_f070_gui 复制改写，`ui.locale=en-US` | D5 English：来源错误行/`1 image` 单数/打开失败单前缀；D1 设置页 banner 重试 | 根离线且无监听刷新，错误条会一直保留；用例：右键/检查器 Open → 设置页 banner。复跑保持 `lib` 目录不存在 |
 | `.kanalib/accept_r9_b` | 两张同像素不同压缩级别的 PNG（`big.png` 900.8KB / `small.png` 1.6KB，pHash 相同）；headless 预先扫描入库 | D5 English：去重保留原因 `Larger file`；D1 去重 banner 重试 | 启动时用 `KANALIB_DISABLE_WATCH=1` 并删除 `big.png`，相似扫描仍从 DB 出组；Open keeper 失败后错误条持续。复跑先恢复 `big.png` 或重新扫描 |
+| `.kanalib/accept_r9_tag` | 61 张图（60 张 1024×1024 + 损坏的 `broken.png`）；`runtime`/`models`/`sidecar` 用目录联接指向仓库 | 队列 running/error 与修复瞬态（需 sidecar/模型） | 用 `KANALIB_DISABLE_WATCH=1`、不设 `KANALIB_SKIP_TAG`，启动时冷扫并打标；大图用于拉长 running 窗口。复跑先清空 DB 的 assets/jobs 再启动；junction 删除只需删链接目录 |
 | `.kanalib/verify_f070/` | F-070/F-073 副屏截图、Tab 日志、UIA 文本 | 既有基线 | 含 16 张亮暗 × 1024/1200 基线 |
 | `.kanalib/ui_f069_fit_data` + `.kanalib/ui_f069_fit_root` | F-069 适应/100% 三张样本 | 查看器缩放 | 样本含 1120×1992、280×175、1300×1149 |
 | `sample_library` | 15 张示例库（含损坏 AVIF） | headless / 快速冒烟 | 不含 100k 性能结论 |
@@ -36,7 +37,7 @@
 | # | 验收项 | 前置/前台 | 证据/备注 |
 |---|---|---|---|
 | 70-1 | 1440/1920 逻辑宽下四种上下文侧栏无水平溢出 | 副屏逻辑宽不足，需改 DPI 或占用主屏；会抢前台 | 已有 1024/1200 基线，见 `.kanalib/verify_f070/` |
-| 70-2 | Shift+Tab 反向遍历、焦点全遍历、Esc 其它分层路径 | 真实键盘；合成 Shift 不生效 | **通过（2026-11-07，用户真实键盘实测确认）**：正向 Tab 与焦点环（`verify_f070/tab_walk*.log`）；Shift+Tab 反向遍历由用户亲自按键确认正常（`verify_round9/tab_user_final.png` 为结束态截图）；合成 Shift 经 AttachThreadInput+SetKeyboardState 尝试未证实（gpui 读真实键盘状态），后续此类验收直接请用户按键 |
+| 70-2 | Shift+Tab 反向遍历、焦点全遍历、Esc 其它分层路径 | 真实键盘；合成 Shift 不生效 | **通过（2026-11-07，用户真实键盘实测确认）**：正向 Tab 与焦点环（`verify_f070/tab_walk*.log`）；Shift+Tab 反向遍历由用户亲自按键确认正常（`verify_round9/tab_user_final.png` 为结束态截图）；合成 Shift 经 AttachThreadInput+SetKeyboardState 尝试未证实（gpui 读真实键盘状态），后续此类验收直接请用户按键；**同日用户决定将 Tab / Shift+Tab 焦点遍历标记为待移除（F-075/F-076），这两部分不再复验；Esc 其它分层路径仍待验收** |
 | 70-3 | F-020 别名/合并对话框真实提交：输入目标、Enter/点击提交、别名与 FTS 生效 | 真实键入 + 前台；空目标时提交按钮 `disabled` | 核心测试 `db::tests::renaming_and_merging_tags_keep_aliases_and_fts` 通过；GUI 提交未验 |
 | 70-4 | 侧栏宽度拖拽、最小/最大宽度、重启后保持 | 真实鼠标拖拽 | 折叠与重启持久化已验；宽度拖拽未验 |
 
@@ -60,7 +61,7 @@
 
 | # | 验收项 | 前置/前台 | 证据/备注 |
 |---|---|---|---|
-| 73-1 | English 下扫描/队列/来源/去重/修复等瞬态状态栏，以及设置页网络来源按钮/说明/凭据/toast 真实渲染 | 副屏 GUI；触发对应动作 | 2026-11-07 部分通过：扫描开始/完成、扫描中途（冷扫 2000 张：`Hashing 1687/2000 · 22.0 images/s · ETA 15 s · Source · libr…`）、队列 waiting、相似完成、来源卡 last-scan、来源离线错误行（`Source offline; watching resumes automatically…`）、监听失败 banner 英文渲染已验（`verify_round8/d4_*.png`、`verify_round9/r9a_settings_en.png`、`r9f_midscan_hashing_en.png`、`r9f_scan_complete_en.png`）；D5 泄漏修复后 English 已复验；队列 running/error 与修复瞬态需 sidecar/模型，未触发，整项维持未勾选 |
+| 73-1 | English 下扫描/队列/来源/去重/修复等瞬态状态栏，以及设置页网络来源按钮/说明/凭据/toast 真实渲染 | 副屏 GUI；触发对应动作 | 2026-11-07 部分通过：扫描开始/完成/中途（`Hashing 1687/2000 · 22.0 images/s · ETA 15 s`）、相似完成、来源卡 last-scan、来源离线错误行、监听失败 banner 英文已验；**扫码/队列/修复**用带 sidecar 的隔离夹具补验——队列 running（状态栏 `Queue waiting 45 · running 4 · failed 0`、设置卡 `Running · waiting 17 · running 4 · done 40 · throughput 3.2 images/s · ETA 7 s`）、队列 error（`Failures while idle · failed 1 · done 60`）、修复瞬态（损坏 PNG → Repair → 错误条）；证据 `verify_round8/d4_*.png`、`verify_round9/r9f_*.png`、`r9h_queue_*.png`、`r9h_run_*.png`、`r9h_repair_*.png`。**新泄漏**：队列卡 `打标已继续` 中文、最新打标错误详情中文（`文件不完整（图片数据被截断）`）、修复失败错误条中文（`修复失败：容错解码…`）——登记 D6。未覆盖：远程来源凭据对话框/toast 真实渲染（未添加远端源）、远程按钮/说明（静态目录已迁移）、修复成功路径（截断文件不可恢复）、队列修复成功后重打标。整项维持未勾选 |
 | 73-2 | 1440/1920 逻辑宽与浮层/查看器/对话框/Toast 截图基线 | 需主屏或改 DPI；会抢前台 | **通过（2026-11-07，主屏授权，125% DPI）**：设置 1800/2400 物理（1440/1920 逻辑），DWM 采集 1784/2384 物理；亮暗 × 图库/重复项/标签/设置 × 宽度 + 命令面板浮层 + 查看器 = 24 张（`verify_round9/baseline/`）；UIA 水平越界审计 24 份全部 0。注：窗口在跨 DPI 移动后会被应用异步改尺寸，采用「设置×2 + 同进程立即 PrintWindow」采集 |
 | 73-3 | GUI 弹窗/菜单/表单/命令面板 UIA 与悬停验收 | 窗口前台 + UIA | 2026-11-07 部分通过：in-app 模态框 UIA 名称与截图——`Rename source`（输入框 + Cancel/Save）、`Remove source?`（危险按钮 + 说明）、`Add WebDAV source`（URL 字段非法输入显示红框 + 清除按钮，`r9d_webdav_invalid_light.png`）；命令面板 72 个 ListItem 全部英文可读，输入 `theme` 过滤为 1 项、方向键移动高亮、Esc 关闭（`r9g_palette_*.png`）；tooltip 见 73-4。未覆盖：loading spinner、原生文件/文件夹选择框（rfd，窗口内消息不可达）、命令动作逐条执行、150/240px 固定宽输入的挤压 |
 | 73-4 | 组件状态矩阵：hover/focus/pressed/selected/disabled/loading 一致性 | 截图对比亮暗主题 | 2026-11-07 抽样通过（亮暗两套）：hover（Open file 按钮像素差 + 裁剪）、focus（暗色收藏按钮蓝环、亮色设置活动项高亮）、pressed（View 按钮按下）、disabled（无标签时 `Copy pro…` 置灰）、selected（侧栏 `All images` 选中行）、tooltip（Theme 悬停提示）。证据 `.kanalib/verify_round9/r9c_*.png`；未覆盖全组件矩阵与 loading 态 |
@@ -103,7 +104,7 @@
 | 标签页单搜索/chips/排序/查看图片→Esc 返回 | 通过 | `verify_f070` |
 | 侧栏折叠隔离 + 重启持久化 | 通过 | `ui.sidebar_collapsed=sources` |
 | 上下文溢出菜单 UIA 名称 | 通过 | `uia_*.txt` |
-| 根 FocusScope + 正向 Tab 顺序 | 通过 | `tab_walk_settings.log`、`tab_walk.log`、`check_ui_invariants.py` 第 6 项 |
+| 根 FocusScope + 正向 Tab 顺序 | 通过；2026-11-07 转 F-076 待移除，不再复验 | `tab_walk_settings.log`、`tab_walk.log`、`check_ui_invariants.py` 第 6 项 |
 | 3 万标签首屏/搜索/滚动 | 通过 | `tags30k_walk.log`、`tags30k_*.png` |
 | F-067 撤销（3 星→底栏撤销→DB 归 0） | 通过 | `f067_after_star.png`、`f067_after_undo.png` |
 | F-071 主题切换/设置选中态/标题栏无主题按钮 | 通过 | `f071_theme_light.png`、`f071_settings_selected.png` |
@@ -119,6 +120,7 @@
 | 73-3 命令面板（72 项 UIA/过滤/方向键/浮层） | 通过（动作逐条执行未覆盖） | `verify_round9/r9g_palette_*.png`、`uia_g_palette.txt` |
 | 73-2 1440/1920 宽基线（亮暗 × 4 页 + 浮层 + 查看器，24 张，越界 0） | 通过（主屏授权） | `verify_round9/baseline/` |
 | 73-5 渲染后对比度抽样（正文 ≥4.5；禁用态豁免；排序图标 2.99 WARN） | 抽样通过 | `scripts/check_rendered_contrast.py` + `verify_round9/baseline/` |
+| 73-1 队列 running/error 与修复失败瞬态（sidecar/模型实机） | 部分通过（新泄漏登记 D6） | `verify_round9/r9h_queue_*.png`、`r9h_run_*.png`、`r9h_repair_*.png` |
 
 ## 10. 长耗时后台项（不属手动验收，需单独确认）
 

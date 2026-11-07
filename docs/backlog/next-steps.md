@@ -9,8 +9,8 @@
 |---|---|
 | 提交点 | `d014839` `docs(backlog): 记录渲染后 WCAG 抽样验收`；D5 代码提交 `65b221d` |
 | 工作区 | 干净 |
-| registry | 56 条：42 已实现、5 远期、9 实现中（剩余以手动/真实环境验收为主） |
-| 未完成 ID | F-030 / F-033 / F-036 / F-069 / F-070 / F-071 / F-072 / F-073 / F-074 |
+| registry | 58 条：42 已实现、5 远期、9 实现中、2 待移除（剩余以手动/真实环境验收为主） |
+| 未完成 ID | F-030 / F-033 / F-036 / F-069 / F-070 / F-071 / F-072 / F-073 / F-074 / F-075 / F-076 |
 | 最近完成 | 第九轮副屏验收（2026-11-07）：D5 English 复验通过（来源错误行/打开链单前缀/`1 image`/去重 `Larger file`）、D1 设置与去重 banner 重试验完（四个展示位齐）；D5 已按 D4 模式落地；A2 关闭 F-070 方案 B |
 | 后台自验 | `cargo test` bin 6 / core 214 / UI 74（新增单数化用例）、`cargo check --workspace`、`cargo check --features frame-profiler`、debug 构建、`check_ui_invariants.py` 9 项、`check_backlog_docs.sh`、headless 冒烟（15 张示例库，退出码 0）—— 全部通过且**未启动窗口** |
 | GUI 验收（2026-11-04，副屏） | F-070 四种侧栏/设置锚点/标签单搜索与返回/折叠隔离/上下文菜单/Tab 顺序/3 万标签、F-073 16 张基线；发现并修复去重页窄宽头部溢出与根 FocusScope 缺失导致 Tab 不可达；证据 `.kanalib/verify_f070/` |
@@ -58,8 +58,9 @@
 - [x] 标签页侧栏搜索 / chips / 排序与页内列表联动，屏幕内只有一套搜索（仅 1 个 Edit；`girl`→2 行；0 使用→0 行；名称排序生效）
 - [x] 3 万标签虚拟列表/搜索/滚动：首屏 152ms、精确搜索 1 条 513ms（含键入）、滚动正常、工作集 133→121MB；侧栏 chips 为固定分类，不随 3 万变化
 - [x] 侧栏 UIA 名称、设置锚点焦点环、「查看图片 → Esc 返回」分层（证据 `uia_*.txt`）
-- [x] Tab 顺序：设置页/标签页逐站记录与焦点环（根 FocusScope 修复后；`tab_walk_settings.log`、`tab_walk.log`）
-- [ ] Shift+Tab、焦点全遍历、Esc 其它分层路径
+- [x] Tab 顺序：设置页/标签页逐站记录与焦点环（根 FocusScope 修复后；`tab_walk_settings.log`、`tab_walk.log`；同日转 F-076 待移除，不再复验）
+- [x] Shift+Tab 反向遍历（2026-11-07 真实键盘通过；同日产品决定下线，转 F-075 待移除，不再复验）
+- [ ] Esc 其它分层路径（焦点全遍历随 Tab/Shift+Tab 下线，不再作为验收目标）
 - [x] 回归：F-006 折叠与重启持久化（`ui.sidebar_collapsed=sources`，旧键生效；宽度拖拽未验）+ 方案 C 的「查看图片 → Esc 返回 → 状态保留」
 - [x] F-011 侧栏标签面（chips/搜索/排序/查看图片在标签页验收中覆盖）
 - [x] F-025 低频/0 使用筛选与计数（低频 30156、0 使用 0；无自动删除入口）
@@ -76,7 +77,7 @@
 - [x] 1024/1200 逻辑宽截图基线补四种新侧栏（16 张，水平越界 0）
 - [x] 去重页评审区窄宽头部溢出修复（1024 宽 4 个按钮、1200 宽 2 个按钮越界 → 修复后均 0）
 - [x] 上下文溢出菜单项 UIA 名称（图库 3 项 / 设置 1 项）
-- [x] 根 FocusScope 修复 + Tab 遍历（`.root().node(...)`；`check_ui_invariants.py` 第 6 项）
+- [x] 根 FocusScope 修复 + Tab 遍历（`.root().node(...)`；`check_ui_invariants.py` 第 6 项；Tab/Shift+Tab 遍历同日转 F-075/F-076 待移除）
 - [x] 项目级 i18n 第一批（zh-CN/en-US 目录、设置页语言切换、壳层/导航/标题栏；`ui.locale` 持久化）
 - [x] 项目级 i18n 第二批（侧栏 8 个分区标题、状态栏计数/队列/命令面板键；错误 compact 下部分项未截图）
 - [x] 项目级 i18n 第三批（侧栏过滤/评级行、标签计数/分类/空状态/更多、搜索占位改 `placeholder_key`）
@@ -115,6 +116,7 @@
 | D3 | F-070 方案 B | **已关闭（2026-11-07）**：被方案 A 取代，不实现；registry/overview/browse 已补备注 |
 | D4 | core 状态消息结构化 | 已按「core 结构化 key+args」落地（2026-11-06）：`StatusMessage` + `notice.*` 双语目录 + `check_ui_invariants.py` 第 7 项；2026-11-07 副屏部分验收通过，剩余泄漏见 D5 |
 | D5 | core 原串泄漏结构化（来源错误/去重保留原因/打开链 bail/计数复数） | **已拍板并落地（2026-11-07）**：用户选择「按 D4 模式结构化」。`SourceScanStatus.error` 改为 `StatusMessage`（11 处写点全部 keyed）；新增 `watch_retry: bool` 替代 `contains("监听"/"离线")` 恢复判定；去重「文件更大」补 UI 映射；打开链去掉内层「打开失败」前缀并在 UI 预检缺失文件；英文计数单数化（`finish_text`）。`check_ui_invariants.py` 第 9 项固化。2026-11-07 第九轮副屏 English 复验通过（来源错误行/打开链单前缀/`1 image`/去重 `Larger file`） |
+| D6 | 队列/修复路径原串泄漏（`tag_status.message` 打标已继续 / 打标错误详情 / 修复失败 `shared.error`） | 2026-11-07 队列与修复瞬态验收发现：① `model.rs:1636` 队列状态消息无 key；② `media.rs:283` 与 sidecar 固定文案「文件不完整（图片数据被截断）」在 English 队列卡原样显示；③ core 修复线程写 `shared.error`（全局错误条）导致 `修复失败：容错解码…` 中文。②③ 涉 `shared.error`/sidecar 文案模型，是否按 D5 模式结构化需拍板；证据 `verify_round9/r9h_*.png` |
 
 ## 4. 红线
 
@@ -130,7 +132,7 @@
 | 选项 | 说明 |
 |---|---|
 | D5 方案决策 | ✅ 已拍板（2026-11-07）：按 D4 模式结构化，代码与静态检查已落地；剩 English 实机复验 73-1/73-9 |
-| C 类手动验收 | 按 `docs/backlog/manual-acceptance.md` 逐项走；剩组件状态全矩阵与 loading、命令动作逐条执行/原生选择框、队列 running/修复瞬态（需 sidecar） |
+| C 类手动验收 | 按 `docs/backlog/manual-acceptance.md` 逐项走；剩组件状态全矩阵与 loading、命令动作逐条执行/原生选择框、远程来源凭据对话框/toast、修复成功路径 |
 | B1 启动 100k 后台全量回归 | 约 1 小时以上，纯后台；需要先确认 |
 | F-012 搜索 p95 优化 | 需完整 100k 库与长跑基准；当前 150ms 目标已改为同库实测上限口径 |
 | 暂停 | 保持现状，等用户有空做 C 类验收 |

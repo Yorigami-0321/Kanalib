@@ -527,8 +527,10 @@
   - 1440/1920 宽基线（73-2，主屏授权，125% DPI，`verify_round9/baseline/`）：设置窗口 1800/2400 物理宽（1440/1920 逻辑），DWM 采集 1784/2384×992；亮/暗 × 图库/重复项/标签/设置 + 命令面板浮层 + 查看器 = 24 张；UIA 水平越界审计 24 份全部 0。期间发现窗口跨 DPI 移动后会被应用异步改尺寸，改用 set_capture（SetWindowPos×2 + 同进程 PrintWindow）固定尺寸采集。
   - Shift+Tab 反向遍历（70-2 通过）：用户真实键盘实测确认正常（2026-11-07）。此前合成 Shift 被 gpui 的 `GetKeyState` 真实键盘状态判定忽略；AttachThreadInput + SetKeyboardState 注入未证实，结案口径改为「修饰键类验收由用户亲按」。窗口同时修正为 1536×1000 完整落在副屏内。
   - 渲染后 WCAG 抽样（73-5，`scripts/check_rendered_contrast.py` + 第九轮基线）：对 8 张页面 × 亮暗 × 1440/1920 的 UIA 元素矩形做截图取色（背景=量化众数色，文字=出现 ≥3 次且对比度最高的稳定色）。正文最低暗色 5.18:1、亮色 5.47:1，全部 ≥4.5；低于 4.5 的只有禁用态 `Copy prompt`/`Reset`（2.96–3.73，WCAG 豁免）；排序方向图标亮色 2.99:1 与非文本 3:1 临界（WARN，建议 token 微调）。脚本固定了豁免/非文本名单与阈值。
+  - 队列 running/error 与修复瞬态（73-1 补验，sidecar+模型实机，`verify_round9/r9h_*.png`）：隔离夹具通过目录联接复用 `runtime/models/sidecar`，冷扫 61 张（含 1 张截断 PNG）。队列 running——状态栏 `Queue waiting 45 · running 4 · failed 0`，设置卡 `Running · waiting 57 · running 4 · done 0` → `done 40 / 61 · throughput 3.2 images/s · ETA 7 s`、`Device cuda · GPU available`；队列 error——`Failures while idle · waiting 0 · running 0 · failed 1 · done 60`、`done 61 / 61 · failed 1`；`broken.png` 打标失败详情 `OSError: Truncated File Read`。修复瞬态——损坏项选中后点 `Repair`，错误条显示 `Error · 修复失败： 容错解码 …`（中文，见 D6）。
+  - **D6 候选（新泄漏，登记待决策）**：① 队列卡状态消息 `打标已继续` 无 key（`model.rs:1636` `tag_status.message = Some("打标已继续")`，UI 原样渲染）；② 打标最新错误详情 `文件不完整（图片数据被截断）` 为固定文案（`media.rs:283` / `sidecar/tagger/*.py`），English 队列卡原样显示；③ 修复失败错误条 `修复失败：容错解码 …`（core 修复线程写 `shared.error`，属全局错误条未结构化范围）。三者与 D5 同类但涉及 `shared.error`/sidecar 固定文案，是否按 D5 模式一并结构化需拍板。
 - 未迁移：vendor 内部文案与动态数据（标签名/文件名/来源名/错误原文）按设计不翻译。core 状态已结构化，但英文渲染未做 GUI 验收，不得写成已全量通过。
-- 剩余：English 扫描中途与队列/修复瞬态、组件状态其余示例（hover/focus/pressed/selected 一致性）、设置页字段/对话框、渲染后可访问性实测、1440/1920 与浮层截图基线、Shift+Tab 与焦点全遍历（需真实键盘）、tooltip/loading 视觉验收、100k 全量性能回归；`shared.error` 全局错误条仍保留中文 core 原文（属更大的错误模型结构化，本轮未动）；vendor 侧仍有硬编码英文的组件（视频控制/字幕等）待接入对应界面时再收 —— 已核实 Kanalib 实际用到的组件英文默认值均被业务侧覆盖；F-070 方案 A 已落地并完成副屏 GUI 验收（四种侧栏、锚点、单搜索、折叠隔离），方案 B 于 2026-11-07 关闭（被 A 取代），不再列为待定。
+- 剩余：English 扫描中途与队列/修复瞬态、组件状态其余示例（hover/focus/pressed/selected 一致性）、设置页字段/对话框、渲染后可访问性实测、1440/1920 与浮层截图基线、焦点全遍历（随 Tab/Shift+Tab 下线不再作为验收目标，见 F-075/F-076）、tooltip/loading 视觉验收、100k 全量性能回归；`shared.error` 全局错误条仍保留中文 core 原文（属更大的错误模型结构化，本轮未动）；vendor 侧仍有硬编码英文的组件（视频控制/字幕等）待接入对应界面时再收 —— 已核实 Kanalib 实际用到的组件英文默认值均被业务侧覆盖；F-070 方案 A 已落地并完成副屏 GUI 验收（四种侧栏、锚点、单搜索、折叠隔离），方案 B 于 2026-11-07 关闭（被 A 取代），不再列为待定。
 
 ## F-074 查看器默认加载原图
 
@@ -611,3 +613,21 @@
 - **待确认 3（快速预览入口）**：原「预览」按钮是否改名为「快速预览」，并与「原图」并列；默认原图。
 - **技术风险**：gpui `ImageAssetLoader` 的解码线程与 ICC 行为需实测；全尺寸解码内存/纹理图集；超大图 OOM；动画只显示首帧；快速切图竞态；原始文件损坏；远端/视频边界。
 - **约束**：不改变缩略图缓存 `v4` 与 10GB 预算；不改 schema；不把全尺寸解码放到 UI 线程；不把 GPL 代码复制进 MIT 仓库；不静默用处理后的图替代原图。
+
+## F-075 Shift+Tab 反向焦点遍历下线
+
+> 2026-11-07 用户指示：把 Shift+Tab 标记为待移除项（产品决定下线）。状态「待移除」= 行为当前已存在，但产品决定移除；本次只登记，不改代码。
+
+- 现状：反向遍历已由用户真实键盘验收通过（70-2，证据 `.kanalib/verify_round9/tab_user_final.png`）。绑定来自 vendor `ely-gpui-components/crates/ely-core/src/lib.rs` 的 `KeyBinding::new("shift-tab", FocusPrev, Some(FOCUS_CONTEXT))`；Kanalib 侧未单独绑定 Shift+Tab。
+- 下线范围：Shift+Tab 不再反向移动焦点；正向 Tab 由 F-076 另行登记下线，二者合并构成焦点遍历整体下线。实现方式（解绑或覆盖键位）待做，本次不写代码。
+- 验收：真实键盘按 Shift+Tab 焦点不反向移动；与 F-076（Tab 正向）一并验收，鼠标点击与快捷键路径不回归。未做前保留「待移除」状态，不写成已移除。
+- 连带更新：`manual-acceptance.md` 70-2 保留通过记录并标注转待移除；`next-steps.md` C 类清单不再把 Shift+Tab 列为待复验项。
+
+## F-076 Tab 正向焦点遍历下线
+
+> 2026-11-07 用户指示：Tab 切换焦点也标记为待移除项（产品决定下线）。状态「待移除」= 行为当前已存在，但产品决定移除；本次只登记，不改代码。
+
+- 现状：正向 Tab 顺序与焦点环已通过（70-2、F-070/F-073 验收；证据 `.kanalib/verify_f070/tab_walk*.log`、`.kanalib/verify_round9/`）。绑定来自 vendor `ely-gpui-components/crates/ely-core/src/lib.rs` 的 `KeyBinding::new("tab", FocusNext, Some(FOCUS_CONTEXT))`；Kanalib 侧另有根 `FocusScope`（`kanalib-root-focus`）与 13 处控件的 `.tab_index(0)` 停靠点。
+- 下线范围：Tab 不再在 Kanalib 控件间切换焦点；与 F-075（Shift+Tab 反向）一起构成焦点遍历整体下线。深层组件若自带 Tab 语义，保持组件现有行为，不在本条范围。实现方式（解绑或覆盖键位、停靠点处理）待做，本次不写代码。
+- 验收：真实键盘按 Tab 焦点不移动；与 F-075 一并验收，鼠标点击与快捷键路径不回归。未做前保留「待移除」状态，不写成已移除。
+- 连带更新：`manual-acceptance.md` 70-2 与已通过项索引「根 FocusScope + 正向 Tab 顺序」保留通过记录并标注转待移除（70-2 的 Esc 分层子项仍待验收）；`next-steps.md` 不再把 Tab 顺序/焦点遍历列为待复验项。
