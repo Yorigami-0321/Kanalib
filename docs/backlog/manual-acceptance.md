@@ -59,7 +59,7 @@
 
 | # | 验收项 | 前置/前台 | 证据/备注 |
 |---|---|---|---|
-| 73-1 | English 下扫描/队列/来源/去重/修复等瞬态状态栏，以及设置页网络来源按钮/说明/凭据/toast 真实渲染 | 副屏 GUI；触发对应动作 | 2026-11-07 部分通过：扫描开始/完成、相似完成、来源卡 last-scan、来源离线错误行（`Source offline; watching resumes automatically…`）、监听失败 banner 英文渲染已验（`verify_round8/d4_*.png`、`verify_round9/r9a_settings_en.png`）；D5 泄漏修复后 English 已复验；扫描中途瞬态未截到（暖缓存过快）、队列/修复瞬态未触发，整项维持未勾选 |
+| 73-1 | English 下扫描/队列/来源/去重/修复等瞬态状态栏，以及设置页网络来源按钮/说明/凭据/toast 真实渲染 | 副屏 GUI；触发对应动作 | 2026-11-07 部分通过：扫描开始/完成、扫描中途（冷扫 2000 张：`Hashing 1687/2000 · 22.0 images/s · ETA 15 s · Source · libr…`）、队列 waiting、相似完成、来源卡 last-scan、来源离线错误行（`Source offline; watching resumes automatically…`）、监听失败 banner 英文渲染已验（`verify_round8/d4_*.png`、`verify_round9/r9a_settings_en.png`、`r9f_midscan_hashing_en.png`、`r9f_scan_complete_en.png`）；D5 泄漏修复后 English 已复验；队列 running/error 与修复瞬态需 sidecar/模型，未触发，整项维持未勾选 |
 | 73-2 | 1440/1920 逻辑宽与浮层/查看器/对话框/Toast 截图基线 | 需主屏或改 DPI；会抢前台 | 已有 1024/1200 16 张基线 |
 | 73-3 | GUI 弹窗/菜单/表单/命令面板 UIA 与悬停验收 | 窗口前台 + UIA | 2026-11-07 部分通过：in-app 模态框 UIA 名称与截图——`Rename source`（输入框 + Cancel/Save）、`Remove source?`（危险按钮 + 说明）、`Add WebDAV source`（URL 字段非法输入显示红框 + 清除按钮，`r9d_webdav_invalid_light.png`）；tooltip 见 73-4。未覆盖：loading spinner、原生文件/文件夹选择框（rfd，窗口内消息不可达）、命令面板全量项、150/240px 固定宽输入的挤压 |
 | 73-4 | 组件状态矩阵：hover/focus/pressed/selected/disabled/loading 一致性 | 截图对比亮暗主题 | 2026-11-07 抽样通过（亮暗两套）：hover（Open file 按钮像素差 + 裁剪）、focus（暗色收藏按钮蓝环、亮色设置活动项高亮）、pressed（View 按钮按下）、disabled（无标签时 `Copy pro…` 置灰）、selected（侧栏 `All images` 选中行）、tooltip（Theme 悬停提示）。证据 `.kanalib/verify_round9/r9c_*.png`；未覆盖全组件矩阵与 loading 态 |
@@ -114,6 +114,7 @@
 | D5 English 复验（来源错误行/打开链单前缀/`1 image`/去重 `Larger file`） | 通过 | `verify_round9/r9a_settings_en.png`、`r9a_open_failed_en.png`、`r9a_retry_failed_en.png`、`r9b_similar_larger_en.png`、`uia_a_*.txt` |
 | 73-4 组件状态抽样（hover/focus/pressed/disabled/selected/tooltip，亮暗） | 抽样通过（全矩阵未覆盖） | `verify_round9/r9c_*.png` |
 | 73-3 设置页字段/对话框（重命名/移除确认/URL 非法红框） | 部分通过（loading/原生选择框未覆盖） | `verify_round9/r9d_*.png` |
+| 73-1 扫描中途瞬态（English Hashing/吞吐/ETA + 完成 + 队列 waiting） | 通过（队列 running/修复仍需 sidecar） | `verify_round9/r9f_midscan_hashing_en.png`、`r9f_scan_complete_en.png` |
 
 ## 10. 长耗时后台项（不属手动验收，需单独确认）
 
