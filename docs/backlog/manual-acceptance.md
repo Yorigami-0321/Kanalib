@@ -39,22 +39,22 @@
 |---|---|---|---|
 | 70-1 | 1440/1920 逻辑宽下四种上下文侧栏无水平溢出 | 副屏逻辑宽不足，需改 DPI 或占用主屏；会抢前台 | 已有 1024/1200 基线，见 `.kanalib/verify_f070/` |
 | 70-2 | Shift+Tab 反向遍历、焦点全遍历、Esc 其它分层路径 | 真实键盘；合成 Shift 不生效 | **通过（2026-11-07，用户真实键盘实测确认）**：正向 Tab 与焦点环（`verify_f070/tab_walk*.log`）；Shift+Tab 反向遍历由用户亲自按键确认正常（`verify_round9/tab_user_final.png` 为结束态截图）；合成 Shift 经 AttachThreadInput+SetKeyboardState 尝试未证实（gpui 读真实键盘状态），后续此类验收直接请用户按键；**同日用户决定将 Tab / Shift+Tab 焦点遍历标记为待移除（F-075/F-076），这两部分不再复验；Esc 其它分层路径仍待验收** |
-| 70-3 | F-020 别名/合并对话框真实提交：输入目标、Enter/点击提交、别名与 FTS 生效 | 真实键入 + 前台；空目标时提交按钮 `disabled` | 核心测试 `db::tests::renaming_and_merging_tags_keep_aliases_and_fts` 通过；GUI 提交未验 |
-| 70-4 | 侧栏宽度拖拽、最小/最大宽度、重启后保持 | 真实鼠标拖拽 | 折叠与重启持久化已验；宽度拖拽未验 |
+| 70-3 | F-020 别名/合并对话框真实提交：输入目标、Enter/点击提交、别名与 FTS 生效 | 真实键入 + 前台；空目标时提交按钮 `disabled` | 核心测试 `db::tests::renaming_and_merging_tags_keep_aliases_and_fts` 通过；2026-11-07 GUI 复核：`Rename tag` 对话框渲染正确（`#abstract affects 60 images; the old name stays an alias…`）、输入可清空/键入（截图确认 `abstract_renamed`）、空值禁用 Rename；但合成输入下 Rename/Enter/UIA Invoke 均未把改名落库（日志有 `prompt dialog … sent`，DB/FTS 不变），提交路径未验收，需真实点击复核 |
+| 70-4 | 侧栏宽度拖拽、最小/最大宽度、重启后保持 | 真实鼠标拖拽 | 折叠与重启持久化已验；2026-11-07 合成拖拽：设置写入 `ui.sidebar_width=298` 但布局未变化（按下/移动未稳定命中分隔条），宽度拖拽与最小/最大夹取仍需真实鼠标复核 |
 
 ## 4. F-071 活动栏与标题栏
 
 | # | 验收项 | 前置/前台 | 证据/备注 |
 |---|---|---|---|
 | 71-1 | 标题栏拖拽区可拖动窗口；右侧间距、最小化/最大化/关闭点击不受影响 | 真实鼠标 | 主题切换、设置选中态、标题栏无主题按钮已验（`f071_theme_light.png`、`f071_settings_selected.png`） |
-| 71-2 | 活动栏底部「设置」与命令面板「设置」都进入设置页 | 真实点击 | 代码路径已核对 |
+| 71-2 | 活动栏底部「设置」与命令面板「设置」都进入设置页 | 真实点击 | **通过（2026-11-07）**：活动栏 Settings 点击进入设置页；命令面板输入 `Settings` 回车亦进入（`cmd_k_settings.png` 页头 `Settings`） |
 
 ## 5. F-072 搜索入口与搜索态
 
 | # | 验收项 | 前置/前台 | 证据/备注 |
 |---|---|---|---|
 | 72-1 | `Ctrl+F` 聚焦标题栏搜索并全选 | 真实键盘 + 前台 | 副屏 WM_CHAR 焦点受限，未写成通过 |
-| 72-2 | 清除按钮、搜索历史打开/选择/关闭、Esc 清空或退出 | 真实键入/点击 | 标签侧栏搜索清除已验；标题栏搜索未验 |
+| 72-2 | 清除按钮、搜索历史打开/选择/关闭、Esc 清空或退出 | 真实键入/点击 | **通过（2026-11-07）**：标题栏搜索键入 `sky` 后出现 Clear、Recent searches 1；Clear 清空查询；历史菜单含 `sky`/`Clear recent searches`，选择 `sky` 重新搜索；Esc 清空查询并退出过滤（`search_*.png`）；标签侧栏搜索此前已验 |
 | 72-3 | 命令面板/对话框打开时搜索框不被抢回；点击侧栏/空白后焦点环消失 | 真实焦点切换 | 合成焦点不可靠 |
 | 72-4 | 相似视图与标签页局部搜索文案/作用域不与全局搜索混淆 | 截图 + UIA | 与 F-070 标签页验收联动 |
 
@@ -125,6 +125,8 @@
 | 73-4 组件状态扩展（菜单 hover/开关/分段/输入焦点/loading spinner，亮暗） | 抽样通过 | `verify_round9/state_*.png`、`r9i_backup*.png` |
 | 73-3 命令执行（17 条 picked 日志复核）与远程凭据对话框 | 部分通过（原生/破坏性/剪贴板命令未执行） | `verify_round9/command_kbd.log`、`uia_*`、`r9j_credentials_dialog.png`、`r9j_test_connection.png` |
 | 修复成功路径（截断 JPEG：Preview cache rebuilt → Repair complete） | 通过 | `verify_round9/r9k4_*.png`、sidecar.log |
+| 71-2 双入口进设置（活动栏 + 命令面板） | 通过 | `verify_round9/cmd_k_settings.png` |
+| 72-2 标题栏搜索清除/历史/重选/Esc | 通过 | `verify_round9/search_*.png` |
 | 原生选择框（打开 UIA 树完整、Esc/WM_CLOSE 关闭） | 通过（仅打开/取消） | `verify_round9` 日志 |
 
 ## 10. 长耗时后台项（不属手动验收，需单独确认）
