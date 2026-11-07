@@ -15,6 +15,7 @@
 - **合成输入限制**：`WM_CHAR` 在查看器/检查器等焦点下不可靠；合成 Shift 修饰不进入 gpui `current_modifiers`，Shift+Tab 必须用真实键盘；`SendMessage(WM_KEYDOWN)` 对 gpui 无效，需要窗口前台 + 带扫描码的按键。合成输入不能作为通过依据。
 - **会抢前台的脚本**：`run_frame_probe.ps1`、`focus_window.ps1`、`ui_baseline.ps1`（需 `-Hwnd`）、`capture_window.ps1`、`uia_*`、`window_type.ps1`、`window_wheel.ps1`。默认只由用户手动执行。
 - **数据隔离**：`KANALIB_ROOT=<隔离数据根>`；`library.local_roots` 必须指向夹具图库，否则会打开空库。测试清理只动隔离数据根，不碰真实图库与真实图库 DB。
+- **窗口形态**：所有 GUI 验收一律使用正常横屏窗口（约 16:9），窗口必须完整落在所选屏幕内，禁止超长/超出屏幕下沿。夹具 `window_state.json` 统一写 800×450 逻辑；启动后若被放大，用 SetWindowPos 连设两次并复核（参见 `.kanalib/verify_round9/set_capture.ps1`）。
 - **证据归档**：统一放 `.kanalib/<轮次>/`，文件名含页面、主题、逻辑宽；截图记录逻辑宽与 DPI，UIA/日志保留原始文本。
 
 ## 2. 夹具与证据
@@ -61,7 +62,7 @@
 
 | # | 验收项 | 前置/前台 | 证据/备注 |
 |---|---|---|---|
-| 73-1 | English 下扫描/队列/来源/去重/修复等瞬态状态栏，以及设置页网络来源按钮/说明/凭据/toast 真实渲染 | 副屏 GUI；触发对应动作 | 2026-11-07 部分通过：扫描开始/完成/中途（`Hashing 1687/2000 · 22.0 images/s · ETA 15 s`）、相似完成、来源卡 last-scan、来源离线错误行、监听失败 banner 英文已验；**扫码/队列/修复**用带 sidecar 的隔离夹具补验——队列 running（状态栏 `Queue waiting 45 · running 4 · failed 0`、设置卡 `Running · waiting 17 · running 4 · done 40 · throughput 3.2 images/s · ETA 7 s`）、队列 error（`Failures while idle · failed 1 · done 60`）、修复瞬态（损坏 PNG → Repair → 错误条）；证据 `verify_round8/d4_*.png`、`verify_round9/r9f_*.png`、`r9h_queue_*.png`、`r9h_run_*.png`、`r9h_repair_*.png`。**新泄漏**：队列卡 `打标已继续` 中文、最新打标错误详情中文（`文件不完整（图片数据被截断）`）、修复失败错误条中文（`修复失败：容错解码…`）——登记 D6。未覆盖：远程来源凭据对话框/toast 真实渲染（未添加远端源）、远程按钮/说明（静态目录已迁移）、修复成功路径（截断文件不可恢复）、队列修复成功后重打标。整项维持未勾选 |
+| 73-1 | English 下扫描/队列/来源/去重/修复等瞬态状态栏，以及设置页网络来源按钮/说明/凭据/toast 真实渲染 | 副屏 GUI；触发对应动作 | 2026-11-07 部分通过：扫描开始/完成/中途（`Hashing 1687/2000 · 22.0 images/s · ETA 15 s`）、相似完成、来源卡 last-scan、来源离线错误行、监听失败 banner 英文已验；**扫码/队列/修复**用带 sidecar 的隔离夹具补验——队列 running（状态栏 `Queue waiting 45 · running 4 · failed 0`、设置卡 `Running · waiting 17 · running 4 · done 40 · throughput 3.2 images/s · ETA 7 s`）、队列 error（`Failures while idle · failed 1 · done 60`）、修复瞬态（损坏 PNG → Repair → 错误条）；证据 `verify_round8/d4_*.png`、`verify_round9/r9f_*.png`、`r9h_queue_*.png`、`r9h_run_*.png`、`r9h_repair_*.png`。**新泄漏**：队列卡 `打标已继续` 中文、最新打标错误详情中文（`文件不完整（图片数据被截断）`）、修复失败错误条中文（`修复失败：容错解码…`）——登记 D6。未覆盖：远程来源凭据对话框/toast 真实渲染（后续第九轮已补）、远程按钮/说明（静态目录已迁移）。**修复成功路径已补验**（截断 JPEG，容错解码 accepted）：`Preview cache rebuilt …` → `Repair complete (文件不完整…)`，damage 标签因文件仍截断而保留；`Repair complete` 括号内仍为中文 damage 文案（D6）。整项维持未勾选（剩余远程 toast 细节） |
 | 73-2 | 1440/1920 逻辑宽与浮层/查看器/对话框/Toast 截图基线 | 需主屏或改 DPI；会抢前台 | **通过（2026-11-07，主屏授权，125% DPI）**：设置 1800/2400 物理（1440/1920 逻辑），DWM 采集 1784/2384 物理；亮暗 × 图库/重复项/标签/设置 × 宽度 + 命令面板浮层 + 查看器 = 24 张（`verify_round9/baseline/`）；UIA 水平越界审计 24 份全部 0。注：窗口在跨 DPI 移动后会被应用异步改尺寸，采用「设置×2 + 同进程立即 PrintWindow」采集 |
 | 73-3 | GUI 弹窗/菜单/表单/命令面板 UIA 与悬停验收 | 窗口前台 + UIA | 2026-11-07 部分通过：in-app 模态框 UIA 与截图——`Rename source`、`Remove source?`、`Add WebDAV source`（URL 非法红框）、`Set network source credential`（username:password 字段 + Cancel/Save credential，`r9j_credentials_dialog.png`）；远程序章——添加 WebDAV 源（`Added the WebDAV source`）、`Test connection` 失败提示 `… connection failed`、移除源；命令面板 72 项英文可读，过滤/方向键/Esc；**命令执行**：键盘输入+回车执行并用 `picked <id>` 日志复核 17 条——`goto:all/untagged/failed/damaged/dup/similar/tags/settings`、`view:theme`（亮暗截图）、`view:quick`（查看器）、`view:small`、`view:select-all`、`view:clear`、`act:star3`（★3）、`act:toggle-fav`+`act:undo`（截图差）、`scan:rescan`（完成摘要）。未覆盖/未执行：原生选择框（rfd）、剪贴板命令、导出/破坏性命令（按设计跳过）、150/240px 输入挤压；坐标点击对折叠列表不可靠（仅顶部导航项可点） |
 | 73-4 | 组件状态矩阵：hover/focus/pressed/selected/disabled/loading 一致性 | 截图对比亮暗主题 | **抽样通过（2026-11-07，亮暗两套）**：hover（工具条按钮、菜单项 `Compare selected (2–4)`、分段中文）、focus（收藏按钮蓝环、设置活动项、阈值输入蓝框）、pressed（View 按下）、disabled（`Copy pro…` 置灰）、selected（`All images` 选中行、标签页选中）、tooltip（Theme）、**loading**（备份按钮 spinner + `Backing up the database...` banner，亮暗各一）。滑块无可见 hover 样式（记录为现状）。证据 `r9c_*.png`、`state_*.png`、`r9i_backup2_1.png`、`r9i_backup_dark_1.png`、`menu_*`；未逐控件穷举（按组件类型抽样） |
@@ -123,6 +124,8 @@
 | 73-1 队列 running/error 与修复失败瞬态（sidecar/模型实机） | 部分通过（新泄漏登记 D6） | `verify_round9/r9h_queue_*.png`、`r9h_run_*.png`、`r9h_repair_*.png` |
 | 73-4 组件状态扩展（菜单 hover/开关/分段/输入焦点/loading spinner，亮暗） | 抽样通过 | `verify_round9/state_*.png`、`r9i_backup*.png` |
 | 73-3 命令执行（17 条 picked 日志复核）与远程凭据对话框 | 部分通过（原生/破坏性/剪贴板命令未执行） | `verify_round9/command_kbd.log`、`uia_*`、`r9j_credentials_dialog.png`、`r9j_test_connection.png` |
+| 修复成功路径（截断 JPEG：Preview cache rebuilt → Repair complete） | 通过 | `verify_round9/r9k4_*.png`、sidecar.log |
+| 原生选择框（打开 UIA 树完整、Esc/WM_CLOSE 关闭） | 通过（仅打开/取消） | `verify_round9` 日志 |
 
 ## 10. 长耗时后台项（不属手动验收，需单独确认）
 
