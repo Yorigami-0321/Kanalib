@@ -521,6 +521,7 @@
   - 夹具：`accept_r9_a`（单资产、启动时根离线、en-US）；`accept_r9_b`（两张同像素不同压缩 PNG，pHash 相同 → 相似组保留原因「文件更大」）。窗口受 GPUI 还原影响高度停在 2085 物理像素（宽可调），PrintWindow 可完整截图，不影响文案验收。
   - 未覆盖：扫描中途/队列/修复瞬态（需 sidecar/模型或更慢扫描）；去重/设置容器宽度溢出未另测（本轮只验文案与按钮）。
   - 组件状态抽样（73-4，亮暗两套，`verify_round9/r9c_*.png`）：hover—— `Open file` 按钮暗/亮主题像素差（裁剪 `r9c_of_*`）；focus——暗色收藏按钮蓝色焦点环、亮色设置活动项高亮；pressed——`View` 按钮按住态（暗/亮）；disabled——无标签时 `Copy pro…` 置灰；selected——侧栏 `All images` 选中行；tooltip——Theme 悬停提示（`r9c_library_light_base.png`）。窗口内 `WM_MOUSEMOVE` 可驱动 GPUI hover（无需真实光标），按键 `Tab/Esc` 用 `WM_KEYDOWN/UP` 注入。未覆盖：全组件矩阵、loading 态、长按/重复触发。
+  - 设置页字段/对话框（73-3 部分，`verify_round9/r9d_*.png`）：重命名来源模态框（输入框为空时回退文件夹名，Cancel/Save）；移除来源确认框（`Remove source?` + 危险按钮）；添加 WebDAV 模态框，URL 输入 `abc` 时出现红色 `.invalid()` 边框与清除按钮。模态框都是窗口内自绘，UIA 名称可读；原生 rfd 文件/文件夹选择框不在窗口内消息可达范围，未测。阈值输入 `2` 可输入并保持聚焦，但该字段只在接受时校验，未观察到红框（与 URL 字段不同）。
 - 未迁移：vendor 内部文案与动态数据（标签名/文件名/来源名/错误原文）按设计不翻译。core 状态已结构化，但英文渲染未做 GUI 验收，不得写成已全量通过。
 - 剩余：English 扫描中途与队列/修复瞬态、组件状态其余示例（hover/focus/pressed/selected 一致性）、设置页字段/对话框、渲染后可访问性实测、1440/1920 与浮层截图基线、Shift+Tab 与焦点全遍历（需真实键盘）、tooltip/loading 视觉验收、100k 全量性能回归；`shared.error` 全局错误条仍保留中文 core 原文（属更大的错误模型结构化，本轮未动）；vendor 侧仍有硬编码英文的组件（视频控制/字幕等）待接入对应界面时再收 —— 已核实 Kanalib 实际用到的组件英文默认值均被业务侧覆盖；F-070 方案 A 已落地并完成副屏 GUI 验收（四种侧栏、锚点、单搜索、折叠隔离），方案 B 于 2026-11-07 关闭（被 A 取代），不再列为待定。
 
