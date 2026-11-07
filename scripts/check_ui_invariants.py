@@ -16,6 +16,8 @@
      不得直接写中文（`is_english()` 分支除外）。
   9. D5 来源错误结构化：`status.error` 不得裸写中文；恢复/重试判定不得依赖
      `contains("监听"/"离线")`；去重固定保留原因必须在 UI 映射表里。
+ 10. UI 消息键：`t(cx, "…")` / `t_args(cx, "…")` / `placeholder_key(…, "…")` 的
+     字面量键必须在中英目录同时存在（缺失键会触发 vendor i18n panic）。
 """
 
 from __future__ import annotations
@@ -318,6 +320,44 @@ def check_source_error_structure() -> tuple[list[str], int]:
     return problems, checks
 
 
+def check_ui_message_keys() -> tuple[list[str], int]:
+    """UI 使用的消息键必须在中英目录同时存在；缺失键会让 vendor i18n panic。"""
+    key_pattern = re.compile(r'"([a-z][a-z0-9_]*(?:\.[a-z0-9_]+)+)"')
+    zh: set[str] = set()
+    en: set[str] = set()
+    catalog_files = [UI / "localization.rs"] + sorted((UI / "localization").rglob("*.rs"))
+    for path in catalog_files:
+        source = path.read_text(encoding="utf-8")
+        split = re.search(r"pub\(crate\) const EN", source)
+        if not split:
+            continue  # extra/mod.rs 等无目录文件
+        zh |= set(key_pattern.findall(source[: split.start()]))
+        en |= set(key_pattern.findall(source[split.start():]))
+
+    used: dict[str, str] = {}
+    call_patterns = [
+        re.compile(r"t\(\s*cx\s*,\s*\"([^\"]+)\""),
+        re.compile(r"t_args\(\s*cx\s*,\s*\"([^\"]+)\""),
+        re.compile(r"\.placeholder_key\([^)]*?\"([^\"]+)\""),
+    ]
+    checks = 0
+    for path in sorted(UI.rglob("*.rs")):
+        rel = path.relative_to(UI).as_posix()
+        if rel.startswith("localization"):
+            continue
+        text = path.read_text(encoding="utf-8")
+        for pattern in call_patterns:
+            for match in pattern.finditer(text):
+                checks += 1
+                used.setdefault(match.group(1), rel)
+    problems = [
+        f"{rel} 使用的键 {key!r} 缺目录条目（会 panic）"
+        for key, rel in sorted(used.items())
+        if key not in zh or key not in en
+    ]
+    return problems, checks
+
+
 def main() -> int:
     checks = [
         ("手搓 role(Role::Button) 元素（id/aria/键盘可达）", *check_role_buttons()),
@@ -329,6 +369,7 @@ def main() -> int:
         ("core 状态 i18n（结构化写入 + 双语键齐全）", *check_core_status_i18n()),
         ("直接 UI 文案（不得硬编码中文）", *check_direct_ui_text()),
         ("D5 来源错误结构化（key/类型化恢复/去重原因映射）", *check_source_error_structure()),
+        ("UI 消息键（t/t_args/placeholder_key 双语齐全）", *check_ui_message_keys()),
     ]
     failed = False
     for name, problems, count in checks:
