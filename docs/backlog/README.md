@@ -49,6 +49,7 @@
 | [candidate-pool.md](candidate-pool.md) | 低优先级/远期候选 |
 | [next-steps.md](next-steps.md) | 2026-11-04 暂停点：后续任务分类、优先级、红线与命令速查（未验收项保持未勾选） |
 | [manual-acceptance.md](manual-acceptance.md) | 手动验收总清单：前台/GUI/UIA/真实输入/长耗时项、夹具、证据与已通过项索引 |
+| [../TESTING-PROCESS.md](../TESTING-PROCESS.md) | 轻量测试流程：测试分层、风险定档、改动类型矩阵、门禁与反过度测试约束 |
 | [constraints.md](constraints.md) | 安全/性能/缓存/许可/本机脚本等全局约束 |
 | [parallel-plan.md](parallel-plan.md) | 并行开发矩阵 + 第一轮可直接派发的任务包 |
 | [round-2.md](round-2.md) | 第二轮任务包：打标质量/队列、搜索性能、媒体格式与阶段 2 |
@@ -77,5 +78,6 @@
 - **新需求**：先在 [registry.md](registry.md) 加一行，再到 `pending/` 对应职责文件写需求/方案/验收/风险；调研遵循本页准则，补「调研来源/候选对比/复用结论」。
 - **实现后**：从 `pending/` 移入 [implemented.md](implemented.md)，只保留关键约束与验证。
 - **派发任务**：先看 [parallel-plan.md](parallel-plan.md)；UI 只有一条车道，schema/sidecar 单一负责人。
+- **验证**：按 [../TESTING-PROCESS.md](../TESTING-PROCESS.md) 的改动类型矩阵与门禁执行；默认最小验证，不做过度测试。
 - **不写工时/排期**；代码行号会漂移，按函数名搜索。
 - **文档自检**：`bash scripts/check_backlog_docs.sh` 校验 registry 的 F-xxx 不重复不丢失、implemented 与 pending 的状态不互相矛盾；每轮收口后重跑一次。

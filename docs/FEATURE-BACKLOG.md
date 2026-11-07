@@ -7,6 +7,7 @@
 | 入口 | 内容 |
 |---|---|
 | [backlog/README.md](backlog/README.md) | 调研准则、状态定义、文档地图、推荐顺序、使用约定 |
+| [TESTING-PROCESS.md](TESTING-PROCESS.md) | 轻量测试流程：测试分层、风险定档、改动类型矩阵、门禁与反过度测试约束 |
 | [backlog/registry.md](backlog/registry.md) | 全量 F-xxx 登记表 |
 | [backlog/implemented.md](backlog/implemented.md) | 已实现归档与验证 |
 | [backlog/pending/overview.md](backlog/pending/overview.md) | 未完成项速览 |
@@ -29,4 +30,5 @@
 - 新功能先检索活跃、许可明确的开源项目，优先借鉴验证过的设计，不复制来源不明代码；每个条目补「调研来源 / 候选对比 / 复用结论」。
 - 新需求先加 `registry.md`，再写 `pending/` 对应文件；实现后移入 `implemented.md`。
 - 派任务先看 `parallel-plan.md`；UI 单一车道，schema/sidecar 单一负责人。
+- 验证按 [`TESTING-PROCESS.md`](TESTING-PROCESS.md) 的改动类型矩阵与门禁执行；默认最小验证，不做过度测试。
 - 安全、性能、缓存、迁移、许可与本机 PowerShell 7 约束见 `constraints.md`。

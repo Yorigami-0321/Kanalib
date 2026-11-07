@@ -135,7 +135,7 @@
 
 ## 验收与验证约定
 
-- 每轮收尾重跑 `cargo test --workspace`（当前基线 core 82 + UI 15，7 项按需忽略）与 `cargo check --workspace`。
+- 每轮收尾重跑默认成员的 `cargo test`（core + UI + bin；当时基线 core 82 + UI 15，7 项按需忽略）与 `cargo check --workspace`。`cargo test --workspace` 会连带 vendor 测试，不作为门禁（见 [../TESTING-PROCESS.md](../TESTING-PROCESS.md)）。
 - 每轮收尾重跑 `bash scripts/check_backlog_docs.sh`：registry ID 不重复、不丢失，implemented/pending 状态互不矛盾。
 - 基准数字必须说明用的是哪份库（第二轮已出现同一查询在不同合成库上 276–304ms 与 350–380ms 的差异）。
 - `.ps1` 一律 `pwsh -NoLogo -NoProfile`；UI 自动化只针对本应用窗口，用窗口内 UIA/消息，不用全局键鼠。

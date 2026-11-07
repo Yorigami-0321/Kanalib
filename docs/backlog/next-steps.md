@@ -142,8 +142,11 @@ bash scripts/check_backlog_docs.sh
 python scripts/check_ui_invariants.py
 python scripts/check_theme_contrast.py
 PATH="/c/Users/Administrator/.cargo/bin:$PATH" cargo check --workspace
+PATH="/c/Users/Administrator/.cargo/bin:$PATH" cargo test          # default-members 完整回归（core + UI + bin）
 PATH="/c/Users/Administrator/.cargo/bin:$PATH" cargo test -p kanalib-ui -p kanalib
 ```
+
+测试门禁按 [../TESTING-PROCESS.md](../TESTING-PROCESS.md)：默认最小验证，不把 `cargo test --workspace` 当门禁。
 
 便携包 pre-flight 必须走 PowerShell 工具执行（Bash 里调 `pwsh` 会被安全策略拒绝）：
 
