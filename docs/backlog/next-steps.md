@@ -11,10 +11,10 @@
 | 工作区 | 干净 |
 | registry | 56 条：42 已实现、5 远期、9 实现中（剩余以手动/真实环境验收为主） |
 | 未完成 ID | F-030 / F-033 / F-036 / F-069 / F-070 / F-071 / F-072 / F-073 / F-074 |
-| 最近完成 | 第八轮副屏验收（2026-11-07）：D4 English 扫描/相似完成态实机、D1 重试 zh+en 全链路、Shift+Tab 合成限制复核；发现 core 原串泄漏登记 D5；A2 关闭 F-070 方案 B |
-| 后台自验 | 编译（含 `--features frame-profiler`）、完整 debug 构建、`cargo test`（bin 6 / core 214 / UI 73）、文档自检、8 项 UI 不变量、亮暗对比度、便携包 pre-flight、headless 冒烟 —— 全部通过且**未启动窗口**（第八轮为 GUI 验收轮，后台自验沿用 2026-11-06 结果，本轮无代码改动） |
+| 最近完成 | 第八轮副屏验收（2026-11-07）：D4 English 扫描/相似完成态实机、D1 重试 zh+en 全链路、Shift+Tab 合成限制复核；D5 拍板并按 D4 模式落地（来源错误 keyed + `watch_retry` + 去重「文件更大」+ 打开链单前缀 + 英文单数）；A2 关闭 F-070 方案 B |
+| 后台自验 | `cargo test` bin 6 / core 214 / UI 74（新增单数化用例）、`cargo check --workspace`、`cargo check --features frame-profiler`、debug 构建、`check_ui_invariants.py` 9 项、`check_backlog_docs.sh`、headless 冒烟（15 张示例库，退出码 0）—— 全部通过且**未启动窗口** |
 | GUI 验收（2026-11-04，副屏） | F-070 四种侧栏/设置锚点/标签单搜索与返回/折叠隔离/上下文菜单/Tab 顺序/3 万标签、F-073 16 张基线；发现并修复去重页窄宽头部溢出与根 FocusScope 缺失导致 Tab 不可达；证据 `.kanalib/verify_f070/` |
-| GUI 验收（2026-11-07，副屏） | D4 English 状态栏/banner 扫描与相似完成态、D1 重试 zh+en 全链路（1024 宽）、Shift+Tab 合成复核；证据 `.kanalib/verify_round8/`；泄漏与未触发项见 `manual-acceptance.md` 73-1/73-9 与 D5 |
+| GUI 验收（2026-11-07，副屏） | D4 English 状态栏/banner 扫描与相似完成态、D1 重试 zh+en 全链路（1024 宽）、Shift+Tab 合成复核；证据 `.kanalib/verify_round8/`；泄漏与未触发项见 `manual-acceptance.md` 73-1/73-9 与 D5。D5 修复后的 English 渲染尚未实机复验 |
 
 **唯一既有失败**：`sources::tests::immich_missing_key_and_disconnect_do_not_block_local_library`
 （`http://127.0.0.1:1` 的错误 kind 不在断言集合，属环境/网络分类差异），与本轮改动无关，未写成通过。
@@ -84,6 +84,7 @@
 - [x] 项目级 i18n 第五批（撤销状态栏/toast/状态覆盖、自动归类固定名与「作品:」前缀）
 - [x] 项目级 i18n 第六批（UI 全量收口：设置/去重/侧栏/视图/主应用/检查器/对比/标签/查看器/搜索等；六页 English 巡检）
 - [x] core 状态消息结构化（D4）：`Shared.status` 改为 `StatusMessage { key, args, text }`；state.rs 110 处 + watch.rs 2 处迁移，138 个 `notice.*` 键补中英文；UI `core_status` 统一渲染；headless/日志保留中文 `text`。2026-11-07 副屏部分验收：扫描开始/完成、相似完成、来源卡 last-scan 英文通过；中途瞬态未截到、来源错误行/去重原因泄漏转 D5。
+- [x] D5 core 原串泄漏结构化（2026-11-07 拍板）：`SourceScanStatus.error` 改 `StatusMessage`（11 处 keyed、10 个新 `notice.source.*` 键）、`watch_retry` 替代文案 `contains` 判定、去重「文件更大」映射、打开链单前缀 + 缺失文件预检、英文「1 <单数>」；`check_ui_invariants.py` 第 9 项。English 实机复验未做。
 - [ ] 1440/1920 与浮层/查看器截图基线
 - [ ] GUI 弹窗 / 菜单 / 表单 / 命令面板 UIA 与悬停验收（tooltip、loading spinner、`.invalid()` 红框、清除按钮对 150/240px 固定宽输入的挤压）
 - [ ] 渲染后 WCAG 实测（现有 `check_theme_contrast.py` 只是 token 设计值）
@@ -113,7 +114,7 @@
 | D2 | 项目级 i18n | 已落地第一批（2026-11-04）：zh-CN/en-US 项目目录、`ui.locale` 持久化、设置页语言切换、壳层/导航/标题栏迁移；键名 `区域.用途`；其余 1500+ 条按页面分批 |
 | D3 | F-070 方案 B | **已关闭（2026-11-07）**：被方案 A 取代，不实现；registry/overview/browse 已补备注 |
 | D4 | core 状态消息结构化 | 已按「core 结构化 key+args」落地（2026-11-06）：`StatusMessage` + `notice.*` 双语目录 + `check_ui_invariants.py` 第 7 项；2026-11-07 副屏部分验收通过，剩余泄漏见 D5 |
-| D5 | core 原串泄漏结构化（来源错误/去重保留原因/打开链 bail/计数复数） | 2026-11-07 第八轮验收发现：`SourceScanStatus.error` 约 10 处中文写点且 `state.rs:1277` 靠 `contains("监听"/"离线")` 判定恢复；`dedup.rs:1300-1350` 保留原因；core `open.rs` bail 作 error 参数嵌套双重前缀；「1 images」复数。属「core 错误模型结构化」方案决策，**不得自行定**；证据与写点清单见 `pending/browse.md` 第八轮记录 |
+| D5 | core 原串泄漏结构化（来源错误/去重保留原因/打开链 bail/计数复数） | **已拍板并落地（2026-11-07）**：用户选择「按 D4 模式结构化」。`SourceScanStatus.error` 改为 `StatusMessage`（11 处写点全部 keyed）；新增 `watch_retry: bool` 替代 `contains("监听"/"离线")` 恢复判定；去重「文件更大」补 UI 映射；打开链去掉内层「打开失败」前缀并在 UI 预检缺失文件；英文计数单数化（`finish_text`）。`check_ui_invariants.py` 第 9 项固化。剩 English 实机渲染验收（来源错误行/去重原因/复数组卡） |
 
 ## 4. 红线
 
@@ -128,8 +129,8 @@
 
 | 选项 | 说明 |
 |---|---|
-| D5 方案决策（推荐先拍板） | 来源错误/去重原因/打开链 bail 的结构化口径（含 `contains` 恢复判定改造）；拍板后按 D4 模式落地并复验 73-1/73-9 |
-| C 类手动验收 | 按 `docs/backlog/manual-acceptance.md` 逐项走；剩 1440/1920、Shift+Tab（真实键盘）、去重/设置错误条重试、浮层基线 |
+| D5 方案决策 | ✅ 已拍板（2026-11-07）：按 D4 模式结构化，代码与静态检查已落地；剩 English 实机复验 73-1/73-9 |
+| C 类手动验收 | 按 `docs/backlog/manual-acceptance.md` 逐项走；剩 1440/1920、Shift+Tab（真实键盘）、去重/设置错误条重试、浮层基线，以及 D5 修复的 English 实机复验 |
 | B1 启动 100k 后台全量回归 | 约 1 小时以上，纯后台；需要先确认 |
 | F-012 搜索 p95 优化 | 需完整 100k 库与长跑基准；当前 150ms 目标已改为同库实测上限口径 |
 | 暂停 | 保持现状，等用户有空做 C 类验收 |
