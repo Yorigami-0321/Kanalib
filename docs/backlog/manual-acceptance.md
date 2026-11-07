@@ -23,6 +23,8 @@
 | `.kanalib/accept_f070_gui` | 10k 测试库副本，268 标签、102 精确重复组；缺失来源显示离线，缩略图缓存可用 | 侧栏/标签/设置/去重回归 | 隔离根无 sidecar，会出现 `sidecar script not found` 红色提示，属环境 |
 | `.kanalib/accept_f070_tags30k` | 同一 10k 库 + 30,000 个通用标签（共 30,268）与 30,871 条使用记录 | 3 万标签列表/搜索/滚动 | 同上 |
 | `.kanalib/accept_r8_d1` | 单资产隔离根（`retry_probe.txt`，路径在 `probe_outside` 根内）；DB 由 accept_f070_gui 复制改写 | D1 打开失败/重试链路 | 复跑先删整个 `probe_outside` 目录再启动（根离线：不弹缺失清理对话框）；触发失败后补目录+文件再点重试即成功。根在线时增删文件会触发监听刷新清掉错误条，抢在重试前 |
+| `.kanalib/accept_r9_a` | 单资产隔离根（`lib/only.png`，启动时 `lib` 不存在）；DB 由 accept_f070_gui 复制改写，`ui.locale=en-US` | D5 English：来源错误行/`1 image` 单数/打开失败单前缀；D1 设置页 banner 重试 | 根离线且无监听刷新，错误条会一直保留；用例：右键/检查器 Open → 设置页 banner。复跑保持 `lib` 目录不存在 |
+| `.kanalib/accept_r9_b` | 两张同像素不同压缩级别的 PNG（`big.png` 900.8KB / `small.png` 1.6KB，pHash 相同）；headless 预先扫描入库 | D5 English：去重保留原因 `Larger file`；D1 去重 banner 重试 | 启动时用 `KANALIB_DISABLE_WATCH=1` 并删除 `big.png`，相似扫描仍从 DB 出组；Open keeper 失败后错误条持续。复跑先恢复 `big.png` 或重新扫描 |
 | `.kanalib/verify_f070/` | F-070/F-073 副屏截图、Tab 日志、UIA 文本 | 既有基线 | 含 16 张亮暗 × 1024/1200 基线 |
 | `.kanalib/ui_f069_fit_data` + `.kanalib/ui_f069_fit_root` | F-069 适应/100% 三张样本 | 查看器缩放 | 样本含 1120×1992、280×175、1300×1149 |
 | `sample_library` | 15 张示例库（含损坏 AVIF） | headless / 快速冒烟 | 不含 100k 性能结论 |
@@ -57,7 +59,7 @@
 
 | # | 验收项 | 前置/前台 | 证据/备注 |
 |---|---|---|---|
-| 73-1 | English 下扫描/队列/来源/去重/修复等瞬态状态栏，以及设置页网络来源按钮/说明/凭据/toast 真实渲染 | 副屏 GUI；触发对应动作 | 2026-11-07 部分通过：扫描开始/完成、相似完成、来源卡 last-scan 英文渲染已验（`verify_round8/d4_*.png`）；扫描中途瞬态未截到（暖缓存过快）、队列/修复瞬态未触发；**发现泄漏**：来源离线错误行与去重保留原因仍中文（D5 于 2026-11-07 已拍板并修复，修复后的 English 渲染未复验），故整项维持未勾选 |
+| 73-1 | English 下扫描/队列/来源/去重/修复等瞬态状态栏，以及设置页网络来源按钮/说明/凭据/toast 真实渲染 | 副屏 GUI；触发对应动作 | 2026-11-07 部分通过：扫描开始/完成、相似完成、来源卡 last-scan、来源离线错误行（`Source offline; watching resumes automatically…`）、监听失败 banner 英文渲染已验（`verify_round8/d4_*.png`、`verify_round9/r9a_settings_en.png`）；D5 泄漏修复后 English 已复验；扫描中途瞬态未截到（暖缓存过快）、队列/修复瞬态未触发，整项维持未勾选 |
 | 73-2 | 1440/1920 逻辑宽与浮层/查看器/对话框/Toast 截图基线 | 需主屏或改 DPI；会抢前台 | 已有 1024/1200 16 张基线 |
 | 73-3 | GUI 弹窗/菜单/表单/命令面板 UIA 与悬停验收 | 窗口前台 + UIA | 覆盖 tooltip、loading spinner、`.invalid()` 红框、清除按钮对 150/240px 固定宽输入的挤压 |
 | 73-4 | 组件状态矩阵：hover/focus/pressed/selected/disabled/loading 一致性 | 截图对比亮暗主题 | 源码状态口径已写入 `constraints.md` |
@@ -65,7 +67,7 @@
 | 73-6 | 帧率 `present p99`：窗口前台，`run_frame_probe.ps1` 每秒置前，失焦样本为 0 | 必须前台；会抢前台 | 失焦数据作废 |
 | 73-7 | 100k 滚动峰值工作集 326–329MB | 前台 + `KANALIB_UI_SCROLL_TEST` + 100k 库 | 需先生成完整 100k 库 |
 | 73-8 | 100k 首屏/搜索/切图全量回归不劣于既有基线 | 前台 + 100k 库；冷导入约 42min | 既有基线见 `docs/PLAN.md`；本轮未重跑 |
-| 73-9 | D1 打开失败重试按钮：底栏/主图库/去重/设置错误条显示「重试」，成功后错误清除，失败后保留入口 | 触发 6 处打开失败之一（可用不可用系统应用的文件） | 2026-11-07 主图库/检查器/底栏 zh+en 全链路通过（失败显示→重试失败保留→补文件重试成功清除；1024 宽无溢出；`verify_round8/d1_*.png`）；去重/设置错误条重试显示未单独触发；error 参数内嵌 core 中文 bail（D5 已修复：UI 预检缺失文件 + 去掉内层前缀，修复后的 English 渲染未复验），整项维持未勾选 |
+| 73-9 | D1 打开失败重试按钮：底栏/主图库/去重/设置错误条显示「重试」，成功后错误清除，失败后保留入口 | 触发 6 处打开失败之一（可用不可用系统应用的文件） | **通过（2026-11-07）**：四个展示位全部实机验证——底栏/主图库错误条（`verify_round8/d1_*.png`，zh+en）、设置页 banner（`verify_round9/r9a_settings_banner_retry_en.png`）、去重 banner（`r9b_dedup_banner_retry_en.png`）；失败显示→重试失败保留→补文件重试成功清除（zh）已验；错误文案为英文单前缀 `Failed to open file: File not found:`（D5 修复）；其余打开分支共用 `open_asset_with_system` 同一链路，未逐条单独点击 |
 
 ## 7. F-069 / F-074 查看器
 
@@ -108,7 +110,8 @@
 | F-069 双击入口、适应/75% 标签、100MP 阈值与回退提示 | 通过 | `f069_large_banner*.png`、`browse.md` F-069 记录 |
 | F-074 双击默认原图、缺失原图错误态 | 通过 | `browse.md` F-074 记录 |
 | D4 English 状态栏/banner（扫描开始/完成、相似完成、来源卡 last-scan） | 通过（瞬态中途与泄漏项除外，见 73-1） | `verify_round8/d4_settings_en.png`、`d4_rescan_summary_en.png`、`d4_similar_done_en.png` |
-| D1 重试机制（主图库/检查器/底栏，zh+en：失败显示/失败保留/成功清除/1024 宽） | 通过（去重/设置错误条与 error 参数泄漏除外，见 73-9） | `verify_round8/d1_*.png` |
+| D1 重试机制（四个展示位：底栏/主图库/设置 banner/去重 banner；zh+en） | 通过 | `verify_round8/d1_*.png`、`verify_round9/r9a_settings_banner_retry_en.png`、`r9b_dedup_banner_retry_en.png` |
+| D5 English 复验（来源错误行/打开链单前缀/`1 image`/去重 `Larger file`） | 通过 | `verify_round9/r9a_settings_en.png`、`r9a_open_failed_en.png`、`r9a_retry_failed_en.png`、`r9b_similar_larger_en.png`、`uia_a_*.txt` |
 
 ## 10. 长耗时后台项（不属手动验收，需单独确认）
 
