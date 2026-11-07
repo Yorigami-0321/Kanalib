@@ -83,6 +83,46 @@ pub(crate) const ZH: &[(&str, &str)] = &[
         "待打标 {pending} 张 · 队列已恢复",
     ),
     ("notice.source.offline", "来源离线 · {path}"),
+    (
+        "notice.source.unreachable",
+        "来源不可访问：{path}",
+    ),
+    (
+        "notice.source.unreachable_kept",
+        "来源不可访问，已保留图库记录：{path}",
+    ),
+    (
+        "notice.source.incomplete_walk",
+        "来源未能完整遍历（可能离线或权限不足），已保留图库记录：{path}",
+    ),
+    (
+        "notice.source.offline_kept",
+        "来源离线或不可访问，已保留现有记录：{path}",
+    ),
+    (
+        "notice.source.watch_unavailable",
+        "无法监听来源：{error}；将在后台自动重试",
+    ),
+    (
+        "notice.source.offline_watch_retry",
+        "来源离线，恢复后自动重试监听：{path}",
+    ),
+    (
+        "notice.source.watch_io_error",
+        "文件监听错误：{error}；请手动重新扫描该来源",
+    ),
+    (
+        "notice.source.watch_batch_failed",
+        "监听事件处理失败：{error}；请手动重新扫描该来源",
+    ),
+    (
+        "notice.source.watch_storm_rescan_failed",
+        "文件变化过多，自动重扫失败：{error}",
+    ),
+    (
+        "notice.source.watch_sync_failed",
+        "增量同步失败：{error}；请手动重新扫描该来源",
+    ),
     ("notice.source.watch_recovered", "来源已恢复监听 · {source}"),
     ("notice.source.watch_failed", "文件监听失败 · {path}"),
     ("notice.source.watch_error", "文件监听异常 · {path}"),
@@ -410,6 +450,46 @@ pub(crate) const EN: &[(&str, &str)] = &[
         "{pending} images pending tagging · queue restored",
     ),
     ("notice.source.offline", "Source offline · {path}"),
+    (
+        "notice.source.unreachable",
+        "Source unreachable: {path}",
+    ),
+    (
+        "notice.source.unreachable_kept",
+        "Source unreachable; library records kept: {path}",
+    ),
+    (
+        "notice.source.incomplete_walk",
+        "Source not fully walked (possibly offline or permission denied); library records kept: {path}",
+    ),
+    (
+        "notice.source.offline_kept",
+        "Source offline or unreachable; existing records kept: {path}",
+    ),
+    (
+        "notice.source.watch_unavailable",
+        "Cannot watch source: {error}; retrying in the background",
+    ),
+    (
+        "notice.source.offline_watch_retry",
+        "Source offline; watching resumes automatically when it returns: {path}",
+    ),
+    (
+        "notice.source.watch_io_error",
+        "File watching error: {error}; rescan the source manually",
+    ),
+    (
+        "notice.source.watch_batch_failed",
+        "Watch event processing failed: {error}; rescan the source manually",
+    ),
+    (
+        "notice.source.watch_storm_rescan_failed",
+        "Too many file changes; automatic rescan failed: {error}",
+    ),
+    (
+        "notice.source.watch_sync_failed",
+        "Incremental sync failed: {error}; rescan the source manually",
+    ),
     (
         "notice.source.watch_recovered",
         "Source watching resumed · {source}",

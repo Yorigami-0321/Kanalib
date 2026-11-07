@@ -2080,6 +2080,7 @@ impl KanalibApp {
                                         ),
                                 )
                                 .children(error.map(|error| {
+                                    let error_text = crate::localization::core_status(cx, &error);
                                     div()
                                         .truncate()
                                         .text_xs()
@@ -2087,7 +2088,7 @@ impl KanalibApp {
                                         .child(t_args(
                                             cx,
                                             "settings.sources.error",
-                                            &[("error", &error)],
+                                            &[("error", error_text.as_ref())],
                                         ))
                                 }))
                                 .child(
@@ -3670,9 +3671,15 @@ impl KanalibApp {
                         text.push_str(t(cx, "settings.diag.offline_suffix").as_ref());
                     }
                     if let Some(error) = &source.error {
+                        let error_text = crate::localization::core_status(cx, error);
                         text.push(' ');
                         text.push_str(
-                            t_args(cx, "settings.diag.error_suffix", &[("error", error)]).as_ref(),
+                            t_args(
+                                cx,
+                                "settings.diag.error_suffix",
+                                &[("error", error_text.as_ref())],
+                            )
+                            .as_ref(),
                         );
                     }
                     rows = rows.child(info_row(

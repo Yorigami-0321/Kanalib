@@ -112,7 +112,7 @@ pub fn collect(data_dir: &Path, context: DiagnosticsContext) -> Result<Diagnosti
 
     for source in &mut sources {
         if let Some(error) = &source.error {
-            source.error = Some(redact_text(error));
+            source.error = Some(error.redacted_with(redact_text));
         }
     }
     // 稳定输出：来源按根目录排序，便于复制到 issue 后对比。
@@ -121,7 +121,11 @@ pub fn collect(data_dir: &Path, context: DiagnosticsContext) -> Result<Diagnosti
     let last_scan =
         last_scan.or_else(|| sources.iter().filter_map(|source| source.last_scan).max());
     let last_error = last_error
-        .or_else(|| sources.iter().find_map(|source| source.error.clone()))
+        .or_else(|| {
+            sources
+                .iter()
+                .find_map(|source| source.error.as_ref().map(|error| error.text().to_string()))
+        })
         .map(|error| redact_text(&error));
 
     Ok(DiagnosticSnapshot {
@@ -452,8 +456,9 @@ mod tests {
             last_scan: Some(1_700_000_000),
             asset_count: 3,
             counts: Default::default(),
-            error: Some("sync failed for https://user:hunter2@example.com/dav".to_string()),
+            error: Some("sync failed for https://user:hunter2@example.com/dav".to_string().into()),
             online: true,
+            watch_retry: false,
         }];
 
         let snapshot = collect(

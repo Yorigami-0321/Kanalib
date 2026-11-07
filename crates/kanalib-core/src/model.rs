@@ -1304,10 +1304,10 @@ pub struct PendingCleanup {
 
 /// 核心写入的瞬时状态：`text` 是中文回退（headless/日志/旧调用方），
 /// `key`/`args` 供 UI 按当前语言渲染。键名使用 `notice.区域.用途`。
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StatusMessage {
-    key: Option<&'static str>,
-    args: Vec<(&'static str, String)>,
+    key: Option<String>,
+    args: Vec<(String, String)>,
     text: String,
 }
 
@@ -1326,22 +1326,38 @@ impl StatusMessage {
         args: Vec<(&'static str, String)>,
     ) -> Self {
         Self {
-            key: Some(key),
-            args,
+            key: Some(key.to_string()),
+            args: args
+                .into_iter()
+                .map(|(name, value)| (name.to_string(), value))
+                .collect(),
             text: text.into(),
         }
     }
 
-    pub fn key(&self) -> Option<&'static str> {
-        self.key
+    pub fn key(&self) -> Option<&str> {
+        self.key.as_deref()
     }
 
-    pub fn args(&self) -> &[(&'static str, String)] {
+    pub fn args(&self) -> &[(String, String)] {
         &self.args
     }
 
     pub fn text(&self) -> &str {
         &self.text
+    }
+
+    /// 保留 key/args 结构，对文本与参数值逐一变换（诊断脱敏用）。
+    pub fn redacted_with(&self, redact: impl Fn(&str) -> String) -> Self {
+        Self {
+            key: self.key.clone(),
+            args: self
+                .args
+                .iter()
+                .map(|(name, value)| (name.clone(), redact(value)))
+                .collect(),
+            text: redact(&self.text),
+        }
     }
 }
 
@@ -1888,10 +1904,14 @@ pub struct SourceScanStatus {
     pub asset_count: usize,
     /// 最近一次扫描的计数明细。
     pub counts: ScanCounts,
-    /// 最近一次扫描错误；成功时为 None。
-    pub error: Option<String>,
+    /// 最近一次扫描错误；成功时为 None。结构化 key+args 供 UI 翻译，text 为中文回退。
+    pub error: Option<StatusMessage>,
     /// 来源当前是否可访问；离线来源不参与缺失清理。
     pub online: bool,
+    /// 监听需要（重）建立：watcher 创建失败或来源离线期间置位，恢复后清除。
+    /// 类型化标记替代对错误文案的 contains 判定。
+    #[serde(default)]
+    pub watch_retry: bool,
 }
 
 /// 一次来源扫描的计数明细。

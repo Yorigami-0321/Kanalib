@@ -325,7 +325,7 @@ pub(crate) fn current(cx: &App) -> &'static str {
 }
 
 pub(crate) fn t(cx: &App, key: &str) -> SharedString {
-    i18n::text(cx, key, &[])
+    finish_text(i18n::text(cx, key, &[]))
 }
 
 
@@ -348,7 +348,59 @@ pub(crate) fn filter_label(cx: &App, filter: &kanalib_core::model::Filter) -> St
     }
 }
 pub(crate) fn t_args(cx: &App, key: &str, args: &[(&str, &str)]) -> SharedString {
-    i18n::text(cx, key, args)
+    finish_text(i18n::text(cx, key, args))
+}
+
+/// 英文目录没有复数表：渲染后把「1 <复数>」收成单数；中文与非 1 计数原样返回。
+fn finish_text(text: SharedString) -> SharedString {
+    if !is_english() || !text.contains("1 ") {
+        return text;
+    }
+    let mut owned = text.to_string();
+    for (plural, singular) in ENGLISH_PLURALS {
+        replace_one_plural(&mut owned, plural, singular);
+    }
+    SharedString::from(owned)
+}
+
+/// 计数单位；只收目录里实际出现的名词，避免过度匹配。
+const ENGLISH_PLURALS: &[(&str, &str)] = &[
+    ("images", "image"),
+    ("assets", "asset"),
+    ("sources", "source"),
+    ("groups", "group"),
+    ("tags", "tag"),
+    ("stars", "star"),
+    ("files", "file"),
+    ("items", "item"),
+    ("albums", "album"),
+    ("copies", "copy"),
+];
+
+fn replace_one_plural(text: &mut String, plural: &str, singular: &str) {
+    let needle = format!("1 {plural}");
+    let mut search_from = 0;
+    while let Some(offset) = text[search_from..].find(&needle) {
+        let start = search_from + offset;
+        let end = start + needle.len();
+        // 前一位不能是数字（「21 images」不改），后一位不能是字母（避免截断单词）。
+        let before_ok = start == 0
+            || !text[..start]
+                .chars()
+                .next_back()
+                .is_some_and(|ch| ch.is_ascii_digit() || ch == '_');
+        let after_ok = text[end..]
+            .chars()
+            .next()
+            .is_none_or(|ch| !ch.is_ascii_alphabetic());
+        if before_ok && after_ok {
+            let replacement = format!("1 {singular}");
+            text.replace_range(start..end, &replacement);
+            search_from = start + replacement.len();
+        } else {
+            search_from = end;
+        }
+    }
 }
 
 /// 核心写入的结构化状态：有 key 走目录，无 key 保留原文（备份通知/UI 覆盖）。
@@ -358,7 +410,7 @@ pub(crate) fn core_status(cx: &App, status: &kanalib_core::model::StatusMessage)
             let args = status
                 .args()
                 .iter()
-                .map(|(name, value)| (*name, value.as_str()))
+                .map(|(name, value)| (name.as_str(), value.as_str()))
                 .collect::<Vec<_>>();
             t_args(cx, key, &args)
         }
@@ -419,5 +471,24 @@ mod tests {
         let zh: HashSet<_> = zh_all.iter().map(|(key, _)| *key).collect();
         let en: HashSet<_> = en_all.iter().map(|(key, _)| *key).collect();
         assert_eq!(zh, en);
+    }
+
+    #[test]
+    fn english_count_one_uses_singular() {
+        let mut text = "1 images · 1 sources · 1 images/s".to_string();
+        for (plural, singular) in ENGLISH_PLURALS {
+            replace_one_plural(&mut text, plural, singular);
+        }
+        assert_eq!(text, "1 image · 1 source · 1 image/s");
+
+        let mut many = "21 images · 11 tags · 1 group".to_string();
+        for (plural, singular) in ENGLISH_PLURALS {
+            replace_one_plural(&mut many, plural, singular);
+        }
+        assert_eq!(many, "21 images · 11 tags · 1 group");
+
+        let mut tied = "1 tags tied".to_string();
+        replace_one_plural(&mut tied, "tags", "tag");
+        assert_eq!(tied, "1 tag tied");
     }
 }

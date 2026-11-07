@@ -14,6 +14,8 @@
   7. core 状态 i18n：不得裸写 `shared.status`；所有 `notice.*` 键必须在中英文目录同时存在。
   8. 直接 UI 文案：`.child("…")`、`push_toast(..., "…")`、`Button::new(..., "…")`
      不得直接写中文（`is_english()` 分支除外）。
+  9. D5 来源错误结构化：`status.error` 不得裸写中文；恢复/重试判定不得依赖
+     `contains("监听"/"离线")`；去重固定保留原因必须在 UI 映射表里。
 """
 
 from __future__ import annotations
@@ -288,6 +290,34 @@ def check_direct_ui_text() -> tuple[list[str], int]:
     return problems, checks
 
 
+def check_source_error_structure() -> tuple[list[str], int]:
+    """D5：来源错误结构化、恢复判定类型化、去重固定原因可翻译。"""
+    problems: list[str] = []
+    checks = 0
+    for path in (CORE / "state.rs", CORE / "watch.rs"):
+        rel = path.relative_to(ROOT).as_posix()
+        text = path.read_text(encoding="utf-8")
+        checks += 1
+        for match in re.finditer(r"status\.error\s*=\s*Some\(\s*format!", text):
+            line_no = text[: match.start()].count("\n") + 1
+            problems.append(
+                f"{rel}:{line_no} 来源错误仍裸写中文；改用 StatusMessage::keyed/plain"
+            )
+        checks += 1
+        for match in re.finditer(r'contains\("(?:监听|离线)"\)', text):
+            line_no = text[: match.start()].count("\n") + 1
+            problems.append(
+                f"{rel}:{line_no} 恢复/重试判定仍匹配错误文案；改用 status.watch_retry"
+            )
+    checks += 1
+    dedup_core = (CORE / "dedup.rs").read_text(encoding="utf-8")
+    dedup_ui = (UI / "dedup.rs").read_text(encoding="utf-8")
+    for reason in ("保护路径", "分辨率最高", "文件更大", "最早导入", "路径最短", "标签最多"):
+        if f'"{reason}"' in dedup_core and f'"{reason}"' not in dedup_ui:
+            problems.append(f"core 去重保留原因 {reason} 在 UI 映射里缺失")
+    return problems, checks
+
+
 def main() -> int:
     checks = [
         ("手搓 role(Role::Button) 元素（id/aria/键盘可达）", *check_role_buttons()),
@@ -298,6 +328,7 @@ def main() -> int:
         ("命令面板键位（必须真实绑定）", *check_palette_keys()),
         ("core 状态 i18n（结构化写入 + 双语键齐全）", *check_core_status_i18n()),
         ("直接 UI 文案（不得硬编码中文）", *check_direct_ui_text()),
+        ("D5 来源错误结构化（key/类型化恢复/去重原因映射）", *check_source_error_structure()),
     ]
     failed = False
     for name, problems, count in checks:

@@ -23,6 +23,7 @@ fn localize_dedup_reason(cx: &App, reason: &str) -> String {
     }
     let key = match reason {
         "分辨率最高" => Some("dedup.reason.resolution"),
+        "文件更大" => Some("dedup.reason.larger_file"),
         "最早导入" => Some("dedup.reason.earliest"),
         "路径最短" => Some("dedup.reason.shortest_path"),
         "保护路径" => Some("dedup.reason.protected"),

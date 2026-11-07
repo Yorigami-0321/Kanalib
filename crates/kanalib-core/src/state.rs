@@ -1126,7 +1126,11 @@ impl AppState {
             let mut shared = self.shared.lock().unwrap();
             let status = shared.source_status_mut(root);
             status.online = false;
-            status.error = Some(format!("来源不可访问：{}", root.display()));
+            status.error = Some(StatusMessage::keyed(
+                "notice.source.unreachable",
+                format!("来源不可访问：{}", root.display()),
+                vec![("path", root.display().to_string())],
+            ));
             shared.error = Some(format!("来源离线，已保留图库记录：{}", root.display()));
             set_status!(
                 shared,
@@ -1155,6 +1159,7 @@ impl AppState {
         let status = shared.source_status_mut(root);
         status.online = true;
         status.error = None;
+        status.watch_retry = false;
         shared.revision = shared.revision.wrapping_add(1);
         Ok(())
     }
@@ -1246,12 +1251,7 @@ impl AppState {
             let retry_roots = shared
                 .source_statuses
                 .iter()
-                .filter(|(_, status)| {
-                    status
-                        .error
-                        .as_deref()
-                        .is_some_and(|error| error.contains("监听") || error.contains("离线"))
-                })
+                .filter(|(_, status)| status.watch_retry)
                 .map(|(root, _)| root.clone())
                 .collect::<HashSet<_>>();
             (shared.roots.clone(), retry_roots)
@@ -1271,13 +1271,11 @@ impl AppState {
                     watchers.insert(root.clone(), handle);
                     let mut shared = state.shared.lock().unwrap();
                     let status = shared.source_status_mut(&root);
-                    let recovered = status
-                        .error
-                        .as_deref()
-                        .is_some_and(|error| error.contains("监听") || error.contains("离线"));
+                    let recovered = status.watch_retry;
                     status.online = true;
                     if recovered {
                         status.error = None;
+                        status.watch_retry = false;
                         set_status!(
                             shared,
                             "notice.source.watch_recovered",
@@ -1291,14 +1289,23 @@ impl AppState {
                     log::warn!("watch {}: {error:#}", root.display());
                     let online = root.is_dir();
                     let message = if online {
-                        format!("无法监听来源：{error:#}；将在后台自动重试")
+                        StatusMessage::keyed(
+                            "notice.source.watch_unavailable",
+                            format!("无法监听来源：{error:#}；将在后台自动重试"),
+                            vec![("error", format!("{error:#}"))],
+                        )
                     } else {
-                        format!("来源离线，恢复后自动重试监听：{}", root.display())
+                        StatusMessage::keyed(
+                            "notice.source.offline_watch_retry",
+                            format!("来源离线，恢复后自动重试监听：{}", root.display()),
+                            vec![("path", root.display().to_string())],
+                        )
                     };
                     let mut shared = state.shared.lock().unwrap();
                     let status = shared.source_status_mut(&root);
                     status.online = online;
-                    if status.error.as_deref() != Some(message.as_str()) {
+                    status.watch_retry = true;
+                    if status.error.as_ref() != Some(&message) {
                         status.error = Some(message);
                         set_status!(
                             shared,
@@ -4502,8 +4509,13 @@ fn scan_one_root(
         status.online = online;
         if online {
             status.error = None;
+            status.watch_retry = false;
         } else {
-            status.error = Some(format!("来源不可访问：{}", root.display()));
+            status.error = Some(StatusMessage::keyed(
+                "notice.source.unreachable",
+                format!("来源不可访问：{}", root.display()),
+                vec![("path", root.display().to_string())],
+            ));
         }
         shared.revision = shared.revision.wrapping_add(1);
     }
@@ -4520,7 +4532,7 @@ fn scan_one_root(
         }
         Err(error) => {
             reporter.failed();
-            record_source_error(state, root, format!("{error:#}"));
+            record_source_error(state, root, StatusMessage::plain(format!("{error:#}")));
         }
     }
     result
@@ -4542,15 +4554,26 @@ fn record_source_scan(state: &Arc<AppState>, root: &Path, stats: &ScanStats, can
     if !stats.root_accessible {
         status.online = false;
         if status.error.is_none() {
-            status.error = Some(format!("来源不可访问，已保留图库记录：{}", root.display()));
+            status.error = Some(StatusMessage::keyed(
+                "notice.source.unreachable_kept",
+                format!("来源不可访问，已保留图库记录：{}", root.display()),
+                vec![("path", root.display().to_string())],
+            ));
+            status.watch_retry = false;
         }
     } else if !stats.walk_complete {
-        status.error = Some(format!(
-            "来源未能完整遍历（可能离线或权限不足），已保留图库记录：{}",
-            root.display()
+        status.error = Some(StatusMessage::keyed(
+            "notice.source.incomplete_walk",
+            format!(
+                "来源未能完整遍历（可能离线或权限不足），已保留图库记录：{}",
+                root.display()
+            ),
+            vec![("path", root.display().to_string())],
         ));
+        status.watch_retry = true;
     } else {
         status.error = None;
+        status.watch_retry = false;
     }
     if stats.root_accessible {
         status.counts = stats.scan_counts();
@@ -4561,14 +4584,15 @@ fn record_source_scan(state: &Arc<AppState>, root: &Path, stats: &ScanStats, can
     shared.revision = shared.revision.wrapping_add(1);
 }
 
-fn record_source_error(state: &Arc<AppState>, root: &Path, message: String) {
+fn record_source_error(state: &Arc<AppState>, root: &Path, message: StatusMessage) {
     let mut shared = state.shared.lock().unwrap();
     let online = root.is_dir();
     let status = shared.source_status_mut(root);
     status.root = root.to_path_buf();
     status.online = online;
     status.error = Some(message.clone());
-    shared.error = Some(message);
+    status.watch_retry = false;
+    shared.error = Some(message.text().to_string());
     shared.revision = shared.revision.wrapping_add(1);
 }
 
@@ -4925,7 +4949,11 @@ fn index_inner(
         let status = shared.source_status_mut(folder);
         status.root = folder.to_path_buf();
         status.online = false;
-        status.error = Some(format!("来源不可访问：{}", folder.display()));
+        status.error = Some(StatusMessage::keyed(
+            "notice.source.unreachable",
+            format!("来源不可访问：{}", folder.display()),
+            vec![("path", folder.display().to_string())],
+        ));
         shared.revision = shared.revision.wrapping_add(1);
         log::warn!("source inaccessible: {}", folder.display());
         return Ok(());
@@ -5047,10 +5075,15 @@ fn index_inner(
             let mut shared = state.shared.lock().unwrap();
             let status = shared.source_status_mut(folder);
             status.online = root_accessible;
-            status.error = Some(format!(
-                "来源未能完整遍历（可能离线或权限不足），已保留图库记录：{}",
-                folder.display()
+            status.error = Some(StatusMessage::keyed(
+                "notice.source.incomplete_walk",
+                format!(
+                    "来源未能完整遍历（可能离线或权限不足），已保留图库记录：{}",
+                    folder.display()
+                ),
+                vec![("path", folder.display().to_string())],
             ));
+            status.watch_retry = true;
             append_scan_warning(
                 &mut shared,
                 format!(
@@ -7317,12 +7350,11 @@ mod tests {
 
         let status = state.source_statuses().remove(0);
         assert!(!status.online);
-        assert!(
-            status
-                .error
-                .as_deref()
-                .is_some_and(|error| error.contains("离线"))
+        assert_eq!(
+            status.error.as_ref().and_then(|error| error.key()),
+            Some("notice.source.offline_watch_retry")
         );
+        assert!(status.watch_retry);
 
         std::fs::create_dir_all(&lib).unwrap();
         state.retry_watchers_once();
@@ -7372,6 +7404,7 @@ mod tests {
             &state,
             &lib,
             "文件监听错误：模拟断线；请手动重新扫描该来源".into(),
+            true,
         );
         assert!(state.source_statuses().remove(0).error.is_some());
         state.retry_watchers_once();
@@ -8147,17 +8180,19 @@ mod tests {
                 "来源离线/不可访问时绝不删除记录"
             );
             assert!(!shared.source_statuses[&lib].online);
-            assert!(
+            assert_eq!(
                 shared.source_statuses[&lib]
                     .error
-                    .as_deref()
-                    .is_some_and(|error| error.contains("离线"))
+                    .as_ref()
+                    .and_then(|error| error.key()),
+                Some("notice.source.offline_kept")
             );
+            assert!(shared.source_statuses[&lib].watch_retry);
             assert!(
                 shared
                     .error
                     .as_deref()
-                    .is_some_and(|error| error.contains("离线"))
+                    .is_some_and(|error| error.starts_with("来源离线"))
             );
         }
         assert_eq!(exact_group_paths(&state), groups);

@@ -219,22 +219,26 @@ pub(crate) fn any_remote_asset<'a>(paths: impl IntoIterator<Item = &'a Path>) ->
 
 /// 把本地资产交给系统默认程序：视频走 `open_video`，其余媒体走默认关联程序。
 /// 远端路径在这里直接拒绝，绝不调用 explorer/xdg-open。
+///
+/// 只返回原因（不叠加“打开失败”前缀）：调用方带一次就地说明，避免双重前缀；
+/// 核心的错误原文保留，缺失文件在这里给出本地化原因。
 pub(crate) fn open_asset_with_system(path: &Path) -> Result<(), String> {
     if is_remote_asset(path) {
         return Err(format!("{}（{}）", remote_readonly_note(), path.display()));
+    }
+    if !path.is_file() {
+        return Err(if crate::localization::is_english() {
+            format!("File not found: {}", path.display())
+        } else {
+            format!("文件不存在：{}", path.display())
+        });
     }
     let result = if kanalib_core::model::is_video(path) {
         kanalib_core::open::open_video(path)
     } else {
         kanalib_core::open::open_with_default_app(path)
     };
-    result.map_err(|error| {
-        if crate::localization::is_english() {
-            format!("Open failed: {error:#}")
-        } else {
-            format!("打开失败：{error:#}")
-        }
-    })
+    result.map_err(|error| format!("{error:#}"))
 }
 
 /// 纯 std 相对时间；超过 30 天回退为日期。

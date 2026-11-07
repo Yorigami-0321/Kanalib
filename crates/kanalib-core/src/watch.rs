@@ -17,7 +17,7 @@ use anyhow::{Context, Result};
 use notify::{RecommendedWatcher, RecursiveMode};
 use notify_debouncer_mini::{DebounceEventResult, Debouncer, new_debouncer};
 
-use crate::model::{ScanCounts, ScanFilterConfig, Shared, is_media};
+use crate::model::{ScanCounts, ScanFilterConfig, Shared, StatusMessage, is_media};
 use crate::scan_filter::{CompiledIgnoreRules, CompiledScanFilter, IgnoreRules};
 use crate::state::{AppState, IndexedFile};
 
@@ -78,7 +78,12 @@ pub(crate) fn spawn(state: &Arc<AppState>, root: PathBuf) -> Result<WatchHandle>
                 mark_source_error(
                     &state,
                     &callback_root,
-                    format!("文件监听错误：{error}；请手动重新扫描该来源"),
+                    StatusMessage::keyed(
+                        "notice.source.watch_io_error",
+                        format!("文件监听错误：{error}；请手动重新扫描该来源"),
+                        vec![("error", error.to_string())],
+                    ),
+                    true,
                 );
             }
         }
@@ -182,7 +187,12 @@ pub(crate) fn handle_watch_batch(state: &Arc<AppState>, root: &Path, paths: Vec<
                 mark_source_error(
                     state,
                     root,
-                    format!("监听事件处理失败：{error:#}；请手动重新扫描该来源"),
+                    StatusMessage::keyed(
+                        "notice.source.watch_batch_failed",
+                        format!("监听事件处理失败：{error:#}；请手动重新扫描该来源"),
+                        vec![("error", format!("{error:#}"))],
+                    ),
+                    true,
                 );
                 return;
             }
@@ -197,7 +207,12 @@ pub(crate) fn handle_watch_batch(state: &Arc<AppState>, root: &Path, paths: Vec<
             mark_source_error(
                 state,
                 root,
-                format!("文件变化过多，自动重扫失败：{error:#}"),
+                StatusMessage::keyed(
+                    "notice.source.watch_storm_rescan_failed",
+                    format!("文件变化过多，自动重扫失败：{error:#}"),
+                    vec![("error", format!("{error:#}"))],
+                ),
+                false,
             );
         }
         return;
@@ -207,7 +222,12 @@ pub(crate) fn handle_watch_batch(state: &Arc<AppState>, root: &Path, paths: Vec<
         mark_source_error(
             state,
             root,
-            format!("增量同步失败：{error:#}；请手动重新扫描该来源"),
+            StatusMessage::keyed(
+                "notice.source.watch_sync_failed",
+                format!("增量同步失败：{error:#}；请手动重新扫描该来源"),
+                vec![("error", format!("{error:#}"))],
+            ),
+            false,
         );
     }
 }
@@ -325,11 +345,14 @@ pub(crate) fn apply_watch_batch(
     status.online = online;
     if online {
         status.error = None;
+        status.watch_retry = false;
     } else {
-        status.error = Some(format!(
-            "来源离线或不可访问，已保留现有记录：{}",
-            root.display()
+        status.error = Some(StatusMessage::keyed(
+            "notice.source.offline_kept",
+            format!("来源离线或不可访问，已保留现有记录：{}", root.display()),
+            vec![("path", root.display().to_string())],
         ));
+        status.watch_retry = true;
     }
     status.counts = ScanCounts {
         discovered: batch.changed.len() + batch.missing.len(),
@@ -356,12 +379,18 @@ fn definitely_missing(path: &Path) -> bool {
     }
 }
 
-pub(crate) fn mark_source_error(state: &Arc<AppState>, root: &Path, message: String) {
+pub(crate) fn mark_source_error(
+    state: &Arc<AppState>,
+    root: &Path,
+    message: StatusMessage,
+    retry_watch: bool,
+) {
     let mut shared = state.shared.lock().unwrap();
     let status = shared.source_status_mut(root);
     status.online = root.is_dir();
     status.error = Some(message.clone());
-    shared.error = Some(message);
+    status.watch_retry = retry_watch;
+    shared.error = Some(message.text().to_string());
     crate::state::set_status!(
         shared,
         "notice.source.watch_error",

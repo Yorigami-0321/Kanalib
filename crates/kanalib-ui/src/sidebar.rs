@@ -242,7 +242,10 @@ pub(crate) fn source_row(
         ),
         _ => (SharedString::default(), colors.subtle),
     };
-    let error = status.as_ref().and_then(|status| status.error.as_deref());
+    let error = status
+        .as_ref()
+        .and_then(|status| status.error.as_ref())
+        .map(|error| crate::localization::core_status(cx, error));
     let aria = match (status_text.is_empty(), error) {
         (true, _) => path.clone(),
         (false, Some(error)) => crate::localization::t_args(
@@ -251,7 +254,7 @@ pub(crate) fn source_row(
             &[
                 ("path", &path),
                 ("text", status_text.as_ref()),
-                ("error", error),
+                ("error", error.as_ref()),
             ],
         )
         .to_string(),
