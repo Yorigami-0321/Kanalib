@@ -4,7 +4,7 @@
 >
 > 上级索引：[README.md](README.md) · 路线：[next-steps.md](next-steps.md) · 逐项实现记录：[pending/browse.md](pending/browse.md)
 >
-> 最后整理：2026-11-06（F-073 D4 提交后）。
+> 最后整理：2026-11-07（第八轮副屏验收后）。
 
 ## 1. 执行约定
 
@@ -22,6 +22,7 @@
 |---|---|---|---|
 | `.kanalib/accept_f070_gui` | 10k 测试库副本，268 标签、102 精确重复组；缺失来源显示离线，缩略图缓存可用 | 侧栏/标签/设置/去重回归 | 隔离根无 sidecar，会出现 `sidecar script not found` 红色提示，属环境 |
 | `.kanalib/accept_f070_tags30k` | 同一 10k 库 + 30,000 个通用标签（共 30,268）与 30,871 条使用记录 | 3 万标签列表/搜索/滚动 | 同上 |
+| `.kanalib/accept_r8_d1` | 单资产隔离根（`retry_probe.txt`，路径在 `probe_outside` 根内）；DB 由 accept_f070_gui 复制改写 | D1 打开失败/重试链路 | 复跑先删整个 `probe_outside` 目录再启动（根离线：不弹缺失清理对话框）；触发失败后补目录+文件再点重试即成功。根在线时增删文件会触发监听刷新清掉错误条，抢在重试前 |
 | `.kanalib/verify_f070/` | F-070/F-073 副屏截图、Tab 日志、UIA 文本 | 既有基线 | 含 16 张亮暗 × 1024/1200 基线 |
 | `.kanalib/ui_f069_fit_data` + `.kanalib/ui_f069_fit_root` | F-069 适应/100% 三张样本 | 查看器缩放 | 样本含 1120×1992、280×175、1300×1149 |
 | `sample_library` | 15 张示例库（含损坏 AVIF） | headless / 快速冒烟 | 不含 100k 性能结论 |
@@ -32,7 +33,7 @@
 | # | 验收项 | 前置/前台 | 证据/备注 |
 |---|---|---|---|
 | 70-1 | 1440/1920 逻辑宽下四种上下文侧栏无水平溢出 | 副屏逻辑宽不足，需改 DPI 或占用主屏；会抢前台 | 已有 1024/1200 基线，见 `.kanalib/verify_f070/` |
-| 70-2 | Shift+Tab 反向遍历、焦点全遍历、Esc 其它分层路径 | 真实键盘；合成 Shift 不生效 | 正向 Tab 与焦点环已验，日志 `.kanalib/verify_f070/tab_walk*.log` |
+| 70-2 | Shift+Tab 反向遍历、焦点全遍历、Esc 其它分层路径 | 真实键盘；合成 Shift 不生效 | 正向 Tab 与焦点环已验，日志 `.kanalib/verify_f070/tab_walk*.log`；2026-11-07 复核：`verify_round8/tab_walk_reverse.log` R1–R4 仍正向续走，合成 Shift 被 gpui 忽略，维持待真实键盘 |
 | 70-3 | F-020 别名/合并对话框真实提交：输入目标、Enter/点击提交、别名与 FTS 生效 | 真实键入 + 前台；空目标时提交按钮 `disabled` | 核心测试 `db::tests::renaming_and_merging_tags_keep_aliases_and_fts` 通过；GUI 提交未验 |
 | 70-4 | 侧栏宽度拖拽、最小/最大宽度、重启后保持 | 真实鼠标拖拽 | 折叠与重启持久化已验；宽度拖拽未验 |
 
@@ -56,7 +57,7 @@
 
 | # | 验收项 | 前置/前台 | 证据/备注 |
 |---|---|---|---|
-| 73-1 | English 下扫描/队列/来源/去重/修复等瞬态状态栏，以及设置页网络来源按钮/说明/凭据/toast 真实渲染 | 副屏 GUI；触发对应动作 | D4 已结构化并补 138 个 `notice.*` 键；设置页网络来源已补漏；底栏/设置 banner/去重摘要走 `core_status`；未实机验收 |
+| 73-1 | English 下扫描/队列/来源/去重/修复等瞬态状态栏，以及设置页网络来源按钮/说明/凭据/toast 真实渲染 | 副屏 GUI；触发对应动作 | 2026-11-07 部分通过：扫描开始/完成、相似完成、来源卡 last-scan 英文渲染已验（`verify_round8/d4_*.png`）；扫描中途瞬态未截到（暖缓存过快）、队列/修复瞬态未触发；**发现泄漏**：来源离线错误行与去重保留原因仍中文（D5 待决策），故整项维持未勾选 |
 | 73-2 | 1440/1920 逻辑宽与浮层/查看器/对话框/Toast 截图基线 | 需主屏或改 DPI；会抢前台 | 已有 1024/1200 16 张基线 |
 | 73-3 | GUI 弹窗/菜单/表单/命令面板 UIA 与悬停验收 | 窗口前台 + UIA | 覆盖 tooltip、loading spinner、`.invalid()` 红框、清除按钮对 150/240px 固定宽输入的挤压 |
 | 73-4 | 组件状态矩阵：hover/focus/pressed/selected/disabled/loading 一致性 | 截图对比亮暗主题 | 源码状态口径已写入 `constraints.md` |
@@ -64,7 +65,7 @@
 | 73-6 | 帧率 `present p99`：窗口前台，`run_frame_probe.ps1` 每秒置前，失焦样本为 0 | 必须前台；会抢前台 | 失焦数据作废 |
 | 73-7 | 100k 滚动峰值工作集 326–329MB | 前台 + `KANALIB_UI_SCROLL_TEST` + 100k 库 | 需先生成完整 100k 库 |
 | 73-8 | 100k 首屏/搜索/切图全量回归不劣于既有基线 | 前台 + 100k 库；冷导入约 42min | 既有基线见 `docs/PLAN.md`；本轮未重跑 |
-| 73-9 | D1 打开失败重试按钮：底栏/主图库/去重/设置错误条显示「重试」，成功后错误清除，失败后保留入口 | 触发 6 处打开失败之一（可用不可用系统应用的文件） | 已实现（2026-11-06）；重试失败文案 `重试失败：{error}`；GUI 点击与窄宽布局未验 |
+| 73-9 | D1 打开失败重试按钮：底栏/主图库/去重/设置错误条显示「重试」，成功后错误清除，失败后保留入口 | 触发 6 处打开失败之一（可用不可用系统应用的文件） | 2026-11-07 主图库/检查器/底栏 zh+en 全链路通过（失败显示→重试失败保留→补文件重试成功清除；1024 宽无溢出；`verify_round8/d1_*.png`）；去重/设置错误条重试显示未单独触发；error 参数内嵌 core 中文 bail（D5），整项维持未勾选 |
 
 ## 7. F-069 / F-074 查看器
 
@@ -106,6 +107,8 @@
 | 项目级 i18n 静态 UI 六页巡检 | 通过 | `i18n_final_library.png`、`i18n_full_tags.png`、`i18n_final_dedup.png`、`i18n_full_settings.png`、`i18n_final_viewer_back.png`、`i18n_final_compare.png` |
 | F-069 双击入口、适应/75% 标签、100MP 阈值与回退提示 | 通过 | `f069_large_banner*.png`、`browse.md` F-069 记录 |
 | F-074 双击默认原图、缺失原图错误态 | 通过 | `browse.md` F-074 记录 |
+| D4 English 状态栏/banner（扫描开始/完成、相似完成、来源卡 last-scan） | 通过（瞬态中途与泄漏项除外，见 73-1） | `verify_round8/d4_settings_en.png`、`d4_rescan_summary_en.png`、`d4_similar_done_en.png` |
+| D1 重试机制（主图库/检查器/底栏，zh+en：失败显示/失败保留/成功清除/1024 宽） | 通过（去重/设置错误条与 error 参数泄漏除外，见 73-9） | `verify_round8/d1_*.png` |
 
 ## 10. 长耗时后台项（不属手动验收，需单独确认）
 
