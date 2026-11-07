@@ -62,7 +62,7 @@
 | 73-1 | English 下扫描/队列/来源/去重/修复等瞬态状态栏，以及设置页网络来源按钮/说明/凭据/toast 真实渲染 | 副屏 GUI；触发对应动作 | 2026-11-07 部分通过：扫描开始/完成、相似完成、来源卡 last-scan、来源离线错误行（`Source offline; watching resumes automatically…`）、监听失败 banner 英文渲染已验（`verify_round8/d4_*.png`、`verify_round9/r9a_settings_en.png`）；D5 泄漏修复后 English 已复验；扫描中途瞬态未截到（暖缓存过快）、队列/修复瞬态未触发，整项维持未勾选 |
 | 73-2 | 1440/1920 逻辑宽与浮层/查看器/对话框/Toast 截图基线 | 需主屏或改 DPI；会抢前台 | 已有 1024/1200 16 张基线 |
 | 73-3 | GUI 弹窗/菜单/表单/命令面板 UIA 与悬停验收 | 窗口前台 + UIA | 覆盖 tooltip、loading spinner、`.invalid()` 红框、清除按钮对 150/240px 固定宽输入的挤压 |
-| 73-4 | 组件状态矩阵：hover/focus/pressed/selected/disabled/loading 一致性 | 截图对比亮暗主题 | 源码状态口径已写入 `constraints.md` |
+| 73-4 | 组件状态矩阵：hover/focus/pressed/selected/disabled/loading 一致性 | 截图对比亮暗主题 | 2026-11-07 抽样通过（亮暗两套）：hover（Open file 按钮像素差 + 裁剪）、focus（暗色收藏按钮蓝环、亮色设置活动项高亮）、pressed（View 按钮按下）、disabled（无标签时 `Copy pro…` 置灰）、selected（侧栏 `All images` 选中行）、tooltip（Theme 悬停提示）。证据 `.kanalib/verify_round9/r9c_*.png`；未覆盖全组件矩阵与 loading 态 |
 | 73-5 | 渲染后 WCAG 实测（非 token 设计值） | 截图/取色 + 前台 | `check_theme_contrast.py` 只算 token；渲染后未测 |
 | 73-6 | 帧率 `present p99`：窗口前台，`run_frame_probe.ps1` 每秒置前，失焦样本为 0 | 必须前台；会抢前台 | 失焦数据作废 |
 | 73-7 | 100k 滚动峰值工作集 326–329MB | 前台 + `KANALIB_UI_SCROLL_TEST` + 100k 库 | 需先生成完整 100k 库 |
@@ -112,6 +112,7 @@
 | D4 English 状态栏/banner（扫描开始/完成、相似完成、来源卡 last-scan） | 通过（瞬态中途与泄漏项除外，见 73-1） | `verify_round8/d4_settings_en.png`、`d4_rescan_summary_en.png`、`d4_similar_done_en.png` |
 | D1 重试机制（四个展示位：底栏/主图库/设置 banner/去重 banner；zh+en） | 通过 | `verify_round8/d1_*.png`、`verify_round9/r9a_settings_banner_retry_en.png`、`r9b_dedup_banner_retry_en.png` |
 | D5 English 复验（来源错误行/打开链单前缀/`1 image`/去重 `Larger file`） | 通过 | `verify_round9/r9a_settings_en.png`、`r9a_open_failed_en.png`、`r9a_retry_failed_en.png`、`r9b_similar_larger_en.png`、`uia_a_*.txt` |
+| 73-4 组件状态抽样（hover/focus/pressed/disabled/selected/tooltip，亮暗） | 抽样通过（全矩阵未覆盖） | `verify_round9/r9c_*.png` |
 
 ## 10. 长耗时后台项（不属手动验收，需单独确认）
 
