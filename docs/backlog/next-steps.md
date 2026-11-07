@@ -130,7 +130,7 @@
 | 选项 | 说明 |
 |---|---|
 | D5 方案决策 | ✅ 已拍板（2026-11-07）：按 D4 模式结构化，代码与静态检查已落地；剩 English 实机复验 73-1/73-9 |
-| C 类手动验收 | 按 `docs/backlog/manual-acceptance.md` 逐项走；剩 Shift+Tab（真实键盘）、组件状态全矩阵与 loading、命令动作逐条执行/原生选择框、渲染后 WCAG、队列 running/修复瞬态（需 sidecar） |
+| C 类手动验收 | 按 `docs/backlog/manual-acceptance.md` 逐项走；剩组件状态全矩阵与 loading、命令动作逐条执行/原生选择框、渲染后 WCAG、队列 running/修复瞬态（需 sidecar） |
 | B1 启动 100k 后台全量回归 | 约 1 小时以上，纯后台；需要先确认 |
 | F-012 搜索 p95 优化 | 需完整 100k 库与长跑基准；当前 150ms 目标已改为同库实测上限口径 |
 | 暂停 | 保持现状，等用户有空做 C 类验收 |
