@@ -61,7 +61,7 @@
 | # | 验收项 | 前置/前台 | 证据/备注 |
 |---|---|---|---|
 | 73-1 | English 下扫描/队列/来源/去重/修复等瞬态状态栏，以及设置页网络来源按钮/说明/凭据/toast 真实渲染 | 副屏 GUI；触发对应动作 | 2026-11-07 部分通过：扫描开始/完成、扫描中途（冷扫 2000 张：`Hashing 1687/2000 · 22.0 images/s · ETA 15 s · Source · libr…`）、队列 waiting、相似完成、来源卡 last-scan、来源离线错误行（`Source offline; watching resumes automatically…`）、监听失败 banner 英文渲染已验（`verify_round8/d4_*.png`、`verify_round9/r9a_settings_en.png`、`r9f_midscan_hashing_en.png`、`r9f_scan_complete_en.png`）；D5 泄漏修复后 English 已复验；队列 running/error 与修复瞬态需 sidecar/模型，未触发，整项维持未勾选 |
-| 73-2 | 1440/1920 逻辑宽与浮层/查看器/对话框/Toast 截图基线 | 需主屏或改 DPI；会抢前台 | 已有 1024/1200 16 张基线 |
+| 73-2 | 1440/1920 逻辑宽与浮层/查看器/对话框/Toast 截图基线 | 需主屏或改 DPI；会抢前台 | **通过（2026-11-07，主屏授权，125% DPI）**：设置 1800/2400 物理（1440/1920 逻辑），DWM 采集 1784/2384 物理；亮暗 × 图库/重复项/标签/设置 × 宽度 + 命令面板浮层 + 查看器 = 24 张（`verify_round9/baseline/`）；UIA 水平越界审计 24 份全部 0。注：窗口在跨 DPI 移动后会被应用异步改尺寸，采用「设置×2 + 同进程立即 PrintWindow」采集 |
 | 73-3 | GUI 弹窗/菜单/表单/命令面板 UIA 与悬停验收 | 窗口前台 + UIA | 2026-11-07 部分通过：in-app 模态框 UIA 名称与截图——`Rename source`（输入框 + Cancel/Save）、`Remove source?`（危险按钮 + 说明）、`Add WebDAV source`（URL 字段非法输入显示红框 + 清除按钮，`r9d_webdav_invalid_light.png`）；命令面板 72 个 ListItem 全部英文可读，输入 `theme` 过滤为 1 项、方向键移动高亮、Esc 关闭（`r9g_palette_*.png`）；tooltip 见 73-4。未覆盖：loading spinner、原生文件/文件夹选择框（rfd，窗口内消息不可达）、命令动作逐条执行、150/240px 固定宽输入的挤压 |
 | 73-4 | 组件状态矩阵：hover/focus/pressed/selected/disabled/loading 一致性 | 截图对比亮暗主题 | 2026-11-07 抽样通过（亮暗两套）：hover（Open file 按钮像素差 + 裁剪）、focus（暗色收藏按钮蓝环、亮色设置活动项高亮）、pressed（View 按钮按下）、disabled（无标签时 `Copy pro…` 置灰）、selected（侧栏 `All images` 选中行）、tooltip（Theme 悬停提示）。证据 `.kanalib/verify_round9/r9c_*.png`；未覆盖全组件矩阵与 loading 态 |
 | 73-5 | 渲染后 WCAG 实测（非 token 设计值） | 截图/取色 + 前台 | `check_theme_contrast.py` 只算 token；渲染后未测 |
@@ -117,6 +117,7 @@
 | 73-3 设置页字段/对话框（重命名/移除确认/URL 非法红框） | 部分通过（loading/原生选择框未覆盖） | `verify_round9/r9d_*.png` |
 | 73-1 扫描中途瞬态（English Hashing/吞吐/ETA + 完成 + 队列 waiting） | 通过（队列 running/修复仍需 sidecar） | `verify_round9/r9f_midscan_hashing_en.png`、`r9f_scan_complete_en.png` |
 | 73-3 命令面板（72 项 UIA/过滤/方向键/浮层） | 通过（动作逐条执行未覆盖） | `verify_round9/r9g_palette_*.png`、`uia_g_palette.txt` |
+| 73-2 1440/1920 宽基线（亮暗 × 4 页 + 浮层 + 查看器，24 张，越界 0） | 通过（主屏授权） | `verify_round9/baseline/` |
 
 ## 10. 长耗时后台项（不属手动验收，需单独确认）
 
