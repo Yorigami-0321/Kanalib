@@ -64,7 +64,7 @@
 | 73-1 | English 下扫描/队列/来源/去重/修复等瞬态状态栏，以及设置页网络来源按钮/说明/凭据/toast 真实渲染 | 副屏 GUI；触发对应动作 | 2026-11-07 部分通过：扫描开始/完成/中途（`Hashing 1687/2000 · 22.0 images/s · ETA 15 s`）、相似完成、来源卡 last-scan、来源离线错误行、监听失败 banner 英文已验；**扫码/队列/修复**用带 sidecar 的隔离夹具补验——队列 running（状态栏 `Queue waiting 45 · running 4 · failed 0`、设置卡 `Running · waiting 17 · running 4 · done 40 · throughput 3.2 images/s · ETA 7 s`）、队列 error（`Failures while idle · failed 1 · done 60`）、修复瞬态（损坏 PNG → Repair → 错误条）；证据 `verify_round8/d4_*.png`、`verify_round9/r9f_*.png`、`r9h_queue_*.png`、`r9h_run_*.png`、`r9h_repair_*.png`。**新泄漏**：队列卡 `打标已继续` 中文、最新打标错误详情中文（`文件不完整（图片数据被截断）`）、修复失败错误条中文（`修复失败：容错解码…`）——登记 D6。未覆盖：远程来源凭据对话框/toast 真实渲染（未添加远端源）、远程按钮/说明（静态目录已迁移）、修复成功路径（截断文件不可恢复）、队列修复成功后重打标。整项维持未勾选 |
 | 73-2 | 1440/1920 逻辑宽与浮层/查看器/对话框/Toast 截图基线 | 需主屏或改 DPI；会抢前台 | **通过（2026-11-07，主屏授权，125% DPI）**：设置 1800/2400 物理（1440/1920 逻辑），DWM 采集 1784/2384 物理；亮暗 × 图库/重复项/标签/设置 × 宽度 + 命令面板浮层 + 查看器 = 24 张（`verify_round9/baseline/`）；UIA 水平越界审计 24 份全部 0。注：窗口在跨 DPI 移动后会被应用异步改尺寸，采用「设置×2 + 同进程立即 PrintWindow」采集 |
 | 73-3 | GUI 弹窗/菜单/表单/命令面板 UIA 与悬停验收 | 窗口前台 + UIA | 2026-11-07 部分通过：in-app 模态框 UIA 名称与截图——`Rename source`（输入框 + Cancel/Save）、`Remove source?`（危险按钮 + 说明）、`Add WebDAV source`（URL 字段非法输入显示红框 + 清除按钮，`r9d_webdav_invalid_light.png`）；命令面板 72 个 ListItem 全部英文可读，输入 `theme` 过滤为 1 项、方向键移动高亮、Esc 关闭（`r9g_palette_*.png`）；tooltip 见 73-4。未覆盖：loading spinner、原生文件/文件夹选择框（rfd，窗口内消息不可达）、命令动作逐条执行、150/240px 固定宽输入的挤压 |
-| 73-4 | 组件状态矩阵：hover/focus/pressed/selected/disabled/loading 一致性 | 截图对比亮暗主题 | 2026-11-07 抽样通过（亮暗两套）：hover（Open file 按钮像素差 + 裁剪）、focus（暗色收藏按钮蓝环、亮色设置活动项高亮）、pressed（View 按钮按下）、disabled（无标签时 `Copy pro…` 置灰）、selected（侧栏 `All images` 选中行）、tooltip（Theme 悬停提示）。证据 `.kanalib/verify_round9/r9c_*.png`；未覆盖全组件矩阵与 loading 态 |
+| 73-4 | 组件状态矩阵：hover/focus/pressed/selected/disabled/loading 一致性 | 截图对比亮暗主题 | **抽样通过（2026-11-07，亮暗两套）**：hover（工具条按钮、菜单项 `Compare selected (2–4)`、分段中文）、focus（收藏按钮蓝环、设置活动项、阈值输入蓝框）、pressed（View 按下）、disabled（`Copy pro…` 置灰）、selected（`All images` 选中行、标签页选中）、tooltip（Theme）、**loading**（备份按钮 spinner + `Backing up the database...` banner，亮暗各一）。滑块无可见 hover 样式（记录为现状）。证据 `r9c_*.png`、`state_*.png`、`r9i_backup2_1.png`、`r9i_backup_dark_1.png`、`menu_*`；未逐控件穷举（按组件类型抽样） |
 | 73-5 | 渲染后 WCAG 实测（非 token 设计值） | 截图/取色 + 前台 | **通过（2026-11-07，抽样）**：用基线截图 + UIA 元素矩形逐控件采样（`scripts/check_rendered_contrast.py`，8 页 × 亮暗 × 2 宽）：正文最低于暗色 5.18:1 / 亮色 5.47:1，全部 ≥4.5；禁用态 `Copy prompt`/`Reset` 2.96–3.73（WCAG 1.4.3 豁免）；`Ascending; click for descending` 排序图标亮色 2.99:1 略低于非文本 3:1（WARN，临界，建议后续 token 微调）。方法说明：按元素矩形取背景模态色与对比度最高的稳定色，小字号抗锯齿会使测得值偏低 |
 | 73-6 | 帧率 `present p99`：窗口前台，`run_frame_probe.ps1` 每秒置前，失焦样本为 0 | 必须前台；会抢前台 | 失焦数据作废 |
 | 73-7 | 100k 滚动峰值工作集 326–329MB | 前台 + `KANALIB_UI_SCROLL_TEST` + 100k 库 | 需先生成完整 100k 库 |
@@ -121,6 +121,7 @@
 | 73-2 1440/1920 宽基线（亮暗 × 4 页 + 浮层 + 查看器，24 张，越界 0） | 通过（主屏授权） | `verify_round9/baseline/` |
 | 73-5 渲染后对比度抽样（正文 ≥4.5；禁用态豁免；排序图标 2.99 WARN） | 抽样通过 | `scripts/check_rendered_contrast.py` + `verify_round9/baseline/` |
 | 73-1 队列 running/error 与修复失败瞬态（sidecar/模型实机） | 部分通过（新泄漏登记 D6） | `verify_round9/r9h_queue_*.png`、`r9h_run_*.png`、`r9h_repair_*.png` |
+| 73-4 组件状态扩展（菜单 hover/开关/分段/输入焦点/loading spinner，亮暗） | 抽样通过 | `verify_round9/state_*.png`、`r9i_backup*.png` |
 
 ## 10. 长耗时后台项（不属手动验收，需单独确认）
 
