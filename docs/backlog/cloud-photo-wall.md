@@ -2,7 +2,9 @@
 
 > 上级索引：[README.md](README.md) · 登记：[registry.md](registry.md) · 速览：[pending/overview.md](pending/overview.md)
 >
-> 2026-11-08 登记。分支 `feature/cloud-photo-wall`；**本文档只做计划与登记，不含代码改动**。用户指示：图片墙单开分支；本地工作台作为图片墙的后台管理工具；在做的本地条目适当精简（提案见 §6，待拍板）。
+> 2026-11-08 登记。分支 `feature/cloud-photo-wall`；本地工作台作为图片墙的后台管理工具；在做的本地条目适当精简（提案见 §6，已拍板）。
+>
+> 2026-11-08 用户指示改为**在本分支直接开发代码**（原「本分支只写文档」红线作废，见 §8）。接口契约冻结在 [photo-wall-contract.md](photo-wall-contract.md)，实施状态见 §9。
 >
 > 参考截图（音乐应用的不规则拼贴墙，仅作交互参照）：`C:\Users\Administrator\.qoder-cn\tmp\D--Code-Kanalib\images\4fbc87a7-18ef-4908-b554-ccb7dbc016cf\decb9aad-3349-42b7-9df6-3c7b4e8f3f1b.png`、`...\57da8e37-3b6b-4409-8d3f-5fd990adbf35.png`。
 
@@ -172,8 +174,22 @@ manifest 契约要点（F-080 首产物）：分片按排序键切（每片 ≤5
 
 ## 8. 红线
 
-- 本分支只写文档；代码实现另开任务包，按 [parallel-plan.md](parallel-plan.md) 派发（schema/sidecar 单一负责人不变）。
+- （2026-11-08 更新）用户指示本分支直接开发：F-080 发布器与 F-081 墙前端在本分支落地，不再另开分支；新增代码只落在 `crates/kanalib-publish/` 与 `web/` 两个新目录，schema/sidecar 单一负责人的约束不变。
 - 不引入 schema 迁移；发布状态走 settings/导出清单。
 - 不引入 AGPL 依赖进推荐组合；借鉴遵守许可与署名。
 - 不写工时/排期；规模用分片数/资产量/牵连面表达。
 - 未验收不写成通过；main 合并需用户正文确认。
+
+## 9. 实施状态（2026-11-08 起）
+
+> 契约：[photo-wall-contract.md](photo-wall-contract.md)（v1 冻结）。代码只落在两个新目录 + 脚本，不改 DB schema、不动 `crates/kanalib-ui`。
+
+| 层 | 落点 | 状态 | 备注 |
+|---|---|---|---|
+| 契约 | `docs/backlog/photo-wall-contract.md` | 已冻结 v1 | item 字段 id/w/h/n/rt/st/fav/tags/ph/mtime/orig；目录 index.json + m/*.json + t256/t512/o |
+| F-080 发布器 | `crates/kanalib-publish/`（新 workspace 成员，仅依赖 core） | 实现中 | 只读导出：manifest 分片 + 缩略图 + 可选原图 + publish-ledger 增量；`--dry-run` |
+| F-081 墙前端 | `web/`（Vite + React + TS，包名 kanalib-wall） | 实现中 | infinitegrid 混排 + PhotoSwipe + 详情路由 + 整墙缩放 + 顶部筛选 |
+| 验收脚手架 | `scripts/wall_manifest_check.py`、`scripts/wall_verify.ps1` | 实现中 | 契约不变量校验 + headless 截图/DOM 统计 |
+
+- 开发数据：发布器可导出到 `web/public/data/`（已 gitignore），`npm run dev` 直接以 `/data/` 读取；构建产物 `web/dist` 与 `data/` 一起上传。
+- 未做（后续）：t1024/t2048 高质量档（W3）、rclone 推送与 F-083 部署、动态后端迁移（§4.1）。

@@ -29,3 +29,9 @@ __pycache__/
 
 # 会话记忆（本地）
 /.workbuddy/
+
+# 图片墙前端（F-081）：依赖与构建产物、发布器导出数据
+/web/node_modules/
+/web/dist/
+/web/public/data/
+/web/.vite/
