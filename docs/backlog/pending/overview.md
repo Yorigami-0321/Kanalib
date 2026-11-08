@@ -16,7 +16,7 @@
 | F-075 | Shift+Tab 反向焦点遍历下线（产品决定移除） | 中 | 行为已由 70-2 真实键盘验收通过；绑定来自 vendor `ely-core` 的 `shift-tab` → `FocusPrev`，Kanalib 未单独绑定；2026-11-07 只登记为待移除，代码解绑未做 | 2026-11-07 登记 |
 | F-076 | Tab 正向焦点遍历下线（产品决定移除） | 中 | 正向 Tab 顺序与焦点环已验收通过；绑定来自 vendor `ely-core` 的 `tab` → `FocusNext`，Kanalib 侧另有根 `FocusScope` 与 `.tab_index(0)` 停靠点；2026-11-07 只登记为待移除，代码解绑未做 | 2026-11-07 登记 |
 | F-080 | 云端图片墙：发布导出与同步 | 高 | 计划 [../cloud-photo-wall.md](../cloud-photo-wall.md)；core 只读复用 search_page/load_asset/缩略图档；W1–W5 已定（静态+CDN/混排/无失真/公开只读/冻结回写）；方案定稿待实现；2026-11-08 用户指示改为**本分支直接开发**：契约 v1 见 [../photo-wall-contract.md](../photo-wall-contract.md)，发布器 crate crates/kanalib-publish 开发中（index+分片+t256/t512+原图+ledger+--dry-run），t1024/t2048 与 rclone 未做 | 2026-11-08 登记 |
-| F-081 | 云端图片墙：墙前端与交互 | 高 | infinitegrid + PhotoSwipe + react-zoom-pan-pinch（均 MIT）；单击 220ms 去抖/双击路由/移动端兜底；依赖 F-080 契约（v1 已冻结）；2026-11-08 起本分支落地 web/（默认 ./data/ 读发布产物） | 2026-11-08 登记 |
+| F-081 | 云端图片墙：墙前端与交互 | 高 | infinitegrid + PhotoSwipe + react-zoom-pan-pinch（均 MIT）；单击 220ms 去抖/双击路由/移动端兜底；依赖 F-080 契约（v1 已冻结）；2026-11-08 起本分支落地 web/（默认 ./data/ 读发布产物）；同日用户否掉顶部工具条，改左侧竖排边栏+密集拼贴+展示型详情页，视觉 v2 待参考定稿（[../photo-wall-design.md](../photo-wall-design.md)），代码暂停 | 2026-11-08 登记 |
 | F-082 | 云端图片墙：详情页 | 中 | 标签/相似推荐/元数据；similar_to_anchor 复用；依赖 F-081 | 2026-11-08 登记 |
 | F-083 | 云端图片墙：部署与同步运维 | 中 | rclone 单向 --checksum 先 dry-run；托管 R2+Pages 或 VPS；W4=A 公开只读（可选 noindex） | 2026-11-08 登记 |
 

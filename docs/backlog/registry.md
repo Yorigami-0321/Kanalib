@@ -65,7 +65,7 @@
 | F-075 | Shift+Tab 反向焦点遍历下线（已实现，产品决定下线） | 用户 2026-11-07 指示（70-2 验收通过后改为待移除） | 待移除（vendor `ely-core` 的 `shift-tab` → `FocusPrev` 仍生效；代码解绑未做，本次只登记） | 中 |
 | F-076 | Tab 正向焦点遍历下线（已实现，产品决定下线） | 用户 2026-11-07 指示（Tab 切换焦点也标记为待移除） | 待移除（vendor `ely-core` 的 `tab` → `FocusNext` 仍生效；Kanalib 侧 `FocusScope` 与 `.tab_index(0)` 停靠点仍在；代码解绑未做，本次只登记） | 中 |
 | F-080 | 云端图片墙：发布导出与同步（manifest 分片 + t256–t2048 档 + 原图 + rclone 单向推送） | 用户 2026-11-08 指示；HomeGallery 静态导出架构借鉴 | 实现中（W1–W5 已定；契约 v1 冻结于 [photo-wall-contract.md](photo-wall-contract.md)；2026-11-08 起本分支落地 `crates/kanalib-publish`：index.json+分片+t256/t512+可选原图+ledger 增量+--dry-run；未做 t1024/t2048 与 rclone） | 高 |
-| F-081 | 云端图片墙：墙前端与交互（infinitegrid 混排 + 单击 lightbox + 双击详情 + 整墙缩放） | 用户截图（音乐应用拼贴墙）；egjs-infinitegrid/PhotoSwipe/react-zoom-pan-pinch | 实现中（依赖 F-080 契约 v1 已冻结；2026-11-08 起本分支落地 `web/`：Vite+React+TS、@egjs/react-infinitegrid 混排、PhotoSwipe lightbox、#/a/<id> 详情、react-zoom-pan-pinch 整墙缩放、浏览器侧筛选） | 高 |
+| F-081 | 云端图片墙：墙前端与交互（infinitegrid 混排 + 单击 lightbox + 双击详情 + 整墙缩放） | 用户截图（音乐应用拼贴墙）；egjs-infinitegrid/PhotoSwipe/react-zoom-pan-pinch | 实现中（依赖 F-080 契约 v1 已冻结；2026-11-08 起本分支落地 `web/`：Vite+React+TS、@egjs/react-infinitegrid 混排、PhotoSwipe lightbox、#/a/<id> 详情、react-zoom-pan-pinch 整墙缩放、浏览器侧筛选）；2026-11-08 用户否掉顶部工具条，视觉改版 v2 待参考定稿（见 [photo-wall-design.md](photo-wall-design.md)），代码暂停） | 高 |
 | F-082 | 云端图片墙：详情页（标签/相似推荐/元数据） | 用户 2026-11-08 指示；core similar_to_anchor 复用 | 待确认（依赖 F-081） | 中 |
 | F-083 | 云端图片墙：部署与同步运维（托管选型/rclone 校验/公开只读/回滚） | 用户 2026-11-08 指示；rclone/Cloudflare R2 调研 | 待确认（W4=A 公开只读已定；方案定稿待实现） | 中 |
 
