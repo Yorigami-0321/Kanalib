@@ -1,0 +1,19 @@
+[package]
+name = "kanalib-publish"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.98"
+license = "MIT"
+publish = false
+description = "Kanalib 云端图片墙发布器：把本地库导出成静态站点数据目录（F-080）"
+
+[dependencies]
+anyhow = { workspace = true }
+# id 兜底需要 blake3(path_key::encode(path))：core 已在用同一大版本，不引入新下载。
+blake3 = "1"
+kanalib-core = { path = "../kanalib-core" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+[lints]
+workspace = true

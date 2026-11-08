@@ -4197,6 +4197,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "kanalib-publish"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "blake3",
+ "kanalib-core",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "kanalib-ui"
 version = "0.1.0"
 dependencies = [
