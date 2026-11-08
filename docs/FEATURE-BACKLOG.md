@@ -23,6 +23,7 @@
 | [backlog/component-research.md](backlog/component-research.md) | 非 UI 现成组件调研 |
 | [backlog/ui-refactor.md](backlog/ui-refactor.md) | UI 重构调研、参考层级（图片管理器为主，VS Code 仅局部参考）、设计 token、组件状态与验收基线 |
 | [backlog/candidate-pool.md](backlog/candidate-pool.md) | 候选池 |
+| [backlog/cloud-photo-wall.md](backlog/cloud-photo-wall.md) | 云端无界图片墙计划（F-080–F-083）与本地条目精简提案 |
 | [backlog/references.md](backlog/references.md) | 参考与本地依据 |
 
 ## 使用约定（摘要）

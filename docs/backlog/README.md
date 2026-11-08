@@ -47,6 +47,7 @@
 | [pending/dedup.md](pending/dedup.md) | 去重：F-045 |
 | [pending/ops.md](pending/ops.md) | 性能/可靠性与交付：F-038/F-039、F-061–F-063 |
 | [candidate-pool.md](candidate-pool.md) | 低优先级/远期候选 |
+| [cloud-photo-wall.md](cloud-photo-wall.md) | 云端无界图片墙计划（F-080–F-083）：后端复用面/开源调研/架构/本地精简提案/决策点 |
 | [next-steps.md](next-steps.md) | 2026-11-04 暂停点：后续任务分类、优先级、红线与命令速查（未验收项保持未勾选） |
 | [manual-acceptance.md](manual-acceptance.md) | 手动验收总清单：前台/GUI/UIA/真实输入/长耗时项、夹具、证据与已通过项索引 |
 | [../TESTING-PROCESS.md](../TESTING-PROCESS.md) | 轻量测试流程：测试分层、风险定档、改动类型矩阵、门禁与反过度测试约束 |
