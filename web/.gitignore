@@ -1,0 +1,11 @@
+# 依赖与产物
+node_modules/
+dist/
+.vite/
+
+# 发布器导出的真实数据（体积大、含私人内容，不入库）
+public/data/
+
+# 本地调试
+*.local
+screenshots/
