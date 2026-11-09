@@ -256,6 +256,9 @@ async function main() {
         docHeight: document.querySelector('.world')?.getBoundingClientRect().height ?? 0,
         pending: tiles.filter((tile) => tile.querySelector('img:not(.is-loaded)')).length,
         failed: tiles.filter((tile) => tile.querySelector('.tile__fallback')).length,
+        // 跨行布局的"主图"：宽度超过视口 35% 的卡
+        bigTiles: tiles.filter((tile) => tile.getBoundingClientRect().width > innerWidth * 0.35).length,
+        zoom: Number((new DOMMatrixReadOnly(getComputedStyle(document.querySelector('.world')).transform).a).toFixed(2)),
       };
     })()`);
     report.shots.home = await shot('v3f-home');
@@ -535,6 +538,7 @@ async function main() {
       };
     })()`);
     if (report.mobile) {
+      report.mobile.cover = await coverage();
       const before = await matrixOf();
       await drag(340, 640, 80, 640);
       const after = await matrixOf();
@@ -544,13 +548,23 @@ async function main() {
       // 触屏长按概要：按住一张卡 700ms 再松手，应该出概要且不开灯箱。
       const touchSpot = await evaluate(`(() => {
         const seam = document.querySelector('.seam')?.getBoundingClientRect().right ?? 64;
+        const safe = { left: seam + 20, top: 120, right: innerWidth - 20, bottom: innerHeight - 140 };
+        let best = null;
         for (const tile of document.querySelectorAll('.tile')) {
           const box = tile.getBoundingClientRect();
-          if (box.left > seam + 20 && box.right < innerWidth - 20 && box.top > 120 && box.bottom < innerHeight - 120) {
-            return { x: Math.round(box.left + box.width / 2), y: Math.round(box.top + box.height / 2) };
+          const w = Math.min(box.right, safe.right) - Math.max(box.left, safe.left);
+          const h = Math.min(box.bottom, safe.bottom) - Math.max(box.top, safe.top);
+          if (w < 50 || h < 50) continue;
+          const area = w * h;
+          if (!best || area > best.area) {
+            best = {
+              area,
+              x: Math.round(Math.max(box.left, safe.left) + w / 2),
+              y: Math.round(Math.max(box.top, safe.top) + h / 2),
+            };
           }
         }
-        return null;
+        return best ? { x: best.x, y: best.y } : null;
       })()`);
       if (touchSpot) {
         await cdp.send('Input.dispatchTouchEvent', {
@@ -566,6 +580,8 @@ async function main() {
         await cdp.send('Input.dispatchKeyEvent', { type: 'keyDown', key: 'Escape', code: 'Escape', windowsVirtualKeyCode: 27 });
         await cdp.send('Input.dispatchKeyEvent', { type: 'keyUp', key: 'Escape', code: 'Escape', windowsVirtualKeyCode: 27 });
         await sleep(200);
+      } else {
+        report.failures.push('390 长按测试找不到可点的卡片');
       }
     }
 
@@ -609,6 +625,7 @@ async function main() {
     if (report.mobile && !report.mobile.canPanHorizontally) report.failures.push('390 下不能横向移动（碰到边界）');
     if (report.mobile && report.mobile.longPressSummary === false) report.failures.push('触屏长按没有出概要');
     if (report.mobile && report.mobile.longPressOpenedLightbox) report.failures.push('触屏长按误开了灯箱');
+    if (report.mobile && report.mobile.cover < 0.8) report.failures.push('390 出现空白带');
     if (report.interactions) {
       if (!report.interactions.drag?.panned) report.failures.push('拖拽没有平移画布');
       if (report.interactions.drag?.openedLightbox) report.failures.push('拖拽被误判成单击（打开了灯箱）');

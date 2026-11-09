@@ -153,15 +153,15 @@ export function WallView({
   layoutRef.current = layout;
 
   // 无限空间（§1.1 / 规则 11）：世界没有尺寸，空间切成格子按需生成。
-  // 格子边长跟着视口走（一屏 4–6 格）；窄屏必须收窄到可见宽度，
-  // 否则 1080 的桌面地板会让 390 屏上每张卡都大得只剩半张。
+  // 格子边长约 0.72 个视口 —— 一屏能看到 2–3 个格子，视野内维持 30–45 张（v3 基线 39–49）。
+  // 早先取 1.15 倍视口，一屏只有一个格子，整面墙像被放大了一档。
   const cellWidth = narrow
     ? Math.max(260, viewWidth)
-    : Math.max(1080, Math.round(viewWidth * 1.15));
+    : Math.max(760, Math.round(viewWidth * 0.72));
   // 窄屏格子按"两列三行"反推：行高 ≈ 可见宽/2/1.33，三层加起来约等于可见宽 × 1.15。
   const cellHeight = narrow
     ? Math.max(320, Math.round(viewWidth * 1.15))
-    : Math.max(720, Math.round(size.h * 1.15));
+    : Math.max(520, Math.round(size.h * 0.72));
   const cellSpec = useMemo<CellSpec>(
     () => ({ items, seed: worldSeed, cellWidth, cellHeight, gap: GAP }),
     [items, worldSeed, cellWidth, cellHeight],

@@ -182,59 +182,184 @@ export function mulberry32(seed: number): () => number {
 }
 
 /** 排一个格子。b/c 可以是负数（往左上走），坐标直接由格号算出来。 */
+/** 横向填满一条：连取若干张，最后按比例缩放到正好铺满 box.w（cover 裁切，不显变形）。 */
+function pickStrip(
+  items: readonly WallItem[],
+  rng: () => number,
+  box: { x: number; y: number; w: number; h: number },
+  gap: number,
+  cell: { b: number; c: number },
+  used: Set<number>,
+  out: PlacedTile[],
+): void {
+  const total = items.length;
+  const start = Math.floor(rng() * total);
+  const picked: { index: number; ratio: number }[] = [];
+  let ratioSum = 0;
+  // 太窄的卡放不下标题（390 屏上一张竖图可能只有 60px 宽），宁可跳过换下一张；
+  // 一张都没挑到时再退回"不限宽度"的兜底，保证行不会空着。
+  const minWidth = Math.min(box.w * 0.45, 96);
+  for (let step = 0; step < total && picked.length < 8; step += 1) {
+    const index = (start + step) % total;
+    if (used.has(index)) continue;
+    const entry = items[index];
+    const ratio = entry.w > 0 && entry.h > 0 ? entry.w / entry.h : 1;
+    if (picked.length > 0 && ratio * box.h < minWidth) continue;
+    picked.push({ index, ratio });
+    ratioSum += ratio;
+    const natural = ratioSum * box.h;
+    const gaps = gap * (picked.length - 1);
+    if (natural + gaps >= box.w) break;
+    // 剩下的宽度要拉伸 35% 以上才填得满？再补一张更划算。
+    if ((box.w - gaps) / natural <= 1.35) break;
+  }
+  if (picked.length === 0) return;
+  const gaps = gap * (picked.length - 1);
+  const scale = (box.w - gaps) / Math.max(1, ratioSum * box.h);
+  let x = box.x;
+  for (const entry of picked) {
+    const width = entry.ratio * box.h * scale;
+    used.add(entry.index);
+    out.push({
+      item: items[entry.index],
+      index: entry.index,
+      rect: { x, y: box.y, w: width, h: box.h },
+      cell,
+    });
+    x += width + gap;
+  }
+}
+
+/** 竖向填满一列：宽度固定为 box.w，高度按自然比例分摊后缩放到正好铺满 box.h。 */
+function pickColumn(
+  items: readonly WallItem[],
+  rng: () => number,
+  box: { x: number; y: number; w: number; h: number },
+  gap: number,
+  cell: { b: number; c: number },
+  used: Set<number>,
+  out: PlacedTile[],
+): void {
+  const total = items.length;
+  // 张数跟着列的高宽比走：宽扁的列放 1–2 张，别切成一堆 570×110 的宽扁条。
+  const aspect = box.h / Math.max(1, box.w * 0.78);
+  const wanted = Math.max(1, Math.min(4, Math.round(aspect)));
+  const start = Math.floor(rng() * total);
+  const picked: { index: number; ratio: number }[] = [];
+  for (let step = 0; step < total && picked.length < wanted; step += 1) {
+    const index = (start + step) % total;
+    if (used.has(index)) continue;
+    const entry = items[index];
+    picked.push({ index, ratio: entry.w > 0 && entry.h > 0 ? entry.w / entry.h : 1 });
+  }
+  if (picked.length === 0) return;
+  const natural = picked.reduce((sum, entry) => sum + box.w / entry.ratio, 0);
+  const usable = box.h - gap * (picked.length - 1);
+  const scale = usable / Math.max(1, natural);
+  let y = box.y;
+  for (const entry of picked) {
+    const height = (box.w / entry.ratio) * scale;
+    used.add(entry.index);
+    out.push({
+      item: items[entry.index],
+      index: entry.index,
+      rect: { x: box.x, y, w: box.w, h: height },
+      cell,
+    });
+    y += height + gap;
+  }
+}
+
+/**
+ * 排一个格子。b/c 可以是负数（往左上走），坐标直接由格号算出来。
+ *
+ * 两种排法：
+ * - 常规：2–4 条横向满铺，行高由格子种子决定（0.72–1.42 倍权重）。
+ * - 跨行（约 42% 的格子、且格子够宽）：左侧一张大图占掉 52–66% 宽、52–66% 高，
+ *   右侧竖着排 2–3 张，下方再补 1–2 条横条 —— 这是"格位感"的来源：
+ *   每走几步就有一张主图把整片节奏打断，而不是永远一条条等宽横带。
+ */
 export function layoutCell(spec: CellSpec, b: number, c: number): PlacedTile[] {
   const total = spec.items.length;
   if (total === 0) return [];
   const rng = mulberry32(mix32(spec.seed, [b, c]));
-  const rows = 2 + Math.floor(rng() * 3);
   const innerWidth = Math.max(1, spec.cellWidth - spec.gap);
   const innerHeight = Math.max(1, spec.cellHeight - spec.gap);
   const rowGap = spec.gap;
-  // 行高权重在 0.72–1.42 之间浮动：原来只有 0.82–1.18，几行几乎等高，整屏是等宽横带；
-  // 拉到 0.55–1.75 又太狠（一行能占半格，画面只剩两三张巨图）。这里是折中：
-  // 一眼能看出大小行交错，但每行仍能放 3–4 张（2026-11-09）。
+  const originX = c * spec.cellWidth;
+  const originY = b * spec.cellHeight;
+  const cell = { b, c };
+  const used = new Set<number>();
+  const tiles: PlacedTile[] = [];
+
+  // 窄格子（390 屏）放不下"主图 + 侧栏"，直接走常规排法。
+  const wantFeature = innerWidth >= 620 && rng() < 0.3;
+  if (wantFeature) {
+    const heroWidth = Math.round(innerWidth * (0.38 + rng() * 0.12));
+    const heroHeight = Math.round(innerHeight * (0.42 + rng() * 0.13));
+    // 主图挑一张比例最接近这个框的，少裁一点。
+    const target = heroWidth / heroHeight;
+    let heroIndex = -1;
+    let bestDelta = Infinity;
+    for (let probe = 0; probe < 8; probe += 1) {
+      const index = Math.floor(rng() * total);
+      const entry = spec.items[index];
+      const ratio = entry.w > 0 && entry.h > 0 ? entry.w / entry.h : 1;
+      const delta = Math.abs(Math.log(ratio / target));
+      if (delta < bestDelta) {
+        bestDelta = delta;
+        heroIndex = index;
+      }
+    }
+    if (heroIndex >= 0) {
+      used.add(heroIndex);
+      tiles.push({
+        item: spec.items[heroIndex],
+        index: heroIndex,
+        rect: { x: originX, y: originY, w: heroWidth, h: heroHeight },
+        cell,
+      });
+      const rightX = originX + heroWidth + rowGap;
+      pickColumn(
+        spec.items,
+        rng,
+        { x: rightX, y: originY, w: innerWidth - heroWidth - rowGap, h: heroHeight },
+        rowGap,
+        cell,
+        used,
+        tiles,
+      );
+      const bottomY = originY + heroHeight + rowGap;
+      const bottomH = innerHeight - heroHeight - rowGap;
+      // 下方按 55/45 拆两条（不够高就只留一条）。
+      if (bottomH > rowGap * 3) {
+        const first = Math.round((bottomH - rowGap) * 0.55);
+        pickStrip(spec.items, rng, { x: originX, y: bottomY, w: innerWidth, h: first }, rowGap, cell, used, tiles);
+        pickStrip(
+          spec.items,
+          rng,
+          { x: originX, y: bottomY + first + rowGap, w: innerWidth, h: bottomH - first - rowGap },
+          rowGap,
+          cell,
+          used,
+          tiles,
+        );
+      } else {
+        pickStrip(spec.items, rng, { x: originX, y: bottomY, w: innerWidth, h: bottomH }, rowGap, cell, used, tiles);
+      }
+      return tiles;
+    }
+  }
+
+  // 常规：2–4 条横向满铺。
+  const rows = 2 + Math.floor(rng() * 3);
   const weights = Array.from({ length: rows }, () => 0.72 + rng() * 0.7);
   const weightSum = weights.reduce((sum, value) => sum + value, 0);
   const usable = innerHeight - rowGap * (rows - 1);
-
-  const tiles: PlacedTile[] = [];
-  let worldY = b * spec.cellHeight;
+  let worldY = originY;
   for (let row = 0; row < rows; row += 1) {
     const rowHeight = (usable * weights[row]) / weightSum;
-    const start = Math.floor(rng() * total);
-    // 选图规则：先按自然宽度累加，直到"填满这一行"或者"再补一张也不会让拉伸变小"。
-    // 最后统一按比例缩放到正好铺满——卡片是 object-fit: cover，横向拉伸只是多裁一点，
-    // 不会被看出变形；这样做行里不会留空白竖条（留白曾把整屏覆盖率拉到 0.6）。
-    const picked: { index: number; ratio: number }[] = [];
-    let ratioSum = 0;
-    let natural = 0;
-    for (let step = 0; step < total && picked.length < 8; step += 1) {
-      const index = (start + step) % total;
-      const entry = spec.items[index];
-      const ratio = entry.w > 0 && entry.h > 0 ? entry.w / entry.h : 1;
-      picked.push({ index, ratio });
-      ratioSum += ratio;
-      natural = ratioSum * rowHeight;
-      const gaps = rowGap * (picked.length - 1);
-      if (natural + gaps >= innerWidth) break;
-      // 剩下的宽度要拉伸 35% 以上才填得满？再补一张更划算。
-      if ((innerWidth - gaps) / natural <= 1.35) break;
-    }
-    if (picked.length === 0) continue;
-
-    const gaps = rowGap * (picked.length - 1);
-    const scale = (innerWidth - gaps) / Math.max(1, ratioSum * rowHeight);
-    let x = c * spec.cellWidth;
-    for (const entry of picked) {
-      const width = entry.ratio * rowHeight * scale;
-      tiles.push({
-        item: spec.items[entry.index],
-        index: entry.index,
-        rect: { x, y: worldY, w: width, h: rowHeight },
-        cell: { b, c },
-      });
-      x += width + rowGap;
-    }
+    pickStrip(spec.items, rng, { x: originX, y: worldY, w: innerWidth, h: rowHeight }, rowGap, cell, used, tiles);
     worldY += rowHeight + rowGap;
   }
   return tiles;
