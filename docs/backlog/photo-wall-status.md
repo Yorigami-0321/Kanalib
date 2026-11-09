@@ -142,11 +142,12 @@ Lead 统筹，编码分给三个 teammate（写域隔离，只有 verifier 能 b
 
 ### 5.4 侧边栏常驻透明（v3 §6.G #1）——**2026-11-09 已实现**
 
-- Q6 改判 **C′**：默认 76% 纸 + `blur(10px) saturate(1.08)` 常驻，悬停升到 88% + `blur(14px)`；
-  边栏内 `--ink-soft` 提到 72%，图片透上来后次级文字仍可读。
-- `@supports not (backdrop-filter)` 降级为 88% 实色，不至于让图糊在字底下。
-- 特异性上 `.app .seam` / `.app .seam:hover` 都能压过 `styles.css` 的 `.seam` / `.seam:hover`（后者同为两个类，靠加载顺序反超）。
-- 未做：最亮底图下的对比度**量化**测量与 `backdrop-filter` 对拖拽帧率的影响（10px 半径是上限，掉帧先降半径）。
+- Q6 改判 **C′**：默认 76% 纸 + `blur(10px) saturate(1.08)` 常驻；边栏内 `--ink-soft` 提到 72%，图片透上来后次级文字仍可读。
+- **悬停不改透明度**（2026-11-09 用户报"鼠标扫过会暗一下"）：纸面是深色，76% → 88% 就是整条变暗。
+  现在 hover 只把模糊从 10px 提到 12px，底色恒为 76%；真正的交互反馈交给页签自己的底/描边。
+  `wall_shots.mjs` 新增断言：`rest` 与 `hover` 的 `backgroundColor` 必须完全一致。
+- `@supports not (backdrop-filter)` 降级为 88% 实色（没有模糊时纸面要更实才压得住图），两态同值，同样不会闪。
+- 未做：最亮底图下的对比度**量化**测量与 `backdrop-filter` 对拖拽帧率的影响。
 
 ## 6. 后续工作
 

@@ -99,10 +99,13 @@
   --ink-soft: color-mix(in srgb, #f7f4ee 72%, transparent);
 }
 
+/* 悬停**不改**透明度：76% 的深色纸叠在亮图上，提到 88% 等于整条变暗，
+   鼠标扫过就像闪一下（2026-11-09 用户报）。这里只把模糊加深一档，
+   真正的 hover 反馈交给页签自己的底/描边。 */
 .app .seam:hover {
-  background: color-mix(in srgb, var(--surface) 88%, transparent);
-  backdrop-filter: blur(14px) saturate(1.1);
-  -webkit-backdrop-filter: blur(14px) saturate(1.1);
+  background: color-mix(in srgb, var(--surface) 76%, transparent);
+  backdrop-filter: blur(12px) saturate(1.1);
+  -webkit-backdrop-filter: blur(12px) saturate(1.1);
 }
 
 /* 不支持 backdrop-filter 时退回 88% 实色，别让图片直接糊在文字底下。 */

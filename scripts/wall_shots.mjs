@@ -428,8 +428,30 @@ async function main() {
       await sleep(500);
     }
 
-    report.interactions = interactions;
+    // 6.5 侧栏悬停不得改变底色：曾经 hover 把纸面 76% 提到 88%，亮图底下会"暗一下"。
+    await cdp.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: 980, y: 500 });
+    await sleep(450);
+    const seamRest = await evaluate(
+      `getComputedStyle(document.querySelector('.seam')).backgroundColor`,
+    );
+    await cdp.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: 60, y: 420 });
+    await sleep(450);
+    const seamHoverStyle = await evaluate(`(() => {
+      const node = document.querySelector('.seam');
+      if (!node) return { bg: '', blur: '' };
+      const style = getComputedStyle(node);
+      return { bg: style.backgroundColor, blur: style.backdropFilter || style.webkitBackdropFilter };
+    })()`);
+    await cdp.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: 980, y: 500 });
+    await sleep(200);
+    interactions.seamHover = {
+      rest: seamRest,
+      hover: seamHoverStyle.bg,
+      blur: seamHoverStyle.blur,
+      stable: seamRest === seamHoverStyle.bg,
+    };
 
+    report.interactions = interactions;
     // 7) 规则 11：任意方向连续拖拽 20000px 都不"到头"，且视野里没有空白带
     const coverage = () =>
       evaluate(`(() => {
@@ -568,6 +590,9 @@ async function main() {
       if (report.interactions.hover && report.interactions.hover.ok) {
         if (report.interactions.hover.filter === 'none') report.failures.push('hover 没有滤镜反馈');
         if (report.interactions.hover.detailOpacity < 0.9) report.failures.push('hover 时分辨率行没出现');
+      }
+      if (report.interactions.seamHover && !report.interactions.seamHover.stable) {
+        report.failures.push('侧栏悬停改变了底色（扫过会"暗一下"）');
       }
     }
 
