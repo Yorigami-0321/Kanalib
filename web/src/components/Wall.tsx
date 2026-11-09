@@ -1,27 +1,37 @@
-import { MasonryInfiniteGrid } from '@egjs/react-infinitegrid';
-import { useCallback, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
+import { formatCount } from '../lib/format';
 import type { TierPaths, WallItem } from '../source/types';
 import type { WallPhase } from '../state/useWall';
-import { WallCard } from './WallCard';
+import { spanOf, WallCard } from './WallCard';
 
-export const WALL_GAP = 8;
-/** 目标小图宽度：决定列数（窄屏保底 2 列）。 */
-const TARGET_TILE = 320;
-const MIN_COLUMNS = 2;
-const MAX_COLUMNS = 6;
-/** 每 N 条一组，给 infinitegrid 的回收（useRecycle）留分组边界。 */
-const GROUP_SIZE = 24;
+/** 一列的目标宽度：墙的实际密度由它决定，窗口越宽列越多。 */
+const TARGET_CELL = 76;
+const MIN_COLUMNS = 8;
+const MAX_COLUMNS = 26;
+/** 墙层左右留白 + 贴片间隙，与 styles.css 的 .wall / --gap 对齐。 */
+const WALL_PAD = 10;
+const WALL_GAP = 6;
+
+interface Metrics {
+  columns: number;
+  cell: number;
+}
+
+function measure(hostWidth: number): Metrics {
+  const usable = Math.max(hostWidth - WALL_PAD * 2, 120);
+  const columns = Math.min(MAX_COLUMNS, Math.max(MIN_COLUMNS, Math.round(usable / TARGET_CELL)));
+  const cell = Math.floor((usable - WALL_GAP * (columns - 1)) / columns);
+  return { columns, cell: Math.max(24, cell) };
+}
 
 export interface WallViewProps {
   items: WallItem[];
   paths: TierPaths;
   phase: WallPhase;
   hasMore: boolean;
-  /** 筛选（或列数档位）变化时整体重排。 */
   resetKey: string;
   loadedCount: number;
   totalCount: number;
-  /** 是否处于筛选子集（文案提示“只在已加载范围内”）。 */
   filtered: boolean;
   onLoadMore: () => void;
   onOpen: (item: WallItem, index: number) => void;
@@ -29,18 +39,9 @@ export interface WallViewProps {
   onRetry: () => void;
 }
 
-interface AppendEventLike {
-  reachEnd: () => void;
-}
-
-interface Metrics {
-  columns: number;
-  columnWidth: number;
-}
-
 /**
- * 混排无限墙：MasonryInfiniteGrid + 尺寸档（1x1/1x2/2x1/2x2）。
- * 列数按容器宽度算，item 宽度显式给出（与 columnSize 对齐），高度靠 aspect-ratio 撑出。
+ * 密集拼贴墙：固定列数的 CSS grid + 按宽高比给每片算跨度，
+ * 渲染量交给浏览器，追加由墙尾哨兵的 IntersectionObserver 触发。
  */
 export function WallView({
   items,
@@ -56,130 +57,117 @@ export function WallView({
   onDetail,
   onRetry,
 }: WallViewProps) {
-  const hostRef = useRef<HTMLDivElement>(null);
-  const [metrics, setMetrics] = useState<Metrics | null>(null);
+  const hostRef = useRef<HTMLDivElement | null>(null);
+  const sentinelRef = useRef<HTMLDivElement | null>(null);
+  const [metrics, setMetrics] = useState<Metrics>({ columns: 10, cell: 120 });
 
-  useLayoutEffect(() => {
+  useEffect(() => {
     const host = hostRef.current;
     if (!host) return;
-    const measure = () => {
-      const width = host.clientWidth;
-      if (width <= 0) return;
-      const columns = Math.min(
-        MAX_COLUMNS,
-        Math.max(MIN_COLUMNS, Math.round(width / TARGET_TILE)),
-      );
-      const columnWidth = Math.max(1, Math.floor((width - WALL_GAP * (columns - 1)) / columns));
-      setMetrics((prev) =>
-        prev && prev.columns === columns && prev.columnWidth === columnWidth
-          ? prev
-          : { columns, columnWidth },
-      );
+    const apply = (width: number) => {
+      setMetrics((current) => {
+        const next = measure(width);
+        return current.columns === next.columns && current.cell === next.cell ? current : next;
+      });
     };
-    measure();
-    const observer = new ResizeObserver(measure);
+    apply(host.clientWidth);
+    if (typeof ResizeObserver === 'undefined') {
+      const onResize = () => apply(host.clientWidth);
+      window.addEventListener('resize', onResize);
+      return () => window.removeEventListener('resize', onResize);
+    }
+    const observer = new ResizeObserver((entries) => {
+      const entry = entries[0];
+      if (entry) apply(entry.contentRect.width);
+    });
     observer.observe(host);
     return () => observer.disconnect();
   }, []);
 
-  // 只在这里响应 append 请求（不自己监听滚动，Lead 口径）。
-  const handleRequestAppend = useCallback(
-    (event: AppendEventLike) => {
-      if (!hasMore) {
-        event.reachEnd();
-        return;
-      }
-      onLoadMore();
-    },
-    [hasMore, onLoadMore],
+  // 墙尾哨兵：进入视口前 800px 就预取下一片，滚到底时不会等。
+  useEffect(() => {
+    const sentinel = sentinelRef.current;
+    if (!sentinel || !hasMore) return;
+    if (typeof IntersectionObserver === 'undefined') return;
+    const observer = new IntersectionObserver(
+      (entries) => {
+        if (entries.some((entry) => entry.isIntersecting)) onLoadMore();
+      },
+      { rootMargin: '800px 0px' },
+    );
+    observer.observe(sentinel);
+    return () => observer.disconnect();
+  }, [hasMore, onLoadMore, resetKey, items.length]);
+
+  const spans = useMemo(() => items.map((item) => spanOf(item)), [items]);
+
+  const gridStyle = useMemo(
+    () => ({
+      gridTemplateColumns: 'repeat(' + metrics.columns + ', minmax(0, 1fr))',
+      gridAutoRows: metrics.cell + 'px',
+    }),
+    [metrics],
   );
 
-  const gridKey = metrics ? `${resetKey}|${metrics.columns}` : resetKey;
-  const cards = useMemo(
-    () =>
-      items.map((item, index) => (
-        <WallCard
-          key={item.id}
-          item={item}
-          index={index}
-          paths={paths}
-          columns={metrics ? metrics.columns : MIN_COLUMNS}
-          columnWidth={metrics ? metrics.columnWidth : TARGET_TILE}
-          gap={WALL_GAP}
-          groupKey={Math.floor(index / GROUP_SIZE)}
-          onOpen={onOpen}
-          onDetail={onDetail}
-        />
-      )),
-    [items, paths, metrics, onOpen, onDetail],
-  );
-
-  const empty = items.length === 0;
+  const isEmpty = items.length === 0;
+  const showEmpty = isEmpty && phase !== 'boot' && phase !== 'loading';
 
   return (
-    <div className="wall-view" ref={hostRef}>
-      {metrics && !empty ? (
-        <MasonryInfiniteGrid
-          key={gridKey}
-          className="wall-grid"
-          gap={WALL_GAP}
-          column={metrics.columns}
-          columnSize={metrics.columnWidth}
-          align="start"
-          isReachEnd={!hasMore}
-          useRecycle
-          threshold={800}
-          onRequestAppend={handleRequestAppend}
-        >
-          {cards}
-        </MasonryInfiniteGrid>
-      ) : null}
-
-      {empty ? (
-        <div className="wall-empty">
-          {phase === 'boot' || phase === 'loading' ? (
-            <p>正在加载…</p>
-          ) : phase === 'error' ? (
+    <div className="wall" ref={hostRef}>
+      {showEmpty ? (
+        <div className="wall__note">
+          {phase === 'error' ? (
             <>
-              <p className="wall-empty__title">数据加载失败</p>
-              <p className="wall-empty__hint">检查数据目录是否包含发布器导出的 index.json 与分片。</p>
-              <button type="button" className="button" onClick={onRetry}>
+              <strong>数据源没加载成功</strong>
+              检查一下 web/public/data 是否已导出、服务是否在站点根下运行。
+              <button type="button" onClick={onRetry}>
                 重试
               </button>
             </>
           ) : filtered ? (
             <>
-              <p className="wall-empty__title">当前筛选没有命中</p>
-              <p className="wall-empty__hint">筛选只在已加载的 {loadedCount} 张里生效，可以放宽条件或继续往下滚动加载。</p>
+              <strong>没有符合条件的图片</strong>
+              换个标签或清掉筛选再看。
             </>
           ) : (
             <>
-              <p className="wall-empty__title">还没有图片</p>
-              <p className="wall-empty__hint">发布器导出 0 条资产，或数据目录为空。</p>
+              <strong>还没有图片</strong>
+              先在工作台里跑一次发布导出。
             </>
           )}
         </div>
-      ) : null}
+      ) : (
+        <div className="wall__grid" style={gridStyle}>
+          {items.map((item, index) => (
+            <WallCard
+              key={item.id}
+              item={item}
+              index={index}
+              paths={paths}
+              span={spans[index]}
+              onOpen={onOpen}
+              onDetail={onDetail}
+            />
+          ))}
+        </div>
+      )}
 
-      <div className="wall-footer">
-        {phase === 'error' ? (
-          <span className="wall-footer__error">
-            加载出错：
-            <button type="button" className="link-button" onClick={onRetry}>
-              重试
-            </button>
-          </span>
-        ) : hasMore ? (
-          <span className="wall-footer__hint">
-            {phase === 'loading' ? '加载中…' : '继续向下滚动加载更多'}
-          </span>
-        ) : (
-          <span className="wall-footer__end">
-            {filtered
-              ? `筛选命中 ${items.length} 张（已加载 ${loadedCount} / 共 ${totalCount}）`
-              : `已加载全部 ${items.length} 张`}
-          </span>
-        )}
+      {hasMore ? <div className="wall__sentinel" ref={sentinelRef} /> : null}
+
+      <div className="wall__status">
+        <span>
+          已加载 <b>{formatCount(loadedCount)}</b> / {formatCount(totalCount)}
+          {filtered ? <>（筛后 <b>{formatCount(items.length)}</b>）</> : null}
+        </span>
+        <span>
+          {hasMore
+            ? phase === 'loading'
+              ? '正在加载…'
+              : '继续向下滚动'
+            : phase === 'error'
+              ? '加载中断'
+              : '到底了'}
+        </span>
       </div>
     </div>
   );

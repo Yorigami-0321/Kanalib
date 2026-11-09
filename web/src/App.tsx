@@ -1,140 +1,196 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { ReactZoomPanPinchRef } from 'react-zoom-pan-pinch';
 import { Detail } from './components/Detail';
-import { closeLightbox, isLightboxOpen, openLightbox, primeLightboxTiers } from './components/Lightbox';
-import { Toolbar } from './components/Toolbar';
+import {
+  closeLightbox,
+  isLightboxOpen,
+  openLightbox,
+  primeLightboxTiers,
+} from './components/Lightbox';
+import { Sidebar, type SortMode } from './components/Sidebar';
 import { WallView } from './components/Wall';
 import { ZoomStage } from './components/ZoomStage';
-import { detailHref, navigate, useRoute, wallHref, type Route } from './lib/router';
-import { DATA_ROOT, StaticSource } from './source';
-import type { WallItem } from './source/types';
-import {
-  EMPTY_FILTERS,
-  filterItems,
-  filterSignature,
-  isFilterActive,
-  type FilterState,
-} from './state/filters';
+import { detailHref, navigate, useRoute, wallHref } from './lib/router';
+import { DATA_ROOT } from './source/config';
+import { StaticSource } from './source/StaticSource';
+import { EMPTY_FILTERS, filterItems, filterSignature, isFilterActive, type FilterState } from './state/filters';
 import { useWall } from './state/useWall';
+import type { TagFacet, WallItem } from './source/types';
+
+const EMPTY_TAGS: TagFacet[] = [];
 
 function isTypingTarget(target: EventTarget | null): boolean {
   if (!(target instanceof HTMLElement)) return false;
-  const tag = target.tagName;
-  return tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || target.isContentEditable;
+  const tag = target.tagName.toLowerCase();
+  return tag === 'input' || tag === 'textarea' || tag === 'select' || target.isContentEditable;
 }
 
+function sortItems(items: readonly WallItem[], mode: SortMode): WallItem[] {
+  const copy = [...items];
+  if (mode === 'name') {
+    copy.sort((left, right) => left.n.localeCompare(right.n, 'zh-Hans-CN'));
+  } else if (mode === 'stars') {
+    copy.sort((left, right) => right.st - left.st || right.mtime - left.mtime);
+  } else {
+    copy.sort((left, right) => right.mtime - left.mtime);
+  }
+  return copy;
+}
+
+/**
+ * 应用外壳：左侧边栏 + 整屏墙面（或详情页）。
+ * 数据只从 StaticSource 来；路由只有墙与详情两种形状。
+ */
 export function App() {
   const [source] = useState(() => new StaticSource(DATA_ROOT));
   const wall = useWall(source);
   const route = useRoute();
 
   const [filters, setFilters] = useState<FilterState>(EMPTY_FILTERS);
+  const [sort, setSort] = useState<SortMode>('time');
+  const [railOpen, setRailOpen] = useState(false);
   const [zoomMode, setZoomMode] = useState(false);
   const [scale, setScale] = useState(1);
-  const [resolving, setResolving] = useState(false);
+  const [detailItem, setDetailItem] = useState<WallItem | null>(null);
+  const [detailMissing, setDetailMissing] = useState(false);
 
   const zoomApi = useRef<ReactZoomPanPinchRef | null>(null);
   const scrollMemo = useRef(0);
-  const previousRoute = useRef<Route>(route);
+  const previousRoute = useRef(route);
   const probedId = useRef<string | null>(null);
+  const wallRef = useRef(wall);
+  wallRef.current = wall;
 
-  const shown = useMemo(() => filterItems(wall.items, filters), [wall.items, filters]);
-  const signature = filterSignature(filters);
-  const filterActive = isFilterActive(filters);
-  const indexPath = useMemo(() => {
-    try {
-      return new URL('index.json', new URL(DATA_ROOT, document.baseURI)).href;
-    } catch {
-      return `${DATA_ROOT}index.json`;
+  const detailId = route.view === 'detail' ? route.id : null;
+
+  const shown = useMemo(
+    () => sortItems(filterItems(wall.items, filters), sort),
+    [wall.items, filters, sort],
+  );
+  const signature = filterSignature(filters) + '|' + sort;
+  const filtered = isFilterActive(filters);
+  const total = wall.index?.count ?? wall.items.length;
+  const facetTags = wall.index?.facets?.tags ?? EMPTY_TAGS;
+
+  const groups = useMemo(() => {
+    const fromIndex = wall.index?.facets?.groups;
+    if (fromIndex && fromIndex.length > 0) return fromIndex;
+    const seen = new Set<string>();
+    for (const item of wall.items) {
+      if (item.group) seen.add(item.group);
     }
-  }, []);
+    return [...seen].sort();
+  }, [wall.index, wall.items]);
 
-  // 路由里的 ?tag= 变成筛选 chip（详情页点标签回流到墙）。
+  const indexPath = useMemo(
+    () => new URL('index.json', new URL(DATA_ROOT, document.baseURI)).href,
+    [],
+  );
+
+  // 深链详情：先查已加载条目，再让数据源往后探分片找。
   useEffect(() => {
-    if (route.view !== 'wall') return;
+    setDetailMissing(false);
+    if (!detailId) {
+      setDetailItem(null);
+      return;
+    }
+    const local = wallRef.current.items.find((item) => item.id === detailId);
+    if (local) {
+      setDetailItem(local);
+      return;
+    }
+    setDetailItem(null);
+    let alive = true;
+    void wallRef.current.findItem(detailId).then((found) => {
+      if (!alive) return;
+      if (found) setDetailItem(found);
+      else setDetailMissing(true);
+    });
+    return () => {
+      alive = false;
+    };
+  }, [detailId, wall.items]);
+
+  // 路由带标签参数时并进当前筛选。
+  useEffect(() => {
+    if (route.view !== 'wall' || !route.tag) return;
     const tag = route.tag;
-    if (!tag) return;
-    setFilters((prev) =>
-      prev.tags.includes(tag) ? prev : { ...prev, tags: [...prev.tags, tag] },
+    setFilters((current) =>
+      current.tags.includes(tag) ? current : { ...current, tags: [...current.tags, tag] },
     );
   }, [route]);
 
-  // 墙 ⇄ 详情切换时记住/恢复滚动位置。
+  // 墙与详情之间切换：记住墙的滚动位置，切回来时恢复。
   useEffect(() => {
-    const previous = previousRoute.current;
-    if (previous.view === 'wall' && route.view === 'detail') {
+    const wasWall = previousRoute.current.view === 'wall';
+    const isWall = route.view === 'wall';
+    if (wasWall && !isWall) {
       scrollMemo.current = window.scrollY;
-      zoomApi.current?.resetTransform(0);
-      setZoomMode(false);
-    } else if (previous.view === 'detail' && route.view === 'wall') {
-      const target = scrollMemo.current;
-      const restore = () => window.scrollTo({ top: target });
-      requestAnimationFrame(restore);
-      const timers = [window.setTimeout(restore, 160), window.setTimeout(restore, 480)];
-      previousRoute.current = route;
-      return () => timers.forEach((timer) => window.clearTimeout(timer));
+      window.scrollTo(0, 0);
+    } else if (!wasWall && isWall) {
+      const top = scrollMemo.current;
+      window.requestAnimationFrame(() => window.scrollTo(0, top));
     }
     previousRoute.current = route;
-    return undefined;
-  }, [route]);
-
-  // 进入缩放：先把变换复位到 1:1，避免上一次遗留的缩放被带进来。
-  const enterZoomMode = useCallback(() => {
-    setZoomMode(true);
-    window.requestAnimationFrame(() => zoomApi.current?.resetTransform(0));
-  }, []);
-
-  // 退出缩放：复位内部状态 + 关模式（视觉复位由 .app:not(.app--zooming) 的 CSS 兜底）。
-  const exitZoomMode = useCallback(() => {
     zoomApi.current?.resetTransform(0);
     setZoomMode(false);
-  }, []);
+  }, [route]);
 
-  // W 切换缩放模式；Esc 先退缩放模式（lightbox 打开时交给 PhotoSwipe 自己处理）。
-  useEffect(() => {
-    const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') {
-        if (isLightboxOpen()) return;
-        if (zoomMode) exitZoomMode();
-        return;
-      }
-      if ((event.key === 'w' || event.key === 'W') && !event.metaKey && !event.ctrlKey && !isTypingTarget(event.target)) {
-        if (zoomMode) exitZoomMode();
-        else enterZoomMode();
-      }
-    };
-    window.addEventListener('keydown', onKeyDown);
-    return () => window.removeEventListener('keydown', onKeyDown);
-  }, [zoomMode, exitZoomMode]);
-
-  // 缩放模式锁住页面滚动，避免与无限加载抢滚轮。
   useEffect(() => {
     document.body.classList.toggle('is-zoom-locked', zoomMode);
     return () => document.body.classList.remove('is-zoom-locked');
   }, [zoomMode]);
 
-  // 首屏有数据后探一次 t1024 档是否产出（决定 lightbox 的首选档位）。
   useEffect(() => {
-    primeLightboxTiers(wall.paths, wall.items[0]?.id);
-  }, [wall.paths, wall.items]);
+    const first = wall.items[0];
+    if (!first || probedId.current === first.id) return;
+    probedId.current = first.id;
+    primeLightboxTiers(wall.paths, first.id);
+  }, [wall.items, wall.paths]);
 
-  // 详情页深链：没加载到就顺序补拉分片找一次。
-  const detailId = route.view === 'detail' ? route.id : null;
-  useEffect(() => {
-    if (!detailId) {
-      probedId.current = null;
+  const setZoom = useCallback((next: boolean) => {
+    if (!next) zoomApi.current?.resetTransform(0);
+    setZoomMode(next);
+  }, []);
+
+  const toggleZoom = useCallback(() => {
+    if (zoomMode) {
+      setZoom(false);
       return;
     }
-    if (wall.items.some((candidate) => candidate.id === detailId)) return;
-    if (probedId.current === detailId) return;
-    probedId.current = detailId;
-    setResolving(true);
-    void wall.findItem(detailId).finally(() => setResolving(false));
-  }, [detailId, wall.items, wall.findItem]);
+    window.requestAnimationFrame(() => zoomApi.current?.resetTransform(0));
+    setZoom(true);
+  }, [zoomMode, setZoom]);
 
-  const handleOpenLightbox = useCallback(
-    (item: WallItem, index: number) => {
-      void item;
+  const fitScreen = useCallback(() => {
+    zoomApi.current?.resetTransform(0);
+    setZoomMode(false);
+  }, []);
+
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (isTypingTarget(event.target)) return;
+      if (event.metaKey || event.ctrlKey || event.altKey) return;
+      if (event.key === 'Escape') {
+        if (isLightboxOpen()) return;
+        if (zoomMode) {
+          event.preventDefault();
+          setZoom(false);
+        }
+        return;
+      }
+      if (event.key.toLowerCase() === 'w') {
+        if (detailId) return;
+        event.preventDefault();
+        toggleZoom();
+      }
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [detailId, setZoom, toggleZoom, zoomMode]);
+
+  const handleOpen = useCallback(
+    (_item: WallItem, index: number) => {
       openLightbox({
         items: shown,
         startIndex: index,
@@ -146,6 +202,7 @@ export function App() {
   );
 
   const handleDetail = useCallback((id: string) => {
+    closeLightbox();
     navigate(detailHref(id));
   }, []);
 
@@ -158,68 +215,60 @@ export function App() {
     closeLightbox();
     setFilters(EMPTY_FILTERS);
     navigate(wallHref());
-    window.scrollTo({ top: 0 });
+    window.scrollTo(0, 0);
   }, []);
 
   const handleTagClick = useCallback((tag: string) => {
-    setFilters((prev) =>
-      prev.tags.includes(tag) ? prev : { ...prev, tags: [...prev.tags, tag] },
-    );
-    navigate(wallHref(tag));
+    setFilters((current) => ({ ...current, tags: [tag] }));
+    navigate(wallHref());
   }, []);
 
-  const handleSearchMore = useCallback(() => {
-    if (!detailId) return;
-    setResolving(true);
-    void wall.loadMoreUntilFound(detailId).finally(() => setResolving(false));
-  }, [detailId, wall]);
-
-  const toggleZoom = useCallback(() => {
-    if (zoomMode) exitZoomMode();
-    else enterZoomMode();
-  }, [zoomMode, exitZoomMode, enterZoomMode]);
-
-  const fitScreen = useCallback(() => {
-    exitZoomMode();
-  }, [exitZoomMode]);
-
-  const facets = wall.index?.facets;
+  const handleLoadMore = useCallback(() => {
+    void wall.loadMore();
+  }, [wall]);
 
   return (
-    <div className={`app${zoomMode ? ' app--zooming' : ''}`}>
-      <Toolbar
+    <div
+      className={'app' + (railOpen ? ' app--rail-open' : '') + (zoomMode ? ' app--zooming' : '')}
+    >
+      <Sidebar
         filters={filters}
-        onChange={setFilters}
-        onReset={() => setFilters(EMPTY_FILTERS)}
-        tags={facets?.tags ?? []}
-        groups={facets?.groups ?? []}
+        onFilters={setFilters}
+        facetTags={facetTags}
+        groups={groups}
         loaded={wall.items.length}
-        total={wall.index?.count ?? 0}
+        total={total}
         shown={shown.length}
-        filterActive={filterActive}
+        filtered={filtered}
+        sort={sort}
+        onSort={setSort}
+        expanded={railOpen}
+        onExpandedChange={setRailOpen}
         zoomMode={zoomMode}
         scale={scale}
         onToggleZoom={toggleZoom}
         onFitScreen={fitScreen}
         onHome={handleHome}
-        showBack={route.view === 'detail'}
       />
 
-      {detailId ? (
-        <Detail
-          key={detailId}
-          id={detailId}
-          items={wall.items}
-          paths={wall.paths}
-          hasMore={wall.hasMore}
-          looking={resolving}
-          onBack={handleBack}
-          onOpenDetail={handleDetail}
-          onSearchMore={handleSearchMore}
-          onTagClick={handleTagClick}
-        />
-      ) : (
-        <main className="wall-main">
+      <main className="stage">
+        {detailId ? (
+          detailItem ? (
+            <Detail
+              key={detailItem.id}
+              item={detailItem}
+              items={wall.items}
+              paths={wall.paths}
+              onBack={handleBack}
+              onOpenDetail={handleDetail}
+              onTagClick={handleTagClick}
+            />
+          ) : (
+            <p className="stage__hint">
+              {detailMissing ? '找不到这张图片（可能不在已导出的范围里）' : '正在定位…'}
+            </p>
+          )
+        ) : (
           <ZoomStage zoomMode={zoomMode} apiRef={zoomApi} onScaleChange={setScale}>
             <WallView
               items={shown}
@@ -228,21 +277,34 @@ export function App() {
               hasMore={wall.hasMore}
               resetKey={signature}
               loadedCount={wall.items.length}
-              totalCount={wall.index?.count ?? 0}
-              filtered={filterActive}
-              onLoadMore={wall.loadMore}
-              onOpen={handleOpenLightbox}
+              totalCount={total}
+              filtered={filtered}
+              onLoadMore={handleLoadMore}
+              onOpen={handleOpen}
               onDetail={handleDetail}
               onRetry={wall.retry}
             />
           </ZoomStage>
-          {wall.error ? (
-            <p className="app__error" role="status">
-              数据源错误：{wall.error}（数据根 {indexPath}）
-            </p>
-          ) : null}
-        </main>
-      )}
+        )}
+
+        {wall.error ? (
+          <p className="app__error">
+            数据源错误：{wall.error}（数据根 {indexPath}）
+          </p>
+        ) : null}
+      </main>
+
+      {zoomMode ? (
+        <div className="zoom-pill">
+          <span>{Math.round(scale * 100)}%</span>
+          <button type="button" className="ghost" onClick={fitScreen}>
+            适应屏幕
+          </button>
+          <button type="button" className="ghost is-on" onClick={toggleZoom}>
+            退出
+          </button>
+        </div>
+      ) : null}
     </div>
   );
 }

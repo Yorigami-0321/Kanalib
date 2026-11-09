@@ -188,9 +188,10 @@ manifest 契约要点（F-080 首产物）：分片按排序键切（每片 ≤5
 |---|---|---|---|
 | 契约 | `docs/backlog/photo-wall-contract.md` | 已冻结 v1 | item 字段 id/w/h/n/rt/st/fav/tags/ph/mtime/orig；目录 index.json + m/*.json + t256/t512/o |
 | F-080 发布器 | `crates/kanalib-publish/`（新 workspace 成员，仅依赖 core） | 实现中 | 只读导出：manifest 分片 + 缩略图 + 可选原图 + publish-ledger 增量；`--dry-run` |
-| F-081 墙前端 | `web/`（Vite + React + TS，包名 kanalib-wall） | 实现中 | infinitegrid 混排 + PhotoSwipe + 详情路由 + 整墙缩放 + 顶部筛选 |
-| 验收脚手架 | `scripts/wall_manifest_check.py`、`scripts/wall_verify.ps1` | 实现中 | 契约不变量校验 + headless 截图/DOM 统计（未提交，verifier 收口中） |
-| 视觉改版 v2 | [photo-wall-design.md](photo-wall-design.md) | **待定稿（代码暂停）** | 2026-11-08 用户否掉顶部工具条：改左侧竖排边栏、去掉中栏、密集拼贴、详情页改展示型；等用户补参考图后定稿再动代码 |
+| F-081 墙前端 | `web/`（Vite + React + TS，包名 kanalib-wall） | 实现中（v2 视觉已落地） | v1：infinitegrid 混排 + PhotoSwipe + 详情路由 + 整墙缩放 + 顶部筛选；v2（2026-11-09）：左侧竖排边栏、12 列密集拼贴、展示型详情页，见 [photo-wall-design.md](photo-wall-design.md) |
+| 验收脚手架 | `scripts/wall_manifest_check.py`、`scripts/wall_verify.ps1` | 已提交 | 契约不变量校验 + headless 截图/DOM 统计；对全量产物 `wall_manifest_check.py` 退出 0 |
+| 视觉改版 v2 | [photo-wall-design.md](photo-wall-design.md) | **已实施（2026-11-09）** | 参照 [chthollyphile/folia-major](https://github.com/chthollyphile/folia-major)：珊瑚红 `#fd5c47` + 光晕/噪点底层、左侧 76/232px 边栏（8 个浮层面板）、保持 6px 缝隙的密集拼贴（按宽高比给跨度）、展示型详情页；顶部工具条已删除 |
 
 - 开发数据：发布器可导出到 `web/public/data/`（已 gitignore），`npm run dev` 直接以 `/data/` 读取；构建产物 `web/dist` 与 `data/` 一起上传。
+- v2 自测（2026-11-09，headless Edge + CDP，1440×900 与 390×844）：9899 条全量数据下墙 17 列、贴片跨度随宽高比、滚动到墙尾继续追加；边栏展开 232px 后墙重排为 12 列点位；标签筛选生效（筛后计数与边栏计数一致）；单击 PhotoSwipe、双击进详情、Esc 返回；`npx tsc --noEmit` 与 `npm run build` 均退出 0。截图见 `web/screenshots/v2-*.png`。
 - 未做（后续）：t1024/t2048 高质量档（W3）、rclone 推送与 F-083 部署、动态后端迁移（§4.1）。
