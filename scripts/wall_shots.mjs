@@ -442,6 +442,7 @@ async function main() {
       const style = getComputedStyle(node);
       return { bg: style.backgroundColor, blur: style.backdropFilter || style.webkitBackdropFilter };
     })()`);
+    report.shots.seamHover = await shot('v3f-seam-hover');
     await cdp.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: 980, y: 500 });
     await sleep(200);
     interactions.seamHover = {
@@ -450,7 +451,6 @@ async function main() {
       blur: seamHoverStyle.blur,
       stable: seamRest === seamHoverStyle.bg,
     };
-
     report.interactions = interactions;
     // 7) 规则 11：任意方向连续拖拽 20000px 都不"到头"，且视野里没有空白带
     const coverage = () =>
