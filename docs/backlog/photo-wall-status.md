@@ -1,20 +1,20 @@
-# 图片墙开发状态（2026-11-09 19:05）
+# 图片墙开发状态（2026-11-09 20:45）
 
-> 分支 `feature/cloud-photo-wall` · HEAD `8ea1fc4` · 上级计划 [cloud-photo-wall.md](cloud-photo-wall.md) · v3 标准 [photo-wall-v3.md](photo-wall-v3.md)
+> 分支 `feature/cloud-photo-wall` · 上级计划 [cloud-photo-wall.md](cloud-photo-wall.md) · v3 标准 [photo-wall-v3.md](photo-wall-v3.md)
 >
-> 一句话：**v3 全部硬规则（含 11 条中的"360° 全向无界"）已落地并 headless 实测通过；发布器的重复副本标签问题已修并重导数据（facets 54 → 135）；改动已按三块提交。**
+> 一句话：**v3 十一条硬规则全过；本轮补完剩余 P1/P2——缩放比例提示、有限世界边界回弹、筛选收窄不再重播波次、详情相似条窄屏密度、标签封面去重、灯箱→详情→返回的焦点归位；并首次量化了 30 秒拖拽的内存/帧率、侧栏真实像素对比度、backdrop-filter 的帧率代价。**
 
 ## 1. 当前状态速览
 
 | 项 | 值 |
 |---|---|
-| 分支 / HEAD | `feature/cloud-photo-wall` / `0341e2f` feat(wall): F-081 v2 按 Folia 风格改版 |
-| 提交情况 | **v3 一行未提交**：11 个修改文件 + 11 个新增文件（清单见 §9） |
+| 分支 / HEAD | `feature/cloud-photo-wall` |
+| 提交情况 | v3 及之前已提交（`f691dc4` 为止）；**本轮四个文件 + 一个新脚本未提交**（清单见 §9） |
 | 类型检查 | `cd web && npx tsc --noEmit` → exit 0 |
-| 生产构建 | exit 0：CSS 31.3KB / JS 285.0KB（gzip 91.3KB）/ photoswipe chunk 60.3KB（本机 build 命令见 §8，`npm run build` 会被沙箱批量删除拦截） |
+| 生产构建 | exit 0：CSS 32.8KB（gzip 7.4KB）/ JS 293.2KB（gzip 94.5KB）/ photoswipe chunk 60.3KB（本机 build 命令见 §8，`npm run build` 会被沙箱批量删除拦截） |
 | 数据 | `web/public/data/` 9899 条 / 2 分片（m/0000 5000 + m/0001 4899），gitignore |
+| 验证产物 | `web/screenshots/` 下 `report.json`（四页 + 交互）、`perf-report.json`（长时拖拽/对比度/帧率），两个脚本均可复跑 |
 | 改动前备份 | `.kanalib/backups/src-20261109-130014`（25 个文件），整体回退用 |
-| 验证产物 | `web/screenshots/v3f-*.png` + `report.json`（本轮，脚本可复跑） |
 
 ## 2. 本轮怎么做的
 
@@ -107,6 +107,25 @@ Lead 统筹，编码分给三个 teammate（写域隔离，只有 verifier 能 b
 | 10 | 390 单手可浏览 | seam 64 / 世界 326 / 无横向溢出 / 无右缘裁切 | 通过 |
 | 11 | L0 任意方向无边界（2026-11-09 追加，v3 §1.1） | 无限格子：`layoutCell`/`cellTilesInView` 按 (种子, 格号) 生成，`clampCamera` 在无限模式直接返回原相机；实测横走 42,899px、竖走 9,799px 仍满屏（覆盖率 87% / 86%），DOM 恒定 25–38 张，按 Home 回起点 | 通过 |
 
+### 4.4 本轮增量实测（20:00–20:45，P1/P2 收尾）
+
+工具：既有 `scripts/wall_shots.mjs`（回归）+ 新增 `scripts/wall_perf.mjs`（长时性能/对比度/帧率）+ 一次性 CDP 探针（390 详情、焦点链、排序波次）。
+
+| 项 | 实测 | 结论 |
+|---|---|---|
+| 缩放比例提示 | Ctrl+滚轮后出现 `126%`（`pointer-events:none`、`aria-hidden`）；1440 下矩形 1371–1422 / 780–808，与 hint(820–848)、home(856–884)、progress(899–900)、error 四者**相交面积全 0**；390 下同样全 0；停手 1.4s 后节点已卸载（`afterExists: false`） | 通过 |
+| 有限世界边界回弹 | `#/t/1girl` 甩惯性撞边：越界峰值 26.8px（≤28 上限），195ms 回到合法位（180–220 区间）；结束时 `world` 位移 = 合法值 `-1508.8`，无残留偏移。无限首页同样操作峰值 0（不触发） | 通过 |
+| `prefers-reduced-motion` | 同场景峰值 0 / 回弹 0ms（直接夹住） | 通过 |
+| 筛选收窄不重播波次 | 搜索收窄到 33 张：`animationDelay` 全部为 0（`max: 0`）；清空搜索扩宽到 44 张：延迟重新出现 `0/30/60/90/120/150` | 通过 |
+| 详情相似条 · 1440 | 6 张 58×58，`scrollWidth = clientWidth = 378`（不溢出） | 通过 |
+| 详情相似条 · 390 | 单张 61×61，`scrollWidth 395 / clientWidth 298`（溢出 97px）；4 张整 + 右露半张；可滚到 `scrollLeft = 97`，最后一张完整进框（`fullyIn: true`） | 通过 |
+| 详情页 390 横向溢出 | `documentElement.scrollWidth = body.scrollWidth = 390 = innerWidth` | 通过 |
+| 标签封面 | 135 张卡、段内相邻重复 39 次，其中来自"候选 ≥2 的标签"的是 **0** 次——39 次全部来自单图标签（135 个标签里 **107 个只有 1 张图**，封面唯一，属数据必然）。段内不同封面数 5（受样例库真实图片数限制） | 通过（策略有效，重复是数据决定的） |
+| 焦点归位 | 墙 → 点卡开灯箱 → 点「详情」→ Esc 返回：`document.activeElement` 是 `div.tile` 且 `dataset.id` 与触发卡一致（`restored: true`），未退化到 `.canvas` | 通过 |
+| 30 秒连续拖拽（blur 开） | JS 堆 7.59 → 8.76MB（**+15.5%**，GC×3 后保留堆）；DOM 卡片 45–81（上限 220）；帧 p50 6.9 / p95 7.1 / p99 13.9ms，掉帧 **0%**，4241 帧；长任务 0 条；主线程占用 53% | 通过 |
+| backdrop-filter 代价 | 开/关各 30s：p95 7.1 vs 7.1、p99 13.9 vs 13.9、掉帧 0% vs 0%、主线程 53% vs 51%。**主线程差值为 0，不等于 GPU 无代价**（headless 走 SwiftShader，结论只到"主线程不受影响"） | 通过（口径有限） |
+| 侧栏实际像素对比度 | 最差样本 `bright-1-y120`（底图亮度 0.6394）：次级文字「Kanalib」**5.68:1**（目标 ≥4.5），主文字最差 **12.16:1**（目标 ≥7）；理论下限（纯白图 + 名义色，不含抗锯齿）5.36:1 | 通过（另：计数文字 2.55:1，v3 未立口径，仅记录） |
+
 ## 5. 仍未解决
 
 ### 5.1 重复副本的标签曾丢失（2026-11-09 已修，数据已重导）
@@ -166,16 +185,19 @@ Lead 统筹，编码分给三个 teammate（写域隔离，只有 verifier 能 b
 6. 首屏"格位感"：**已完成跨行布局**——约 30% 的格子是"主图（38–50% 宽 / 42–55% 高）+ 右侧竖列 + 下方 1–2 条横条"，
    其余格子仍是 2–4 条横向满铺；行高权重 0.72–1.42。踩过的两个坑都写在代码注释里：
    格子开到 1.15 个视口会让整面墙像放大一档（现为 0.72）、行内允许过窄的图会出现 60px 细条（现最小 96px）。
-7. 详情页相似条密度（窄屏 48px 偏挤）、标签封面策略（真实数据下复查是否重复）。
-8. 性能红线：1 万条连续拖拽 30 秒的内存与帧率曲线（虚拟化已生效，未跑长测）。
+7. ~~详情页相似条密度~~ 已修（§4.4）：390 下单张 61px、4 整 + 右露半张、可滚；1440 保持 6 张 58px 不溢出。
+   ~~标签封面策略~~ 已改为段内贪心去重（§7 裁定）：候选 ≥2 的标签**零相邻重复**，39 次重复全部来自 107 个单图标签。
+8. ~~性能红线~~ 已量化（§4.4）：30s 拖拽堆 +15.5%、DOM 45–81、帧 p95 7.1ms、掉帧 0%、长任务 0。
 
 ### P2
 
-9. 缩放比例提示；惯性到边界的回弹（无限模式下没有边界，回弹只在有限世界有意义）。
+9. ~~缩放比例提示~~ 已实现（§4.4）：瞬态、不占焦点、与四个既有浮层零相交。
+   ~~惯性到边界回弹~~ 已实现（§4.4）：有限世界峰值 26.8px / 195ms 归位；无限模式与 reduced-motion 均不触发。
 10. ~~触屏长按概要~~ 已实现：按住卡片 500ms 出概要，松手不会误开灯箱（移动 / 第二指 / 抬手都会取消）。
-11. lightbox ↔ 详情切换后焦点显式归位到触发卡。
-12. 入场波次在"筛选收窄"时会让留下的卡重播一次动画——按当前口径视为"切换态"的合理表现，若嫌吵可只在路由变化时播。
-13. 边栏对比度量化（§5.4 未做项）与 `backdrop-filter` 帧率测量。
+11. ~~lightbox ↔ 详情切换后焦点显式归位到触发卡~~ 已实现并实测（§4.4）。
+12. ~~入场波次在"筛选收窄"时重播~~ 已修（§4.4）：收窄只淡入，扩宽/换页签仍播波次。
+13. ~~边栏对比度量化~~ 已实测（§4.4）：次级文字最差 5.68:1、主文字 12.16:1。
+    ~~`backdrop-filter` 帧率测量~~ 已测（§4.4）：主线程差值 0；**GPU 侧无结论**（headless 软件渲染）。
 
 ## 7. 验收口径（裁定记录，避免重开争论）
 
@@ -183,6 +205,9 @@ Lead 统筹，编码分给三个 teammate（写域隔离，只有 verifier 能 b
 - **规则 4 vs Q13**：§F 已拍板 "Q2–Q23 按建议值"，Q13 建议 A = 常驻底部大字标题 → **标题常驻合规**；需隐藏的是 `.tile__copy small`（分辨率·星级）。`.tile__chip` 角标常显（B1 交付物）。
 - **文字越框的判法**：不能凭截图判断——画布可平移，视口右缘会切卡。用 `Range.selectNodeContents().getClientRects()` 量文字矩形与卡片矩形的关系。
 - **窄屏世界宽**：≤760px 时世界宽 = 视口宽 − 64px 缝，行高 = min(268, 可见宽×0.55)；桌面保持世界 1843 / 行高 268。
+- **缩放比例提示 vs 规则 1**（2026-11-09 裁定）：规则 1 禁的是常驻计数/页码/脚手架文案。缩放提示是**瞬态交互反馈**，合规的前提是四条同时满足：不缩放时不显示（节点直接卸载）、`pointer-events:none`、`aria-hidden`、不进 Tab 序列。以后加同类提示（如"已回到起点"）沿用这四条。
+- **入场波次的"收窄"判据**（2026-11-09 裁定）：按 **item id 集合**判定，新列表 ⊆ 旧列表即视为收窄（只淡入，不播波次）。副作用是**排序变化也不播**（集合不变）——这是可接受的：排序后卡片位置全变，逐格波次反而制造无意义的动效；换页签/换标签/扩宽仍照常播。
+- **标签封面**（2026-11-09 裁定）：按 categoryKey 分段贪心，先剔除左邻封面、再取本段用量最少者，起点由 `hash(name)` 轮转决定，**全流程无随机数**（同数据刷新结果一致）。107/135 个标签只有 1 张图，封面重复属数据必然，不算 bug；真实库接入后可复跑同一判据复核。
 
 ## 8. 复现与工具
 
@@ -200,6 +225,9 @@ cd web; npx vite --port 4318 --strictPort
 # 四页 + 概要 + 5 条交互 + 390 窄屏 + 双指缩放，一次跑完
 node scripts/wall_shots.mjs --base http://127.0.0.1:4318/ --out web/screenshots
 
+# 30 秒长时拖拽（堆/DOM/帧/长任务）+ 侧栏真实像素对比度 + backdrop-filter 开关对比
+node scripts/wall_perf.mjs --base http://127.0.0.1:4318/ --out web/screenshots --seconds 30
+
 # 重新导出数据（修完 task-5 之后）
 cargo run -p kanalib-publish -- --db .kanalib/kanalib.db --out web/public/data
 
@@ -213,24 +241,26 @@ python scripts/wall_manifest_check.py web/public/data
 - `--screenshot` 的 exit code 不可信，判据是文件大小（空白页 5–10KB）。
 - 首页 world 高约 19 万 px，全页截图不可行，只能多点视口。
 - 本机 safe-delete 会把删除送回收站，临时产物用 `find <dir> -depth -delete` 直接删。
+- **local 请求必须绕过 env 代理**：本机 `HTTP_PROXY` 指向 127.0.0.1:58614，`curl http://127.0.0.1:4318/` 不加 `--noproxy '*'` 会拿到 502 假故障。
+- **headless 的帧率不代表真机**：没有 vsync，rAF 基准约 143–145Hz；`p95 ≤33.3ms` 是"两个 60Hz 帧周期"的卡顿红线，不是刷新率。backdrop-filter 由合成器执行，headless 走 SwiftShader，**GPU 侧成本量不出来**。
+- **性能测量必须在无人改代码时跑**：HMR 重载会让探针失效，`wall_perf.mjs` 用 session 令牌判废并自动重试 3 次，报告里出现"重试 N 次"说明当时有人在改文件，数据要重跑。
 
-## 9. 未提交文件清单
+## 9. 未提交文件清单（本轮）
 
 ```text
- M web/package.json           M web/src/App.tsx               M web/src/components/Detail.tsx
- M web/package-lock.json      M web/src/lib/router.ts         M web/src/components/Lightbox.ts
- M web/src/styles.css         M web/src/lib/format.ts         M web/src/components/Sidebar.tsx
- M web/src/components/Wall.tsx  M web/src/components/WallCard.tsx
- D web/src/components/ZoomStage.tsx          （整墙缩放退役）
-?? web/src/components/TagGallery.tsx        ?? web/src/lib/accent.ts   ?? web/src/lib/shuffle.ts
-?? web/src/components/{sidebar,detail,taggallery,lightbox}.css       ?? web/src/lib/world.ts
-?? scripts/wall_shots.mjs
-?? docs/backlog/photo-wall-v3.md            ?? docs/backlog/photo-wall-status.md（本文件）
+ M web/src/App.tsx               （标签封面段内去重 + 焦点归位）
+ M web/src/components/Wall.tsx   （缩放提示 / 边界回弹 / 波次收窄判据）
+ M web/src/components/detail.css （窄屏相似条密度）
+ M web/src/styles.css            （.canvas__zoom）
+?? scripts/wall_perf.mjs         （长时性能 + 对比度 + blur 代价测量）
+?? docs/backlog/photo-wall-status.md（本文件，状态回写）
 ```
 
-## 10. 提交切分（已按此执行）
+> v3 那批 11 改 + 11 增已在前四笔提交里落地，清单见 §10（历史记录，勿再按它判断当前工作区）。
 
-原计划拆成两个 feat（画布 / 缝与详情），实际合并成一个：`App.tsx`、`styles.css` 两个文件同时承载画布与导航两块的改动，按文件切会得到"引用了尚未提交组件"的编译不过中间态，硬拆只为了好看没有价值。
+## 10. 提交切分（历史记录）
+
+v3 及之前已按下列五笔提交完毕（`f691dc4` 为止）。原计划拆成两个 feat（画布 / 缝与详情），实际合并成一个：`App.tsx`、`styles.css` 两个文件同时承载画布与导航两块的改动，按文件切会得到"引用了尚未提交组件"的编译不过中间态，硬拆只为了好看没有价值。
 
 ```text
 feat(wall): v3 空间画布、黑白竖排缝与全屏详情
@@ -259,6 +289,7 @@ feat(wall): 首页改为 360° 全向无限画布 + 侧栏常驻半透明
 ## 11. 风险与备注
 
 - **不要在生产库上跑导出**：白名单/隐私边界见契约 §7。
-- 画布性能命门是虚拟化：视野内约 40–50 张卡流畅；1 万条长时拖拽的内存曲线仍未测。
+- 画布性能命门是虚拟化：30s 连续拖拽实测 DOM 45–81 张、堆 +15.5%、掉帧 0%（§4.4）。1 万条的数据规模已覆盖；十万条需重新评估（无限首页要求全量分片到齐才生成格子）。
 - 动态强调色对纯灰/纯白图会退化成中性灰，属预期行为。
+- **标签封面的"5 种封面"是样例库的限制**：9899 条里只有 5 条真实带标签的图，107/135 个标签是单图标签。真实库接入后要复跑一次相邻重复统计，不能把当前数字当基线。
 - `.kanalib/folia-ui-spec.md`（36KB）是 Folia 的实测规格，需要细节时继续照抄。
