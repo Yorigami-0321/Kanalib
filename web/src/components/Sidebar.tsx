@@ -1,16 +1,16 @@
-import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
+import { useEffect, useRef, useState, type ReactNode } from 'react';
 import { formatCount } from '../lib/format';
-import type { FilterState } from '../state/filters';
-import type { TagFacet } from '../source/types';
+import './sidebar.css';
+import { EMPTY_FILTERS, type FilterState } from '../state/filters';
+import type { WallItem } from '../source/types';
 
-/** 墙面排序：默认按发布时间倒序（发布器已按 Modified 降序分片）。 */
-export type SortMode = 'time' | 'name' | 'stars';
+export type SortMode = 'random' | 'time' | 'name' | 'stars';
 
-type PanelId = 'search' | 'tags' | 'favorites' | 'ratings' | 'groups' | 'sort' | 'zoom' | 'about';
+type PanelId = 'search' | 'favorites' | 'ratings' | 'groups' | 'sort' | 'about';
 
 const RATING_ORDER = ['G', 'S', 'Q', 'E'];
 
-function Icon({ children, size = 16 }: { children: ReactNode; size?: number }) {
+function Icon({ children, size = 15 }: { children: ReactNode; size?: number }) {
   return (
     <svg
       width={size}
@@ -18,7 +18,7 @@ function Icon({ children, size = 16 }: { children: ReactNode; size?: number }) {
       viewBox="0 0 24 24"
       fill="none"
       stroke="currentColor"
-      strokeWidth={1.6}
+      strokeWidth={1.5}
       strokeLinecap="round"
       strokeLinejoin="round"
       aria-hidden="true"
@@ -28,10 +28,10 @@ function Icon({ children, size = 16 }: { children: ReactNode; size?: number }) {
   );
 }
 
-const ICON_SEARCH = (
+const ICON_HOME = (
   <Icon>
-    <circle cx="11" cy="11" r="7.5" />
-    <path d="m21 21-4.6-4.6" />
+    <path d="M4 10.5 12 3.5l8 7" />
+    <path d="M6 9.8V20h5v-5.5h2V20h5V9.8" />
   </Icon>
 );
 
@@ -39,6 +39,13 @@ const ICON_TAG = (
   <Icon>
     <path d="M12.6 2.6A2 2 0 0 0 11.2 2H4a2 2 0 0 0-2 2v7.2a2 2 0 0 0 .6 1.4l8.7 8.7a2.4 2.4 0 0 0 3.4 0l6.6-6.6a2.4 2.4 0 0 0 0-3.4z" />
     <circle cx="7.5" cy="7.5" r=".6" fill="currentColor" />
+  </Icon>
+);
+
+const ICON_SEARCH = (
+  <Icon>
+    <circle cx="11" cy="11" r="7.5" />
+    <path d="m21 21-4.6-4.6" />
   </Icon>
 );
 
@@ -69,15 +76,6 @@ const ICON_SORT = (
   </Icon>
 );
 
-const ICON_ZOOM = (
-  <Icon>
-    <path d="M8 3H5a2 2 0 0 0-2 2v3" />
-    <path d="M21 8V5a2 2 0 0 0-2-2h-3" />
-    <path d="M3 16v3a2 2 0 0 0 2 2h3" />
-    <path d="M16 21h3a2 2 0 0 0 2-2v-3" />
-  </Icon>
-);
-
 const ICON_INFO = (
   <Icon>
     <circle cx="12" cy="12" r="9.5" />
@@ -86,32 +84,28 @@ const ICON_INFO = (
   </Icon>
 );
 
-const ICON_CHEVRON = (
-  <Icon>
-    <path d="m9 18 6-6-6-6" />
-  </Icon>
-);
-
-interface NavEntry {
+interface PanelEntry {
   id: PanelId;
   label: string;
   icon: ReactNode;
 }
 
-const NAV: NavEntry[] = [
+const PANELS: PanelEntry[] = [
   { id: 'search', label: '搜索', icon: ICON_SEARCH },
-  { id: 'tags', label: '标签', icon: ICON_TAG },
   { id: 'favorites', label: '收藏', icon: ICON_HEART },
   { id: 'ratings', label: '分级', icon: ICON_SHIELD },
   { id: 'groups', label: '分组', icon: ICON_FOLDER },
   { id: 'sort', label: '排序', icon: ICON_SORT },
-  { id: 'zoom', label: '缩放', icon: ICON_ZOOM },
 ];
 
+export type RailView = 'home' | 'tags' | 'tag';
+
 export interface SidebarProps {
+  view: RailView;
+  onHome: () => void;
+  onTags: () => void;
   filters: FilterState;
   onFilters: (next: FilterState) => void;
-  facetTags: TagFacet[];
   groups: string[];
   loaded: number;
   total: number;
@@ -119,27 +113,19 @@ export interface SidebarProps {
   filtered: boolean;
   sort: SortMode;
   onSort: (mode: SortMode) => void;
-  expanded: boolean;
-  onExpandedChange: (next: boolean) => void;
-  zoomMode: boolean;
-  scale: number;
-  onToggleZoom: () => void;
-  onFitScreen: () => void;
-  onHome: () => void;
-}
-
-function matchesNeedle(needle: string, text: string): boolean {
-  return needle.length === 0 || text.toLowerCase().includes(needle);
+  focusItem?: WallItem | null;
 }
 
 /**
- * 左侧竖向边栏：唯一的导航与筛选入口（取代 v1 的顶部工具条）。
- * 收起时只留图标，展开后浮层面板给出具体选项；筛选状态立即作用于墙。
+ * 左侧的"缝"：120px 黑白竖排页签。默认是实色纸面 + 大投影，
+ * 鼠标进入时切成薄玻璃，让底下的墙透出来一点。
  */
 export function Sidebar({
+  view,
+  onHome,
+  onTags,
   filters,
   onFilters,
-  facetTags,
   groups,
   loaded,
   total,
@@ -147,27 +133,20 @@ export function Sidebar({
   filtered,
   sort,
   onSort,
-  expanded,
-  onExpandedChange,
-  zoomMode,
-  scale,
-  onToggleZoom,
-  onFitScreen,
-  onHome,
+  focusItem,
 }: SidebarProps) {
   const [panel, setPanel] = useState<PanelId | null>(null);
-  const [tagNeedle, setTagNeedle] = useState('');
   const panelRef = useRef<HTMLDivElement | null>(null);
-
-  const closePanel = () => setPanel(null);
+  /** 打开面板的按钮：关闭后把焦点还回去（P2-2）。 */
+  const panelTriggerRef = useRef<HTMLElement | null>(null);
 
   useEffect(() => {
     if (!panel) return;
     const onPointerDown = (event: PointerEvent) => {
       const target = event.target as Node | null;
       if (panelRef.current && target && panelRef.current.contains(target)) return;
-      if (target instanceof Element && target.closest('.rail')) return;
-      closePanel();
+      if (target instanceof Element && target.closest('.seam')) return;
+      setPanel(null);
     };
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.key === 'Escape') setPanel(null);
@@ -180,99 +159,119 @@ export function Sidebar({
     };
   }, [panel]);
 
-  const tagList = useMemo(() => {
-    const needle = tagNeedle.trim().toLowerCase();
-    return facetTags.filter((tag) => matchesNeedle(needle, tag.name)).slice(0, 200);
-  }, [facetTags, tagNeedle]);
+  useEffect(() => {
+    setPanel(null);
+  }, [view]);
 
-  const toggleTag = (name: string) => {
-    const next = filters.tags.includes(name)
-      ? filters.tags.filter((tag) => tag !== name)
-      : [...filters.tags, name];
-    onFilters({ ...filters, tags: next });
-  };
+  // P2-2：role="dialog" 要配焦点管理——打开时把焦点送进面板（搜索框自己 autoFocus），
+  // 关闭/切换后还给触发按钮，而不是只挂一个 aria-expanded 就完事。
+  useEffect(() => {
+    if (!panel) return;
+    const node = panelRef.current;
+    if (node && panel !== 'search') {
+      const first = node.querySelector<HTMLElement>(
+        'button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])',
+      );
+      first?.focus();
+    }
+    return () => {
+      const trigger = panelTriggerRef.current;
+      panelTriggerRef.current = null;
+      trigger?.focus();
+    };
+  }, [panel]);
 
   const setRating = (rating: string | null) => {
     onFilters({ ...filters, ratings: rating ? [rating] : [] });
   };
 
-  const activeCount =
-    (filters.query.trim() ? 1 : 0) +
-    (filters.tags.length > 0 ? 1 : 0) +
-    (filters.onlyFav ? 1 : 0) +
-    (filters.ratings.length > 0 ? 1 : 0) +
-    (filters.group !== null ? 1 : 0);
-
-  const openPanel = (id: PanelId) => {
-    setPanel((current) => (current === id ? null : id));
-    // 窄屏上不展开边栏：面板本身就要占掉大半屏宽，展开反而没有位置。
-    const narrow = typeof window !== 'undefined' && window.matchMedia('(max-width: 760px)').matches;
-    if (!expanded && !narrow) onExpandedChange(true);
+  const openPanel = (id: PanelId, trigger: HTMLElement | null = null) => {
+    if (panel === id) {
+      setPanel(null);
+      return;
+    }
+    panelTriggerRef.current = trigger;
+    setPanel(id);
   };
 
   return (
     <>
-      <nav className="rail" aria-label="图片墙导航">
-        <button type="button" className="rail__brand" onClick={onHome} title="回到全部图片">
-          <span className="rail__dot" />
-          <span className="rail__word">
-            <span className="rail__name">Kanalib</span>
-            <span className="rail__sub">图片墙</span>
-          </span>
-        </button>
+      <nav className="seam" aria-label="图片墙导航">
+        <span className="seam__dot" />
+        <span className="seam__word" aria-hidden="true">
+          Kanalib
+        </span>
 
-        <div className="rail__nav">
-          {NAV.map((entry) => (
+        <div className="seam__nav">
+          <button
+            type="button"
+            className={'seam__tab' + (view === 'home' ? ' is-on' : '')}
+            onClick={onHome}
+            title="首页"
+            aria-current={view === 'home' ? 'page' : undefined}
+          >
+            {ICON_HOME}
+            <span className="seam__label">首页</span>
+          </button>
+          <button
+            type="button"
+            className={'seam__tab' + (view === 'tags' || view === 'tag' ? ' is-on' : '')}
+            onClick={onTags}
+            title="标签"
+            aria-current={view === 'tags' || view === 'tag' ? 'page' : undefined}
+          >
+            {ICON_TAG}
+            <span className="seam__label">标签</span>
+          </button>
+
+          {PANELS.map((entry) => (
             <button
               key={entry.id}
               type="button"
               className={
-                'rail__item' +
+                'seam__tab' +
                 (panel === entry.id ? ' is-on' : '') +
                 (entry.id === 'favorites' && filters.onlyFav ? ' is-on' : '')
               }
+              id={'seam-panel-trigger-' + entry.id}
               aria-expanded={panel === entry.id}
-              onClick={() => openPanel(entry.id)}
+              aria-controls={panel === entry.id ? 'seam-panel' : undefined}
+              onClick={(event) => openPanel(entry.id, event.currentTarget)}
               title={entry.label}
             >
               {entry.icon}
-              <span className="rail__label">{entry.label}</span>
+              <span className="seam__label">{entry.label}</span>
             </button>
           ))}
         </div>
 
-        <p className="rail__count">
-          {formatCount(loaded)} / {formatCount(total)}
-          {filtered ? ' · 筛后 ' + formatCount(shown) : ''}
-        </p>
-
-        <div className="rail__foot">
+        <div className="seam__foot">
+          <span className="seam__count">
+            {formatCount(loaded)} / {formatCount(total)}
+          </span>
           <button
             type="button"
-            className="rail__item"
-            onClick={() => openPanel('about')}
+            className={'seam__tab seam__tab--icon' + (panel === 'about' ? ' is-on' : '')}
+            id="seam-panel-trigger-about"
+            aria-expanded={panel === 'about'}
+            aria-controls={panel === 'about' ? 'seam-panel' : undefined}
+            onClick={(event) => openPanel('about', event.currentTarget)}
             title="关于"
           >
             {ICON_INFO}
-            <span className="rail__label">关于</span>
-          </button>
-          <button
-            type="button"
-            className="rail__item"
-            onClick={() => onExpandedChange(!expanded)}
-            aria-expanded={expanded}
-            title={expanded ? '收起边栏' : '展开边栏'}
-          >
-            <span style={{ display: 'inline-flex', transform: expanded ? 'rotate(180deg)' : 'none' }}>
-              {ICON_CHEVRON}
-            </span>
-            <span className="rail__label">收起</span>
           </button>
         </div>
       </nav>
 
       {panel ? (
-        <div className="panel" ref={panelRef} role="dialog" aria-label="筛选">
+        <div
+          className="panel"
+          id="seam-panel"
+          ref={panelRef}
+          role="dialog"
+          aria-modal="false"
+          aria-labelledby={'seam-panel-trigger-' + panel}
+        >
           {panel === 'search' ? (
             <>
               <p className="panel__title">搜索</p>
@@ -289,57 +288,10 @@ export function Sidebar({
                 {filters.query.trim() ? '已按文件名过滤' : '输入文件名的一部分即可过滤'}
               </p>
               <div className="panel__actions">
-                <button
-                  type="button"
-                  className="ghost"
-                  onClick={() => onFilters({ ...filters, query: '' })}
-                >
+                <button type="button" className="ghost" onClick={() => onFilters({ ...filters, query: '' })}>
                   清空
                 </button>
               </div>
-            </>
-          ) : null}
-
-          {panel === 'tags' ? (
-            <>
-              <p className="panel__title">标签 · {filters.tags.length} 项已选</p>
-              <label className="field">
-                {ICON_SEARCH}
-                <input
-                  value={tagNeedle}
-                  placeholder="过滤标签"
-                  onChange={(event) => setTagNeedle(event.target.value)}
-                />
-              </label>
-              <div className="list">
-                {tagList.map((tag) => {
-                  const on = filters.tags.includes(tag.name);
-                  return (
-                    <button
-                      key={tag.name + '|' + tag.category}
-                      type="button"
-                      className={'list__row' + (on ? ' is-on' : '')}
-                      onClick={() => toggleTag(tag.name)}
-                    >
-                      <span className="mark" />
-                      <span className="list__text">{tag.name}</span>
-                      <span className="list__num">{formatCount(tag.count)}</span>
-                    </button>
-                  );
-                })}
-                {tagList.length === 0 ? <p className="panel__hint">没有匹配的标签</p> : null}
-              </div>
-              {filters.tags.length > 0 ? (
-                <div className="panel__actions">
-                  <button
-                    type="button"
-                    className="ghost"
-                    onClick={() => onFilters({ ...filters, tags: [] })}
-                  >
-                    清空标签
-                  </button>
-                </div>
-              ) : null}
             </>
           ) : null}
 
@@ -374,9 +326,7 @@ export function Sidebar({
                   <button
                     key={rating}
                     type="button"
-                    className={
-                      'list__row' + (filters.ratings.includes(rating) ? ' is-on' : '')
-                    }
+                    className={'list__row' + (filters.ratings.includes(rating) ? ' is-on' : '')}
                     onClick={() => setRating(rating)}
                   >
                     <span className="mark" />
@@ -420,6 +370,7 @@ export function Sidebar({
               <div className="list">
                 {(
                   [
+                    ['random', '随机（每次打开重排）'],
                     ['time', '发布时间（新→旧）'],
                     ['name', '文件名'],
                     ['stars', '星级（高→低）'],
@@ -439,44 +390,26 @@ export function Sidebar({
             </>
           ) : null}
 
-          {panel === 'zoom' ? (
-            <>
-              <p className="panel__title">缩放</p>
-              <div className="list">
-                <button
-                  type="button"
-                  className={'list__row' + (zoomMode ? ' is-on' : '')}
-                  onClick={onToggleZoom}
-                >
-                  <span className="mark" />
-                  <span className="list__text">{zoomMode ? '退出缩放' : '进入缩放'}</span>
-                  <span className="list__num">{Math.round(scale * 100)}%</span>
-                </button>
-                <button type="button" className="list__row" onClick={onFitScreen}>
-                  <span className="mark" />
-                  <span className="list__text">适应屏幕</span>
-                </button>
-              </div>
-              <p className="panel__hint">缩放模式下滚轮缩放、拖拽平移；Esc 退出。</p>
-            </>
-          ) : null}
-
           {panel === 'about' ? (
             <>
               <p className="panel__title">关于</p>
               <p className="panel__hint" style={{ marginTop: 0 }}>
-                这是 Kanalib 的只读展示墙：图片在工作台的本地库里整理，导出成静态站点后在这里浏览。
+                只读展示墙：图片在工作台的本地库里整理，导出成静态站点后在这里浏览。
               </p>
               <p className="panel__hint">
-                已加载 {formatCount(loaded)} / {formatCount(total)} 张{filtered ? '，筛选后 ' + formatCount(shown) + ' 张' : ''}。
+                已加载 {formatCount(loaded)} / {formatCount(total)} 张
+                {filtered ? '，筛选后 ' + formatCount(shown) + ' 张' : ''}。
               </p>
-              {activeCount > 0 ? (
-                <div className="panel__actions">
-                  <button type="button" className="ghost" onClick={() => onFilters({ ...EMPTY })}>
-                    清除全部筛选
-                  </button>
-                </div>
+              {focusItem ? (
+                <p className="panel__hint">
+                  最近看的一张：{focusItem.n}（{Math.round(focusItem.w)} × {Math.round(focusItem.h)}）
+                </p>
               ) : null}
+              <div className="panel__actions">
+                <button type="button" className="ghost" onClick={() => onFilters({ ...EMPTY_FILTERS })}>
+                  清除全部筛选
+                </button>
+              </div>
             </>
           ) : null}
         </div>
@@ -484,13 +417,3 @@ export function Sidebar({
     </>
   );
 }
-
-/** 全空的筛选项（组件内部清理用）。 */
-const EMPTY: FilterState = {
-  query: '',
-  tags: [],
-  onlyFav: false,
-  ratings: [],
-  minStars: 0,
-  group: null,
-};

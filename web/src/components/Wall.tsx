@@ -1,28 +1,21 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
-import { formatCount } from '../lib/format';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { TierPaths, WallItem } from '../source/types';
 import type { WallPhase } from '../state/useWall';
-import { spanOf, WallCard } from './WallCard';
+import { layoutWorld, visibleSlice } from '../lib/world';
+import { WallCard } from './WallCard';
 
-/** 一列的目标宽度：墙的实际密度由它决定，窗口越宽列越多。 */
-const TARGET_CELL = 76;
-const MIN_COLUMNS = 8;
-const MAX_COLUMNS = 26;
-/** 墙层左右留白 + 贴片间隙，与 styles.css 的 .wall / --gap 对齐。 */
-const WALL_PAD = 10;
-const WALL_GAP = 6;
-
-interface Metrics {
-  columns: number;
-  cell: number;
-}
-
-function measure(hostWidth: number): Metrics {
-  const usable = Math.max(hostWidth - WALL_PAD * 2, 120);
-  const columns = Math.min(MAX_COLUMNS, Math.max(MIN_COLUMNS, Math.round(usable / TARGET_CELL)));
-  const cell = Math.floor((usable - WALL_GAP * (columns - 1)) / columns);
-  return { columns, cell: Math.max(24, cell) };
-}
+/** 世界比视口宽多少：留出横向可平移的余量。 */
+const WORLD_OVERSCAN = 1.28;
+const WORLD_MIN_WIDTH = 1180;
+const GAP = 8;
+const TARGET_ROW_HEIGHT = 268;
+const ZOOM_MIN = 0.5;
+const ZOOM_MAX = 1.6;
+const LOAD_AHEAD = 900;
+/** 左键按下后位移超过这个距离（CSS px）就不再算单击。 */
+const CLICK_SLOP = 6;
+/** 这些元素自己处理手势，画布不接管。 */
+const INTERACTIVE = 'button, a, input, select, textarea, [role="button"]';
 
 export interface WallViewProps {
   items: WallItem[];
@@ -30,18 +23,60 @@ export interface WallViewProps {
   phase: WallPhase;
   hasMore: boolean;
   resetKey: string;
-  loadedCount: number;
-  totalCount: number;
   filtered: boolean;
+  /** 条目只会向后追加、顺序不会被重排时为 true：布局可以暂扣不满的行，已渲染的卡永不移动。 */
+  stableAppend?: boolean;
+  /** 标签 → 张数，透传给卡片角标。 */
+  tagCounts?: ReadonlyMap<string, number>;
   onLoadMore: () => void;
   onOpen: (item: WallItem, index: number) => void;
-  onDetail: (id: string) => void;
+  onSummary: (item: WallItem, clientX: number, clientY: number) => void;
+  onFocusItems?: (items: WallItem[]) => void;
   onRetry: () => void;
 }
 
+interface Camera {
+  x: number;
+  y: number;
+  zoom: number;
+}
+
+interface PointerState {
+  active: boolean;
+  id: number;
+  startX: number;
+  startY: number;
+  camX: number;
+  camY: number;
+  moved: boolean;
+  lastX: number;
+  lastY: number;
+  vx: number;
+  vy: number;
+  lastT: number;
+  /** 按下时命中的卡片：setPointerCapture 之后 pointerup 的 target 会被重定向到画布，必须提前记住。 */
+  downTile: HTMLElement | null;
+}
+
+const IDLE_POINTER: PointerState = {
+  active: false,
+  id: -1,
+  startX: 0,
+  startY: 0,
+  camX: 0,
+  camY: 0,
+  moved: false,
+  lastX: 0,
+  lastY: 0,
+  vx: 0,
+  vy: 0,
+  lastT: 0,
+  downTile: null,
+};
+
 /**
- * 密集拼贴墙：固定列数的 CSS grid + 按宽高比给每片算跨度，
- * 渲染量交给浏览器，追加由墙尾哨兵的 IntersectionObserver 触发。
+ * 空间层：一面比视口大的墙，左键拖拽平移、滚轮纵向滚动、Ctrl+滚轮缩放。
+ * 只渲染视野内的卡片（按 y 二分），所以一万条也能拖得动。
  */
 export function WallView({
   items,
@@ -49,71 +84,514 @@ export function WallView({
   phase,
   hasMore,
   resetKey,
-  loadedCount,
-  totalCount,
   filtered,
+  stableAppend = false,
+  tagCounts,
   onLoadMore,
   onOpen,
-  onDetail,
+  onSummary,
+  onFocusItems,
   onRetry,
 }: WallViewProps) {
-  const hostRef = useRef<HTMLDivElement | null>(null);
-  const sentinelRef = useRef<HTMLDivElement | null>(null);
-  const [metrics, setMetrics] = useState<Metrics>({ columns: 10, cell: 120 });
+  const viewportRef = useRef<HTMLDivElement | null>(null);
+  const [size, setSize] = useState({ w: 1440, h: 900 });
+  const [camera, setCamera] = useState<Camera>({ x: 0, y: 0, zoom: 1 });
+  const [dragging, setDragging] = useState(false);
+  const [activeId, setActiveId] = useState<string | null>(null);
+  const cameraRef = useRef<Camera>(camera);
+  cameraRef.current = camera;
+  const sizeRef = useRef(size);
+  sizeRef.current = size;
+
+  // 窄屏（<=760）：导航缝收成 64px，世界也从缝的右缘开始 —— 否则第一列会被缝压掉一半，
+  // 390 屏上看着像坏掉。桌面保持"世界铺满、图从缝底下穿过"的空间感。
+  const narrow = size.w <= 760;
+  const worldInset = narrow ? 64 : 0;
+  const viewWidth = Math.max(200, size.w - worldInset);
+  const worldWidth = narrow
+    ? viewWidth
+    : Math.max(WORLD_MIN_WIDTH, Math.round(size.w * WORLD_OVERSCAN));
+  // 窄屏把世界行高收到可见宽度的 0.55 倍：一张卡大致正好放进一列，不再横向切卡。
+  const rowTargetHeight = narrow
+    ? Math.round(Math.min(TARGET_ROW_HEIGHT, viewWidth * 0.55))
+    : TARGET_ROW_HEIGHT;
+  // 顺序稳定 + 还有下一片：末尾不满的行先不进布局，这样追加分片时
+  // 已经渲染出来的卡片一个像素都不会动（P0：滚到底加载后"已看内容不抖动"）。
+  // 筛选/排序/标签墙的列表会因为新数据整体重排，那些场景必须把不满的行画出来，
+  // 否则可能整页空白；数据全部到齐后再拉伸最后一行，视觉上收口。
+  const includePartialRow = !(stableAppend && hasMore);
+  const stretchPartialRow = !hasMore;
+  const layout = useMemo(
+    () =>
+      layoutWorld(items, {
+        width: worldWidth,
+        gap: GAP,
+        targetHeight: rowTargetHeight,
+        includePartialRow,
+        stretchPartialRow,
+      }),
+    [items, worldWidth, rowTargetHeight, includePartialRow, stretchPartialRow],
+  );
+  const layoutRef = useRef(layout);
+  layoutRef.current = layout;
+
+  const clampCamera = useCallback(
+    (cam: Camera): Camera => {
+      const maxX = Math.max(0, worldWidth * cam.zoom - viewWidth);
+      const maxY = Math.max(0, layoutRef.current.height * cam.zoom - size.h);
+      return {
+        zoom: cam.zoom,
+        x: Math.min(maxX, Math.max(0, cam.x)),
+        y: Math.min(maxY, Math.max(0, cam.y)),
+      };
+    },
+    [size.h, viewWidth, worldWidth],
+  );
+
+  const moveCamera = useCallback(
+    (next: Camera) => {
+      const clamped = clampCamera(next);
+      cameraRef.current = clamped;
+      setCamera(clamped);
+    },
+    [clampCamera],
+  );
+  const moveCameraRef = useRef(moveCamera);
+  moveCameraRef.current = moveCamera;
 
   useEffect(() => {
-    const host = hostRef.current;
+    const host = viewportRef.current;
     if (!host) return;
-    const apply = (width: number) => {
-      setMetrics((current) => {
-        const next = measure(width);
-        return current.columns === next.columns && current.cell === next.cell ? current : next;
-      });
+    const apply = (width: number, height: number) => {
+      setSize((current) =>
+        current.w === width && current.h === height ? current : { w: width, h: height },
+      );
     };
-    apply(host.clientWidth);
-    if (typeof ResizeObserver === 'undefined') {
-      const onResize = () => apply(host.clientWidth);
-      window.addEventListener('resize', onResize);
-      return () => window.removeEventListener('resize', onResize);
-    }
+    apply(host.clientWidth, host.clientHeight);
+    if (typeof ResizeObserver === 'undefined') return;
     const observer = new ResizeObserver((entries) => {
       const entry = entries[0];
-      if (entry) apply(entry.contentRect.width);
+      if (entry) apply(Math.round(entry.contentRect.width), Math.round(entry.contentRect.height));
     });
     observer.observe(host);
     return () => observer.disconnect();
   }, []);
 
-  // 墙尾哨兵：进入视口前 800px 就预取下一片，滚到底时不会等。
+  // 换筛选/换页：回到顶部。
   useEffect(() => {
-    const sentinel = sentinelRef.current;
-    if (!sentinel || !hasMore) return;
-    if (typeof IntersectionObserver === 'undefined') return;
-    const observer = new IntersectionObserver(
-      (entries) => {
-        if (entries.some((entry) => entry.isIntersecting)) onLoadMore();
-      },
-      { rootMargin: '800px 0px' },
+    const cam = cameraRef.current;
+    moveCamera({ x: Math.max(0, (worldWidth * cam.zoom - viewWidth) / 2), y: 0, zoom: cam.zoom });
+    setActiveId(null);
+  }, [resetKey]);
+
+  // 视口变窄/旋转/世界重排后，相机可能留在越界位置（典型症状：390 宽时右侧空一大条）。
+  // 这里把相机夹回合法区间——只在真的越界时才写状态，避免自激重渲染。
+  useEffect(() => {
+    const cam = cameraRef.current;
+    const clamped = clampCamera(cam);
+    if (clamped.x === cam.x && clamped.y === cam.y && clamped.zoom === cam.zoom) return;
+    cameraRef.current = clamped;
+    setCamera(clamped);
+  }, [clampCamera, layout.height]);
+
+  // 到墙尾前预取下一片。
+  useEffect(() => {
+    if (!hasMore) return;
+    const bottom = (camera.y + size.h) / camera.zoom;
+    if (bottom > layout.height - LOAD_AHEAD) onLoadMore();
+  }, [camera, hasMore, layout.height, onLoadMore, size.h]);
+
+  const pointer = useRef<PointerState>({ ...IDLE_POINTER });
+  const inertia = useRef(0);
+  /** 当前按在画布上的所有指针（触屏双指缩放要同时跟踪两根）。 */
+  const pointers = useRef(new Map<number, { x: number; y: number }>());
+  /** 双指缩放基准：起始指距、起始缩放，以及基准时中点的世界坐标。 */
+  const pinch = useRef<{ dist: number; zoom: number; worldX: number; worldY: number } | null>(null);
+
+  // ===== 入场动效（§2.5）=====
+  // 首载只做淡入 + 上浮 12px；换页签/换筛选走对角线波次。
+  // 关键约束：虚拟化会在滚动中不断挂载新卡，动画必须限制在"进入窗口"内，
+  // 否则滚一下就闪一片——所以用 enterOn 开关 + 定时收口，而不是纯 CSS 的 mount 动画。
+  const firstEnter = useRef(true);
+  const [enter, setEnter] = useState({ on: true, wave: false, token: 0 });
+  useEffect(() => {
+    const wave = !firstEnter.current;
+    firstEnter.current = false;
+    setEnter((current) => ({ on: true, wave, token: current.token + 1 }));
+    const timer = window.setTimeout(
+      () => setEnter((current) => ({ ...current, on: false })),
+      wave ? 900 : 520,
     );
-    observer.observe(sentinel);
-    return () => observer.disconnect();
-  }, [hasMore, onLoadMore, resetKey, items.length]);
+    return () => window.clearTimeout(timer);
+  }, [resetKey]);
 
-  const spans = useMemo(() => items.map((item) => spanOf(item)), [items]);
+  const stopInertia = useCallback(() => {
+    if (inertia.current) cancelAnimationFrame(inertia.current);
+    inertia.current = 0;
+  }, []);
 
-  const gridStyle = useMemo(
+  // P1-1：切 #/tags、开详情都会卸载 WallView，惯性 rAF 必须在这里停掉，
+  // 否则它会在已卸载的组件上继续 moveCamera → setState（真泄漏）。
+  useEffect(() => stopInertia, [stopInertia]);
+
+  /** 手势收尾：无论正常抬起、被取消还是丢了指针捕获，都走这里。 */
+  const endPointer = (host: HTMLElement | null, pointerId: number) => {
+    pointer.current = { ...pointer.current, active: false };
+    setDragging(false);
+    if (host && pointerId >= 0 && host.hasPointerCapture?.(pointerId)) {
+      host.releasePointerCapture(pointerId);
+    }
+  };
+
+  /** 双指结束：清基准，剩下那根手指重新起一个拖拽基线（否则抬手后画面推不动）。 */
+  const endPinch = (host: HTMLElement | null, pointerId: number) => {
+    pinch.current = null;
+    setDragging(false);
+    if (host && pointerId >= 0 && host.hasPointerCapture?.(pointerId)) {
+      host.releasePointerCapture(pointerId);
+    }
+    const rest = pointers.current.entries().next();
+    if (rest.done) {
+      pointer.current = { ...IDLE_POINTER };
+      return;
+    }
+    const [id, position] = rest.value;
+    const cam = cameraRef.current;
+    pointer.current = {
+      ...IDLE_POINTER,
+      active: true,
+      id,
+      startX: position.x,
+      startY: position.y,
+      camX: cam.x,
+      camY: cam.y,
+      lastX: position.x,
+      lastY: position.y,
+      lastT: performance.now(),
+    };
+  };
+
+  const onPointerDown = (event: React.PointerEvent<HTMLDivElement>) => {
+    // 鼠标只认左键；触摸/手写笔的每个 pointerId 都要收（第二根手指是缩放）。
+    if (event.pointerType === 'mouse' && event.button !== 0) return;
+    const element = event.target as Element | null;
+    // .tile 现在也是 role="button"（键盘可达），但它照样要能被拖：
+    // 只跳过真正的交互控件，卡片本身继续走画布手势。
+    const interactive = element?.closest(INTERACTIVE);
+    if (interactive && !interactive.classList.contains('tile')) return;
+    stopInertia();
+    const host = event.currentTarget as HTMLElement;
+    // 捕获在画布上：指针移出画布后 pointermove 仍然到画布，拖拽不会断。
+    host.setPointerCapture?.(event.pointerId);
+    pointers.current.set(event.pointerId, { x: event.clientX, y: event.clientY });
+
+    if (pointers.current.size >= 2) {
+      // 第二根手指落下：单指平移立刻让位给缩放，且不再算"点击"。
+      pointer.current = { ...pointer.current, active: false, moved: true };
+      setDragging(true);
+      const [first, second] = [...pointers.current.values()];
+      const box = host.getBoundingClientRect();
+      const midX = (first.x + second.x) / 2 - box.left;
+      const midY = (first.y + second.y) / 2 - box.top;
+      const cam = cameraRef.current;
+      pinch.current = {
+        dist: Math.max(1, Math.hypot(first.x - second.x, first.y - second.y)),
+        zoom: cam.zoom,
+        worldX: (cam.x + midX) / cam.zoom,
+        worldY: (cam.y + midY) / cam.zoom,
+      };
+      return;
+    }
+
+    const cam = cameraRef.current;
+    pointer.current = {
+      active: true,
+      id: event.pointerId,
+      startX: event.clientX,
+      startY: event.clientY,
+      camX: cam.x,
+      camY: cam.y,
+      moved: false,
+      lastX: event.clientX,
+      lastY: event.clientY,
+      vx: 0,
+      vy: 0,
+      lastT: performance.now(),
+      downTile: element?.closest<HTMLElement>('.tile') ?? null,
+    };
+  };
+
+  const onPointerMove = (event: React.PointerEvent<HTMLDivElement>) => {
+    if (pointers.current.has(event.pointerId)) {
+      pointers.current.set(event.pointerId, { x: event.clientX, y: event.clientY });
+    }
+
+    // 双指缩放：指距比例映射到缩放倍数，锚点固定在双指中点。
+    const pinchState = pinch.current;
+    if (pinchState && pointers.current.size >= 2) {
+      const [first, second] = [...pointers.current.values()];
+      const box = (event.currentTarget as HTMLElement).getBoundingClientRect();
+      const midX = (first.x + second.x) / 2 - box.left;
+      const midY = (first.y + second.y) / 2 - box.top;
+      const distance = Math.max(1, Math.hypot(first.x - second.x, first.y - second.y));
+      const zoom = Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, pinchState.zoom * (distance / pinchState.dist)));
+      moveCameraRef.current({
+        zoom,
+        x: pinchState.worldX * zoom - midX,
+        y: pinchState.worldY * zoom - midY,
+      });
+      return;
+    }
+
+    const state = pointer.current;
+    if (!state.active || event.pointerId !== state.id) return;
+    // 鼠标键已经松开但没收到 pointerup（比如指针在窗口外松开）：按抬起处理。
+    if (event.pointerType === 'mouse' && event.buttons === 0) {
+      endPointer(event.currentTarget as HTMLElement, event.pointerId);
+      return;
+    }
+    const dx = event.clientX - state.startX;
+    const dy = event.clientY - state.startY;
+    if (!state.moved && Math.hypot(dx, dy) > CLICK_SLOP) {
+      state.moved = true;
+      setDragging(true);
+    }
+    if (!state.moved) return;
+    const now = performance.now();
+    const dt = Math.max(1, now - state.lastT);
+    state.vx = (event.clientX - state.lastX) / dt;
+    state.vy = (event.clientY - state.lastY) / dt;
+    state.lastX = event.clientX;
+    state.lastY = event.clientY;
+    state.lastT = now;
+    moveCamera({ ...cameraRef.current, x: state.camX - dx, y: state.camY - dy });
+  };
+
+  const settleInertia = () => {
+    const state = pointer.current;
+    let vx = state.vx * 16;
+    let vy = state.vy * 16;
+    if (Math.hypot(vx, vy) < 1.2) return;
+    const step = () => {
+      vx *= 0.92;
+      vy *= 0.92;
+      const cam = cameraRef.current;
+      moveCameraRef.current({ ...cam, x: cam.x - vx, y: cam.y - vy });
+      if (Math.hypot(vx, vy) > 0.4) inertia.current = requestAnimationFrame(step);
+      else inertia.current = 0;
+    };
+    inertia.current = requestAnimationFrame(step);
+  };
+
+  const onPointerUp = (event: React.PointerEvent<HTMLDivElement>) => {
+    const host = event.currentTarget as HTMLElement;
+    pointers.current.delete(event.pointerId);
+
+    // 缩放中松手：退出缩放；还剩一根手指就交回给平移，而不是让画面"冻住"。
+    if (pinch.current) {
+      if (pointers.current.size < 2) endPinch(host, event.pointerId);
+      return;
+    }
+
+    const state = pointer.current;
+    if (!state.active || event.pointerId !== state.id) return;
+    const moved = state.moved;
+    // 命中的卡片在 pointerdown 时就记住了：捕获之后 pointerup 的 target 是画布本身。
+    const tile = state.downTile;
+    endPointer(host, event.pointerId);
+    if (moved) {
+      settleInertia();
+      return;
+    }
+    const rawIndex = tile?.dataset.index;
+    if (rawIndex === undefined) return;
+    const index = Number(rawIndex);
+    const item = items[index];
+    if (!item) return;
+    setActiveId(item.id);
+    onOpen(item, index);
+  };
+
+  const onPointerCancel = (event: React.PointerEvent<HTMLDivElement>) => {
+    const host = event.currentTarget as HTMLElement;
+    pointers.current.delete(event.pointerId);
+    if (pinch.current) {
+      if (pointers.current.size < 2) endPinch(host, event.pointerId);
+      return;
+    }
+    if (event.pointerId !== pointer.current.id) return;
+    endPointer(host, event.pointerId);
+  };
+
+  // 滚轮必须用非被动监听：React 的 onWheel 挂在 root 上是 passive 的，
+  // preventDefault() 会被忽略并报 "Unable to preventDefault inside passive event listener"。
+  useEffect(() => {
+    const host = viewportRef.current;
+    if (!host) return;
+    const onWheelNative = (event: WheelEvent) => {
+      event.preventDefault();
+      stopInertia();
+      const cam = cameraRef.current;
+      if (event.ctrlKey || event.metaKey) {
+        const rect = host.getBoundingClientRect();
+        const mx = event.clientX - rect.left;
+        const my = event.clientY - rect.top;
+        const worldX = (cam.x + mx) / cam.zoom;
+        const worldY = (cam.y + my) / cam.zoom;
+        const nextZoom = Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, cam.zoom * (1 - event.deltaY * 0.0022)));
+        moveCameraRef.current({ zoom: nextZoom, x: worldX * nextZoom - mx, y: worldY * nextZoom - my });
+        return;
+      }
+      // deltaMode：0=像素、1=行、2=页。触控板给的是像素，鼠标滚轮常给行。
+      const scale = event.deltaMode === 1 ? 16 : event.deltaMode === 2 ? sizeRef.current.h : 1;
+      moveCameraRef.current({ ...cam, y: cam.y + event.deltaY * scale });
+    };
+    host.addEventListener('wheel', onWheelNative, { passive: false });
+    return () => host.removeEventListener('wheel', onWheelNative);
+  }, []);
+
+  // 相机停下 320ms 后告诉上层"现在该用什么颜色"（滚动中不换色，避免抽搐）。
+  useEffect(() => {
+    if (!onFocusItems) return;
+    const timer = window.setTimeout(() => {
+      const top = camera.y / camera.zoom;
+      const bottom = (camera.y + size.h) / camera.zoom;
+      const center = (top + bottom) / 2;
+      const span = Math.max(1, (bottom - top) / 2);
+      const slice = visibleSlice(layout.tiles, top, bottom, 0);
+      const scored = layout.tiles.slice(slice.start, slice.end).map((tile) => {
+        const visibleTop = Math.max(tile.rect.y, top);
+        const visibleBottom = Math.min(tile.rect.y + tile.rect.h, bottom);
+        const area = Math.max(0, visibleBottom - visibleTop);
+        const middle = tile.rect.y + tile.rect.h / 2;
+        const centrality = 1 - Math.min(1, Math.abs(middle - center) / span);
+        return { item: tile.item, weight: area * (0.35 + centrality) };
+      });
+      scored.sort((left, right) => right.weight - left.weight);
+      onFocusItems(scored.slice(0, 6).map((entry) => entry.item));
+    }, 320);
+    return () => window.clearTimeout(timer);
+  }, [camera, layout.tiles, onFocusItems, size.h]);
+
+  const worldStyle = useMemo(
     () => ({
-      gridTemplateColumns: 'repeat(' + metrics.columns + ', minmax(0, 1fr))',
-      gridAutoRows: metrics.cell + 'px',
+      width: worldWidth,
+      height: Math.max(layout.height, size.h),
+      // worldInset：窄屏把世界右移，让开 64px 的导航缝（桌面为 0，图照样从缝底下穿过）。
+      transform:
+        'translate3d(' +
+        (worldInset - camera.x) +
+        'px,' +
+        -camera.y +
+        'px,0) scale(' +
+        camera.zoom +
+        ')',
+      transformOrigin: '0 0',
     }),
-    [metrics],
+    [camera, layout.height, size.h, worldInset, worldWidth],
   );
 
+  const slice = useMemo(() => {
+    const top = camera.y / camera.zoom;
+    const bottom = (camera.y + size.h) / camera.zoom;
+    return visibleSlice(layout.tiles, top, bottom);
+  }, [camera, layout.tiles, size.h]);
+
+  // P1-2：画布本身的键盘平移（Tab 进来后方向键/PageUp/PageDown，+/- 缩放）。
+  const onCanvasKeyDown = (event: React.KeyboardEvent<HTMLDivElement>) => {
+    const cam = cameraRef.current;
+    const step = 120;
+    const page = Math.max(200, Math.round(sizeRef.current.h * 0.9));
+    const zoomBy = (factor: number) => {
+      // 缩放锚点取"可见区"中心：窄屏要让开 64px 的缝，否则会往左上偏。
+      const inset = sizeRef.current.w <= 760 ? 64 : 0;
+      const cx = inset + (sizeRef.current.w - inset) / 2;
+      const cy = sizeRef.current.h / 2;
+      const worldX = (cam.x + cx) / cam.zoom;
+      const worldY = (cam.y + cy) / cam.zoom;
+      const nextZoom = Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, cam.zoom * factor));
+      stopInertia();
+      moveCamera({ zoom: nextZoom, x: worldX * nextZoom - cx, y: worldY * nextZoom - cy });
+    };
+    switch (event.key) {
+      case 'ArrowUp':
+        stopInertia();
+        moveCamera({ ...cam, y: cam.y - step });
+        break;
+      case 'ArrowDown':
+        stopInertia();
+        moveCamera({ ...cam, y: cam.y + step });
+        break;
+      case 'ArrowLeft':
+        stopInertia();
+        moveCamera({ ...cam, x: cam.x - step });
+        break;
+      case 'ArrowRight':
+        stopInertia();
+        moveCamera({ ...cam, x: cam.x + step });
+        break;
+      case 'PageUp':
+        stopInertia();
+        moveCamera({ ...cam, y: cam.y - page });
+        break;
+      case 'PageDown':
+        stopInertia();
+        moveCamera({ ...cam, y: cam.y + page });
+        break;
+      case 'Home':
+        stopInertia();
+        moveCamera({ ...cam, y: 0 });
+        break;
+      case 'End':
+        stopInertia();
+        moveCamera({ ...cam, y: Math.max(0, layout.height * cam.zoom - sizeRef.current.h) });
+        break;
+      case '+':
+      case '=':
+        zoomBy(1.1);
+        break;
+      case '-':
+      case '_':
+        zoomBy(1 / 1.1);
+        break;
+      default:
+        return;
+    }
+    event.preventDefault();
+  };
+
+  const visible = layout.tiles.slice(slice.start, slice.end);
+  // 对角线波次从视野左上角起算（不是世界原点）：否则滚到中段换页签时会整屏一起延迟。
+  const waveLeft = camera.x / camera.zoom;
+  const waveTop = camera.y / camera.zoom;
+  const enterDelayOf = (rect: { x: number; y: number }) => {
+    if (!enter.on || !enter.wave) return 0;
+    const column = Math.max(0, Math.floor((rect.x - waveLeft) / 300));
+    const row = Math.max(0, Math.floor((rect.y - waveTop) / 280));
+    return Math.min(340, (column + row) * 30);
+  };
   const isEmpty = items.length === 0;
   const showEmpty = isEmpty && phase !== 'boot' && phase !== 'loading';
 
   return (
-    <div className="wall" ref={hostRef}>
+    <div
+      className={'canvas' + (dragging ? ' is-grabbing' : '')}
+      ref={viewportRef}
+      tabIndex={0}
+      role="region"
+      aria-label="图片画布：Tab 选卡片、Enter 打开、方向键平移、+/- 缩放"
+      onKeyDown={onCanvasKeyDown}
+      onPointerDown={onPointerDown}
+      onPointerMove={onPointerMove}
+      onPointerUp={onPointerUp}
+      onPointerCancel={onPointerCancel}
+      onLostPointerCapture={() => {
+        // 捕获被浏览器抢走（比如触控手势被系统接管）：别留一个"永远按着"的状态。
+        // 缩放中不管——endPinch 会自己给剩下的手指重建基线。
+        if (pinch.current || pointers.current.size > 0) return;
+        endPointer(null, -1);
+      }}
+    >
       {showEmpty ? (
         <div className="wall__note">
           {phase === 'error' ? (
@@ -137,38 +615,38 @@ export function WallView({
           )}
         </div>
       ) : (
-        <div className="wall__grid" style={gridStyle}>
-          {items.map((item, index) => (
+        <div className="world" style={worldStyle}>
+          {visible.map((tile) => (
             <WallCard
-              key={item.id}
-              item={item}
-              index={index}
+              key={tile.item.id}
+              item={tile.item}
+              index={tile.index}
               paths={paths}
-              span={spans[index]}
-              onOpen={onOpen}
-              onDetail={onDetail}
+              rect={tile.rect}
+              current={tile.item.id === activeId}
+              enter={enter.on}
+              enterDelay={enterDelayOf(tile.rect)}
+              tagCounts={tagCounts}
+              onOpen={(openedItem, openedIndex) => {
+                setActiveId(openedItem.id);
+                onOpen(openedItem, openedIndex);
+              }}
+              onSummary={(item, clientX, clientY) => {
+                setActiveId(item.id);
+                onSummary(item, clientX, clientY);
+              }}
             />
           ))}
         </div>
       )}
 
-      {hasMore ? <div className="wall__sentinel" ref={sentinelRef} /> : null}
+      {/* 硬规则 1：首页不出现脚手架文案。计数只留在边栏底部（.seam__count）；
+          加载态只有一条 1px 进度线，错误才给一句提示。 */}
+      <div className="canvas__hint">拖拽平移 · 滚轮滚动 · Ctrl+滚轮缩放 · 右键看概要</div>
 
-      <div className="wall__status">
-        <span>
-          已加载 <b>{formatCount(loadedCount)}</b> / {formatCount(totalCount)}
-          {filtered ? <>（筛后 <b>{formatCount(items.length)}</b>）</> : null}
-        </span>
-        <span>
-          {hasMore
-            ? phase === 'loading'
-              ? '正在加载…'
-              : '继续向下滚动'
-            : phase === 'error'
-              ? '加载中断'
-              : '到底了'}
-        </span>
-      </div>
+      <div className="canvas__progress" data-active={phase === 'loading' ? 'true' : undefined} aria-hidden="true" />
+
+      {phase === 'error' ? <div className="canvas__error">数据加载中断</div> : null}
     </div>
   );
 }

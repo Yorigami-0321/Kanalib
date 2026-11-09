@@ -31,7 +31,11 @@ export function ratingLabel(rating: string): string {
   return RATING_LABELS[rating] ?? rating;
 }
 
-/** 契约 §2 的类别取值；用于标签 chips 着色。 */
+/**
+ * 契约 §2 的类别取值；用于标签 chips 着色与标签总览的分组标题。
+ * 顺序与 TagGallery 的 CATEGORY_ORDER 一致（general/character/copyright/artist/manual/meta/rating），
+ * 缺项会回落成英文原值（D3：rating 之前就漏在这里，标签总览第四段显示成了 "rating"）。
+ */
 export const CATEGORY_LABELS: Record<string, string> = {
   general: '通用',
   character: '角色',
@@ -39,6 +43,7 @@ export const CATEGORY_LABELS: Record<string, string> = {
   artist: '画师',
   manual: '手动',
   meta: '元信息',
+  rating: '分级',
 };
 
 export function categoryLabel(category: string): string {

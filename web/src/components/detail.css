@@ -1,0 +1,292 @@
+/* nav-detail · 全屏详情：B2 的修复 + 窄屏换行（photo-wall-v3 §2.2 / §3 规则 7 / 10）
+
+   结构：.view__media（固定画面，contain）+ .view__scroll（信息层，自己滚）。
+   body{overflow:hidden} 保持不动——详情不再依赖它。
+   styles.css 后加载，覆盖统一靠 .view--detail 前缀的特异性。 */
+
+.view--detail .view__media {
+  z-index: 0;
+  padding: clamp(10px, 2.4vw, 36px);
+}
+
+.view--detail .view__img {
+  display: block;
+}
+
+.view--detail .view__scrim {
+  z-index: 1;
+}
+
+/* ===== 信息层：自己的滚动容器（B2） ===== */
+
+.view--detail .view__scroll {
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-color: rgba(247, 244, 238, 0.2) transparent;
+  scrollbar-width: thin;
+}
+
+.view--detail .view__scroll::-webkit-scrollbar {
+  width: 8px;
+}
+
+.view--detail .view__scroll::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.view--detail .view__scroll::-webkit-scrollbar-thumb {
+  border-radius: 4px;
+  background: rgba(247, 244, 238, 0.16);
+}
+
+.view--detail .view__scroll::-webkit-scrollbar-thumb:hover {
+  background: rgba(247, 244, 238, 0.26);
+}
+
+.view--detail .view__inner {
+  display: flex;
+  flex-direction: column;
+  min-height: 100%;
+}
+
+/* 内容不满一屏时贴底；超长时随内容长高并从头滚动（不用 justify-content:center，
+   那会让溢出部分滚不到）。 */
+.view--detail .view__info {
+  position: static;
+  display: flex;
+  flex-direction: row;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: clamp(18px, 3vw, 48px);
+  margin-top: auto;
+  /* D1：.view 是 fixed inset:0，但左侧 .seam（z-index 40 > .view 的 30）浮在上面，
+     所以内容层必须自己让开 --seam-w；桌面 120px、≤900px 时 64px（styles.css 覆盖该变量）。
+     图（.view__media）不动，仍然占满全屏。 */
+  padding: clamp(72px, 15vh, 150px) clamp(14px, 3vw, 40px) clamp(18px, 3vh, 34px)
+    calc(var(--seam-w) + 24px);
+  background: linear-gradient(
+    180deg,
+    rgba(5, 5, 5, 0) 0%,
+    rgba(5, 5, 5, 0.5) 32%,
+    rgba(5, 5, 5, 0.9) 64%,
+    /* 终色必须与 styles.css:951 的 .view background(#050505) 严丝合缝，
+       token --bg 是 #070707，差 2 级会在接缝处露边，所以这里写死。 */
+    #050505 100%
+  );
+  pointer-events: auto;
+}
+
+.view--detail .view__text {
+  flex: 1 1 auto;
+  min-width: 0;
+  max-width: min(58ch, 100%);
+}
+
+/* 详情标题：§2.2 clamp(28px, 3vw, 44px)，长标题折行不截断 */
+.view--detail .view__title {
+  margin: 0;
+  color: var(--ink);
+  font-size: clamp(28px, 3vw, 44px);
+  font-weight: 600;
+  letter-spacing: -0.035em;
+  line-height: 1.02;
+  text-wrap: balance;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+.view--detail .view__meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  margin: 10px 0 0;
+  color: rgba(247, 244, 238, 0.6);
+  font-size: 13px;
+}
+
+.view--detail .view__meta span {
+  white-space: nowrap;
+}
+
+/* 元信息之间用发丝点分隔，换行时跟着走，不出现孤零零的 "·" */
+.view--detail .view__meta span + span::before {
+  content: '·';
+  margin: 0 10px;
+  color: rgba(247, 244, 238, 0.28);
+}
+
+.view--detail .view__tags {
+  gap: 6px;
+  margin-top: 14px;
+}
+
+/* 详情里的标签 chip：压在图上，需要自己的底与描边 */
+.view--detail .chip {
+  display: inline-flex;
+  max-width: 100%;
+  min-height: 28px;
+  align-items: center;
+  padding: 5px 11px;
+  border-radius: 2px;
+  color: rgba(247, 244, 238, 0.82);
+  background: rgba(8, 8, 9, 0.52);
+  box-shadow: inset 0 0 0 1px rgba(247, 244, 238, 0.12);
+  font-size: 13px;
+  line-height: 1.25;
+  overflow-wrap: anywhere;
+  text-align: left;
+  transition:
+    background-color 160ms var(--ease),
+    color 160ms var(--ease);
+}
+
+.view--detail .chip:hover {
+  color: var(--ink);
+  background: rgba(247, 244, 238, 0.14);
+}
+
+/* 混色锚点必须是纯白：拿 --ink(#f7f4ee) 当锚点混出来会发米，达不到「accent 提亮」的意图 */
+.view--detail .chip--accent {
+  color: color-mix(in srgb, var(--accent) 62%, #fff);
+  background: color-mix(in srgb, var(--accent) 18%, rgba(8, 8, 9, 0.6));
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 40%, transparent);
+}
+
+/* ===== 右下相似条 ===== */
+
+.view--detail .view__similar {
+  display: flex;
+  max-width: 100%;
+  flex: 0 0 auto;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 8px;
+}
+
+.view--detail .view__similar-label {
+  color: rgba(247, 244, 238, 0.42);
+  font-size: 13px;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+}
+
+.view--detail .view__similar-strip {
+  display: flex;
+  max-width: 100%;
+  gap: 6px;
+  overflow-x: auto;
+  padding-bottom: 2px;
+  scrollbar-width: none;
+}
+
+.view--detail .view__similar-strip::-webkit-scrollbar {
+  display: none;
+}
+
+.view--detail .view__similar-strip .similar__item {
+  flex: none;
+  border-radius: 4px;
+}
+
+/* ===== 顶栏：返回 + 前后 + 序号 ===== */
+
+.view--detail .view__bar {
+  z-index: 4;
+  /* 返回键 / 序号同样要让开 seam，否则压在缝下面点不到 */
+  padding: clamp(12px, 1.8vw, 20px) clamp(12px, 2vw, 22px) clamp(12px, 1.8vw, 20px)
+    calc(var(--seam-w) + 12px);
+  pointer-events: none;
+}
+
+.view--detail .view__bar .icon-btn,
+.view--detail .view__bar-end {
+  pointer-events: auto;
+}
+
+.view--detail .view__bar-end {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.view--detail .view__step {
+  display: grid;
+  width: 32px;
+  height: 32px;
+  place-items: center;
+  border-radius: 50%;
+  color: rgba(247, 244, 238, 0.78);
+  background: rgba(247, 244, 238, 0.08);
+  font-size: 13px;
+  line-height: 1;
+  transition:
+    background-color 160ms var(--ease),
+    color 160ms var(--ease),
+    opacity 160ms var(--ease);
+}
+
+.view--detail .view__step:hover:not(:disabled) {
+  color: var(--ink);
+  background: rgba(247, 244, 238, 0.16);
+}
+
+.view--detail .view__step:disabled {
+  opacity: 0.24;
+  cursor: default;
+}
+
+.view--detail .view__seq {
+  margin-left: 4px;
+  color: rgba(247, 244, 238, 0.55);
+  font-size: 13px;
+  letter-spacing: 0.08em;
+  white-space: nowrap;
+}
+
+/* ===== 窄屏（§3 规则 10：390px 可浏览） ===== */
+
+@media (max-width: 760px) {
+  .view--detail .view__media {
+    padding: 8px;
+  }
+
+  .view--detail .view__info {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 16px;
+    padding: clamp(56px, 12vh, 110px) 16px 20px calc(var(--seam-w) + 16px);
+  }
+
+  .view--detail .view__text {
+    max-width: 100%;
+  }
+
+  .view--detail .view__similar {
+    align-items: flex-start;
+  }
+}
+
+@media (max-width: 430px) {
+  .view--detail .view__title {
+    font-size: 27px;
+    line-height: 1.06;
+  }
+
+  .view--detail .view__info {
+    padding-right: 14px;
+    padding-left: calc(var(--seam-w) + 14px);
+  }
+
+  .view--detail .view__similar-strip {
+    gap: 4px;
+  }
+
+  .view--detail .view__similar-strip .similar__item {
+    width: 48px;
+    height: 48px;
+  }
+}

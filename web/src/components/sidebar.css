@@ -1,0 +1,87 @@
+/* nav-detail · 导航缝：状态通道收敛（photo-wall-v3 §3 规则 3 / 6，Folia 指标见 §5）
+
+   选中项只保留一条通道：左侧 2px 动态强调色竖线 + 文字提亮，去掉整块底色。
+   hover 走 ::before 的 currentColor 填充（底 16%）+ 26% 内描边，160ms。
+   Folia 里"高亮 ::before 填 currentColor 14% / 180ms"是给选中项的底色块用的，
+   与"选中去底色"冲突，故不再叠加；只把文字提亮的过渡对齐到 180ms。
+
+   注意：styles.css 在本模块之后加载（main.tsx 先 import App 再 import styles.css），
+   所有覆盖都必须靠特异性取胜，故统一用 .app .seam 前缀。 */
+
+.app .seam {
+  /* Folia 实测：padding 16px 10px 0，段间距 18px */
+  gap: 12px;
+  padding: 16px 10px 0;
+}
+
+.app .seam__tab {
+  padding: 9px 4px;
+  border-radius: 10px;
+  /* 状态只改颜色/伪元素，不改字号与位移（规则 3） */
+  transition:
+    color 180ms var(--ease),
+    box-shadow 160ms var(--ease);
+}
+
+/* hover：16% 底 + 26% 边（160ms）——用伪元素承载，元素本身始终无底色 */
+.app .seam .seam__tab::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  background: currentColor;
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, currentColor 26%, transparent);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 160ms var(--ease);
+}
+
+.app .seam .seam__tab:hover::before {
+  opacity: 0.16;
+}
+
+.app .seam .seam__tab:hover {
+  background: none;
+}
+
+/* 选中：竖线 + 提亮，没有底色块；hover 也不再追加填充（两套不叠加） */
+.app .seam .seam__tab.is-on,
+.app .seam .seam__tab.is-on:hover {
+  color: var(--ink);
+  background: none;
+}
+
+.app .seam .seam__tab.is-on::before {
+  opacity: 0;
+}
+
+/* 焦点用内描边，不用外发光（规则 6） */
+.app .seam .seam__tab:focus-visible {
+  outline: none;
+  box-shadow: inset 0 0 0 1px var(--accent);
+}
+
+/* 选中竖线：3px 内缩 + 2px 宽，颜色跟 --accent 一起过渡 */
+.app .seam .seam__tab.is-on::after {
+  content: '';
+  position: absolute;
+  top: 9px;
+  bottom: 9px;
+  left: -7px;
+  width: 2px;
+  border-radius: 1px;
+  background: var(--accent);
+  transform-origin: 50% 50%;
+  animation: seam-rule-in 240ms var(--ease);
+  transition: background-color 600ms var(--ease);
+}
+
+/* §5：Folia 导航项 14px / 700 / letter-spacing .18em */
+.app .seam__label {
+  font-size: 14px;
+  letter-spacing: 0.18em;
+}
+
+.app .seam__foot {
+  padding-bottom: 16px;
+}

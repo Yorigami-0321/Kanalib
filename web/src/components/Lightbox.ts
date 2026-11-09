@@ -2,6 +2,7 @@ import PhotoSwipeLightbox from 'photoswipe/lightbox';
 import type PhotoSwipe from 'photoswipe';
 import type { SlideData } from 'photoswipe';
 import 'photoswipe/style.css';
+import './lightbox.css';
 import { fitDims, tierUrl } from '../lib/assetUrl';
 import { probeImage } from '../lib/probe';
 import type { TierPaths, WallItem } from '../source/types';
@@ -40,7 +41,7 @@ export interface OpenLightboxArgs {
   items: WallItem[];
   startIndex: number;
   paths: TierPaths;
-  /** 工具栏「详情」按钮 / 双击：路由到 #/a/<id>。 */
+  /** 工具栏「详情」按钮 / 双击：路由到 #/d/<id>。 */
   onDetail: (id: string) => void;
   onClose?: () => void;
 }
@@ -100,6 +101,10 @@ export function openLightbox({
   lightbox.on('uiRegister', () => {
     const pswp = lightbox.pswp;
     if (!pswp || !pswp.ui) return;
+    // P1-1：实例只能在这里拿到。lightbox.loadAndOpen 内部先 await options.pswpModule()，
+    // Promise resolve 之后才 this.pswp = pswp（photoswipe-lightbox.esm.js 的 preload），
+    // 所以在 openLightbox 末尾读 lightbox.pswp 永远是 undefined。
+    activePswp = pswp;
     pswp.ui.registerElement({
       name: 'detail-button',
       order: 9,
@@ -131,11 +136,11 @@ export function openLightbox({
 
   lightbox.on('close', () => {
     activePswp = null;
-    lightbox.destroy();
+    // destroy 幂等：已经销毁过就不再调一次（close 可能被 closeLightbox 重复触发）
+    if (lightbox.pswp) lightbox.destroy();
     onClose?.();
   });
 
   lightbox.init();
   lightbox.loadAndOpen(Math.min(Math.max(startIndex, 0), items.length - 1));
-  activePswp = lightbox.pswp ?? null;
 }

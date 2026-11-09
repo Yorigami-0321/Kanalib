@@ -1,0 +1,221 @@
+/* nav-detail · 标签总览：排版驱动的封面墙（photo-wall-v3 §2.2 字体层级 + §5 模式三）
+   只能覆盖、不能改 styles.css：靠 .app .tags 前缀的特异性取胜（styles.css 后加载）。 */
+
+.app .tags {
+  padding: clamp(20px, 3vw, 34px) clamp(14px, 3vw, 40px) 88px;
+}
+
+.app .tags__head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px 18px;
+  padding: 0 0 clamp(14px, 2vw, 24px);
+  border-bottom: 1px solid var(--hairline);
+}
+
+/* §2.2 第四档：clamp(22px, 2vw, 36px) */
+.app .tags__title {
+  margin: 0;
+  color: var(--ink);
+  font-size: clamp(22px, 2vw, 36px);
+  font-weight: 500;
+  letter-spacing: -0.035em;
+  line-height: 1;
+}
+
+.app .tags__sub {
+  margin: 0;
+  color: var(--ink-soft);
+  font-size: 13px;
+  letter-spacing: 0.02em;
+}
+
+/* 段与段之间给足呼吸，层级靠"标题 + 发丝线 + 计数"这一行建立 */
+.app .tags__group + .tags__group {
+  margin-top: clamp(30px, 4vw, 52px);
+}
+
+.app .tags__group-head {
+  display: flex;
+  align-items: baseline;
+  gap: clamp(10px, 1.4vw, 16px);
+  margin: 0 0 clamp(10px, 1.4vw, 16px);
+}
+
+.app .tags__group-title {
+  flex: none;
+  margin: 0;
+  color: rgba(247, 244, 238, 0.52);
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+}
+
+.app .tags__group-rule {
+  flex: 1;
+  min-width: 20px;
+  height: 1px;
+  background: var(--hairline);
+}
+
+.app .tags__group-count {
+  flex: none;
+  color: rgba(247, 244, 238, 0.32);
+  font-size: 13px;
+  letter-spacing: 0.04em;
+}
+
+.app .tags__grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(clamp(148px, 15vw, 208px), 1fr));
+  gap: clamp(8px, 1vw, 12px);
+}
+
+.app .tags__empty {
+  margin-top: 40px;
+  color: var(--ink-soft);
+  font-size: 13px;
+}
+
+/* ===== 封面卡：超大标签名压在图上 ===== */
+
+.app .tagcard {
+  position: relative;
+  display: block;
+  padding: 0;
+  overflow: hidden;
+  aspect-ratio: 4 / 5;
+  border-radius: 10px;
+  /* 封面未到/加载失败时的底：走 --surface（近黑纸面），不用裸 hex */
+  background: var(--surface);
+  text-align: left;
+  transition:
+    transform 260ms var(--ease),
+    filter 260ms var(--ease);
+}
+
+.app .tagcard:hover {
+  transform: translateY(-2px);
+  filter: saturate(1.06) brightness(1.06);
+}
+
+.app .tagcard:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 3px;
+}
+
+.app .tagcard__img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  transition: transform 700ms var(--ease);
+}
+
+.app .tagcard:hover .tagcard__img {
+  transform: scale(1.04);
+}
+
+.app .tagcard__blank {
+  display: block;
+  width: 100%;
+  height: 100%;
+  /* 无封面瓦片：在 --surface 上掺一点 --ink，保持与整体同一套墨色 */
+  background: linear-gradient(
+    160deg,
+    color-mix(in srgb, var(--ink) 7%, var(--surface)),
+    var(--surface)
+  );
+}
+
+/* 封面还在路上（App 正在把全部分片拉齐）时给一道极淡的扫光，
+   让"空墙"读起来是加载中，而不是坏掉。只动 opacity / transform。 */
+.app .tags--loading .tagcard__shade::after {
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(100deg, transparent 18%, rgba(247, 244, 238, 0.07) 50%, transparent 82%);
+  content: '';
+  animation: tagcard-sweep 1.7s linear infinite;
+}
+
+@keyframes tagcard-sweep {
+  from {
+    opacity: 0.15;
+    transform: translateX(-45%);
+  }
+
+  50% {
+    opacity: 1;
+  }
+
+  to {
+    opacity: 0.15;
+    transform: translateX(45%);
+  }
+}
+
+.app .tagcard__shade {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background: linear-gradient(
+    180deg,
+    rgba(0, 0, 0, 0.3) 0%,
+    rgba(0, 0, 0, 0.02) 24%,
+    rgba(0, 0, 0, 0.46) 60%,
+    rgba(0, 0, 0, 0.9) 100%
+  );
+}
+
+.app .tagcard__body {
+  position: absolute;
+  right: clamp(10px, 1.2vw, 16px);
+  bottom: clamp(10px, 1.2vw, 16px);
+  left: clamp(10px, 1.2vw, 16px);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+/* 标签名就是主角：§2.2 第四档字号，.92 行高、负字距、两行起收、三行封顶 */
+.app .tagcard__name {
+  display: -webkit-box;
+  overflow: hidden;
+  /* 压在照片上的标题用 --ink（近白），不写死 #fff */
+  color: var(--ink);
+  font-size: clamp(20px, 2vw, 34px);
+  font-weight: 600;
+  letter-spacing: -0.035em;
+  line-height: 0.92;
+  text-overflow: clip;
+  text-shadow: 0 1px 10px rgba(0, 0, 0, 0.45);
+  text-wrap: balance;
+  overflow-wrap: anywhere;
+  white-space: normal;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+}
+
+.app .tagcard__meta {
+  color: rgba(247, 244, 238, 0.58);
+  font-size: 13px;
+  letter-spacing: 0.04em;
+}
+
+@media (max-width: 900px) {
+  .app .tags {
+    padding: 14px 12px 64px;
+  }
+
+  .app .tags__grid {
+    grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+    gap: 8px;
+  }
+
+  .app .tags__title {
+    font-size: 22px;
+  }
+}
