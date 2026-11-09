@@ -270,61 +270,6 @@
   border-radius: 4px;
 }
 
-/* ===== 顶栏：返回 + 前后 + 序号 ===== */
-
-.view--detail .view__bar {
-  z-index: 4;
-  /* 返回键 / 序号同样要让开 seam，否则压在缝下面点不到 */
-  padding: clamp(12px, 1.8vw, 20px) clamp(12px, 2vw, 22px) clamp(12px, 1.8vw, 20px)
-    calc(var(--seam-w) + 12px);
-  pointer-events: none;
-}
-
-.view--detail .view__bar .icon-btn,
-.view--detail .view__bar-end {
-  pointer-events: auto;
-}
-
-.view--detail .view__bar-end {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-
-.view--detail .view__step {
-  display: grid;
-  width: 32px;
-  height: 32px;
-  place-items: center;
-  border-radius: 50%;
-  color: rgba(247, 244, 238, 0.78);
-  background: rgba(247, 244, 238, 0.08);
-  font-size: 13px;
-  line-height: 1;
-  transition:
-    background-color 160ms var(--ease),
-    color 160ms var(--ease),
-    opacity 160ms var(--ease);
-}
-
-.view--detail .view__step:hover:not(:disabled) {
-  color: var(--ink);
-  background: rgba(247, 244, 238, 0.16);
-}
-
-.view--detail .view__step:disabled {
-  opacity: 0.24;
-  cursor: default;
-}
-
-.view--detail .view__seq {
-  margin-left: 4px;
-  color: rgba(247, 244, 238, 0.55);
-  font-size: 13px;
-  letter-spacing: 0.08em;
-  white-space: nowrap;
-}
-
 /* ===== 窄屏（§3 规则 10：390px 可浏览） ===== */
 
 @media (max-width: 760px) {

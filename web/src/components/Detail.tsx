@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { detailSources, originalUrl, tierUrl } from '../lib/assetUrl';
 import { expanding } from '../lib/expand';
-import { categoryLabel, formatCount, formatDateTime, formatSize, ratingLabel } from '../lib/format';
+import { categoryLabel, formatDateTime, formatSize, ratingLabel } from '../lib/format';
 import { hammingHex } from '../lib/hash';
 import type { TierPaths, WallItem } from '../source/types';
 import './detail.css';
@@ -16,10 +16,6 @@ export interface DetailProps {
   onBack: () => void;
   onOpenDetail: (id: string) => void;
   onTagClick: (tag: string) => void;
-}
-
-function pad(value: number): string {
-  return value < 10 ? '0' + String(value) : String(value);
 }
 
 function similarOf(item: WallItem, items: readonly WallItem[]): WallItem[] {
@@ -205,8 +201,6 @@ export function Detail({ item, items, paths, onBack, onOpenDetail, onTagClick }:
   }, [veiled]);
 
   const routeIndex = items.findIndex((entry) => entry.id === item.id);
-  const prevId = routeIndex > 0 ? items[routeIndex - 1]?.id : undefined;
-  const nextId = routeIndex >= 0 && routeIndex + 1 < items.length ? items[routeIndex + 1]?.id : undefined;
 
   const panes: (WallItem | undefined)[] = slide
     ? slide.dir === 1
@@ -242,40 +236,6 @@ export function Detail({ item, items, paths, onBack, onOpenDetail, onTagClick }:
         </div>
       </div>
       <div className="view__scrim" aria-hidden="true" />
-
-      <header className="view__bar">
-        <button type="button" className="icon-btn" onClick={onBack} title="返回（Esc）" aria-label="返回">
-          <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-            <path d="M19 12H5" />
-            <path d="m11 18-6-6 6-6" />
-          </svg>
-        </button>
-        <div className="view__bar-end">
-          <button
-            type="button"
-            className="view__step"
-            onClick={() => prevId && onOpenDetail(prevId)}
-            disabled={!prevId}
-            title="上一张（←）"
-            aria-label="上一张"
-          >
-            ←
-          </button>
-          <button
-            type="button"
-            className="view__step"
-            onClick={() => nextId && onOpenDetail(nextId)}
-            disabled={!nextId}
-            title="下一张（→）"
-            aria-label="下一张"
-          >
-            →
-          </button>
-          <span className="view__seq">
-            {routeIndex >= 0 ? pad(routeIndex + 1) : '--'} / {formatCount(items.length)}
-          </span>
-        </div>
-      </header>
     </article>
   );
 }

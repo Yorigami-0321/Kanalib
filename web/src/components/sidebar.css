@@ -86,6 +86,52 @@
   padding-bottom: 16px;
 }
 
+/* ===== 功能键组（2026-11-09 用户指令）：画布与详情页的操作钮统一收进缝 =====
+   墙页给缩放/回到起点（2×2 网格），详情页给返回/翻页（一行三钮 + 竖排序号），
+   两组互斥渲染。竖排一列会把底部计数挤出视口（实测 900 高放不下），必须压扁；
+   宽度不变（规则 2：导航一条、固定宽、不推挤）。 */
+.app .seam__ops {
+  display: grid;
+  width: 100%;
+  flex: none;
+  grid-template-columns: repeat(2, 32px);
+  justify-content: center;
+  gap: 6px;
+  padding-top: 8px;
+  border-top: 1px solid var(--hairline);
+}
+
+.app .seam__ops--detail {
+  grid-template-columns: repeat(3, 30px);
+  gap: 6px 4px;
+}
+
+.app .seam__ops .seam__tab--icon {
+  width: 32px;
+  height: 32px;
+}
+
+.app .seam__ops--detail .seam__tab--icon {
+  width: 30px;
+  height: 30px;
+}
+
+/* 序号占满整行（竖排文字，跟底部计数同款）。 */
+.app .seam__ops .seam__count {
+  grid-column: 1 / -1;
+}
+
+/* 翻页到头时置灰：只降透明度，不换状态通道（规则 3）。 */
+.app .seam .seam__tab:disabled {
+  color: var(--ink-soft);
+  opacity: 0.4;
+  cursor: default;
+}
+
+.app .seam .seam__tab:disabled::before {
+  opacity: 0;
+}
+
 /* ===== Q6 = C′（2026-11-09 用户改判）：常驻半透明 =====
    默认 76% 纸 + blur(10) 一直开；悬停升到 88% + blur(14)。
    以前是"实色纸面，hover 才切玻璃"，用户报"只有悬停才透明"。

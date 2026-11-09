@@ -4,7 +4,7 @@ import { tierUrl } from './lib/assetUrl';
 import { Detail } from './components/Detail';
 import { Sidebar, type RailView, type SortMode } from './components/Sidebar';
 import { TagGallery, type TagEntry } from './components/TagGallery';
-import { WallView } from './components/Wall';
+import { WallView, type WallControls } from './components/Wall';
 import { beginExpand, containRect, flyImage, type Rect } from './lib/expand';
 import { categoryLabel, formatCount } from './lib/format';
 import { detailHref, navigate, tagHref, tagsHref, useRoute, wallHref } from './lib/router';
@@ -57,6 +57,8 @@ export function App() {
   const routeViewRef = useRef(route.view);
   const orderCache = useRef<{ source: readonly WallItem[]; list: WallItem[] }>({ source: [], list: [] });
   const wallRef = useRef(wall);
+  // 侧栏功能键的操纵句柄：缩放/复位/回到起点经 ref 直调 Wall，不经过 React 状态。
+  const wallControls = useRef<WallControls | null>(null);
   wallRef.current = wall;
 
   const detailId = route.view === 'detail' ? route.id : null;
@@ -410,6 +412,44 @@ export function App() {
     wall.loadMore();
   }, [wall.loadMore]);
 
+  // 侧栏功能键：墙页给缩放/回到起点，详情页给返回/翻页，两组互斥。
+  const canvasOps = useMemo(
+    () =>
+      route.view === 'detail'
+        ? null
+        : {
+            onZoomIn: () => wallControls.current?.zoomBy(1.25),
+            onZoomOut: () => wallControls.current?.zoomBy(1 / 1.25),
+            onZoomReset: () => wallControls.current?.zoomReset(),
+            onHome: () => wallControls.current?.goHome(),
+            homeTitle: route.view === 'wall' && !filtered ? '回到起点（Home）' : '回到顶部（Home）',
+          },
+    [filtered, route.view],
+  );
+
+  const detailIndex = detailItem ? detailBrowseItems.findIndex((e) => e.id === detailItem.id) : -1;
+  const detailOps = useMemo(
+    () =>
+      detailItem && detailIndex >= 0
+        ? {
+            index: detailIndex,
+            total: detailBrowseItems.length,
+            hasPrev: detailIndex > 0,
+            hasNext: detailIndex + 1 < detailBrowseItems.length,
+            onBack: handleBack,
+            onPrev: () => {
+              const prev = detailBrowseItems[detailIndex - 1];
+              if (prev) handleDetail(prev.id);
+            },
+            onNext: () => {
+              const next = detailBrowseItems[detailIndex + 1];
+              if (next) handleDetail(next.id);
+            },
+          }
+        : null,
+    [detailBrowseItems, detailIndex, detailItem, handleBack, handleDetail],
+  );
+
   return (
     <div className="app">
       <Sidebar
@@ -426,6 +466,8 @@ export function App() {
         sort={sort}
         onSort={setSort}
         focusItem={focusItems[0] ?? null}
+        canvas={canvasOps}
+        detail={detailOps}
       />
 
       <main className="stage">
@@ -455,9 +497,6 @@ export function App() {
           <>
             {route.view === 'tag' ? (
               <header className="wallhead">
-                <button type="button" className="wallhead__back" onClick={handleTags} title="回到标签">
-                  ←
-                </button>
                 <h1 className="wallhead__title">{route.tag}</h1>
                 <span className="wallhead__count">{formatCount(tagTotal)} 张</span>
               </header>
@@ -480,6 +519,7 @@ export function App() {
               onSummary={handleSummary}
               summaryId={summaryId}
               onCloseSummary={() => setSummaryId(null)}
+              controlsRef={wallControls}
               onFocusItems={handleFocusItems}
               onRetry={wall.retry}
             />

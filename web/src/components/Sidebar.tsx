@@ -84,6 +84,60 @@ const ICON_INFO = (
   </Icon>
 );
 
+const ICON_MINUS = (
+  <Icon>
+    <path d="M5 12h14" />
+  </Icon>
+);
+
+const ICON_PLUS = (
+  <Icon>
+    <path d="M12 5v14" />
+    <path d="M5 12h14" />
+  </Icon>
+);
+
+/** 缩放复位：四角括号=“铺回可视区”。 */
+const ICON_FIT = (
+  <Icon>
+    <path d="M4 9V5.5A1.5 1.5 0 0 1 5.5 4H9" />
+    <path d="M20 9V5.5A1.5 1.5 0 0 0 18.5 4H15" />
+    <path d="M4 15v3.5A1.5 1.5 0 0 0 5.5 20H9" />
+    <path d="M20 15v3.5A1.5 1.5 0 0 1 18.5 20H15" />
+  </Icon>
+);
+
+/** 回到起点：准星。无限空间回格子原点，有限世界回顶部。 */
+const ICON_CROSSHAIR = (
+  <Icon>
+    <circle cx="12" cy="12" r="7.5" />
+    <path d="M12 2.5v4" />
+    <path d="M12 17.5v4" />
+    <path d="M2.5 12h4" />
+    <path d="M17.5 12h4" />
+    <circle cx="12" cy="12" r="0.8" fill="currentColor" />
+  </Icon>
+);
+
+const ICON_BACK = (
+  <Icon>
+    <path d="M19 12H5" />
+    <path d="m11 18-6-6 6-6" />
+  </Icon>
+);
+
+const ICON_PREV = (
+  <Icon>
+    <path d="m15 5-7 7 7 7" />
+  </Icon>
+);
+
+const ICON_NEXT = (
+  <Icon>
+    <path d="m9 5 7 7-7 7" />
+  </Icon>
+);
+
 interface PanelEntry {
   id: PanelId;
   label: string;
@@ -100,6 +154,27 @@ const PANELS: PanelEntry[] = [
 
 export type RailView = 'home' | 'tags' | 'tag';
 
+/** 视图操作（墙页）：缩放与回到起点。离开墙页传 null，整组不渲染。 */
+export interface CanvasOps {
+  onZoomIn: () => void;
+  onZoomOut: () => void;
+  onZoomReset: () => void;
+  onHome: () => void;
+  /** 按钮语义随世界形态变：无限是“回到起点”，有限是“回到顶部”。 */
+  homeTitle: string;
+}
+
+/** 详情操作（详情页）：返回 / 翻页 / 序号。离开详情传 null。 */
+export interface DetailOps {
+  index: number;
+  total: number;
+  hasPrev: boolean;
+  hasNext: boolean;
+  onBack: () => void;
+  onPrev: () => void;
+  onNext: () => void;
+}
+
 export interface SidebarProps {
   view: RailView;
   onHome: () => void;
@@ -114,6 +189,8 @@ export interface SidebarProps {
   sort: SortMode;
   onSort: (mode: SortMode) => void;
   focusItem?: WallItem | null;
+  canvas?: CanvasOps | null;
+  detail?: DetailOps | null;
 }
 
 /**
@@ -134,6 +211,8 @@ export function Sidebar({
   sort,
   onSort,
   focusItem,
+  canvas,
+  detail,
 }: SidebarProps) {
   const [panel, setPanel] = useState<PanelId | null>(null);
   const panelRef = useRef<HTMLDivElement | null>(null);
@@ -244,6 +323,54 @@ export function Sidebar({
             </button>
           ))}
         </div>
+
+        {/* 功能键统一收在缝里（2026-11-09 用户指令）：画布与详情页不再挂任何操作钮。
+            墙页给缩放/回到起点，详情页给返回/翻页——两组互斥，高度不叠加。 */}
+        {canvas ? (
+          <div className="seam__ops" role="group" aria-label="视图操作">
+            <button type="button" className="seam__tab seam__tab--icon" onClick={canvas.onZoomOut} title="缩小">
+              {ICON_MINUS}
+            </button>
+            <button type="button" className="seam__tab seam__tab--icon" onClick={canvas.onZoomIn} title="放大">
+              {ICON_PLUS}
+            </button>
+            <button type="button" className="seam__tab seam__tab--icon" onClick={canvas.onZoomReset} title="缩放复位（100%）">
+              {ICON_FIT}
+            </button>
+            <button type="button" className="seam__tab seam__tab--icon" onClick={canvas.onHome} title={canvas.homeTitle}>
+              {ICON_CROSSHAIR}
+            </button>
+          </div>
+        ) : null}
+
+        {detail ? (
+          <div className="seam__ops seam__ops--detail" role="group" aria-label="详情操作">
+            <button type="button" className="seam__tab seam__tab--icon" onClick={detail.onBack} title="返回（Esc）">
+              {ICON_BACK}
+            </button>
+            <button
+              type="button"
+              className="seam__tab seam__tab--icon"
+              onClick={detail.onPrev}
+              disabled={!detail.hasPrev}
+              title="上一张（←）"
+            >
+              {ICON_PREV}
+            </button>
+            <button
+              type="button"
+              className="seam__tab seam__tab--icon"
+              onClick={detail.onNext}
+              disabled={!detail.hasNext}
+              title="下一张（→）"
+            >
+              {ICON_NEXT}
+            </button>
+            <span className="seam__count">
+              {String(detail.index + 1).padStart(2, '0')} / {formatCount(detail.total)}
+            </span>
+          </div>
+        ) : null}
 
         <div className="seam__foot">
           <span className="seam__count">

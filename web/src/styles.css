@@ -700,60 +700,6 @@ a {
   pointer-events: none;
 }
 
-/* 无限空间容易迷路：走远一屏半之后才浮出这一枚「回到起点」。
-   只在需要时出现，不构成规则 1 说的常驻工具栏。 */
-.canvas__home {
-  position: fixed;
-  bottom: 16px;
-  left: calc(var(--seam-w) + 18px);
-  z-index: 6;
-  padding: 6px 12px;
-  border-radius: 999px;
-  color: rgba(247, 244, 238, 0.78);
-  background: rgba(10, 10, 12, 0.62);
-  box-shadow: inset 0 0 0 1px rgba(247, 244, 238, 0.14);
-  font-size: 11px;
-  letter-spacing: 0.06em;
-  backdrop-filter: blur(10px);
-  transition:
-    color 160ms var(--ease),
-    background-color 160ms var(--ease);
-}
-
-.canvas__home:hover {
-  color: var(--ink);
-  background: rgba(20, 20, 22, 0.8);
-}
-
-/* 缩放比例提示（P2-9）：瞬态交互反馈，不是常驻计数。
-   位置取右下 bottom:92 —— .canvas__hint 停在 bottom 46（淡出时还会上移 6px，实测矩形顶边 820），
-   提示底边在 808，两者留 12px；.canvas__error（bottom 16）、.canvas__progress（bottom 0）、
-   .canvas__home（左下 bottom 16）都不在同一矩形里，390 窄屏同样不相交。
-   不缩放时节点直接卸载，因此不会遮挡卡片内容区，也不参与 Tab 序列。 */
-.canvas__zoom {
-  position: fixed;
-  right: 18px;
-  bottom: 92px;
-  z-index: 6;
-  padding: 5px 9px;
-  border-radius: 999px;
-  color: rgba(247, 244, 238, 0.82);
-  background: rgba(10, 10, 12, 0.62);
-  font-size: 12px;
-  font-weight: 700;
-  font-variant-numeric: tabular-nums;
-  letter-spacing: 0.04em;
-  backdrop-filter: blur(10px);
-  opacity: 1;
-  transition: opacity 300ms var(--ease);
-  pointer-events: none;
-}
-
-/* 停手 800ms 后由 JS 翻成 false，靠这条 transition 淡出。 */
-.canvas__zoom[data-on='false'] {
-  opacity: 0;
-}
-
 .wall__note {
   display: grid;
   min-height: 100vh;
@@ -868,25 +814,6 @@ a {
   max-width: calc(100vw - var(--seam-w) - 40px);
   align-items: center;
   gap: 10px;
-}
-
-.wallhead__back {
-  display: grid;
-  width: 30px;
-  height: 30px;
-  place-items: center;
-  border-radius: 50%;
-  color: rgba(247, 244, 238, 0.72);
-  background: rgba(247, 244, 238, 0.07);
-  font-size: 14px;
-  transition:
-    background-color 160ms var(--ease),
-    color 160ms var(--ease);
-}
-
-.wallhead__back:hover {
-  color: #fff;
-  background: rgba(247, 244, 238, 0.14);
 }
 
 .wallhead__title {
@@ -1094,21 +1021,1810 @@ a {
   );
 }
 
-.view__bar {
-  position: absolute;
-  top: 0;
-  right: 0;
-  left: 0;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 16px 20px;
+.icon-btn {
+  width: 28px;
+  height: 28px;
 }
 
-.view__seq {
-  color: rgba(247, 244, 238, 0.55);
+.tile__info-body {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.tile__info-name {
+  overflow: hidden;
+  color: var(--ink);
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1.3;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+}
+
+.tile__info-meta {
+  overflow: hidden;
+  color: rgba(247, 244, 238, 0.66);
   font-size: 11px;
-  letter-spacing: 0.08em;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tile__info-tags {
+  overflow: hidden;
+  color: color-mix(in srgb, var(--accent) 80%, var(--ink));
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  transition: color 600ms var(--ease);
+}
+
+/* ===== 二级墙标题 ===== */
+
+.wallhead {
+  position: fixed;
+  top: 16px;
+  left: calc(var(--seam-w) + 20px);
+  z-index: 8;
+  display: flex;
+  max-width: calc(100vw - var(--seam-w) - 40px);
+  align-items: center;
+  gap: 10px;
+}
+
+.wallhead__title {
+  min-width: 0;
+  margin: 0;
+  overflow: hidden;
+  font-size: clamp(22px, 2vw, 36px);
+  font-weight: 500;
+  letter-spacing: -0.035em;
+  line-height: 1;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.wallhead__count {
+  flex: none;
+  color: rgba(247, 244, 238, 0.42);
+  font-size: 13px;
+  letter-spacing: 0.04em;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+
+/* ===== 标签总览 ===== */
+
+.tags {
+  padding: 18px 22px 60px;
+}
+
+.tags__head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 2px 2px 14px;
+}
+
+.tags__title {
+  margin: 0;
+  font-size: 20px;
+  font-weight: 500;
+}
+
+.tags__sub {
+  margin: 0;
+  color: var(--ink-soft);
+  font-size: 12px;
+}
+
+.tags__group + .tags__group {
+  margin-top: 26px;
+}
+
+.tags__group-title {
+  margin: 0 0 10px;
+  color: rgba(247, 244, 238, 0.4);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+}
+
+.tags__grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(190px, 1fr));
+  gap: 10px;
+}
+
+.tags__empty {
+  margin-top: 40px;
+  color: var(--ink-soft);
+}
+
+.tagcard {
+  position: relative;
+  display: block;
+  padding: 0;
+  overflow: hidden;
+  aspect-ratio: 4 / 5;
+  border-radius: 12px;
+  background: #0f0f12;
+  text-align: left;
+  transition:
+    transform 260ms var(--ease),
+    filter 260ms var(--ease);
+}
+
+.tagcard:hover {
+  transform: translateY(-2px);
+  filter: saturate(1.06) brightness(1.06);
+}
+
+.tagcard__img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  transition: transform 700ms var(--ease);
+}
+
+.tagcard:hover .tagcard__img {
+  transform: scale(1.045);
+}
+
+.tagcard__blank {
+  display: block;
+  width: 100%;
+  height: 100%;
+  background: linear-gradient(160deg, #17171a, #0c0c0e);
+}
+
+.tagcard__shade {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background: linear-gradient(
+    180deg,
+    rgba(0, 0, 0, 0.4) 0%,
+    rgba(0, 0, 0, 0.06) 30%,
+    rgba(0, 0, 0, 0.55) 74%,
+    rgba(0, 0, 0, 0.86) 100%
+  );
+}
+
+.tagcard__chip {
+  position: absolute;
+  top: 9px;
+  left: 9px;
+  padding: 3px 8px;
+  color: rgba(255, 255, 255, 0.86);
+  background: rgba(0, 0, 0, 0.62);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.1em;
+}
+
+.tagcard__body {
+  position: absolute;
+  right: 13px;
+  bottom: 12px;
+  left: 13px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.tagcard__name {
+  overflow: hidden;
+  color: #fff;
+  font-size: 16px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  text-overflow: ellipsis;
+  text-shadow: 0 1px 4px rgba(0, 0, 0, 0.6);
+  white-space: nowrap;
+}
+
+.tagcard__cat {
+  color: rgba(255, 255, 255, 0.6);
+  font-size: 11px;
+}
+
+/* ===== 详情：全屏视觉 ===== */
+
+.view {
+  position: fixed;
+  inset: 0;
+  z-index: 30;
+  background: #050505;
+  animation: view-in 350ms var(--ease);
+}
+
+@keyframes view-in {
+  from {
+    opacity: 0;
+  }
+}
+
+.view__media {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  padding: 28px;
+}
+
+/* 详情大图：撑满视口（contain 保比例）。以前只有 max-*，512 缩略图在 1440 屏里
+   只占 512px，四周全是黑边，全屏视觉不成立。 */
+.view__img {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+}
+
+.view__scrim {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background: linear-gradient(
+    180deg,
+    rgba(0, 0, 0, 0.55) 0%,
+    rgba(0, 0, 0, 0.05) 26%,
+    rgba(0, 0, 0, 0) 58%,
+    rgba(0, 0, 0, 0.86) 100%
+  );
+}
+
+.icon-btn {
+  width: 28px;
+  height: 28px;
+}
+
+.tile__info-body {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.tile__info-name {
+  overflow: hidden;
+  color: var(--ink);
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1.3;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+}
+
+.tile__info-meta {
+  overflow: hidden;
+  color: rgba(247, 244, 238, 0.66);
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tile__info-tags {
+  overflow: hidden;
+  color: color-mix(in srgb, var(--accent) 80%, var(--ink));
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  transition: color 600ms var(--ease);
+}
+
+/* ===== 二级墙标题 ===== */
+
+.wallhead {
+  position: fixed;
+  top: 16px;
+  left: calc(var(--seam-w) + 20px);
+  z-index: 8;
+  display: flex;
+  max-width: calc(100vw - var(--seam-w) - 40px);
+  align-items: center;
+  gap: 10px;
+}
+
+.wallhead__title {
+  min-width: 0;
+  margin: 0;
+  overflow: hidden;
+  font-size: clamp(22px, 2vw, 36px);
+  font-weight: 500;
+  letter-spacing: -0.035em;
+  line-height: 1;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.wallhead__count {
+  flex: none;
+  color: rgba(247, 244, 238, 0.42);
+  font-size: 13px;
+  letter-spacing: 0.04em;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+
+/* ===== 标签总览 ===== */
+
+.tags {
+  padding: 18px 22px 60px;
+}
+
+.tags__head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 2px 2px 14px;
+}
+
+.tags__title {
+  margin: 0;
+  font-size: 20px;
+  font-weight: 500;
+}
+
+.tags__sub {
+  margin: 0;
+  color: var(--ink-soft);
+  font-size: 12px;
+}
+
+.tags__group + .tags__group {
+  margin-top: 26px;
+}
+
+.tags__group-title {
+  margin: 0 0 10px;
+  color: rgba(247, 244, 238, 0.4);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+}
+
+.tags__grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(190px, 1fr));
+  gap: 10px;
+}
+
+.tags__empty {
+  margin-top: 40px;
+  color: var(--ink-soft);
+}
+
+.tagcard {
+  position: relative;
+  display: block;
+  padding: 0;
+  overflow: hidden;
+  aspect-ratio: 4 / 5;
+  border-radius: 12px;
+  background: #0f0f12;
+  text-align: left;
+  transition:
+    transform 260ms var(--ease),
+    filter 260ms var(--ease);
+}
+
+.tagcard:hover {
+  transform: translateY(-2px);
+  filter: saturate(1.06) brightness(1.06);
+}
+
+.tagcard__img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  transition: transform 700ms var(--ease);
+}
+
+.tagcard:hover .tagcard__img {
+  transform: scale(1.045);
+}
+
+.tagcard__blank {
+  display: block;
+  width: 100%;
+  height: 100%;
+  background: linear-gradient(160deg, #17171a, #0c0c0e);
+}
+
+.tagcard__shade {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background: linear-gradient(
+    180deg,
+    rgba(0, 0, 0, 0.4) 0%,
+    rgba(0, 0, 0, 0.06) 30%,
+    rgba(0, 0, 0, 0.55) 74%,
+    rgba(0, 0, 0, 0.86) 100%
+  );
+}
+
+.tagcard__chip {
+  position: absolute;
+  top: 9px;
+  left: 9px;
+  padding: 3px 8px;
+  color: rgba(255, 255, 255, 0.86);
+  background: rgba(0, 0, 0, 0.62);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.1em;
+}
+
+.tagcard__body {
+  position: absolute;
+  right: 13px;
+  bottom: 12px;
+  left: 13px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.tagcard__name {
+  overflow: hidden;
+  color: #fff;
+  font-size: 16px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  text-overflow: ellipsis;
+  text-shadow: 0 1px 4px rgba(0, 0, 0, 0.6);
+  white-space: nowrap;
+}
+
+.tagcard__cat {
+  color: rgba(255, 255, 255, 0.6);
+  font-size: 11px;
+}
+
+/* ===== 详情：全屏视觉 ===== */
+
+.view {
+  position: fixed;
+  inset: 0;
+  z-index: 30;
+  background: #050505;
+  animation: view-in 350ms var(--ease);
+}
+
+@keyframes view-in {
+  from {
+    opacity: 0;
+  }
+}
+
+.view__media {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  padding: 28px;
+}
+
+/* 详情大图：撑满视口（contain 保比例）。以前只有 max-*，512 缩略图在 1440 屏里
+   只占 512px，四周全是黑边，全屏视觉不成立。 */
+.view__img {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+}
+
+.view__scrim {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background: linear-gradient(
+    180deg,
+    rgba(0, 0, 0, 0.55) 0%,
+    rgba(0, 0, 0, 0.05) 26%,
+    rgba(0, 0, 0, 0) 58%,
+    rgba(0, 0, 0, 0.86) 100%
+  );
+}
+
+.icon-btn {
+  width: 28px;
+  height: 28px;
+}
+
+.tile__info-body {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.tile__info-name {
+  overflow: hidden;
+  color: var(--ink);
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1.3;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+}
+
+.tile__info-meta {
+  overflow: hidden;
+  color: rgba(247, 244, 238, 0.66);
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tile__info-tags {
+  overflow: hidden;
+  color: color-mix(in srgb, var(--accent) 80%, var(--ink));
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  transition: color 600ms var(--ease);
+}
+
+/* ===== 二级墙标题 ===== */
+
+.wallhead {
+  position: fixed;
+  top: 16px;
+  left: calc(var(--seam-w) + 20px);
+  z-index: 8;
+  display: flex;
+  max-width: calc(100vw - var(--seam-w) - 40px);
+  align-items: center;
+  gap: 10px;
+}
+
+.wallhead__title {
+  min-width: 0;
+  margin: 0;
+  overflow: hidden;
+  font-size: clamp(22px, 2vw, 36px);
+  font-weight: 500;
+  letter-spacing: -0.035em;
+  line-height: 1;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.wallhead__count {
+  flex: none;
+  color: rgba(247, 244, 238, 0.42);
+  font-size: 13px;
+  letter-spacing: 0.04em;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+
+/* ===== 标签总览 ===== */
+
+.tags {
+  padding: 18px 22px 60px;
+}
+
+.tags__head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 2px 2px 14px;
+}
+
+.tags__title {
+  margin: 0;
+  font-size: 20px;
+  font-weight: 500;
+}
+
+.tags__sub {
+  margin: 0;
+  color: var(--ink-soft);
+  font-size: 12px;
+}
+
+.tags__group + .tags__group {
+  margin-top: 26px;
+}
+
+.tags__group-title {
+  margin: 0 0 10px;
+  color: rgba(247, 244, 238, 0.4);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+}
+
+.tags__grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(190px, 1fr));
+  gap: 10px;
+}
+
+.tags__empty {
+  margin-top: 40px;
+  color: var(--ink-soft);
+}
+
+.tagcard {
+  position: relative;
+  display: block;
+  padding: 0;
+  overflow: hidden;
+  aspect-ratio: 4 / 5;
+  border-radius: 12px;
+  background: #0f0f12;
+  text-align: left;
+  transition:
+    transform 260ms var(--ease),
+    filter 260ms var(--ease);
+}
+
+.tagcard:hover {
+  transform: translateY(-2px);
+  filter: saturate(1.06) brightness(1.06);
+}
+
+.tagcard__img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  transition: transform 700ms var(--ease);
+}
+
+.tagcard:hover .tagcard__img {
+  transform: scale(1.045);
+}
+
+.tagcard__blank {
+  display: block;
+  width: 100%;
+  height: 100%;
+  background: linear-gradient(160deg, #17171a, #0c0c0e);
+}
+
+.tagcard__shade {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background: linear-gradient(
+    180deg,
+    rgba(0, 0, 0, 0.4) 0%,
+    rgba(0, 0, 0, 0.06) 30%,
+    rgba(0, 0, 0, 0.55) 74%,
+    rgba(0, 0, 0, 0.86) 100%
+  );
+}
+
+.tagcard__chip {
+  position: absolute;
+  top: 9px;
+  left: 9px;
+  padding: 3px 8px;
+  color: rgba(255, 255, 255, 0.86);
+  background: rgba(0, 0, 0, 0.62);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.1em;
+}
+
+.tagcard__body {
+  position: absolute;
+  right: 13px;
+  bottom: 12px;
+  left: 13px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.tagcard__name {
+  overflow: hidden;
+  color: #fff;
+  font-size: 16px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  text-overflow: ellipsis;
+  text-shadow: 0 1px 4px rgba(0, 0, 0, 0.6);
+  white-space: nowrap;
+}
+
+.tagcard__cat {
+  color: rgba(255, 255, 255, 0.6);
+  font-size: 11px;
+}
+
+/* ===== 详情：全屏视觉 ===== */
+
+.view {
+  position: fixed;
+  inset: 0;
+  z-index: 30;
+  background: #050505;
+  animation: view-in 350ms var(--ease);
+}
+
+@keyframes view-in {
+  from {
+    opacity: 0;
+  }
+}
+
+.view__media {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  padding: 28px;
+}
+
+/* 详情大图：撑满视口（contain 保比例）。以前只有 max-*，512 缩略图在 1440 屏里
+   只占 512px，四周全是黑边，全屏视觉不成立。 */
+.view__img {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+}
+
+.view__scrim {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background: linear-gradient(
+    180deg,
+    rgba(0, 0, 0, 0.55) 0%,
+    rgba(0, 0, 0, 0.05) 26%,
+    rgba(0, 0, 0, 0) 58%,
+    rgba(0, 0, 0, 0.86) 100%
+  );
+}
+
+.icon-btn {
+  width: 28px;
+  height: 28px;
+}
+
+.tile__info-body {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.tile__info-name {
+  overflow: hidden;
+  color: var(--ink);
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1.3;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+}
+
+.tile__info-meta {
+  overflow: hidden;
+  color: rgba(247, 244, 238, 0.66);
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tile__info-tags {
+  overflow: hidden;
+  color: color-mix(in srgb, var(--accent) 80%, var(--ink));
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  transition: color 600ms var(--ease);
+}
+
+/* ===== 二级墙标题 ===== */
+
+.wallhead {
+  position: fixed;
+  top: 16px;
+  left: calc(var(--seam-w) + 20px);
+  z-index: 8;
+  display: flex;
+  max-width: calc(100vw - var(--seam-w) - 40px);
+  align-items: center;
+  gap: 10px;
+}
+
+.wallhead__title {
+  min-width: 0;
+  margin: 0;
+  overflow: hidden;
+  font-size: clamp(22px, 2vw, 36px);
+  font-weight: 500;
+  letter-spacing: -0.035em;
+  line-height: 1;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.wallhead__count {
+  flex: none;
+  color: rgba(247, 244, 238, 0.42);
+  font-size: 13px;
+  letter-spacing: 0.04em;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+
+/* ===== 标签总览 ===== */
+
+.tags {
+  padding: 18px 22px 60px;
+}
+
+.tags__head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 2px 2px 14px;
+}
+
+.tags__title {
+  margin: 0;
+  font-size: 20px;
+  font-weight: 500;
+}
+
+.tags__sub {
+  margin: 0;
+  color: var(--ink-soft);
+  font-size: 12px;
+}
+
+.tags__group + .tags__group {
+  margin-top: 26px;
+}
+
+.tags__group-title {
+  margin: 0 0 10px;
+  color: rgba(247, 244, 238, 0.4);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+}
+
+.tags__grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(190px, 1fr));
+  gap: 10px;
+}
+
+.tags__empty {
+  margin-top: 40px;
+  color: var(--ink-soft);
+}
+
+.tagcard {
+  position: relative;
+  display: block;
+  padding: 0;
+  overflow: hidden;
+  aspect-ratio: 4 / 5;
+  border-radius: 12px;
+  background: #0f0f12;
+  text-align: left;
+  transition:
+    transform 260ms var(--ease),
+    filter 260ms var(--ease);
+}
+
+.tagcard:hover {
+  transform: translateY(-2px);
+  filter: saturate(1.06) brightness(1.06);
+}
+
+.tagcard__img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  transition: transform 700ms var(--ease);
+}
+
+.tagcard:hover .tagcard__img {
+  transform: scale(1.045);
+}
+
+.tagcard__blank {
+  display: block;
+  width: 100%;
+  height: 100%;
+  background: linear-gradient(160deg, #17171a, #0c0c0e);
+}
+
+.tagcard__shade {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background: linear-gradient(
+    180deg,
+    rgba(0, 0, 0, 0.4) 0%,
+    rgba(0, 0, 0, 0.06) 30%,
+    rgba(0, 0, 0, 0.55) 74%,
+    rgba(0, 0, 0, 0.86) 100%
+  );
+}
+
+.tagcard__chip {
+  position: absolute;
+  top: 9px;
+  left: 9px;
+  padding: 3px 8px;
+  color: rgba(255, 255, 255, 0.86);
+  background: rgba(0, 0, 0, 0.62);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.1em;
+}
+
+.tagcard__body {
+  position: absolute;
+  right: 13px;
+  bottom: 12px;
+  left: 13px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.tagcard__name {
+  overflow: hidden;
+  color: #fff;
+  font-size: 16px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  text-overflow: ellipsis;
+  text-shadow: 0 1px 4px rgba(0, 0, 0, 0.6);
+  white-space: nowrap;
+}
+
+.tagcard__cat {
+  color: rgba(255, 255, 255, 0.6);
+  font-size: 11px;
+}
+
+/* ===== 详情：全屏视觉 ===== */
+
+.view {
+  position: fixed;
+  inset: 0;
+  z-index: 30;
+  background: #050505;
+  animation: view-in 350ms var(--ease);
+}
+
+@keyframes view-in {
+  from {
+    opacity: 0;
+  }
+}
+
+.view__media {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  padding: 28px;
+}
+
+/* 详情大图：撑满视口（contain 保比例）。以前只有 max-*，512 缩略图在 1440 屏里
+   只占 512px，四周全是黑边，全屏视觉不成立。 */
+.view__img {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+}
+
+.view__scrim {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background: linear-gradient(
+    180deg,
+    rgba(0, 0, 0, 0.55) 0%,
+    rgba(0, 0, 0, 0.05) 26%,
+    rgba(0, 0, 0, 0) 58%,
+    rgba(0, 0, 0, 0.86) 100%
+  );
+}
+
+.icon-btn {
+  width: 28px;
+  height: 28px;
+}
+
+.tile__info-body {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.tile__info-name {
+  overflow: hidden;
+  color: var(--ink);
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1.3;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+}
+
+.tile__info-meta {
+  overflow: hidden;
+  color: rgba(247, 244, 238, 0.66);
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tile__info-tags {
+  overflow: hidden;
+  color: color-mix(in srgb, var(--accent) 80%, var(--ink));
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  transition: color 600ms var(--ease);
+}
+
+/* ===== 二级墙标题 ===== */
+
+.wallhead {
+  position: fixed;
+  top: 16px;
+  left: calc(var(--seam-w) + 20px);
+  z-index: 8;
+  display: flex;
+  max-width: calc(100vw - var(--seam-w) - 40px);
+  align-items: center;
+  gap: 10px;
+}
+
+.wallhead__title {
+  min-width: 0;
+  margin: 0;
+  overflow: hidden;
+  font-size: clamp(22px, 2vw, 36px);
+  font-weight: 500;
+  letter-spacing: -0.035em;
+  line-height: 1;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.wallhead__count {
+  flex: none;
+  color: rgba(247, 244, 238, 0.42);
+  font-size: 13px;
+  letter-spacing: 0.04em;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+
+/* ===== 标签总览 ===== */
+
+.tags {
+  padding: 18px 22px 60px;
+}
+
+.tags__head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 2px 2px 14px;
+}
+
+.tags__title {
+  margin: 0;
+  font-size: 20px;
+  font-weight: 500;
+}
+
+.tags__sub {
+  margin: 0;
+  color: var(--ink-soft);
+  font-size: 12px;
+}
+
+.tags__group + .tags__group {
+  margin-top: 26px;
+}
+
+.tags__group-title {
+  margin: 0 0 10px;
+  color: rgba(247, 244, 238, 0.4);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+}
+
+.tags__grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(190px, 1fr));
+  gap: 10px;
+}
+
+.tags__empty {
+  margin-top: 40px;
+  color: var(--ink-soft);
+}
+
+.tagcard {
+  position: relative;
+  display: block;
+  padding: 0;
+  overflow: hidden;
+  aspect-ratio: 4 / 5;
+  border-radius: 12px;
+  background: #0f0f12;
+  text-align: left;
+  transition:
+    transform 260ms var(--ease),
+    filter 260ms var(--ease);
+}
+
+.tagcard:hover {
+  transform: translateY(-2px);
+  filter: saturate(1.06) brightness(1.06);
+}
+
+.tagcard__img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  transition: transform 700ms var(--ease);
+}
+
+.tagcard:hover .tagcard__img {
+  transform: scale(1.045);
+}
+
+.tagcard__blank {
+  display: block;
+  width: 100%;
+  height: 100%;
+  background: linear-gradient(160deg, #17171a, #0c0c0e);
+}
+
+.tagcard__shade {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background: linear-gradient(
+    180deg,
+    rgba(0, 0, 0, 0.4) 0%,
+    rgba(0, 0, 0, 0.06) 30%,
+    rgba(0, 0, 0, 0.55) 74%,
+    rgba(0, 0, 0, 0.86) 100%
+  );
+}
+
+.tagcard__chip {
+  position: absolute;
+  top: 9px;
+  left: 9px;
+  padding: 3px 8px;
+  color: rgba(255, 255, 255, 0.86);
+  background: rgba(0, 0, 0, 0.62);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.1em;
+}
+
+.tagcard__body {
+  position: absolute;
+  right: 13px;
+  bottom: 12px;
+  left: 13px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.tagcard__name {
+  overflow: hidden;
+  color: #fff;
+  font-size: 16px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  text-overflow: ellipsis;
+  text-shadow: 0 1px 4px rgba(0, 0, 0, 0.6);
+  white-space: nowrap;
+}
+
+.tagcard__cat {
+  color: rgba(255, 255, 255, 0.6);
+  font-size: 11px;
+}
+
+/* ===== 详情：全屏视觉 ===== */
+
+.view {
+  position: fixed;
+  inset: 0;
+  z-index: 30;
+  background: #050505;
+  animation: view-in 350ms var(--ease);
+}
+
+@keyframes view-in {
+  from {
+    opacity: 0;
+  }
+}
+
+.view__media {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  padding: 28px;
+}
+
+/* 详情大图：撑满视口（contain 保比例）。以前只有 max-*，512 缩略图在 1440 屏里
+   只占 512px，四周全是黑边，全屏视觉不成立。 */
+.view__img {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+}
+
+.view__scrim {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background: linear-gradient(
+    180deg,
+    rgba(0, 0, 0, 0.55) 0%,
+    rgba(0, 0, 0, 0.05) 26%,
+    rgba(0, 0, 0, 0) 58%,
+    rgba(0, 0, 0, 0.86) 100%
+  );
+}
+
+.icon-btn {
+  width: 28px;
+  height: 28px;
+}
+
+.tile__info-body {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.tile__info-name {
+  overflow: hidden;
+  color: var(--ink);
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1.3;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+}
+
+.tile__info-meta {
+  overflow: hidden;
+  color: rgba(247, 244, 238, 0.66);
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tile__info-tags {
+  overflow: hidden;
+  color: color-mix(in srgb, var(--accent) 80%, var(--ink));
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  transition: color 600ms var(--ease);
+}
+
+/* ===== 二级墙标题 ===== */
+
+.wallhead {
+  position: fixed;
+  top: 16px;
+  left: calc(var(--seam-w) + 20px);
+  z-index: 8;
+  display: flex;
+  max-width: calc(100vw - var(--seam-w) - 40px);
+  align-items: center;
+  gap: 10px;
+}
+
+.wallhead__title {
+  min-width: 0;
+  margin: 0;
+  overflow: hidden;
+  font-size: clamp(22px, 2vw, 36px);
+  font-weight: 500;
+  letter-spacing: -0.035em;
+  line-height: 1;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.wallhead__count {
+  flex: none;
+  color: rgba(247, 244, 238, 0.42);
+  font-size: 13px;
+  letter-spacing: 0.04em;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+
+/* ===== 标签总览 ===== */
+
+.tags {
+  padding: 18px 22px 60px;
+}
+
+.tags__head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 2px 2px 14px;
+}
+
+.tags__title {
+  margin: 0;
+  font-size: 20px;
+  font-weight: 500;
+}
+
+.tags__sub {
+  margin: 0;
+  color: var(--ink-soft);
+  font-size: 12px;
+}
+
+.tags__group + .tags__group {
+  margin-top: 26px;
+}
+
+.tags__group-title {
+  margin: 0 0 10px;
+  color: rgba(247, 244, 238, 0.4);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+}
+
+.tags__grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(190px, 1fr));
+  gap: 10px;
+}
+
+.tags__empty {
+  margin-top: 40px;
+  color: var(--ink-soft);
+}
+
+.tagcard {
+  position: relative;
+  display: block;
+  padding: 0;
+  overflow: hidden;
+  aspect-ratio: 4 / 5;
+  border-radius: 12px;
+  background: #0f0f12;
+  text-align: left;
+  transition:
+    transform 260ms var(--ease),
+    filter 260ms var(--ease);
+}
+
+.tagcard:hover {
+  transform: translateY(-2px);
+  filter: saturate(1.06) brightness(1.06);
+}
+
+.tagcard__img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  transition: transform 700ms var(--ease);
+}
+
+.tagcard:hover .tagcard__img {
+  transform: scale(1.045);
+}
+
+.tagcard__blank {
+  display: block;
+  width: 100%;
+  height: 100%;
+  background: linear-gradient(160deg, #17171a, #0c0c0e);
+}
+
+.tagcard__shade {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background: linear-gradient(
+    180deg,
+    rgba(0, 0, 0, 0.4) 0%,
+    rgba(0, 0, 0, 0.06) 30%,
+    rgba(0, 0, 0, 0.55) 74%,
+    rgba(0, 0, 0, 0.86) 100%
+  );
+}
+
+.tagcard__chip {
+  position: absolute;
+  top: 9px;
+  left: 9px;
+  padding: 3px 8px;
+  color: rgba(255, 255, 255, 0.86);
+  background: rgba(0, 0, 0, 0.62);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.1em;
+}
+
+.tagcard__body {
+  position: absolute;
+  right: 13px;
+  bottom: 12px;
+  left: 13px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.tagcard__name {
+  overflow: hidden;
+  color: #fff;
+  font-size: 16px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  text-overflow: ellipsis;
+  text-shadow: 0 1px 4px rgba(0, 0, 0, 0.6);
+  white-space: nowrap;
+}
+
+.tagcard__cat {
+  color: rgba(255, 255, 255, 0.6);
+  font-size: 11px;
+}
+
+/* ===== 详情：全屏视觉 ===== */
+
+.view {
+  position: fixed;
+  inset: 0;
+  z-index: 30;
+  background: #050505;
+  animation: view-in 350ms var(--ease);
+}
+
+@keyframes view-in {
+  from {
+    opacity: 0;
+  }
+}
+
+.view__media {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  padding: 28px;
+}
+
+/* 详情大图：撑满视口（contain 保比例）。以前只有 max-*，512 缩略图在 1440 屏里
+   只占 512px，四周全是黑边，全屏视觉不成立。 */
+.view__img {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+}
+
+.view__scrim {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background: linear-gradient(
+    180deg,
+    rgba(0, 0, 0, 0.55) 0%,
+    rgba(0, 0, 0, 0.05) 26%,
+    rgba(0, 0, 0, 0) 58%,
+    rgba(0, 0, 0, 0.86) 100%
+  );
+}
+
+.icon-btn {
+  width: 28px;
+  height: 28px;
+}
+
+.tile__info-body {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.tile__info-name {
+  overflow: hidden;
+  color: var(--ink);
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1.3;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+}
+
+.tile__info-meta {
+  overflow: hidden;
+  color: rgba(247, 244, 238, 0.66);
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tile__info-tags {
+  overflow: hidden;
+  color: color-mix(in srgb, var(--accent) 80%, var(--ink));
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  transition: color 600ms var(--ease);
+}
+
+/* ===== 二级墙标题 ===== */
+
+.wallhead {
+  position: fixed;
+  top: 16px;
+  left: calc(var(--seam-w) + 20px);
+  z-index: 8;
+  display: flex;
+  max-width: calc(100vw - var(--seam-w) - 40px);
+  align-items: center;
+  gap: 10px;
+}
+
+.wallhead__title {
+  min-width: 0;
+  margin: 0;
+  overflow: hidden;
+  font-size: clamp(22px, 2vw, 36px);
+  font-weight: 500;
+  letter-spacing: -0.035em;
+  line-height: 1;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.wallhead__count {
+  flex: none;
+  color: rgba(247, 244, 238, 0.42);
+  font-size: 13px;
+  letter-spacing: 0.04em;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+
+/* ===== 标签总览 ===== */
+
+.tags {
+  padding: 18px 22px 60px;
+}
+
+.tags__head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 2px 2px 14px;
+}
+
+.tags__title {
+  margin: 0;
+  font-size: 20px;
+  font-weight: 500;
+}
+
+.tags__sub {
+  margin: 0;
+  color: var(--ink-soft);
+  font-size: 12px;
+}
+
+.tags__group + .tags__group {
+  margin-top: 26px;
+}
+
+.tags__group-title {
+  margin: 0 0 10px;
+  color: rgba(247, 244, 238, 0.4);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+}
+
+.tags__grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(190px, 1fr));
+  gap: 10px;
+}
+
+.tags__empty {
+  margin-top: 40px;
+  color: var(--ink-soft);
+}
+
+.tagcard {
+  position: relative;
+  display: block;
+  padding: 0;
+  overflow: hidden;
+  aspect-ratio: 4 / 5;
+  border-radius: 12px;
+  background: #0f0f12;
+  text-align: left;
+  transition:
+    transform 260ms var(--ease),
+    filter 260ms var(--ease);
+}
+
+.tagcard:hover {
+  transform: translateY(-2px);
+  filter: saturate(1.06) brightness(1.06);
+}
+
+.tagcard__img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  transition: transform 700ms var(--ease);
+}
+
+.tagcard:hover .tagcard__img {
+  transform: scale(1.045);
+}
+
+.tagcard__blank {
+  display: block;
+  width: 100%;
+  height: 100%;
+  background: linear-gradient(160deg, #17171a, #0c0c0e);
+}
+
+.tagcard__shade {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background: linear-gradient(
+    180deg,
+    rgba(0, 0, 0, 0.4) 0%,
+    rgba(0, 0, 0, 0.06) 30%,
+    rgba(0, 0, 0, 0.55) 74%,
+    rgba(0, 0, 0, 0.86) 100%
+  );
+}
+
+.tagcard__chip {
+  position: absolute;
+  top: 9px;
+  left: 9px;
+  padding: 3px 8px;
+  color: rgba(255, 255, 255, 0.86);
+  background: rgba(0, 0, 0, 0.62);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.1em;
+}
+
+.tagcard__body {
+  position: absolute;
+  right: 13px;
+  bottom: 12px;
+  left: 13px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.tagcard__name {
+  overflow: hidden;
+  color: #fff;
+  font-size: 16px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  text-overflow: ellipsis;
+  text-shadow: 0 1px 4px rgba(0, 0, 0, 0.6);
+  white-space: nowrap;
+}
+
+.tagcard__cat {
+  color: rgba(255, 255, 255, 0.6);
+  font-size: 11px;
+}
+
+/* ===== 详情：全屏视觉 ===== */
+
+.view {
+  position: fixed;
+  inset: 0;
+  z-index: 30;
+  background: #050505;
+  animation: view-in 350ms var(--ease);
+}
+
+@keyframes view-in {
+  from {
+    opacity: 0;
+  }
+}
+
+.view__media {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  padding: 28px;
+}
+
+/* 详情大图：撑满视口（contain 保比例）。以前只有 max-*，512 缩略图在 1440 屏里
+   只占 512px，四周全是黑边，全屏视觉不成立。 */
+.view__img {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+}
+
+.view__scrim {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background: linear-gradient(
+    180deg,
+    rgba(0, 0, 0, 0.55) 0%,
+    rgba(0, 0, 0, 0.05) 26%,
+    rgba(0, 0, 0, 0) 58%,
+    rgba(0, 0, 0, 0.86) 100%
+  );
 }
 
 .icon-btn {

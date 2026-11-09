@@ -1,9 +1,19 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type RefObject } from 'react';
 import type { Rect } from '../lib/expand';
 import type { TierPaths, WallItem } from '../source/types';
 import type { WallPhase } from '../state/useWall';
 import { cellTilesInView, layoutWorld, visibleSlice, type CellSpec } from '../lib/world';
 import { WallCard } from './WallCard';
+
+/** 侧栏功能键的操纵句柄：按钮走 ref 直接调用，不经过 React 状态（缩放不触发全树重渲染）。 */
+export interface WallControls {
+  /** 以可见区中心为锚缩放（factor>1 放大）。 */
+  zoomBy: (factor: number) => void;
+  /** 缩放复位到 100%。 */
+  zoomReset: () => void;
+  /** 回到起点（无限空间回格子原点；有限世界回顶部）。 */
+  goHome: () => void;
+}
 
 /** 世界比视口宽多少：留出横向可平移的余量。 */
 const WORLD_OVERSCAN = 1.28;
@@ -57,6 +67,8 @@ export interface WallViewProps {
   /** 当前叠着概要层的卡片 id；null 表示没有。 */
   summaryId?: string | null;
   onCloseSummary?: () => void;
+  /** 侧栏功能键写进来的操纵句柄（缩放/复位/回到起点）。 */
+  controlsRef?: RefObject<WallControls | null>;
   onFocusItems?: (items: WallItem[]) => void;
   onRetry: () => void;
 }
@@ -121,6 +133,7 @@ export function WallView({
   onSummary,
   summaryId,
   onCloseSummary,
+  controlsRef,
   onFocusItems,
   onRetry,
 }: WallViewProps) {
@@ -253,58 +266,6 @@ export function WallView({
   const moveCameraRef = useRef(moveCamera);
   moveCameraRef.current = moveCamera;
 
-  // 有限世界惯性撞边界的视觉回弹（P2-9）：camera 永远停在合法区间，
-  // 只有 .world 的 transform 在这一层临时越界 ≤28px，180–220ms 后精确归零。
-  // 不把偏移写进 camera：onLoadMore 预取与 visibleSlice 都依赖合法相机。
-  const [bounce, setBounce] = useState({ x: 0, y: 0 });
-  const bounceFrame = useRef(0);
-
-  const stopBounce = useCallback(() => {
-    if (bounceFrame.current) cancelAnimationFrame(bounceFrame.current);
-    bounceFrame.current = 0;
-    setBounce((current) => (current.x === 0 && current.y === 0 ? current : { x: 0, y: 0 }));
-  }, []);
-
-  /** 把 clampCamera 夹掉的越界量翻译成一次 ease-out 回弹；减少动效时直接不做。 */
-  const kickBounce = useCallback((overX: number, overY: number) => {
-    if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) return;
-    // .world 的位移是 -camera，所以回弹峰值取越界量的反号（世界沿惯性方向再多走一点点）。
-    const peakX = Math.max(-BOUNCE_MAX, Math.min(BOUNCE_MAX, -overX));
-    const peakY = Math.max(-BOUNCE_MAX, Math.min(BOUNCE_MAX, -overY));
-    if (Math.abs(peakX) < 1 && Math.abs(peakY) < 1) return;
-    if (bounceFrame.current) cancelAnimationFrame(bounceFrame.current);
-    const start = performance.now();
-    const step = (now: number) => {
-      const t = Math.min(1, (now - start) / BOUNCE_MS);
-      const rest = 1 - t;
-      // 1.6 次方 ease-out：比三次方留得住尾巴——三次方 150ms 就收得看不见了，
-      // 撑不满规格要求的 180–220ms；线性又太"硬"，像在滑而不是被弹回来。
-      const k = Math.pow(rest, 1.6);
-      if (t < 1) {
-        setBounce({ x: peakX * k, y: peakY * k });
-        bounceFrame.current = requestAnimationFrame(step);
-        return;
-      }
-      bounceFrame.current = 0;
-      setBounce({ x: 0, y: 0 });
-    };
-    bounceFrame.current = requestAnimationFrame(step);
-  }, []);
-
-  useEffect(
-    () => () => {
-      if (bounceFrame.current) cancelAnimationFrame(bounceFrame.current);
-    },
-    [],
-  );
-
-  /** 让世界坐标 (wx, wy) 落在视口中心。 */
-  const centerOnWorld = useCallback(
-    (wx: number, wy: number, zoom = cameraRef.current.zoom) => {
-      moveCameraRef.current({ zoom, x: wx * zoom - viewWidth / 2, y: wy * zoom - size.h / 2 });
-    },
-    [size.h, viewWidth],
-  );
 
   useEffect(() => {
     const host = viewportRef.current;
@@ -435,6 +396,99 @@ export function WallView({
   // P1-1：切 #/tags、开详情都会卸载 WallView，惯性 rAF 必须在这里停掉，
   // 否则它会在已卸载的组件上继续 moveCamera → setState（真泄漏）。
   useEffect(() => stopInertia, [stopInertia]);
+
+  /** 以"可见区"中心为锚缩放：键盘 +/- 与侧栏按钮共用一条路。窄屏锚点要让开 64px 的缝。 */
+  const zoomByFactor = useCallback(
+    (factor: number) => {
+      const cam = cameraRef.current;
+      const inset = sizeRef.current.w <= 760 ? 64 : 0;
+      const cx = inset + (sizeRef.current.w - inset) / 2;
+      const cy = sizeRef.current.h / 2;
+      const worldX = (cam.x + cx) / cam.zoom;
+      const worldY = (cam.y + cy) / cam.zoom;
+      const nextZoom = Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, cam.zoom * factor));
+      stopInertia();
+      moveCamera({ zoom: nextZoom, x: worldX * nextZoom - cx, y: worldY * nextZoom - cy });
+      flashZoom(nextZoom);
+    },
+    [flashZoom, moveCamera, stopInertia],
+  );
+
+  /** 缩放复位到 100%（侧栏 ⟲）。 */
+  const zoomReset = useCallback(() => zoomByFactor(1 / cameraRef.current.zoom), [zoomByFactor]);
+
+  // 有限世界惯性撞边界的视觉回弹（P2-9）：camera 永远停在合法区间，
+  // 只有 .world 的 transform 在这一层临时越界 ≤28px，180–220ms 后精确归零。
+  // 不把偏移写进 camera：onLoadMore 预取与 visibleSlice 都依赖合法相机。
+  const [bounce, setBounce] = useState({ x: 0, y: 0 });
+  const bounceFrame = useRef(0);
+
+  const stopBounce = useCallback(() => {
+    if (bounceFrame.current) cancelAnimationFrame(bounceFrame.current);
+    bounceFrame.current = 0;
+    setBounce((current) => (current.x === 0 && current.y === 0 ? current : { x: 0, y: 0 }));
+  }, []);
+
+  /** 把 clampCamera 夹掉的越界量翻译成一次 ease-out 回弹；减少动效时直接不做。 */
+  const kickBounce = useCallback((overX: number, overY: number) => {
+    if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) return;
+    // .world 的位移是 -camera，所以回弹峰值取越界量的反号（世界沿惯性方向再多走一点点）。
+    const peakX = Math.max(-BOUNCE_MAX, Math.min(BOUNCE_MAX, -overX));
+    const peakY = Math.max(-BOUNCE_MAX, Math.min(BOUNCE_MAX, -overY));
+    if (Math.abs(peakX) < 1 && Math.abs(peakY) < 1) return;
+    if (bounceFrame.current) cancelAnimationFrame(bounceFrame.current);
+    const start = performance.now();
+    const step = (now: number) => {
+      const t = Math.min(1, (now - start) / BOUNCE_MS);
+      const rest = 1 - t;
+      // 1.6 次方 ease-out：比三次方留得住尾巴——三次方 150ms 就收得看不见了，
+      // 撑不满规格要求的 180–220ms；线性又太"硬"，像在滑而不是被弹回来。
+      const k = Math.pow(rest, 1.6);
+      if (t < 1) {
+        setBounce({ x: peakX * k, y: peakY * k });
+        bounceFrame.current = requestAnimationFrame(step);
+        return;
+      }
+      bounceFrame.current = 0;
+      setBounce({ x: 0, y: 0 });
+    };
+    bounceFrame.current = requestAnimationFrame(step);
+  }, []);
+
+  useEffect(
+    () => () => {
+      if (bounceFrame.current) cancelAnimationFrame(bounceFrame.current);
+    },
+    [],
+  );
+
+  /** 让世界坐标 (wx, wy) 落在视口中心。 */
+  const centerOnWorld = useCallback(
+    (wx: number, wy: number, zoom = cameraRef.current.zoom) => {
+      moveCameraRef.current({ zoom, x: wx * zoom - viewWidth / 2, y: wy * zoom - size.h / 2 });
+    },
+    [size.h, viewWidth],
+  );
+
+  /** 回到起点：无限空间回格子原点，有限世界回顶部（侧栏 ⌖ 与 Home 键同一语义）。 */
+  const goHome = useCallback(() => {
+    stopInertia();
+    if (infinite) {
+      setOrigin({ x: 0, y: 0 });
+      centerOnWorld(cellWidth / 2, cellHeight / 2);
+      return;
+    }
+    moveCamera({ ...cameraRef.current, y: 0 });
+  }, [cellHeight, cellWidth, centerOnWorld, infinite, moveCamera, stopInertia]);
+
+  // 侧栏功能键的操纵句柄：按钮经 ref 直调，不走 React 状态（缩放不触发全树重渲染）。
+  useEffect(() => {
+    if (!controlsRef) return;
+    controlsRef.current = { zoomBy: zoomByFactor, zoomReset, goHome };
+    return () => {
+      controlsRef.current = null;
+    };
+  }, [controlsRef, goHome, zoomByFactor, zoomReset]);
 
   /** 取消长按计时（移动、第二根手指、抬手、取消都要走这里）。 */
   const clearLongPress = useCallback(() => {
@@ -803,18 +857,6 @@ export function WallView({
     const cam = cameraRef.current;
     const step = 120;
     const page = Math.max(200, Math.round(sizeRef.current.h * 0.9));
-    const zoomBy = (factor: number) => {
-      // 缩放锚点取"可见区"中心：窄屏要让开 64px 的缝，否则会往左上偏。
-      const inset = sizeRef.current.w <= 760 ? 64 : 0;
-      const cx = inset + (sizeRef.current.w - inset) / 2;
-      const cy = sizeRef.current.h / 2;
-      const worldX = (cam.x + cx) / cam.zoom;
-      const worldY = (cam.y + cy) / cam.zoom;
-      const nextZoom = Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, cam.zoom * factor));
-      stopInertia();
-      moveCamera({ zoom: nextZoom, x: worldX * nextZoom - cx, y: worldY * nextZoom - cy });
-      flashZoom(nextZoom);
-    };
     switch (event.key) {
       case 'ArrowUp':
         stopInertia();
@@ -854,11 +896,11 @@ export function WallView({
         break;
       case '+':
       case '=':
-        zoomBy(1.1);
+        zoomByFactor(1.1);
         break;
       case '-':
       case '_':
-        zoomBy(1 / 1.1);
+        zoomByFactor(1 / 1.1);
         break;
       default:
         return;
@@ -896,13 +938,8 @@ export function WallView({
   const showEmpty = isEmpty && phase !== 'boot' && phase !== 'loading';
   // 无限空间要等全量到齐再生成格子：分片陆续到达会让每个格子的选图整体换一遍。
   const awaitingWorld = infinite && !ready && phase !== 'error';
-  // 走了很远（超过约一屏半）才给「回到起点」——无限空间容易迷路（§1.1 必做）。
-  const homeX = cellWidth / 2;
-  const homeY = cellHeight / 2;
-  const displaced =
-    infinite &&
-    (Math.abs(viewRect.x + viewRect.w / 2 - homeX) > viewRect.w * 1.6 ||
-      Math.abs(viewRect.y + viewRect.h / 2 - homeY) > viewRect.h * 1.6);
+  // 「回到起点」不再是画布上的浮出按钮：功能键统一收进左侧缝（2026-11-09 用户指令），
+  // 画布上只留提示与进度，不再放任何操作钮。
 
   return (
     <div
@@ -981,17 +1018,6 @@ export function WallView({
       <div className="canvas__progress" data-active={phase === 'loading' ? 'true' : undefined} aria-hidden="true" />
 
       {phase === 'error' ? <div className="canvas__error">数据加载中断</div> : null}
-
-      {displaced ? (
-        <button
-          type="button"
-          className="canvas__home"
-          onClick={() => centerOnWorld(homeX, homeY)}
-          title="回到起点（Home）"
-        >
-          回到起点
-        </button>
-      ) : null}
 
       {/* 缩放比例提示（P2-9）：只在最后一次缩放后的 1.1s 内存在，
           aria-hidden + pointer-events:none，既不进 Tab 序列也不拦卡片点击。 */}
