@@ -583,4 +583,25 @@ mod tests {
         assert_eq!(binding.keystrokes().len(), 1);
         assert!(binding.predicate().is_some());
     }
+
+    #[test]
+    fn tab_focus_traversal_is_suppressed_under_ely_focus() {
+        use ely_gpui_component::primitives::{FocusNext, FocusPrev};
+        use gpui::{KeyBinding, KeyContext, Keymap, Keystroke};
+
+        // 先注册 vendor 的默认绑定，再叠加 Kanalib 的 NoAction 覆盖。
+        let mut keymap = Keymap::new(vec![
+            KeyBinding::new("tab", FocusNext, Some("ElyFocus")),
+            KeyBinding::new("shift-tab", FocusPrev, Some("ElyFocus")),
+        ]);
+        keymap.add_bindings(super::app::tab_traversal_off_bindings());
+
+        let context = [KeyContext::parse("ElyFocus").unwrap()];
+        for key in ["tab", "shift-tab"] {
+            let stroke = Keystroke::parse(key).unwrap();
+            let (bindings, pending) = keymap.bindings_for_input(&[stroke], &context);
+            assert!(bindings.is_empty(), "{key} 仍会派发动作");
+            assert!(!pending, "{key} 仍可能匹配更长的序列");
+        }
+    }
 }

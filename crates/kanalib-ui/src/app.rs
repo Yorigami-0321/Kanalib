@@ -2831,6 +2831,18 @@ fn round(value: f64, digits: u32) -> f64 {
     (value * factor).round() / factor
 }
 
+/// F-075/F-076：Tab / Shift+Tab 焦点遍历下线。
+///
+/// Ely 在 `FocusScope` 的 `ElyFocus` 上下文把两键绑到 `FocusNext`/`FocusPrev`；
+/// 这里用同上下文的 `NoAction` 覆盖（同等优先级下后注册者生效），不改 vendor。
+/// `.tab_index(0)` 停靠点保留：对话框打开时的 `enter_scope` 仍按停靠点程序化聚焦。
+pub(crate) fn tab_traversal_off_bindings() -> [KeyBinding; 2] {
+    [
+        KeyBinding::new("tab", gpui::NoAction, Some("ElyFocus")),
+        KeyBinding::new("shift-tab", gpui::NoAction, Some("ElyFocus")),
+    ]
+}
+
 impl KanalibApp {
     pub fn new(folder: Option<PathBuf>, cx: &mut Context<Self>) -> Self {
         let open_dedup = std::env::var("KANALIB_OPEN_DEDUP").ok();
@@ -2862,7 +2874,7 @@ impl KanalibApp {
         if std::env::var_os("KANALIB_FRAME_METRICS").is_some() {
             log::warn!("帧计时需要 --features frame-profiler 构建的二进制");
         }
-        cx.bind_keys([
+        let mut bindings = vec![
             KeyBinding::new("ctrl-k", OpenPalette, None),
             KeyBinding::new("ctrl-shift-p", OpenPalette, None),
             KeyBinding::new("ctrl-b", ToggleSidebar, None),
@@ -2921,7 +2933,9 @@ impl KanalibApp {
                 ComparePanDown,
                 Some(crate::compare::COMPARE_CONTEXT),
             ),
-        ]);
+        ];
+        bindings.extend(tab_traversal_off_bindings());
+        cx.bind_keys(bindings);
         let state = AppState::new(folder);
         crate::localization::apply_saved(&state, cx);
         let initial_selected = state.shared.lock().unwrap().selected.clone();
