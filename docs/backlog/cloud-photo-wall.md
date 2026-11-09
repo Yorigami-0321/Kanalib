@@ -6,7 +6,7 @@
 >
 > 2026-11-08 用户指示改为**在本分支直接开发代码**（原「本分支只写文档」红线作废，见 §8）。接口契约冻结在 [photo-wall-contract.md](photo-wall-contract.md)，实施状态见 §9。
 >
-> 参考截图（音乐应用的不规则拼贴墙，仅作交互参照）：`C:\Users\Administrator\.qoder-cn\tmp\D--Code-Kanalib\images\4fbc87a7-18ef-4908-b554-ccb7dbc016cf\decb9aad-3349-42b7-9df6-3c7b4e8f3f1b.png`、`...\57da8e37-3b6b-4409-8d3f-5fd990adbf35.png`。
+> 参考截图（音乐应用的不规则拼贴墙，仅作交互参照）：当时存于本机临时目录（`<临时目录>/images/<uuid>.png`，未入库），构图要点见 [photo-wall-design.md](photo-wall-design.md)。
 
 ## 1. 产品形态与边界
 
