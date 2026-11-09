@@ -619,18 +619,20 @@
 
 ## F-075 Shift+Tab 反向焦点遍历下线
 
-> 2026-11-07 用户指示：把 Shift+Tab 标记为待移除项（产品决定下线）。状态「待移除」= 行为当前已存在，但产品决定移除；本次只登记，不改代码。
+> 2026-11-07 用户指示：把 Shift+Tab 标记为待移除项（产品决定下线）。2026-11-09 实现完成，待真实键盘验收。
 
-- 现状：反向遍历已由用户真实键盘验收通过（70-2，证据 `.kanalib/verify_round9/tab_user_final.png`）。绑定来自 vendor `ely-gpui-components/crates/ely-core/src/lib.rs` 的 `KeyBinding::new("shift-tab", FocusPrev, Some(FOCUS_CONTEXT))`；Kanalib 侧未单独绑定 Shift+Tab。
-- 下线范围：Shift+Tab 不再反向移动焦点；正向 Tab 由 F-076 另行登记下线，二者合并构成焦点遍历整体下线。实现方式（解绑或覆盖键位）待做，本次不写代码。
-- 验收：真实键盘按 Shift+Tab 焦点不反向移动；与 F-076（Tab 正向）一并验收，鼠标点击与快捷键路径不回归。未做前保留「待移除」状态，不写成已移除。
+- 现状：反向遍历已由用户真实键盘验收通过（70-2，证据 `.kanalib/verify_round9/tab_user_final.png`）。绑定来自 vendor `ely-gpui-components/crates/ely-core/src/lib.rs` 的 `KeyBinding::new("shift-tab", FocusPrev, Some(FOCUS_CONTEXT))`；Kanalib 侧原先未单独绑定 Shift+Tab。
+- 下线实现（2026-11-09）：`app.rs` 的 `tab_traversal_off_bindings()` 用同一 `ElyFocus` 上下文的 `gpui::NoAction` 覆盖该键——同等优先级下后注册的绑定生效，且 NoAction 会压制被它盖过的同/低优先级绑定；vendor 不改，升级时不丢。调用点在 `KanalibApp::new` 的 `bind_keys` 末尾。
+- 下线范围：Shift+Tab 不再反向移动焦点；正向 Tab 由 F-076 一并处理。vendor 的 `f6` / `shift-f6` 保持原样，不在本条范围。
+- 验收：真实键盘按 Shift+Tab 焦点不反向移动；与 F-076（Tab 正向）一并验收，鼠标点击与快捷键路径不回归。**代码已实现、单测覆盖键位压制，实机未验前不写成「已移除」**。
 - 连带更新：`manual-acceptance.md` 70-2 保留通过记录并标注转待移除；`next-steps.md` C 类清单不再把 Shift+Tab 列为待复验项。
 
 ## F-076 Tab 正向焦点遍历下线
 
-> 2026-11-07 用户指示：Tab 切换焦点也标记为待移除项（产品决定下线）。状态「待移除」= 行为当前已存在，但产品决定移除；本次只登记，不改代码。
+> 2026-11-07 用户指示：Tab 切换焦点也标记为待移除项（产品决定下线）。2026-11-09 实现完成，待真实键盘验收。
 
 - 现状：正向 Tab 顺序与焦点环已通过（70-2、F-070/F-073 验收；证据 `.kanalib/verify_f070/tab_walk*.log`、`.kanalib/verify_round9/`）。绑定来自 vendor `ely-gpui-components/crates/ely-core/src/lib.rs` 的 `KeyBinding::new("tab", FocusNext, Some(FOCUS_CONTEXT))`；Kanalib 侧另有根 `FocusScope`（`kanalib-root-focus`）与 13 处控件的 `.tab_index(0)` 停靠点。
-- 下线范围：Tab 不再在 Kanalib 控件间切换焦点；与 F-075（Shift+Tab 反向）一起构成焦点遍历整体下线。深层组件若自带 Tab 语义，保持组件现有行为，不在本条范围。实现方式（解绑或覆盖键位、停靠点处理）待做，本次不写代码。
-- 验收：真实键盘按 Tab 焦点不移动；与 F-075 一并验收，鼠标点击与快捷键路径不回归。未做前保留「待移除」状态，不写成已移除。
-- 连带更新：`manual-acceptance.md` 70-2 与已通过项索引「根 FocusScope + 正向 Tab 顺序」保留通过记录并标注转待移除（70-2 的 Esc 分层子项仍待验收）；`next-steps.md` 不再把 Tab 顺序/焦点遍历列为待复验项。
+- 下线实现（2026-11-09）：与 F-075 共用 `tab_traversal_off_bindings()`（`app.rs`），`tab` 用 `ElyFocus` 上下文的 `NoAction` 覆盖 vendor 绑定。深层组件若自带更深上下文的 Tab 绑定仍优先生效，保持组件现有行为。
+- 停靠点处理：13 处 `.tab_index(0)` **保留**——对话框打开时的 `enter_scope` 仍按停靠点程序化聚焦，去掉会让对话框首焦点失效；Tab 已不再走 `FocusNext`，停靠点不再被键盘遍历到。
+- 验收：真实键盘按 Tab 焦点不移动；与 F-075 一并验收，鼠标点击与快捷键路径不回归。**代码已实现、单测覆盖键位压制，实机未验前不写成「已移除」**。
+- 连带更新：`manual-acceptance.md` 70-2 与已通过项索引「根 FocusScope + 正向 Tab 顺序」保留通过记录并标注转待移除（70-2 的 Esc 分层子项仍待验收）；`next-steps.md` 不再把 Tab 顺序/焦点遍历列为待复验项；`constraints.md` 与 `scripts/check_ui_invariants.py` 的 Tab 口径已同步。

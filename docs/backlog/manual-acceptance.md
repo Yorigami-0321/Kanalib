@@ -4,7 +4,7 @@
 >
 > 上级索引：[README.md](README.md) · 路线：[next-steps.md](next-steps.md) · 逐项实现记录：[pending/browse.md](pending/browse.md)
 >
-> 最后整理：2026-11-07（第八轮副屏验收后）。
+> 最后整理：2026-11-09（F-075/F-076 下线后补验收项）。
 
 ## 1. 执行约定
 
@@ -38,7 +38,7 @@
 | # | 验收项 | 前置/前台 | 证据/备注 |
 |---|---|---|---|
 | 70-1 | 1440/1920 逻辑宽下四种上下文侧栏无水平溢出 | 副屏逻辑宽不足，需改 DPI 或占用主屏；会抢前台 | 已有 1024/1200 基线，见 `.kanalib/verify_f070/` |
-| 70-2 | Shift+Tab 反向遍历、焦点全遍历、Esc 其它分层路径 | 真实键盘；合成 Shift 不生效 | **通过（2026-11-07，用户真实键盘实测确认）**：正向 Tab 与焦点环（`verify_f070/tab_walk*.log`）；Shift+Tab 反向遍历由用户亲自按键确认正常（`verify_round9/tab_user_final.png` 为结束态截图）；合成 Shift 经 AttachThreadInput+SetKeyboardState 尝试未证实（gpui 读真实键盘状态），后续此类验收直接请用户按键；**同日用户决定将 Tab / Shift+Tab 焦点遍历标记为待移除（F-075/F-076），这两部分不再复验；Esc 其它分层路径仍待验收** |
+| 70-2 | Shift+Tab 反向遍历、焦点全遍历、Esc 其它分层路径 | 真实键盘；合成 Shift 不生效 | **通过（2026-11-07，用户真实键盘实测确认）**：正向 Tab 与焦点环（`verify_f070/tab_walk*.log`）；Shift+Tab 反向遍历由用户亲自按键确认正常（`verify_round9/tab_user_final.png` 为结束态截图）；合成 Shift 经 AttachThreadInput+SetKeyboardState 尝试未证实（gpui 读真实键盘状态），后续此类验收直接请用户按键；**同日用户决定将 Tab / Shift+Tab 焦点遍历标记为待移除（F-075/F-076），这两部分不再复验**；2026-11-09 下线已实现，改为按 `75-1`/`75-2` 验收新行为；Esc 其它分层路径仍待验收 |
 | 70-3 | F-020 别名/合并对话框真实提交：输入目标、Enter/点击提交、别名与 FTS 生效 | 真实键入 + 前台；空目标时提交按钮 `disabled` | 核心测试 `db::tests::renaming_and_merging_tags_keep_aliases_and_fts` 通过；2026-11-07 GUI 复核：`Rename tag` 对话框渲染正确（`#abstract affects 60 images; the old name stays an alias…`）、输入可清空/键入（截图确认 `abstract_renamed`）、空值禁用 Rename；但合成输入下 Rename/Enter/UIA Invoke 均未把改名落库（日志有 `prompt dialog … sent`，DB/FTS 不变），提交路径未验收，需真实点击复核 |
 | 70-4 | 侧栏宽度拖拽、最小/最大宽度、重启后保持 | 真实鼠标拖拽 | 折叠与重启持久化已验；2026-11-07 合成拖拽：设置写入 `ui.sidebar_width=298` 但布局未变化（按下/移动未稳定命中分隔条），宽度拖拽与最小/最大夹取仍需真实鼠标复核 |
 
@@ -96,7 +96,15 @@
 | 90-2 | Ctrl 点击多选 2–4 张后进入对比 | 真实 Ctrl + 点击 | 合成点击只选中 1 张；未复现 |
 | 90-3 | 视频系统播放器入口 | 真实点击 + 系统关联 | 未验 |
 
-## 9. 已通过项索引（避免重复验收）
+## 9. F-075 / F-076 Tab 焦点遍历下线
+
+| # | 验收项 | 前置/前台 | 证据/备注 |
+|---|---|---|---|
+| 75-1 | 图库、侧栏、设置、标签页各按一次 Tab：焦点不移动 | 真实键盘；合成按键不作为通过依据 | 代码已实现（`app.rs` 的 `tab_traversal_off_bindings()`，`ElyFocus` 上下文的 `NoAction` 覆盖 vendor 绑定），键位压制单测通过；实机未验 |
+| 75-2 | 同上按 Shift+Tab：焦点不反向移动 | 真实键盘（合成 Shift 不进入 gpui） | 同 75-1；vendor 的 `f6`/`shift-f6` 未动，不在本项范围 |
+| 75-3 | 回归：鼠标点击、Ctrl+K / Ctrl+F / Ctrl+B、0–5 星级快捷键正常；打开保存搜索/标签对话框时首焦点仍落在输入框 | 真实点击/键盘 | 停靠点保留给对话框 `enter_scope`，需实机复核首焦点 |
+
+## 10. 已通过项索引（避免重复验收）
 
 | 范围 | 结论 | 证据 |
 |---|---|---|
@@ -105,7 +113,7 @@
 | 标签页单搜索/chips/排序/查看图片→Esc 返回 | 通过 | `verify_f070` |
 | 侧栏折叠隔离 + 重启持久化 | 通过 | `ui.sidebar_collapsed=sources` |
 | 上下文溢出菜单 UIA 名称 | 通过 | `uia_*.txt` |
-| 根 FocusScope + 正向 Tab 顺序 | 通过；2026-11-07 转 F-076 待移除，不再复验 | `tab_walk_settings.log`、`tab_walk.log`、`check_ui_invariants.py` 第 6 项 |
+| 根 FocusScope + 正向 Tab 顺序 | 通过（2026-11-07）；2026-11-09 F-076 下线 Tab 遍历后该顺序不再复验；根 FocusScope 保留用于焦点回落与 `ElyFocus` 上下文 | `tab_walk_settings.log`、`tab_walk.log`、`check_ui_invariants.py` 第 6 项 |
 | 3 万标签首屏/搜索/滚动 | 通过 | `tags30k_walk.log`、`tags30k_*.png` |
 | F-067 撤销（3 星→底栏撤销→DB 归 0） | 通过 | `f067_after_star.png`、`f067_after_undo.png` |
 | F-071 主题切换/设置选中态/标题栏无主题按钮 | 通过 | `f071_theme_light.png`、`f071_settings_selected.png` |

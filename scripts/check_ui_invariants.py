@@ -5,12 +5,13 @@
 退出码 0 表示全部通过；1 表示有违规（会打印文件与行号）。
 
 覆盖前几批靠人工盘点得出的结论，把它们固化成回归检查：
-  1. 手搓 role(Role::Button) 元素必须有 id / aria_label / 键盘可达。
+  1. 手搓 role(Role::Button) 元素必须有 id / aria_label / tab 停靠点。
   2. open_asset_with_system 的失败分支不能只发 toast，还要写就地错误。
   3. 设置页分区标签数量与滚动锚点必须一一对应（F-070 方案 A）。
   4. 命令面板展示的键位必须在 cx.bind_keys 里真实存在。
   5. 上下文侧栏结构：单份标签搜索句柄、四种上下文都有分派、活动栏只在 sidebar.rs 构造。
-  6. 根 FocusScope：应用根必须包 `.root()` + `.node(...)`，否则 Ely 的 Tab 焦点遍历不生效。
+  6. 根 FocusScope：应用根必须包 `.root()` + `.node(...)`，否则焦点动作分发与焦点回落在根节点断掉
+     （Tab 遍历已按 F-075/F-076 下线）。
   7. core 状态 i18n：不得裸写 `shared.status`；所有 `notice.*` 键必须在中英文目录同时存在。
   8. 直接 UI 文案：`.child("…")`、`push_toast(..., "…")`、`Button::new(..., "…")`
      不得直接写中文（`is_english()` 分支除外）。
@@ -61,7 +62,7 @@ def check_role_buttons() -> tuple[list[str], int]:
             if ".aria_label(" not in after:
                 problems.append(f"{where} 手搓按钮缺 .aria_label(...)")
             if rel not in TILE_EXEMPT and ".tab_index(" not in before and ".tab_index(" not in after:
-                problems.append(f"{where} 手搓按钮键盘不可达（缺 .tab_index(0)）")
+                problems.append(f"{where} 手搓按钮缺 .tab_index(0) 停靠点（对话框 enter_scope 仍依赖）")
     return problems, count
 
 
@@ -167,7 +168,7 @@ def check_sidebar_contexts() -> tuple[list[str], int]:
 
 
 def check_root_focus_scope() -> tuple[list[str], int]:
-    """Ely 的 Tab 绑定挂在 FocusScope 的 ElyFocus 上下文；根必须用 .root() + .node()。"""
+    """根 FocusScope 保证焦点分发与回落；Tab 遍历已按 F-075/F-076 下线。"""
     app = (UI / "app.rs").read_text(encoding="utf-8")
     lib = (UI / "lib.rs").read_text(encoding="utf-8")
     problems: list[str] = []
@@ -187,7 +188,7 @@ def check_root_focus_scope() -> tuple[list[str], int]:
     if ".root()" not in block:
         problems.append("根 FocusScope 缺少 .root()")
     if '.node("kanalib-root-focus"' not in block:
-        problems.append("根 FocusScope 缺少 .node(...)，Tab 动作分发路径会断在无 id 的根节点")
+        problems.append("根 FocusScope 缺少 .node(...)，焦点动作分发会断在无 id 的根节点")
 
     checks += 1
     if "FocusScope" not in lib:
@@ -364,7 +365,7 @@ def main() -> int:
         ("open_asset_with_system 失败分支（toast + 就地错误）", *check_open_errors()),
         ("设置页分区标签与滚动锚点一一对应", *check_settings_anchors()),
         ("上下文侧栏结构（单搜索/四上下文/单一活动栏与菜单）", *check_sidebar_contexts()),
-        ("根 FocusScope（.root() + .node()，保证 Tab 遍历）", *check_root_focus_scope()),
+        ("根 FocusScope（.root() + .node()，保证焦点分发/回落）", *check_root_focus_scope()),
         ("命令面板键位（必须真实绑定）", *check_palette_keys()),
         ("core 状态 i18n（结构化写入 + 双语键齐全）", *check_core_status_i18n()),
         ("直接 UI 文案（不得硬编码中文）", *check_direct_ui_text()),
