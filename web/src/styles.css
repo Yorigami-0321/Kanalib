@@ -725,6 +725,35 @@ a {
   background: rgba(20, 20, 22, 0.8);
 }
 
+/* 缩放比例提示（P2-9）：瞬态交互反馈，不是常驻计数。
+   位置取右下 bottom:92 —— .canvas__hint 停在 bottom 46（淡出时还会上移 6px，实测矩形顶边 820），
+   提示底边在 808，两者留 12px；.canvas__error（bottom 16）、.canvas__progress（bottom 0）、
+   .canvas__home（左下 bottom 16）都不在同一矩形里，390 窄屏同样不相交。
+   不缩放时节点直接卸载，因此不会遮挡卡片内容区，也不参与 Tab 序列。 */
+.canvas__zoom {
+  position: fixed;
+  right: 18px;
+  bottom: 92px;
+  z-index: 6;
+  padding: 5px 9px;
+  border-radius: 999px;
+  color: rgba(247, 244, 238, 0.82);
+  background: rgba(10, 10, 12, 0.62);
+  font-size: 12px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.04em;
+  backdrop-filter: blur(10px);
+  opacity: 1;
+  transition: opacity 300ms var(--ease);
+  pointer-events: none;
+}
+
+/* 停手 800ms 后由 JS 翻成 false，靠这条 transition 淡出。 */
+.canvas__zoom[data-on='false'] {
+  opacity: 0;
+}
+
 .wall__note {
   display: grid;
   min-height: 100vh;

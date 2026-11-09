@@ -16,6 +16,12 @@ const LOAD_AHEAD = 900;
 const CLICK_SLOP = 6;
 /** 相机屏幕坐标超过这个量级就 rebase（§1.1 坐标防漂移）。 */
 const REBASE_LIMIT = 1e7;
+/** 有限世界惯性撞边界的视觉回弹：位移上限 28px、时长 220ms（P2-9）。 */
+const BOUNCE_MAX = 28;
+const BOUNCE_MS = 220;
+/** 缩放比例提示：最后一次缩放后停留 800ms，再用 300ms 淡出（P2-9）。 */
+const ZOOM_PIP_HOLD = 800;
+const ZOOM_PIP_FADE = 300;
 /** 这些元素自己处理手势，画布不接管。 */
 const INTERACTIVE = 'button, a, input, select, textarea, [role="button"]';
 
@@ -112,6 +118,30 @@ export function WallView({
   const [camera, setCamera] = useState<Camera>({ x: 0, y: 0, zoom: 1 });
   const [dragging, setDragging] = useState(false);
   const [activeId, setActiveId] = useState<string | null>(null);
+
+  // 缩放比例提示（P2-9）：瞬态交互反馈，不是常驻计数——不缩放就不存在、不进焦点序列、不吃指针。
+  // 四个缩放入口（Ctrl/⌘+滚轮、双指、键盘 +/-）统一走 flashZoom，由它重排同一条 800ms 计时器。
+  const [zoomPip, setZoomPip] = useState<{ percent: number; on: boolean } | null>(null);
+  const zoomPipHold = useRef(0);
+  const zoomPipFade = useRef(0);
+  const flashZoom = useCallback((zoom: number) => {
+    window.clearTimeout(zoomPipHold.current);
+    window.clearTimeout(zoomPipFade.current);
+    setZoomPip({ percent: Math.round(zoom * 100), on: true });
+    zoomPipHold.current = window.setTimeout(() => {
+      setZoomPip((current) => (current ? { ...current, on: false } : current));
+      // 淡出结束后把节点摘掉：不缩放的画布上不该留下任何文字。
+      zoomPipFade.current = window.setTimeout(() => setZoomPip(null), ZOOM_PIP_FADE + 20);
+    }, ZOOM_PIP_HOLD);
+  }, []);
+  useEffect(
+    () => () => {
+      window.clearTimeout(zoomPipHold.current);
+      window.clearTimeout(zoomPipFade.current);
+    },
+    [],
+  );
+
   const cameraRef = useRef<Camera>(camera);
   cameraRef.current = camera;
   const sizeRef = useRef(size);
@@ -212,6 +242,51 @@ export function WallView({
   const moveCameraRef = useRef(moveCamera);
   moveCameraRef.current = moveCamera;
 
+  // 有限世界惯性撞边界的视觉回弹（P2-9）：camera 永远停在合法区间，
+  // 只有 .world 的 transform 在这一层临时越界 ≤28px，180–220ms 后精确归零。
+  // 不把偏移写进 camera：onLoadMore 预取与 visibleSlice 都依赖合法相机。
+  const [bounce, setBounce] = useState({ x: 0, y: 0 });
+  const bounceFrame = useRef(0);
+
+  const stopBounce = useCallback(() => {
+    if (bounceFrame.current) cancelAnimationFrame(bounceFrame.current);
+    bounceFrame.current = 0;
+    setBounce((current) => (current.x === 0 && current.y === 0 ? current : { x: 0, y: 0 }));
+  }, []);
+
+  /** 把 clampCamera 夹掉的越界量翻译成一次 ease-out 回弹；减少动效时直接不做。 */
+  const kickBounce = useCallback((overX: number, overY: number) => {
+    if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) return;
+    // .world 的位移是 -camera，所以回弹峰值取越界量的反号（世界沿惯性方向再多走一点点）。
+    const peakX = Math.max(-BOUNCE_MAX, Math.min(BOUNCE_MAX, -overX));
+    const peakY = Math.max(-BOUNCE_MAX, Math.min(BOUNCE_MAX, -overY));
+    if (Math.abs(peakX) < 1 && Math.abs(peakY) < 1) return;
+    if (bounceFrame.current) cancelAnimationFrame(bounceFrame.current);
+    const start = performance.now();
+    const step = (now: number) => {
+      const t = Math.min(1, (now - start) / BOUNCE_MS);
+      const rest = 1 - t;
+      // 1.6 次方 ease-out：比三次方留得住尾巴——三次方 150ms 就收得看不见了，
+      // 撑不满规格要求的 180–220ms；线性又太"硬"，像在滑而不是被弹回来。
+      const k = Math.pow(rest, 1.6);
+      if (t < 1) {
+        setBounce({ x: peakX * k, y: peakY * k });
+        bounceFrame.current = requestAnimationFrame(step);
+        return;
+      }
+      bounceFrame.current = 0;
+      setBounce({ x: 0, y: 0 });
+    };
+    bounceFrame.current = requestAnimationFrame(step);
+  }, []);
+
+  useEffect(
+    () => () => {
+      if (bounceFrame.current) cancelAnimationFrame(bounceFrame.current);
+    },
+    [],
+  );
+
   /** 让世界坐标 (wx, wy) 落在视口中心。 */
   const centerOnWorld = useCallback(
     (wx: number, wy: number, zoom = cameraRef.current.zoom) => {
@@ -241,6 +316,8 @@ export function WallView({
   // 换筛选/换页：屏幕中央回到世界起点（格子 0,0 的中心）。
   useEffect(() => {
     setActiveId(null);
+    // 上一轮的撞墙回弹不能跨筛选/换页带到新画面。
+    stopBounce();
     if (infinite) {
       setOrigin({ x: 0, y: 0 });
       centerOnWorld(cellWidth / 2, cellHeight / 2, cameraRef.current.zoom);
@@ -299,9 +376,28 @@ export function WallView({
   // 关键约束：虚拟化会在滚动中不断挂载新卡，动画必须限制在"进入窗口"内，
   // 否则滚一下就闪一片——所以用 enterOn 开关 + 定时收口，而不是纯 CSS 的 mount 动画。
   const firstEnter = useRef(true);
+  /** 上一次 reset 时的 id 集合：只用来判断这次变化是不是"纯收窄"（P2-12）。 */
+  const prevIds = useRef<Set<string> | null>(null);
   const [enter, setEnter] = useState({ on: true, wave: false, token: 0 });
   useEffect(() => {
-    const wave = !firstEnter.current;
+    // P2-12：筛选收窄（新列表 ⊆ 旧列表）时留下的卡位置没变，重播波次等于整屏抖一下，
+    // 只做淡入；换页签 / 换标签 / 排序 / 扩宽都会引入新 id，照旧播波次。
+    const nextIds = new Set(items.map((item) => item.id));
+    const previous = prevIds.current;
+    let narrowed = false;
+    if (previous) {
+      narrowed = nextIds.size <= previous.size;
+      if (narrowed) {
+        for (const id of nextIds) {
+          if (!previous.has(id)) {
+            narrowed = false;
+            break;
+          }
+        }
+      }
+    }
+    prevIds.current = nextIds;
+    const wave = !firstEnter.current && !narrowed;
     firstEnter.current = false;
     setEnter((current) => ({ on: true, wave, token: current.token + 1 }));
     const timer = window.setTimeout(
@@ -310,6 +406,13 @@ export function WallView({
     );
     return () => window.clearTimeout(timer);
   }, [resetKey]);
+
+  // 分片追加 / 无限加载会换 items 引用但不重置波次：同步 id 集合，
+  // 否则下一次"收窄"会拿一份过期的旧集合去比，把纯收窄误判成换页签。
+  // 必须声明在 reset 副作用之后：同一次提交里两者都变时，reset 先读到旧的集合。
+  useEffect(() => {
+    prevIds.current = new Set(items.map((item) => item.id));
+  }, [items]);
 
   const stopInertia = useCallback(() => {
     if (inertia.current) cancelAnimationFrame(inertia.current);
@@ -391,6 +494,8 @@ export function WallView({
     const interactive = element?.closest(INTERACTIVE);
     if (interactive && !interactive.classList.contains('tile')) return;
     stopInertia();
+    // 新手势从合法相机重新起算：上一轮未走完的回弹直接归零。
+    stopBounce();
     const host = event.currentTarget as HTMLElement;
     // 捕获在画布上：指针移出画布后 pointermove 仍然到画布，拖拽不会断。
     host.setPointerCapture?.(event.pointerId);
@@ -476,6 +581,7 @@ export function WallView({
         x: pinchState.worldX * zoom - midX,
         y: pinchState.worldY * zoom - midY,
       });
+      flashZoom(zoom);
       return;
     }
 
@@ -513,7 +619,19 @@ export function WallView({
       vx *= 0.92;
       vy *= 0.92;
       const cam = cameraRef.current;
-      moveCameraRef.current({ ...cam, x: cam.x - vx, y: cam.y - vy });
+      const wanted = { ...cam, x: cam.x - vx, y: cam.y - vy };
+      const clamped = clampCamera(wanted);
+      // 有限世界撞到边界：相机立刻落回合法位置（预取与可见切片都依赖它），
+      // 被夹掉的位移交给视觉回弹，而不是原来那样原地"啪"一下停住。
+      if (clamped.x !== wanted.x || clamped.y !== wanted.y) {
+        cameraRef.current = clamped;
+        setCamera(clamped);
+        inertia.current = 0;
+        kickBounce(wanted.x - clamped.x, wanted.y - clamped.y);
+        return;
+      }
+      cameraRef.current = clamped;
+      setCamera(clamped);
       if (Math.hypot(vx, vy) > 0.4) inertia.current = requestAnimationFrame(step);
       else inertia.current = 0;
     };
@@ -581,6 +699,7 @@ export function WallView({
         const worldY = (cam.y + my) / cam.zoom;
         const nextZoom = Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, cam.zoom * (1 - event.deltaY * 0.0022)));
         moveCameraRef.current({ zoom: nextZoom, x: worldX * nextZoom - mx, y: worldY * nextZoom - my });
+        flashZoom(nextZoom);
         return;
       }
       // deltaMode：0=像素、1=行、2=页。触控板给的是像素，鼠标滚轮常给行。
@@ -589,7 +708,7 @@ export function WallView({
     };
     host.addEventListener('wheel', onWheelNative, { passive: false });
     return () => host.removeEventListener('wheel', onWheelNative);
-  }, []);
+  }, [flashZoom]);
 
   // 相机停下 320ms 后告诉上层"现在该用什么颜色"（滚动中不换色，避免抽搐）。
   useEffect(() => {
@@ -626,17 +745,18 @@ export function WallView({
       height: infinite ? undefined : Math.max(layout.height, size.h),
       // worldInset：窄屏把世界右移，让开 64px 的导航缝（桌面为 0，图照样从缝底下穿过）。
       // origin：rebase 后的世界偏移，卡片按 (rect - origin) 渲染，这里把偏移补回屏幕。
+      // bounce：撞边界时的纯视觉越界补偿（≤28px），camera 本身始终合法。
       transform:
         'translate3d(' +
-        (worldInset - camera.x + origin.x * camera.zoom) +
+        (worldInset - camera.x + origin.x * camera.zoom + bounce.x) +
         'px,' +
-        (-camera.y + origin.y * camera.zoom) +
+        (-camera.y + origin.y * camera.zoom + bounce.y) +
         'px,0) scale(' +
         camera.zoom +
         ')',
       transformOrigin: '0 0',
     }),
-    [camera, infinite, layout.height, origin.x, origin.y, size.h, worldInset, worldWidth],
+    [bounce.x, bounce.y, camera, infinite, layout.height, origin.x, origin.y, size.h, worldInset, worldWidth],
   );
 
   const slice = useMemo(() => {
@@ -660,6 +780,7 @@ export function WallView({
       const nextZoom = Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, cam.zoom * factor));
       stopInertia();
       moveCamera({ zoom: nextZoom, x: worldX * nextZoom - cx, y: worldY * nextZoom - cy });
+      flashZoom(nextZoom);
     };
     switch (event.key) {
       case 'ArrowUp':
@@ -835,6 +956,14 @@ export function WallView({
         >
           回到起点
         </button>
+      ) : null}
+
+      {/* 缩放比例提示（P2-9）：只在最后一次缩放后的 1.1s 内存在，
+          aria-hidden + pointer-events:none，既不进 Tab 序列也不拦卡片点击。 */}
+      {zoomPip ? (
+        <div className="canvas__zoom" data-on={zoomPip.on ? 'true' : 'false'} aria-hidden="true">
+          {zoomPip.percent}%
+        </div>
       ) : null}
     </div>
   );
