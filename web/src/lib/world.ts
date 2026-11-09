@@ -202,37 +202,38 @@ export function layoutCell(spec: CellSpec, b: number, c: number): PlacedTile[] {
   for (let row = 0; row < rows; row += 1) {
     const rowHeight = (usable * weights[row]) / weightSum;
     const start = Math.floor(rng() * total);
-    // 先按"加进来还不超宽"取图；一张都放不下时退回单张并压到整宽。
-    const picked: { index: number; width: number }[] = [];
-    let used = 0;
-    for (let step = 0; step < total; step += 1) {
+    // 选图规则：先按自然宽度累加，直到"填满这一行"或者"再补一张也不会让拉伸变小"。
+    // 最后统一按比例缩放到正好铺满——卡片是 object-fit: cover，横向拉伸只是多裁一点，
+    // 不会被看出变形；这样做行里不会留空白竖条（留白曾把整屏覆盖率拉到 0.6）。
+    const picked: { index: number; ratio: number }[] = [];
+    let ratioSum = 0;
+    let natural = 0;
+    for (let step = 0; step < total && picked.length < 8; step += 1) {
       const index = (start + step) % total;
       const entry = spec.items[index];
       const ratio = entry.w > 0 && entry.h > 0 ? entry.w / entry.h : 1;
-      const width = rowHeight * ratio;
-      if (picked.length > 0 && used + rowGap + width > innerWidth) break;
-      if (picked.length === 0 && width > innerWidth) {
-        picked.push({ index, width: innerWidth });
-        used = innerWidth;
-        break;
-      }
-      picked.push({ index, width });
-      used += width + (picked.length > 1 ? rowGap : 0);
-      if (used >= innerWidth) break;
+      picked.push({ index, ratio });
+      ratioSum += ratio;
+      natural = ratioSum * rowHeight;
+      const gaps = rowGap * (picked.length - 1);
+      if (natural + gaps >= innerWidth) break;
+      // 剩下的宽度要拉伸 35% 以上才填得满？再补一张更划算。
+      if ((innerWidth - gaps) / natural <= 1.35) break;
     }
     if (picked.length === 0) continue;
-    // 富余宽度摊进列间距（单张图时居中），图片一律不拉伸。
-    const leftover = Math.max(0, innerWidth - used);
-    const extraGap = picked.length > 1 ? leftover / (picked.length - 1) : 0;
-    let x = c * spec.cellWidth + (picked.length === 1 ? leftover / 2 : 0);
+
+    const gaps = rowGap * (picked.length - 1);
+    const scale = (innerWidth - gaps) / Math.max(1, ratioSum * rowHeight);
+    let x = c * spec.cellWidth;
     for (const entry of picked) {
+      const width = entry.ratio * rowHeight * scale;
       tiles.push({
         item: spec.items[entry.index],
         index: entry.index,
-        rect: { x, y: worldY, w: entry.width, h: rowHeight },
+        rect: { x, y: worldY, w: width, h: rowHeight },
         cell: { b, c },
       });
-      x += entry.width + rowGap + extraGap;
+      x += width + rowGap;
     }
     worldY += rowHeight + rowGap;
   }
