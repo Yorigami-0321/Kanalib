@@ -324,10 +324,18 @@ async function main() {
       await cdp.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: spot.x, y: spot.y, button: 'right', buttons: 0, clickCount: 1 });
       await sleep(500);
       report.summary = await evaluate(`(() => {
-        const node = document.querySelector('.summary');
+        const node = document.querySelector('.tile__info');
         if (!node) return { open: false };
-        const box = node.getBoundingClientRect();
-        return { open: true, left: Math.round(box.left), top: Math.round(box.top), right: Math.round(box.right), bottom: Math.round(box.bottom), inViewport: box.left >= 0 && box.top >= 0 && box.right <= innerWidth && box.bottom <= innerHeight };
+        const tile = node.closest('.tile');
+        const box = tile ? tile.getBoundingClientRect() : node.getBoundingClientRect();
+        return {
+          open: true,
+          left: Math.round(box.left), top: Math.round(box.top),
+          right: Math.round(box.right), bottom: Math.round(box.bottom),
+          // 概要层直接叠在卡片上，卡片在视口内就等于层在视口内
+          inViewport: box.left >= -1 && box.top >= -1 && box.right <= innerWidth + 1 && box.bottom <= innerHeight + 1,
+          name: node.querySelector('.tile__info-name')?.textContent ?? null,
+        };
       })()`);
       report.shots.summary = await shot('v3f-summary');
     } else {
@@ -387,7 +395,7 @@ async function main() {
       before: [Math.round(panBefore.e), Math.round(panBefore.f)],
       after: [Math.round(panAfter.e), Math.round(panAfter.f)],
       panned: Math.abs(panAfter.e - panBefore.e) > 40 || Math.abs(panAfter.f - panBefore.f) > 40,
-      openedLightbox: await evaluate(`!!document.querySelector('.pswp')`),
+      openedLightbox: await evaluate(`location.hash.startsWith('#/d/')`),
     };
 
     // 6.2 Ctrl + 滚轮缩放（以光标为锚）
@@ -404,7 +412,7 @@ async function main() {
     const zoomAfterWheel = (await matrixOf()).a;
     interactions.ctrlWheel = { before: zoomBeforeWheel, after: zoomAfterWheel, zoomed: zoomAfterWheel > zoomBeforeWheel + 0.02 };
 
-    // 6.3 键盘路径：画布聚焦 → ↓（平移）→ Tab（进卡片）→ Enter（开灯箱）
+    // 6.3 键盘路径：画布聚焦 → ↓（平移）→ Tab（进卡片）→ Enter（展开全屏详情）
     await evaluate(`document.querySelector('.canvas')?.focus()`);
     const keyBefore = await matrixOf();
     await cdp.send('Input.dispatchKeyEvent', { type: 'keyDown', key: 'ArrowDown', code: 'ArrowDown', windowsVirtualKeyCode: 40 });
@@ -418,7 +426,7 @@ async function main() {
     await cdp.send('Input.dispatchKeyEvent', { type: 'rawKeyDown', key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13 });
     await cdp.send('Input.dispatchKeyEvent', { type: 'keyUp', key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13 });
     await sleep(900);
-    const lightboxOpened = await evaluate(`!!document.querySelector('.pswp')`);
+    const lightboxOpened = await evaluate(`location.hash.startsWith('#/d/')`);
     interactions.keyboard = {
       arrowPanned: Math.abs(keyAfter.f - keyBefore.f) > 60,
       focusedRole: focusInfo.role,
@@ -572,11 +580,11 @@ async function main() {
           touchPoints: [{ x: touchSpot.x, y: touchSpot.y, id: 1 }],
         });
         await sleep(700);
-        const summaryOpen = await evaluate(`!!document.querySelector('.summary')`);
+        const summaryOpen = await evaluate(`!!document.querySelector('.tile__info')`);
         await cdp.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
         await sleep(400);
         report.mobile.longPressSummary = summaryOpen;
-        report.mobile.longPressOpenedLightbox = await evaluate(`!!document.querySelector('.pswp')`);
+        report.mobile.longPressOpenedLightbox = await evaluate(`location.hash.startsWith('#/d/')`);
         await cdp.send('Input.dispatchKeyEvent', { type: 'keyDown', key: 'Escape', code: 'Escape', windowsVirtualKeyCode: 27 });
         await cdp.send('Input.dispatchKeyEvent', { type: 'keyUp', key: 'Escape', code: 'Escape', windowsVirtualKeyCode: 27 });
         await sleep(200);
