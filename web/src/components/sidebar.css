@@ -85,3 +85,30 @@
 .app .seam__foot {
   padding-bottom: 16px;
 }
+
+/* ===== Q6 = C′（2026-11-09 用户改判）：常驻半透明 =====
+   默认 76% 纸 + blur(10) 一直开；悬停升到 88% + blur(14)。
+   以前是"实色纸面，hover 才切玻璃"，用户报"只有悬停才透明"。
+   特异性：.app .seam 胜过 .seam；悬停用 .app .seam:hover（多一个类）压过 .seam:hover。 */
+.app .seam {
+  background: color-mix(in srgb, var(--surface) 76%, transparent);
+  border-right-color: color-mix(in srgb, var(--ink) 10%, transparent);
+  backdrop-filter: blur(10px) saturate(1.08);
+  -webkit-backdrop-filter: blur(10px) saturate(1.08);
+  /* 底下的图透上来之后，次级文字要提一档才够读（§2.4）。 */
+  --ink-soft: color-mix(in srgb, #f7f4ee 72%, transparent);
+}
+
+.app .seam:hover {
+  background: color-mix(in srgb, var(--surface) 88%, transparent);
+  backdrop-filter: blur(14px) saturate(1.1);
+  -webkit-backdrop-filter: blur(14px) saturate(1.1);
+}
+
+/* 不支持 backdrop-filter 时退回 88% 实色，别让图片直接糊在文字底下。 */
+@supports not ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
+  .app .seam,
+  .app .seam:hover {
+    background: color-mix(in srgb, var(--surface) 88%, transparent);
+  }
+}

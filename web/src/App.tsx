@@ -143,11 +143,13 @@ export function App() {
   );
 
   // 标签页要全量条目（封面 + 单标签墙都从 items 里按 tag 捞）。
+  // 无限空间（首页无筛选）同理：格子按全量池选图，片段陆续到达会让整屏换图。
   // useWall.loadMore() 是 void 的（内部 request() 是 fire-and-forget），不能 await；
   // 改成跟着快照推进：每次分片落地再驱动下一片，直到 hasMore=false。
   // 注意：首屏 boot/loading 时 hasMore 还是初始值 false（首片没到），此时绝不能据此判定
   // 「已经全量」——否则 allLoaded 被永久置真，直开 #/tags 只会停在 5,000 条。
-  const needAll = route.view === 'tags' || route.view === 'tag';
+  const infiniteHome = route.view === 'wall' && !filtered;
+  const needAll = route.view === 'tags' || route.view === 'tag' || infiniteHome;
   useEffect(() => {
     if (!needAll || allLoaded) return;
     if (wall.phase === 'boot' || wall.phase === 'loading' || wall.phase === 'error') return;
@@ -373,6 +375,9 @@ export function App() {
               hasMore={wall.hasMore}
               resetKey={signature}
               filtered={filtered || route.view === 'tag'}
+              infinite={infiniteHome}
+              ready={allLoaded}
+              worldSeed={orderSeed}
               stableAppend={route.view === 'wall' && sort === 'random' && !filtered}
               tagCounts={tagCounts}
               onLoadMore={handleLoadMore}

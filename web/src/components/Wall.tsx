@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { TierPaths, WallItem } from '../source/types';
 import type { WallPhase } from '../state/useWall';
-import { layoutWorld, visibleSlice } from '../lib/world';
+import { cellTilesInView, layoutWorld, visibleSlice, type CellSpec } from '../lib/world';
 import { WallCard } from './WallCard';
 
 /** 世界比视口宽多少：留出横向可平移的余量。 */
@@ -14,6 +14,8 @@ const ZOOM_MAX = 1.6;
 const LOAD_AHEAD = 900;
 /** 左键按下后位移超过这个距离（CSS px）就不再算单击。 */
 const CLICK_SLOP = 6;
+/** 相机屏幕坐标超过这个量级就 rebase（§1.1 坐标防漂移）。 */
+const REBASE_LIMIT = 1e7;
 /** 这些元素自己处理手势，画布不接管。 */
 const INTERACTIVE = 'button, a, input, select, textarea, [role="button"]';
 
@@ -26,6 +28,15 @@ export interface WallViewProps {
   filtered: boolean;
   /** 条目只会向后追加、顺序不会被重排时为 true：布局可以暂扣不满的行，已渲染的卡永不移动。 */
   stableAppend?: boolean;
+  /**
+   * 无限空间（§1.1 / 规则 11）：上/下/左/右都能一直走，没有边界。
+   * 只有"全库随机墙"才开；标签墙/筛选后的列表条目少，仍然用有限世界（否则三张图会无限重复）。
+   */
+  infinite?: boolean;
+  /** 无限空间要求条目全量到齐后再生成，否则分片到达会让整屏重排。 */
+  ready?: boolean;
+  /** 世界种子：决定每个格子拿哪批图（刷新即换）。 */
+  worldSeed?: number;
   /** 标签 → 张数，透传给卡片角标。 */
   tagCounts?: ReadonlyMap<string, number>;
   onLoadMore: () => void;
@@ -86,6 +97,9 @@ export function WallView({
   resetKey,
   filtered,
   stableAppend = false,
+  infinite = false,
+  ready = true,
+  worldSeed = 1,
   tagCounts,
   onLoadMore,
   onOpen,
@@ -123,20 +137,59 @@ export function WallView({
   const stretchPartialRow = !hasMore;
   const layout = useMemo(
     () =>
-      layoutWorld(items, {
-        width: worldWidth,
-        gap: GAP,
-        targetHeight: rowTargetHeight,
-        includePartialRow,
-        stretchPartialRow,
-      }),
-    [items, worldWidth, rowTargetHeight, includePartialRow, stretchPartialRow],
+      // 无限空间不排整墙：一万条跑一遍 justified rows 纯属浪费，格子按需生成就够了。
+      infinite
+        ? { tiles: [], height: 0 }
+        : layoutWorld(items, {
+            width: worldWidth,
+            gap: GAP,
+            targetHeight: rowTargetHeight,
+            includePartialRow,
+            stretchPartialRow,
+          }),
+    [infinite, items, worldWidth, rowTargetHeight, includePartialRow, stretchPartialRow],
   );
   const layoutRef = useRef(layout);
   layoutRef.current = layout;
 
+  // 无限空间（§1.1 / 规则 11）：世界没有尺寸，空间切成格子按需生成。
+  // 格子边长跟着视口走（一屏 4–6 格）；窄屏必须收窄到可见宽度，
+  // 否则 1080 的桌面地板会让 390 屏上每张卡都大得只剩半张。
+  const cellWidth = narrow
+    ? Math.max(260, viewWidth)
+    : Math.max(1080, Math.round(viewWidth * 1.15));
+  // 窄屏格子按"两列三行"反推：行高 ≈ 可见宽/2/1.33，三层加起来约等于可见宽 × 1.15。
+  const cellHeight = narrow
+    ? Math.max(320, Math.round(viewWidth * 1.15))
+    : Math.max(720, Math.round(size.h * 1.15));
+  const cellSpec = useMemo<CellSpec>(
+    () => ({ items, seed: worldSeed, cellWidth, cellHeight, gap: GAP }),
+    [items, worldSeed, cellWidth, cellHeight],
+  );
+  // DOM 坐标不随相机无限增长：origin 是一段世界偏移，rebase 时整体平移。
+  const [origin, setOrigin] = useState({ x: 0, y: 0 });
+  // 相机换算成"世界坐标里的可见矩形"（未乘缩放）。
+  const viewRect = {
+    x: camera.x / camera.zoom,
+    y: camera.y / camera.zoom,
+    w: viewWidth / camera.zoom,
+    h: size.h / camera.zoom,
+  };
+  const cellTiles = useMemo(
+    () =>
+      infinite && ready
+        ? // 缓冲区按格子尺度取（约 1/3 格）：固定 420px 在窄屏上等于多预取两屏，
+          // DOM 卡片数会翻倍，违反"数量恒定"。
+          cellTilesInView(cellSpec, viewRect, Math.round(Math.min(cellWidth, cellHeight) * 0.35))
+        : [],
+    // viewRect 是每帧新建的对象，依赖拆成 4 个数字，避免无谓重算。
+    [infinite, ready, cellSpec, cellHeight, cellWidth, viewRect.x, viewRect.y, viewRect.w, viewRect.h],
+  );
+
   const clampCamera = useCallback(
     (cam: Camera): Camera => {
+      // 无限空间不夹取：任一方向都能一直走（规则 11）。
+      if (infinite) return cam;
       const maxX = Math.max(0, worldWidth * cam.zoom - viewWidth);
       const maxY = Math.max(0, layoutRef.current.height * cam.zoom - size.h);
       return {
@@ -145,7 +198,7 @@ export function WallView({
         y: Math.min(maxY, Math.max(0, cam.y)),
       };
     },
-    [size.h, viewWidth, worldWidth],
+    [infinite, size.h, viewWidth, worldWidth],
   );
 
   const moveCamera = useCallback(
@@ -158,6 +211,14 @@ export function WallView({
   );
   const moveCameraRef = useRef(moveCamera);
   moveCameraRef.current = moveCamera;
+
+  /** 让世界坐标 (wx, wy) 落在视口中心。 */
+  const centerOnWorld = useCallback(
+    (wx: number, wy: number, zoom = cameraRef.current.zoom) => {
+      moveCameraRef.current({ zoom, x: wx * zoom - viewWidth / 2, y: wy * zoom - size.h / 2 });
+    },
+    [size.h, viewWidth],
+  );
 
   useEffect(() => {
     const host = viewportRef.current;
@@ -177,29 +238,52 @@ export function WallView({
     return () => observer.disconnect();
   }, []);
 
-  // 换筛选/换页：回到顶部。
+  // 换筛选/换页：屏幕中央回到世界起点（格子 0,0 的中心）。
   useEffect(() => {
+    setActiveId(null);
+    if (infinite) {
+      setOrigin({ x: 0, y: 0 });
+      centerOnWorld(cellWidth / 2, cellHeight / 2, cameraRef.current.zoom);
+      return;
+    }
     const cam = cameraRef.current;
     moveCamera({ x: Math.max(0, (worldWidth * cam.zoom - viewWidth) / 2), y: 0, zoom: cam.zoom });
-    setActiveId(null);
   }, [resetKey]);
 
   // 视口变窄/旋转/世界重排后，相机可能留在越界位置（典型症状：390 宽时右侧空一大条）。
   // 这里把相机夹回合法区间——只在真的越界时才写状态，避免自激重渲染。
   useEffect(() => {
+    if (infinite) return;
     const cam = cameraRef.current;
     const clamped = clampCamera(cam);
     if (clamped.x === cam.x && clamped.y === cam.y && clamped.zoom === cam.zoom) return;
     cameraRef.current = clamped;
     setCamera(clamped);
-  }, [clampCamera, layout.height]);
+  }, [clampCamera, infinite, layout.height]);
 
-  // 到墙尾前预取下一片。
+  // 坐标防漂移（§1.1）：屏幕坐标量级超过 1e7 就把世界整体平移整数个格子。
+  // origin 与 camera 同步加同一个量，画面一个像素都不动，DOM 里的数却回到小区间。
   useEffect(() => {
-    if (!hasMore) return;
+    if (!infinite) return;
+    if (Math.abs(camera.x) < REBASE_LIMIT && Math.abs(camera.y) < REBASE_LIMIT) return;
+    const zoom = camera.zoom || 1;
+    const kx = Math.round(camera.x / (cellWidth * zoom));
+    const ky = Math.round(camera.y / (cellHeight * zoom));
+    if (kx === 0 && ky === 0) return;
+    setOrigin((current) => ({ x: current.x + kx * cellWidth, y: current.y + ky * cellHeight }));
+    moveCamera({
+      ...camera,
+      x: camera.x + kx * cellWidth * zoom,
+      y: camera.y + ky * cellHeight * zoom,
+    });
+  }, [camera, cellHeight, cellWidth, infinite, moveCamera]);
+
+  // 到墙尾前预取下一片（只在有限世界里有"墙尾"）。
+  useEffect(() => {
+    if (infinite || !hasMore) return;
     const bottom = (camera.y + size.h) / camera.zoom;
     if (bottom > layout.height - LOAD_AHEAD) onLoadMore();
-  }, [camera, hasMore, layout.height, onLoadMore, size.h]);
+  }, [camera, hasMore, infinite, layout.height, onLoadMore, size.h]);
 
   const pointer = useRef<PointerState>({ ...IDLE_POINTER });
   const inertia = useRef(0);
@@ -458,8 +542,13 @@ export function WallView({
       const bottom = (camera.y + size.h) / camera.zoom;
       const center = (top + bottom) / 2;
       const span = Math.max(1, (bottom - top) / 2);
-      const slice = visibleSlice(layout.tiles, top, bottom, 0);
-      const scored = layout.tiles.slice(slice.start, slice.end).map((tile) => {
+      const pool = infinite
+        ? cellTiles
+        : (() => {
+            const slice = visibleSlice(layout.tiles, top, bottom, 0);
+            return layout.tiles.slice(slice.start, slice.end);
+          })();
+      const scored = pool.map((tile) => {
         const visibleTop = Math.max(tile.rect.y, top);
         const visibleBottom = Math.min(tile.rect.y + tile.rect.h, bottom);
         const area = Math.max(0, visibleBottom - visibleTop);
@@ -471,24 +560,26 @@ export function WallView({
       onFocusItems(scored.slice(0, 6).map((entry) => entry.item));
     }, 320);
     return () => window.clearTimeout(timer);
-  }, [camera, layout.tiles, onFocusItems, size.h]);
+  }, [camera, cellTiles, infinite, layout.tiles, onFocusItems, size.h]);
 
   const worldStyle = useMemo(
     () => ({
-      width: worldWidth,
-      height: Math.max(layout.height, size.h),
+      // 无限空间没有世界尺寸：.world 只当坐标系原点用，尺寸交给卡片自己。
+      width: infinite ? undefined : worldWidth,
+      height: infinite ? undefined : Math.max(layout.height, size.h),
       // worldInset：窄屏把世界右移，让开 64px 的导航缝（桌面为 0，图照样从缝底下穿过）。
+      // origin：rebase 后的世界偏移，卡片按 (rect - origin) 渲染，这里把偏移补回屏幕。
       transform:
         'translate3d(' +
-        (worldInset - camera.x) +
+        (worldInset - camera.x + origin.x * camera.zoom) +
         'px,' +
-        -camera.y +
+        (-camera.y + origin.y * camera.zoom) +
         'px,0) scale(' +
         camera.zoom +
         ')',
       transformOrigin: '0 0',
     }),
-    [camera, layout.height, size.h, worldInset, worldWidth],
+    [camera, infinite, layout.height, origin.x, origin.y, size.h, worldInset, worldWidth],
   );
 
   const slice = useMemo(() => {
@@ -540,10 +631,13 @@ export function WallView({
         break;
       case 'Home':
         stopInertia();
-        moveCamera({ ...cam, y: 0 });
+        // 无限空间里 Home = 回到起点（§1.1 必做项）；有限世界仍回顶部。
+        if (infinite) centerOnWorld(cellWidth / 2, cellHeight / 2);
+        else moveCamera({ ...cam, y: 0 });
         break;
       case 'End':
         stopInertia();
+        if (infinite) break;
         moveCamera({ ...cam, y: Math.max(0, layout.height * cam.zoom - sizeRef.current.h) });
         break;
       case '+':
@@ -560,10 +654,26 @@ export function WallView({
     event.preventDefault();
   };
 
-  const visible = layout.tiles.slice(slice.start, slice.end);
+  // 无限空间的卡片按 (rect - origin) 落到 DOM，坐标量级不随相机增长；
+  // 有限世界 origin 恒为 0，等同于原来的世界坐标。
+  const visible = useMemo(
+    () =>
+      infinite
+        ? cellTiles.map((tile) => ({
+            ...tile,
+            rect: {
+              x: tile.rect.x - origin.x,
+              y: tile.rect.y - origin.y,
+              w: tile.rect.w,
+              h: tile.rect.h,
+            },
+          }))
+        : layout.tiles.slice(slice.start, slice.end),
+    [cellTiles, infinite, layout.tiles, origin.x, origin.y, slice.start, slice.end],
+  );
   // 对角线波次从视野左上角起算（不是世界原点）：否则滚到中段换页签时会整屏一起延迟。
-  const waveLeft = camera.x / camera.zoom;
-  const waveTop = camera.y / camera.zoom;
+  const waveLeft = camera.x / camera.zoom - origin.x;
+  const waveTop = camera.y / camera.zoom - origin.y;
   const enterDelayOf = (rect: { x: number; y: number }) => {
     if (!enter.on || !enter.wave) return 0;
     const column = Math.max(0, Math.floor((rect.x - waveLeft) / 300));
@@ -572,6 +682,15 @@ export function WallView({
   };
   const isEmpty = items.length === 0;
   const showEmpty = isEmpty && phase !== 'boot' && phase !== 'loading';
+  // 无限空间要等全量到齐再生成格子：分片陆续到达会让每个格子的选图整体换一遍。
+  const awaitingWorld = infinite && !ready && phase !== 'error';
+  // 走了很远（超过约一屏半）才给「回到起点」——无限空间容易迷路（§1.1 必做）。
+  const homeX = cellWidth / 2;
+  const homeY = cellHeight / 2;
+  const displaced =
+    infinite &&
+    (Math.abs(viewRect.x + viewRect.w / 2 - homeX) > viewRect.w * 1.6 ||
+      Math.abs(viewRect.y + viewRect.h / 2 - homeY) > viewRect.h * 1.6);
 
   return (
     <div
@@ -579,7 +698,7 @@ export function WallView({
       ref={viewportRef}
       tabIndex={0}
       role="region"
-      aria-label="图片画布：Tab 选卡片、Enter 打开、方向键平移、+/- 缩放"
+      aria-label="图片画布：Tab 选卡片、Enter 打开、方向键平移、+/- 缩放、Home 回起点"
       onKeyDown={onCanvasKeyDown}
       onPointerDown={onPointerDown}
       onPointerMove={onPointerMove}
@@ -614,11 +733,11 @@ export function WallView({
             </>
           )}
         </div>
-      ) : (
+      ) : awaitingWorld ? null : (
         <div className="world" style={worldStyle}>
           {visible.map((tile) => (
             <WallCard
-              key={tile.item.id}
+              key={tile.item.id + '@' + Math.round(tile.rect.x) + ',' + Math.round(tile.rect.y)}
               item={tile.item}
               index={tile.index}
               paths={paths}
@@ -647,6 +766,17 @@ export function WallView({
       <div className="canvas__progress" data-active={phase === 'loading' ? 'true' : undefined} aria-hidden="true" />
 
       {phase === 'error' ? <div className="canvas__error">数据加载中断</div> : null}
+
+      {displaced ? (
+        <button
+          type="button"
+          className="canvas__home"
+          onClick={() => centerOnWorld(homeX, homeY)}
+          title="回到起点（Home）"
+        >
+          回到起点
+        </button>
+      ) : null}
     </div>
   );
 }

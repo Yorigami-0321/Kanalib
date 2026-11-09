@@ -129,3 +129,136 @@ export function visibleSlice(
   while (scanEnd < high && tiles[scanEnd].rect.y <= maxY) scanEnd += 1;
   return { start, end: scanEnd };
 }
+
+/* ===== 无限空间：格子（cell）按需生成 =====
+ *
+ * §1.1 要求"世界无尺寸、按环带取格子、同一 (种子, 格子索引) 恒得到同一批图"。
+ * 这里把空间切成 cellWidth × cellHeight 的格子：格子里排 2–4 行（行高由种子决定），
+ * 每行从左到右取连续的条目，宽度不够就补图片、富余的宽度摊进列间距（不拉伸图片）。
+ * 每个格子自己正好填满自己的盒子，所以环带之间不会重叠也不会留白带。
+ */
+
+export interface CellSpec {
+  items: readonly WallItem[];
+  /** 世界种子：决定每个格子拿哪批图。 */
+  seed: number;
+  cellWidth: number;
+  cellHeight: number;
+  gap: number;
+}
+
+export interface PlacedTile {
+  item: WallItem;
+  /** 在 items 里的下标（打开灯箱要用）。 */
+  index: number;
+  /** 世界坐标（绝对，不受 rebase 影响）。 */
+  rect: TileRect;
+  /** 所属格子，用于 key 与波次计算。 */
+  cell: { b: number; c: number };
+}
+
+/** 32 位整数混合（FNV-1a 变体 + 乘法抖动），给每个格子一个稳定种子。 */
+function mix32(seed: number, parts: number[]): number {
+  let hash = seed >>> 0;
+  for (const part of parts) {
+    hash ^= part >>> 0;
+    hash = Math.imul(hash, 0x01000193) >>> 0;
+    hash ^= hash >>> 15;
+    hash = Math.imul(hash, 0x27220a95) >>> 0;
+  }
+  return hash >>> 0;
+}
+
+/** 确定性伪随机：同一 seed 永远同样的序列。 */
+export function mulberry32(seed: number): () => number {
+  let state = seed >>> 0;
+  return () => {
+    state = (state + 0x6d2b79f5) >>> 0;
+    let t = state;
+    t = Math.imul(t ^ (t >>> 15), t | 1);
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+/** 排一个格子。b/c 可以是负数（往左上走），坐标直接由格号算出来。 */
+export function layoutCell(spec: CellSpec, b: number, c: number): PlacedTile[] {
+  const total = spec.items.length;
+  if (total === 0) return [];
+  const rng = mulberry32(mix32(spec.seed, [b, c]));
+  const rows = 2 + Math.floor(rng() * 3);
+  const innerWidth = Math.max(1, spec.cellWidth - spec.gap);
+  const innerHeight = Math.max(1, spec.cellHeight - spec.gap);
+  const rowGap = spec.gap;
+  const weights = Array.from({ length: rows }, () => 0.82 + rng() * 0.36);
+  const weightSum = weights.reduce((sum, value) => sum + value, 0);
+  const usable = innerHeight - rowGap * (rows - 1);
+
+  const tiles: PlacedTile[] = [];
+  let worldY = b * spec.cellHeight;
+  for (let row = 0; row < rows; row += 1) {
+    const rowHeight = (usable * weights[row]) / weightSum;
+    const start = Math.floor(rng() * total);
+    // 先按"加进来还不超宽"取图；一张都放不下时退回单张并压到整宽。
+    const picked: { index: number; width: number }[] = [];
+    let used = 0;
+    for (let step = 0; step < total; step += 1) {
+      const index = (start + step) % total;
+      const entry = spec.items[index];
+      const ratio = entry.w > 0 && entry.h > 0 ? entry.w / entry.h : 1;
+      const width = rowHeight * ratio;
+      if (picked.length > 0 && used + rowGap + width > innerWidth) break;
+      if (picked.length === 0 && width > innerWidth) {
+        picked.push({ index, width: innerWidth });
+        used = innerWidth;
+        break;
+      }
+      picked.push({ index, width });
+      used += width + (picked.length > 1 ? rowGap : 0);
+      if (used >= innerWidth) break;
+    }
+    if (picked.length === 0) continue;
+    // 富余宽度摊进列间距（单张图时居中），图片一律不拉伸。
+    const leftover = Math.max(0, innerWidth - used);
+    const extraGap = picked.length > 1 ? leftover / (picked.length - 1) : 0;
+    let x = c * spec.cellWidth + (picked.length === 1 ? leftover / 2 : 0);
+    for (const entry of picked) {
+      tiles.push({
+        item: spec.items[entry.index],
+        index: entry.index,
+        rect: { x, y: worldY, w: entry.width, h: rowHeight },
+        cell: { b, c },
+      });
+      x += entry.width + rowGap + extraGap;
+    }
+    worldY += rowHeight + rowGap;
+  }
+  return tiles;
+}
+
+/** 视野 + 缓冲里所有格子的卡（按世界坐标过滤），格子本身在 DOM 里不落地。 */
+export function cellTilesInView(
+  spec: CellSpec,
+  view: { x: number; y: number; w: number; h: number },
+  padding = 420,
+): PlacedTile[] {
+  const left = view.x - padding;
+  const right = view.x + view.w + padding;
+  const top = view.y - padding;
+  const bottom = view.y + view.h + padding;
+  const c0 = Math.floor(left / spec.cellWidth);
+  const c1 = Math.floor(right / spec.cellWidth);
+  const b0 = Math.floor(top / spec.cellHeight);
+  const b1 = Math.floor(bottom / spec.cellHeight);
+  const tiles: PlacedTile[] = [];
+  for (let b = b0; b <= b1; b += 1) {
+    for (let c = c0; c <= c1; c += 1) {
+      for (const tile of layoutCell(spec, b, c)) {
+        if (tile.rect.x + tile.rect.w < left || tile.rect.x > right) continue;
+        if (tile.rect.y + tile.rect.h < top || tile.rect.y > bottom) continue;
+        tiles.push(tile);
+      }
+    }
+  }
+  return tiles;
+}
