@@ -189,13 +189,15 @@ manifest 契约要点（F-080 首产物）：分片按排序键切（每片 ≤5
 | 层 | 落点 | 状态 | 备注 |
 |---|---|---|---|
 | 契约 | `docs/backlog/photo-wall-contract.md` | 已冻结 v1 | item 字段 id/w/h/n/rt/st/fav/tags/ph/mtime/orig；目录 index.json + m/*.json + t256/t512/o |
-| F-080 发布器 | `crates/kanalib-publish/`（新 workspace 成员，仅依赖 core） | 实现中 | 只读导出：manifest 分片 + 缩略图 + 可选原图 + publish-ledger 增量；`--dry-run`。**已知缺陷**：`items[].tags` 未 join `asset_tags`（status §5.1） |
-| F-081 墙前端 | `web/`（Vite + React + TS，包名 kanalib-wall） | 实现中（v3 已落地并复验，待提交） | v1：infinitegrid + PhotoSwipe + 详情路由 + 整墙缩放；v2：Folia 风格左侧边栏 + 密集拼贴；**v3（2026-11-09）**：二维画布相机（左键拖拽/滚轮/Ctrl 缩放/双指缩放）、120px 竖排"缝"、动态强调色（OKLCH 取样）、标签两层、全屏详情、入场动效。标准见 [photo-wall-v3.md](photo-wall-v3.md) |
+| F-080 发布器 | `crates/kanalib-publish/`（新 workspace 成员，仅依赖 core） | 实现中 | 只读导出：manifest 分片 + 缩略图 + 可选原图 + publish-ledger 增量；`--dry-run`。2026-11-09 修「重复副本丢标签」（同内容多份时用有标签的那份补位，见 status §5.1） |
+| F-081 墙前端 | `web/`（Vite + React + TS，包名 kanalib-wall） | 实现中（v3 已落地并复验并提交） | v1：infinitegrid + PhotoSwipe + 详情路由 + 整墙缩放；v2：Folia 风格左侧边栏 + 密集拼贴；**v3（2026-11-09）**：二维画布相机（左键拖拽/滚轮/Ctrl 缩放/双指缩放）、120px 竖排"缝"（常驻半透明）、动态强调色（OKLCH 取样）、标签两层、全屏详情、入场动效；**同日二期**：L0 改 360° 全向无限（格子按需生成、相机不夹取、rebase、回到起点）。标准见 [photo-wall-v3.md](photo-wall-v3.md) |
 | 验收脚手架 | `scripts/wall_manifest_check.py`、`scripts/wall_verify.ps1`、`scripts/wall_shots.mjs` | 前两个已提交；`wall_shots.mjs` 待提交 | 契约不变量校验 + 单页 headless + **四页/概要/五条交互/390 窄屏/双指缩放一次跑完**（零依赖 CDP） |
 | 视觉改版 v2 | [photo-wall-design.md](photo-wall-design.md) | **已实施（2026-11-09）** | 珊瑚红 `#fd5c47` + 光晕/噪点、左侧 76/232px 边栏、6px 密集拼贴、展示型详情页；顶部工具条已删除。**已被 v3 取代**（强调色改动态取样、边栏改 120px 竖排缝） |
-| 视觉改版 v3 | [photo-wall-v3.md](photo-wall-v3.md) | **已实施（2026-11-09）** | 空间画布 + 黑白竖排缝 + 动态强调色 + 标签两层 + 全屏详情；十条硬规则全部通过（status §4.3） |
+| 视觉改版 v3 | [photo-wall-v3.md](photo-wall-v3.md) | **已实施（2026-11-09）** | 空间画布 + 黑白竖排缝 + 动态强调色 + 标签两层 + 全屏详情；硬规则 1–10 全部通过，第 11 条（L0 360° 全向无界）待做（status §4.3） |
 
 - 开发数据：发布器可导出到 `web/public/data/`（已 gitignore），`npm run dev` 直接以 `/data/` 读取；构建产物 `web/dist` 与 `data/` 一起上传。
 - v2 自测（2026-11-09，headless Edge + CDP，1440×900 与 390×844）：9899 条全量数据下墙 17 列、贴片跨度随宽高比、滚动到墙尾继续追加；边栏展开 232px 后墙重排为 12 列点位；标签筛选生效（筛后计数与边栏计数一致）；单击 PhotoSwipe、双击进详情、Esc 返回。截图见 `web/screenshots/v2-*.png`。
-- v3 自测（2026-11-09 18:20，`scripts/wall_shots.mjs`）：首页 39–49 张可见卡、动态强调色生效；详情大图铺满视口；`#/tags` 54 卡、第四段标题「分级」；右键概要 320×120 且在视口内；拖拽平移 / Ctrl+滚轮 1→1.528 / 键盘 Tab→Enter 开灯箱 / 双指 1→1.6 / hover 滤镜与信息行；390 下 seam 64、世界 326、无横向溢出；控制台 0 错误。截图 `web/screenshots/v3f-*.png`。
+- v3 自测（2026-11-09 18:20，`scripts/wall_shots.mjs`）：首页 25–38 张可见卡、动态强调色生效；详情大图铺满视口；`#/tags` 135 卡、第四段标题「分级」；右键概要 320×120 且在视口内；拖拽平移 / Ctrl+滚轮 1→1.528 / 键盘 Tab→Enter 开灯箱 / 双指 1→1.6 / hover 滤镜与信息行；390 下横拖仍可继续；控制台 0 错误。截图 `web/screenshots/v3f-*.png`。
+- v3 二期自测（2026-11-09 19:00，规则 11）：横拖 42,899px、竖拖 9,799px 后画面仍满（覆盖率 87% / 86%），DOM 恒定 25–38 张，`Home` 回起点；标签墙/筛选仍是有限世界（3 张图不会无限重复）。
+- 数据重导（2026-11-09）：facets 标签 54 → 135，带标签条目 2 → 5，`#/t/1girl` 由 1 张变 3 张；`wall_manifest_check.py` 退出 0（8 条警告）。
 - 未做（后续）：`asset_tags` join 修复、t1024/t2048 高质量档（W3）、rclone 推送与 F-083 部署、动态后端迁移（§4.1）。

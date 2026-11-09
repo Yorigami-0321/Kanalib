@@ -254,6 +254,8 @@ async function main() {
         seam: document.querySelector('.seam')?.getBoundingClientRect().width ?? 0,
         firstId: tiles[0]?.dataset.id ?? null,
         docHeight: document.querySelector('.world')?.getBoundingClientRect().height ?? 0,
+        pending: tiles.filter((tile) => tile.querySelector('img:not(.is-loaded)')).length,
+        failed: tiles.filter((tile) => tile.querySelector('.tile__fallback')).length,
       };
     })()`);
     report.shots.home = await shot('v3f-home');
@@ -294,14 +296,25 @@ async function main() {
     await go('#/', 2600);
     const spot = await evaluate(`(() => {
       const seam = document.querySelector('.seam')?.getBoundingClientRect().right ?? 120;
-      const tiles = [...document.querySelectorAll('.tile')];
-      const pick = tiles.find((tile) => {
+      // 无限画布上几乎没有"整张都在视口里"的卡（格子会故意切边），
+      // 所以取"与安全区相交面积最大"的那张，再点相交区域的中心。
+      const safe = { left: seam + 40, top: 90, right: innerWidth - 60, bottom: innerHeight - 120 };
+      let best = null;
+      for (const tile of document.querySelectorAll('.tile')) {
         const box = tile.getBoundingClientRect();
-        return box.left > seam + 40 && box.right < innerWidth - 40 && box.top > 80 && box.bottom < innerHeight - 80;
-      });
-      if (!pick) return null;
-      const box = pick.getBoundingClientRect();
-      return { x: Math.round(box.left + box.width / 2), y: Math.round(box.top + box.height / 2) };
+        const w = Math.min(box.right, safe.right) - Math.max(box.left, safe.left);
+        const h = Math.min(box.bottom, safe.bottom) - Math.max(box.top, safe.top);
+        if (w < 60 || h < 60) continue;
+        const area = w * h;
+        if (!best || area > best.area) {
+          best = {
+            area,
+            x: Math.round(Math.max(box.left, safe.left) + w / 2),
+            y: Math.round(Math.max(box.top, safe.top) + h / 2),
+          };
+        }
+      }
+      return best ? { x: best.x, y: best.y } : null;
     })()`);
     if (spot) {
       await cdp.send('Input.dispatchMouseEvent', { type: 'mousePressed', x: spot.x, y: spot.y, button: 'right', buttons: 2, clickCount: 1 });
@@ -417,7 +430,68 @@ async function main() {
 
     report.interactions = interactions;
 
-    // 7) 窄屏首页（390×844）：放在交互实测之后，避免改了视口把桌面坐标搞乱。
+    // 7) 规则 11：任意方向连续拖拽 20000px 都不"到头"，且视野里没有空白带
+    const coverage = () =>
+      evaluate(`(() => {
+        const seam = document.querySelector('.seam')?.getBoundingClientRect().right ?? 120;
+        let hit = 0;
+        let total = 0;
+        // 8px 的缝会造成零星漏点，所以按 40px 网格密采样，只看"成片的空白"。
+        for (let x = seam + 20; x < innerWidth - 20; x += 40) {
+          for (let y = 20; y < innerHeight - 20; y += 40) {
+            total += 1;
+            const el = document.elementFromPoint(x, y);
+            if (el && el.closest('.tile')) hit += 1;
+          }
+        }
+        return total ? Math.round((hit / total) * 1000) / 1000 : 0;
+      })()`);
+    const drag = async (x0, y0, x1, y1) => {
+      await cdp.send('Input.dispatchMouseEvent', { type: 'mousePressed', x: x0, y: y0, button: 'left', buttons: 1, clickCount: 1 });
+      for (let step = 1; step <= 4; step += 1) {
+        await cdp.send('Input.dispatchMouseEvent', {
+          type: 'mouseMoved',
+          x: x0 + ((x1 - x0) * step) / 4,
+          y: y0 + ((y1 - y0) * step) / 4,
+          button: 'left',
+          buttons: 1,
+        });
+        await sleep(28);
+      }
+      await cdp.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: x1, y: y1, button: 'left', buttons: 0, clickCount: 1 });
+      await sleep(200);
+    };
+
+    const startMatrix = await matrixOf();
+    // 向左拖 18 次（每次 1100px）＝ 看过 20000px 向右的空间
+    for (let i = 0; i < 18; i += 1) await drag(1320, 460, 220, 460);
+    const pannedMatrix = await matrixOf();
+    const horizontalCover = await coverage();
+    // 向上拖 8 次 ＝ 纵向也一直有新内容
+    for (let i = 0; i < 8; i += 1) await drag(760, 780, 760, 180);
+    const verticalMatrix = await matrixOf();
+    const verticalCover = await coverage();
+    const tileCount = await evaluate(`document.querySelectorAll('.tile').length`);
+    await shot('v3f-far');
+    await cdp.send('Input.dispatchKeyEvent', { type: 'rawKeyDown', key: 'Home', code: 'Home', windowsVirtualKeyCode: 36 });
+    await cdp.send('Input.dispatchKeyEvent', { type: 'keyUp', key: 'Home', code: 'Home', windowsVirtualKeyCode: 36 });
+    await sleep(500);
+    const homeMatrix = await matrixOf();
+    await shot('v3f-home-after');
+    report.rule11 = {
+      startX: Math.round(startMatrix.e),
+      afterX: Math.round(pannedMatrix.e),
+      travelledX: Math.round(startMatrix.e - pannedMatrix.e),
+      afterY: Math.round(verticalMatrix.f),
+      travelledY: Math.round(startMatrix.f - verticalMatrix.f),
+      coverHorizontal: horizontalCover,
+      coverVertical: verticalCover,
+      domTiles: tileCount,
+      homeX: Math.round(homeMatrix.e),
+      homeY: Math.round(homeMatrix.f),
+    };
+
+    // 8) 窄屏首页（390×844）：放在交互实测之后，避免改了视口把桌面坐标搞乱。
     //    先 reload——交互那几步把相机缩放过，直接改视口会把那张放大的画面带进截图。
     await cdp.send('Emulation.setDeviceMetricsOverride', { width: 390, height: 844, deviceScaleFactor: 2, mobile: true });
     await cdp.send('Page.reload');
@@ -431,18 +505,20 @@ async function main() {
     report.mobile = await evaluate(`(() => {
       const seam = document.querySelector('.seam')?.getBoundingClientRect();
       const world = document.querySelector('.world');
-      const tiles = [...document.querySelectorAll('.tile')];
-      const overflow = tiles.filter((tile) => tile.getBoundingClientRect().right > innerWidth + 1).length;
       return {
         seam: seam ? Math.round(seam.width) : 0,
-        tiles: tiles.length,
-        overflowRight: overflow,
+        tiles: document.querySelectorAll('.tile').length,
         scrollW: document.documentElement.scrollWidth,
-        worldW: world ? Math.round(world.getBoundingClientRect().width) : 0,
         worldTransform: world ? getComputedStyle(world).transform : '',
-        rightmost: tiles.reduce((max, tile) => Math.max(max, Math.round(tile.getBoundingClientRect().right)), 0),
       };
     })()`);
+    if (report.mobile) {
+      const before = await matrixOf();
+      await drag(340, 640, 80, 640);
+      const after = await matrixOf();
+      report.mobile.canPanHorizontally = Math.abs(before.e - after.e) > 60;
+      report.mobile.dragDx = Math.round(before.e - after.e);
+    }
 
     // 8) 双指缩放：两根手指张开，看世界 transform 的 scale 有没有真的变
     await cdp.send('Emulation.setTouchEmulationEnabled', { enabled: true, maxTouchPoints: 5 });
@@ -473,6 +549,15 @@ async function main() {
     if (report.consoleErrors.length > 0) report.failures.push('控制台有 ' + report.consoleErrors.length + ' 条错误');
     if (report.pinch && !report.pinch.zoomed) report.failures.push('双指缩放没生效');
     if (report.enterAnimated === false) report.failures.push('入场动效没触发');
+    if (report.rule11) {
+      if (report.rule11.travelledX < 15000) report.failures.push('规则 11：横向没走过 20000px');
+      if (report.rule11.travelledY < 5000) report.failures.push('规则 11：纵向走不动');
+      if (report.rule11.coverHorizontal < 0.8) report.failures.push('规则 11：走远后出现空白带');
+      if (report.rule11.coverVertical < 0.8) report.failures.push('规则 11：纵向走远后出现空白带');
+      if (report.rule11.domTiles > 220) report.failures.push('规则 11：DOM 卡片数没有收敛');
+      if (Math.abs(report.rule11.homeX) > 900) report.failures.push('Home 没有回到起点');
+    }
+    if (report.mobile && !report.mobile.canPanHorizontally) report.failures.push('390 下不能横向移动（碰到边界）');
     if (report.interactions) {
       if (!report.interactions.drag?.panned) report.failures.push('拖拽没有平移画布');
       if (report.interactions.drag?.openedLightbox) report.failures.push('拖拽被误判成单击（打开了灯箱）');
