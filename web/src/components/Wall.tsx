@@ -318,6 +318,23 @@ export function WallView({
   // 否则它会在已卸载的组件上继续 moveCamera → setState（真泄漏）。
   useEffect(() => stopInertia, [stopInertia]);
 
+  // 「回到起点」做成全局快捷键：拖完画布手还在鼠标上，没人会先去点一下画布再按 Home。
+  // 输入框里按 Home 要留给光标，灯箱打开时也交给灯箱。
+  useEffect(() => {
+    if (!infinite) return;
+    const onHomeKey = (event: KeyboardEvent) => {
+      if (event.key !== 'Home' || event.metaKey || event.ctrlKey || event.altKey) return;
+      const target = event.target as Element | null;
+      if (target?.closest('input, textarea, select, [contenteditable="true"]')) return;
+      if (document.querySelector('.pswp')) return;
+      event.preventDefault();
+      stopInertia();
+      centerOnWorld(cellWidth / 2, cellHeight / 2);
+    };
+    window.addEventListener('keydown', onHomeKey);
+    return () => window.removeEventListener('keydown', onHomeKey);
+  }, [cellHeight, cellWidth, centerOnWorld, infinite, stopInertia]);
+
   /** 手势收尾：无论正常抬起、被取消还是丢了指针捕获，都走这里。 */
   const endPointer = (host: HTMLElement | null, pointerId: number) => {
     pointer.current = { ...pointer.current, active: false };
@@ -631,9 +648,10 @@ export function WallView({
         break;
       case 'Home':
         stopInertia();
-        // 无限空间里 Home = 回到起点（§1.1 必做项）；有限世界仍回顶部。
-        if (infinite) centerOnWorld(cellWidth / 2, cellHeight / 2);
-        else moveCamera({ ...cam, y: 0 });
+        // 无限空间的 Home 由 window 上的全局快捷键处理（见上面的 effect），
+        // 这里只管有限世界"回顶部"。
+        if (infinite) break;
+        moveCamera({ ...cam, y: 0 });
         break;
       case 'End':
         stopInertia();
