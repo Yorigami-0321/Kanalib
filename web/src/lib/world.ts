@@ -190,7 +190,10 @@ export function layoutCell(spec: CellSpec, b: number, c: number): PlacedTile[] {
   const innerWidth = Math.max(1, spec.cellWidth - spec.gap);
   const innerHeight = Math.max(1, spec.cellHeight - spec.gap);
   const rowGap = spec.gap;
-  const weights = Array.from({ length: rows }, () => 0.82 + rng() * 0.36);
+  // 行高权重在 0.72–1.42 之间浮动：原来只有 0.82–1.18，几行几乎等高，整屏是等宽横带；
+  // 拉到 0.55–1.75 又太狠（一行能占半格，画面只剩两三张巨图）。这里是折中：
+  // 一眼能看出大小行交错，但每行仍能放 3–4 张（2026-11-09）。
+  const weights = Array.from({ length: rows }, () => 0.72 + rng() * 0.7);
   const weightSum = weights.reduce((sum, value) => sum + value, 0);
   const usable = innerHeight - rowGap * (rows - 1);
 
