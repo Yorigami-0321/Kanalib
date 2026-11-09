@@ -540,6 +540,33 @@ async function main() {
       const after = await matrixOf();
       report.mobile.canPanHorizontally = Math.abs(before.e - after.e) > 60;
       report.mobile.dragDx = Math.round(before.e - after.e);
+
+      // 触屏长按概要：按住一张卡 700ms 再松手，应该出概要且不开灯箱。
+      const touchSpot = await evaluate(`(() => {
+        const seam = document.querySelector('.seam')?.getBoundingClientRect().right ?? 64;
+        for (const tile of document.querySelectorAll('.tile')) {
+          const box = tile.getBoundingClientRect();
+          if (box.left > seam + 20 && box.right < innerWidth - 20 && box.top > 120 && box.bottom < innerHeight - 120) {
+            return { x: Math.round(box.left + box.width / 2), y: Math.round(box.top + box.height / 2) };
+          }
+        }
+        return null;
+      })()`);
+      if (touchSpot) {
+        await cdp.send('Input.dispatchTouchEvent', {
+          type: 'touchStart',
+          touchPoints: [{ x: touchSpot.x, y: touchSpot.y, id: 1 }],
+        });
+        await sleep(700);
+        const summaryOpen = await evaluate(`!!document.querySelector('.summary')`);
+        await cdp.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
+        await sleep(400);
+        report.mobile.longPressSummary = summaryOpen;
+        report.mobile.longPressOpenedLightbox = await evaluate(`!!document.querySelector('.pswp')`);
+        await cdp.send('Input.dispatchKeyEvent', { type: 'keyDown', key: 'Escape', code: 'Escape', windowsVirtualKeyCode: 27 });
+        await cdp.send('Input.dispatchKeyEvent', { type: 'keyUp', key: 'Escape', code: 'Escape', windowsVirtualKeyCode: 27 });
+        await sleep(200);
+      }
     }
 
     // 8) 双指缩放：两根手指张开，看世界 transform 的 scale 有没有真的变
@@ -580,6 +607,8 @@ async function main() {
       if (Math.abs(report.rule11.homeX) > 900) report.failures.push('Home 没有回到起点');
     }
     if (report.mobile && !report.mobile.canPanHorizontally) report.failures.push('390 下不能横向移动（碰到边界）');
+    if (report.mobile && report.mobile.longPressSummary === false) report.failures.push('触屏长按没有出概要');
+    if (report.mobile && report.mobile.longPressOpenedLightbox) report.failures.push('触屏长按误开了灯箱');
     if (report.interactions) {
       if (!report.interactions.drag?.panned) report.failures.push('拖拽没有平移画布');
       if (report.interactions.drag?.openedLightbox) report.failures.push('拖拽被误判成单击（打开了灯箱）');

@@ -291,6 +291,8 @@ export function WallView({
   const pointers = useRef(new Map<number, { x: number; y: number }>());
   /** 双指缩放基准：起始指距、起始缩放，以及基准时中点的世界坐标。 */
   const pinch = useRef<{ dist: number; zoom: number; worldX: number; worldY: number } | null>(null);
+  /** 触屏长按概要：500ms 内没移动、没落第二根手指才算数。 */
+  const longPress = useRef<{ timer: number; id: number; fired: boolean } | null>(null);
 
   // ===== 入场动效（§2.5）=====
   // 首载只做淡入 + 上浮 12px；换页签/换筛选走对角线波次。
@@ -317,6 +319,14 @@ export function WallView({
   // P1-1：切 #/tags、开详情都会卸载 WallView，惯性 rAF 必须在这里停掉，
   // 否则它会在已卸载的组件上继续 moveCamera → setState（真泄漏）。
   useEffect(() => stopInertia, [stopInertia]);
+
+  /** 取消长按计时（移动、第二根手指、抬手、取消都要走这里）。 */
+  const clearLongPress = useCallback(() => {
+    const state = longPress.current;
+    if (state) window.clearTimeout(state.timer);
+    longPress.current = null;
+  }, []);
+  useEffect(() => clearLongPress, [clearLongPress]);
 
   // 「回到起点」做成全局快捷键：拖完画布手还在鼠标上，没人会先去点一下画布再按 Home。
   // 输入框里按 Home 要留给光标，灯箱打开时也交给灯箱。
@@ -388,6 +398,7 @@ export function WallView({
 
     if (pointers.current.size >= 2) {
       // 第二根手指落下：单指平移立刻让位给缩放，且不再算"点击"。
+      clearLongPress();
       pointer.current = { ...pointer.current, active: false, moved: true };
       setDragging(true);
       const [first, second] = [...pointers.current.values()];
@@ -420,6 +431,30 @@ export function WallView({
       lastT: performance.now(),
       downTile: element?.closest<HTMLElement>('.tile') ?? null,
     };
+
+    // 触屏没有右键：长按 500ms 出概要。移动、第二指、抬手都会取消这个计时。
+    const downTile = pointer.current.downTile;
+    if (event.pointerType !== 'mouse' && downTile) {
+      const item = items[Number(downTile.dataset.index)];
+      if (item) {
+        const pointerId = event.pointerId;
+        const spotX = event.clientX;
+        const spotY = event.clientY;
+        clearLongPress();
+        longPress.current = {
+          id: pointerId,
+          fired: false,
+          timer: window.setTimeout(() => {
+            const state = longPress.current;
+            // 中途移动过（拖拽）或已经换成别的指针，就作废。
+            if (!state || state.id !== pointerId || pointer.current.moved) return;
+            state.fired = true;
+            setActiveId(item.id);
+            onSummary(item, spotX, spotY);
+          }, 500),
+        };
+      }
+    }
   };
 
   const onPointerMove = (event: React.PointerEvent<HTMLDivElement>) => {
@@ -455,6 +490,7 @@ export function WallView({
     const dy = event.clientY - state.startY;
     if (!state.moved && Math.hypot(dx, dy) > CLICK_SLOP) {
       state.moved = true;
+      clearLongPress();
       setDragging(true);
     }
     if (!state.moved) return;
@@ -486,6 +522,9 @@ export function WallView({
 
   const onPointerUp = (event: React.PointerEvent<HTMLDivElement>) => {
     const host = event.currentTarget as HTMLElement;
+    // 长按已经出过概要：松手不能再开灯箱（那是两件事）。
+    const longPressFired = longPress.current?.fired === true;
+    clearLongPress();
     pointers.current.delete(event.pointerId);
 
     // 缩放中松手：退出缩放；还剩一根手指就交回给平移，而不是让画面"冻住"。
@@ -500,8 +539,8 @@ export function WallView({
     // 命中的卡片在 pointerdown 时就记住了：捕获之后 pointerup 的 target 是画布本身。
     const tile = state.downTile;
     endPointer(host, event.pointerId);
-    if (moved) {
-      settleInertia();
+    if (moved || longPressFired) {
+      if (moved) settleInertia();
       return;
     }
     const rawIndex = tile?.dataset.index;
@@ -515,6 +554,7 @@ export function WallView({
 
   const onPointerCancel = (event: React.PointerEvent<HTMLDivElement>) => {
     const host = event.currentTarget as HTMLElement;
+    clearLongPress();
     pointers.current.delete(event.pointerId);
     if (pinch.current) {
       if (pointers.current.size < 2) endPinch(host, event.pointerId);
@@ -716,7 +756,7 @@ export function WallView({
       ref={viewportRef}
       tabIndex={0}
       role="region"
-      aria-label="图片画布：Tab 选卡片、Enter 打开、方向键平移、+/- 缩放、Home 回起点"
+      aria-label="图片画布：Tab 选卡片、Enter 打开、方向键平移、+/- 缩放、Home 回起点、触屏长按看概要"
       onKeyDown={onCanvasKeyDown}
       onPointerDown={onPointerDown}
       onPointerMove={onPointerMove}
@@ -726,6 +766,7 @@ export function WallView({
         // 捕获被浏览器抢走（比如触控手势被系统接管）：别留一个"永远按着"的状态。
         // 缩放中不管——endPinch 会自己给剩下的手指重建基线。
         if (pinch.current || pointers.current.size > 0) return;
+        clearLongPress();
         endPointer(null, -1);
       }}
     >
