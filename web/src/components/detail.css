@@ -281,12 +281,19 @@
     padding-left: calc(var(--seam-w) + 14px);
   }
 
+  /* 窄屏相似条：旧版 6 张 48px 挤成 300px 的碎条，既不好点、也没有"还能滑"的暗示。
+     现在按"可视宽度放 4.5 张"反推单张宽度——4 张整、右侧露出半张，滚动意图一眼可见，
+     单张也不小于 56px（拇指可点）。用百分比而不是死值，390/414/430 下都保持同一比例；
+     max(56px, …) 保证 360 这类更窄的机型不会缩到点不准。 */
   .view--detail .view__similar-strip {
-    gap: 4px;
+    width: 100%;
+    gap: 6px;
+    overscroll-behavior-x: contain;
   }
 
   .view--detail .view__similar-strip .similar__item {
-    width: 48px;
-    height: 48px;
+    width: max(56px, calc((100% - 24px) / 4.5));
+    height: auto;
+    aspect-ratio: 1;
   }
 }

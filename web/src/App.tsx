@@ -17,6 +17,9 @@ import type { TagFacet, WallItem } from './source/types';
 
 const EMPTY_TAGS: TagFacet[] = [];
 
+/** 焦点归位的最大重试帧数：虚拟化的卡可能晚一两帧才挂载，8 帧（约 130ms）足够且不会久拖。 */
+const FOCUS_RETRY_FRAMES = 8;
+
 function sortItems(items: readonly WallItem[], mode: SortMode): WallItem[] {
   if (mode === 'random') return [...items];
   const copy = [...items];
@@ -48,6 +51,11 @@ export function App() {
   const previousRoute = useRef(route);
   const probedId = useRef<string | null>(null);
   const listHref = useRef(wallHref());
+  // 焦点要还给谁：记录最近一次从墙上 / 灯箱里进入详情的条目 id。
+  // 灯箱自己的 returnFocus 只覆盖"关灯箱"，"灯箱 → 详情 → Esc 回墙"中间换过路由、
+  // 墙还重挂过，PhotoSwipe 的返回值已经失效，所以这里单独留一份。
+  const returnFocusId = useRef<string | null>(null);
+  const routeViewRef = useRef(route.view);
   const orderCache = useRef<{ source: readonly WallItem[]; list: WallItem[] }>({ source: [], list: [] });
   const wallRef = useRef(wall);
   wallRef.current = wall;
@@ -100,6 +108,18 @@ export function App() {
     return [...seen].sort();
   }, [wall.index, wall.items]);
 
+  /**
+   * 标签封面：确定性 + 段内不相邻重复。
+   *
+   * 旧做法是 `list[hash(name) % list.length]`，只看单个标签。样本库里 135 个标签却只有
+   * 5 张带标签的图，整段会连着出现同一张照片，看起来像渲染坏了。现在按 categoryKey 分段
+   * 贪心：先避开左邻那张卡的封面，再在本段内挑「已被用作封面次数最少」的候选，
+   * 由 hash(name) 的轮转顺序决定起点与打平。全程不掷随机数，同一份数据刷新结果一致。
+   * 只有单图标签（没有别的候选）允许重复，这是数据决定的，不是策略问题。
+   *
+   * 段内顺序必须和 TagGallery 一致（张数降序、同名按名称）——它会拿 entries 再用同一个
+   * 比较器排一次；这里保持同序，"上一张封面"才对得上真实的相邻关系。
+   */
   const tagEntries = useMemo<TagEntry[]>(() => {
     const byTag = new Map<string, WallItem[]>();
     for (const item of wall.items) {
@@ -109,19 +129,57 @@ export function App() {
         else byTag.set(tag[0], [item]);
       }
     }
-    return facetTags
-      .map((facet) => {
-        const list = byTag.get(facet.name);
-        const cover = list && list.length > 0 ? list[hashString(facet.name) % list.length] : undefined;
-        return {
-          name: facet.name,
-          category: categoryLabel(facet.category),
-          categoryKey: facet.category,
-          count: facet.count,
-          coverId: cover?.id,
-        };
-      })
+    // 候选 id 先排序：wall.items 带会话级 shuffle，直接沿用会让封面每次刷新都变。
+    const ordered = facetTags
+      .map((facet) => ({
+        name: facet.name,
+        category: categoryLabel(facet.category),
+        categoryKey: facet.category,
+        count: facet.count,
+        candidates: (byTag.get(facet.name) ?? []).map((item) => item.id).sort(),
+      }))
       .sort((left, right) => right.count - left.count || left.name.localeCompare(right.name, 'zh-Hans-CN'));
+
+    // 分段独立计数：used 是「封面 → 本段已用次数」，prev 是本段上一张卡的封面。
+    const used = new Map<string, Map<string, number>>();
+    const prev = new Map<string, string>();
+    const covers = new Map<string, string>();
+    for (const entry of ordered) {
+      if (entry.candidates.length === 0) continue;
+      const key = entry.categoryKey || 'other';
+      let counts = used.get(key);
+      if (!counts) {
+        counts = new Map();
+        used.set(key, counts);
+      }
+      // 从 hash 决定的起点开始轮转：同样的"最少使用"里也保留各标签自己的偏好，不至于全挤在字典序第一个。
+      const offset = hashString(entry.name) % entry.candidates.length;
+      const rotated = entry.candidates.slice(offset).concat(entry.candidates.slice(0, offset));
+      // 先剔除左邻已经用过的那张（相邻不重复优先于均匀），再在剩下的里挑用量最少的；
+      // 只有该标签全部候选都等于左邻时才会重复。打平仍按轮转顺序，结果稳定。
+      const pool = rotated.filter((id) => id !== prev.get(key));
+      const usable = pool.length > 0 ? pool : rotated;
+      let pick = usable[0];
+      let pickUses = counts.get(pick) ?? 0;
+      for (const id of usable) {
+        const uses = counts.get(id) ?? 0;
+        if (uses < pickUses) {
+          pick = id;
+          pickUses = uses;
+        }
+      }
+      counts.set(pick, pickUses + 1);
+      prev.set(key, pick);
+      covers.set(entry.name, pick);
+    }
+
+    return ordered.map((entry) => ({
+      name: entry.name,
+      category: entry.category,
+      categoryKey: entry.categoryKey,
+      count: entry.count,
+      coverId: covers.get(entry.name),
+    }));
   }, [wall.items, facetTags]);
 
   const tagTotal = useMemo(() => {
@@ -193,6 +251,44 @@ export function App() {
   useEffect(() => {
     if (route.view === 'wall') listHref.current = wallHref();
     else if (route.view === 'tag') listHref.current = tagHref(route.tag);
+  }, [route]);
+
+  // 焦点归位（status §6 P2-11）：从详情回到列表时，把焦点还给触发那张卡。
+  // 墙是虚拟化的，返回那一帧卡片可能还没挂载，所以在 rAF 里最多重试 8 帧；
+  // 仍找不到（例如卡被筛掉/走远了）就退到画布容器——.canvas 有 tabIndex=0，
+  // 方向键仍能继续浏览，不会把焦点丢给 body。
+  // 只在「详情 → 列表」这一跳触发：进详情不该抢焦点，回标签总览也没有对应卡片。
+  useEffect(() => {
+    const cameFromDetail = routeViewRef.current === 'detail';
+    routeViewRef.current = route.view;
+    if (route.view === 'detail') {
+      // 详情里换图（相似/前后）或深链进来时，以当前这张为准，避免留下上一次的旧 id。
+      returnFocusId.current = route.id;
+      return;
+    }
+    if (!cameFromDetail || (route.view !== 'wall' && route.view !== 'tag')) return;
+    const id = returnFocusId.current;
+    if (!id) return;
+    let frame = 0;
+    let raf = 0;
+    const step = () => {
+      // 不拼属性选择器：id 来自数据，逐张比对 dataset 更稳妥，也省掉转义问题。
+      const card = Array.from(document.querySelectorAll<HTMLElement>('.tile')).find(
+        (node) => node.dataset.id === id,
+      );
+      if (card) {
+        card.focus({ preventScroll: true });
+        return;
+      }
+      frame += 1;
+      if (frame <= FOCUS_RETRY_FRAMES) {
+        raf = window.requestAnimationFrame(step);
+        return;
+      }
+      document.querySelector<HTMLElement>('.canvas')?.focus({ preventScroll: true });
+    };
+    raf = window.requestAnimationFrame(step);
+    return () => window.cancelAnimationFrame(raf);
   }, [route]);
 
   useEffect(() => {
@@ -269,7 +365,9 @@ export function App() {
   }, []);
 
   const handleOpen = useCallback(
-    (_item: WallItem, index: number) => {
+    (item: WallItem, index: number) => {
+      // 灯箱 → 详情 → Esc 回墙时，要把焦点还给这一张。
+      returnFocusId.current = item.id;
       openLightbox({
         items: shown,
         startIndex: index,
@@ -281,6 +379,7 @@ export function App() {
   );
 
   const handleDetail = useCallback((id: string) => {
+    returnFocusId.current = id;
     closeLightbox();
     navigate(detailHref(id));
   }, []);
