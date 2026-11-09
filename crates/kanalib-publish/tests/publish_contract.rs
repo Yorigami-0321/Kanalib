@@ -532,3 +532,37 @@ fn limit_caps_exported_items() {
         .collect::<Vec<_>>();
     assert_eq!(mtimes, vec![1_003, 1_002], "limit 应取排序最前的两条");
 }
+
+/// 同内容的两份拷贝、只有较旧那份打过标签：导出的条目仍要带上标签。
+///
+/// 真实数据里踩到过：样例图在 stress 库里有一份未打标签的拷贝且 mtime 更新，
+/// Modified 降序把它排在了前面并被保留，标签全丢——看起来像"asset_tags 没 join"。
+#[test]
+fn duplicate_copy_supplies_tags_when_kept_copy_is_untagged() {
+    let fixture = Fixture::new("dup-tags");
+    let db = fixture.open();
+    let sha = sha1_of(9);
+    let tagged = fixture.add(&db, "keep/tagged.png", 100, &sha, true);
+    fixture.add(&db, "keep/untagged-newer.png", 900, &sha, true);
+
+    let mut asset = db.load_asset(&tagged).unwrap();
+    asset.tags = vec![TagHit {
+        tag: "1girl".to_string(),
+        category: "general".to_string(),
+        score: 0.9,
+        vocab_index: None,
+    }];
+    db.update_tags(&asset).unwrap();
+    drop(db);
+
+    let stats = run(&fixture.options()).unwrap();
+    assert_eq!(stats.exported, 1, "重复 id 只导出一条");
+    assert_eq!(stats.duplicates, 1);
+    assert_eq!(stats.tags_from_duplicates, 1, "标签应从同内容副本补回");
+
+    let items = read_items(&fixture.out());
+    assert_eq!(items.len(), 1);
+    let tags = items[0]["tags"].as_array().unwrap();
+    assert_eq!(tags.len(), 1);
+    assert_eq!(tags[0][0], "1girl");
+}

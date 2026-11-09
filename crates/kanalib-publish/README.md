@@ -65,6 +65,7 @@ cargo run -p kanalib-publish -- --db .kanalib/kanalib.db --out .kanalib/wall_exp
 - t512 是硬不变量：源缩略图文件缺失时跳过该资产并 warn，不中止发布、不产生半条数据。
 - t256 从缩略图同目录的 {stem}-t256.jpg 派生（DB 不存该路径），缺失只计 missing，不报错。
 - 同一 id（重复 sha1）只发布第一条，其余计入 duplicates。
+- 被保留的那条**没有**任何标签、而同内容副本打过标签时，用副本的标签补位（stats.tags_from_duplicates 计数）；两份都有标签时仍以被保留那条为准，不混批次。
 - 陈旧分片（m/ 下比本次分片数多的文件）默认只警告并提示；清理必须显式 --prune-stale，遵循「绝不自动删除」。
 - 全流程单遍扫描、流式写分片，facets 用计数器累计，内存只保留当前分片。
 
@@ -83,4 +84,4 @@ cargo run -p kanalib-publish -- --db .kanalib/kanalib.db --out .kanalib/wall_exp
 cargo test -p kanalib-publish
 ~~~
 
-覆盖：id 三级回退与稳定性、非法哈希降级、rating 归一化、可选字段缺省不出现、facets 排序与截断、分片切分边界（0 条 / 恰好 shard_size / 多一条）、--dry-run 不写盘、账本二次运行跳过未变资产且不重写文件、缩略图缺失跳过、原图缺失降级、重复 id 去重、--limit 截断、导出目录内无绝对路径（含 t256/t512 文件名均为合法 id）。
+覆盖：id 三级回退与稳定性、非法哈希降级、rating 归一化、可选字段缺省不出现、facets 排序与截断、分片切分边界（0 条 / 恰好 shard_size / 多一条）、--dry-run 不写盘、账本二次运行跳过未变资产且不重写文件、缩略图缺失跳过、原图缺失降级、重复 id 去重、重复副本补标签、--limit 截断、导出目录内无绝对路径（含 t256/t512 文件名均为合法 id）。

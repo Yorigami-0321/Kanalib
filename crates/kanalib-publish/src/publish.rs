@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 use kanalib_core::db::{Db, SearchCursor, SearchPageRequest, SearchSort};
-use kanalib_core::model::{Asset, Filter, SearchQuery};
+use kanalib_core::model::{Asset, Filter, SearchQuery, TagHit};
 use kanalib_core::sources;
 
 use crate::fsutil;
@@ -76,6 +76,8 @@ pub struct Stats {
     pub skipped_no_thumb: usize,
     pub skipped_invalid: usize,
     pub duplicates: usize,
+    /// 从同内容重复副本补回标签的条目数。
+    pub tags_from_duplicates: usize,
     pub shards: usize,
     pub shard_size: usize,
     pub tags: usize,
@@ -93,6 +95,13 @@ impl fmt::Display for Stats {
             "扫描 {} 条；导出 {} 条（重复 id {}、缺可用缩略图 {}、字段不合法 {}）",
             self.scanned, self.exported, self.duplicates, self.skipped_no_thumb, self.skipped_invalid
         )?;
+        if self.tags_from_duplicates > 0 {
+            writeln!(
+                f,
+                "其中 {} 条的标签来自同内容副本（被保留的那份没打标签）",
+                self.tags_from_duplicates
+            )?;
+        }
         writeln!(
             f,
             "分片 {} 片（每片上限 {}）；facets 标签 {} 个 / 分组 {} 个",
@@ -252,6 +261,8 @@ struct Publisher<'a> {
     /// 本次发布写出的账本。
     next: Ledger,
     seen: HashSet<String>,
+    /// 同内容重复副本的标签池（键是小写 sha1 / blake3）：保留的那份没标签时用来补位。
+    duplicate_tags: HashMap<String, Vec<TagHit>>,
     tag_counts: HashMap<String, manifest::TagCount>,
     group_counts: HashMap<String, usize>,
     pending: Vec<Item>,
@@ -270,6 +281,7 @@ impl<'a> Publisher<'a> {
             previous: Ledger::load(&options.out_dir),
             next: Ledger::default(),
             seen: HashSet::new(),
+            duplicate_tags: HashMap::new(),
             tag_counts: HashMap::new(),
             group_counts: HashMap::new(),
             pending: Vec::new(),
@@ -285,6 +297,12 @@ impl<'a> Publisher<'a> {
     }
 
     fn scan(&mut self, db: &Db, folders: &[String]) -> Result<()> {
+        // 同一内容的重复副本只导出第一条；若第一条没标签、另一条有，用这张表补位。
+        // 数据侧真出现过：样例图在 stress 库里有一份未打标签的拷贝，且 mtime 更新，
+        // 于是被保留下来、标签全丢（不是 asset_tags 没 join）。
+        self.duplicate_tags = db
+            .tags_for_duplicated_assets()
+            .context("读取重复资产的标签失败")?;
         let filter = Filter::All;
         let query = SearchQuery::default();
         let mut cursor: Option<SearchCursor> = None;
@@ -311,7 +329,10 @@ impl<'a> Publisher<'a> {
                 }
                 self.stats.scanned += 1;
                 match db.load_asset(path) {
-                    Ok(asset) => self.push_asset(&asset)?,
+                    Ok(mut asset) => {
+                        self.fill_tags_from_duplicates(&mut asset);
+                        self.push_asset(&asset)?
+                    }
                     Err(error) => {
                         self.stats.skipped_invalid += 1;
                         eprintln!(
@@ -327,6 +348,22 @@ impl<'a> Publisher<'a> {
             }
         }
         Ok(())
+    }
+
+    /// 保留的那份没有任何标签时，用同内容副本的标签补位。
+    /// 只补"空"的情况：两份都有标签时以被保留那条为准，避免把不同批次的打标结果混在一起。
+    fn fill_tags_from_duplicates(&mut self, asset: &mut Asset) {
+        if !asset.tags.is_empty() || !asset.manual_tags.is_empty() || self.duplicate_tags.is_empty() {
+            return;
+        }
+        let lookup = |hash: Option<&str>| {
+            hash.map(|value| value.to_ascii_lowercase())
+                .and_then(|value| self.duplicate_tags.get(&value).cloned())
+        };
+        if let Some(tags) = lookup(asset.sha1.as_deref()).or_else(|| lookup(asset.blake3.as_deref())) {
+            asset.tags = tags;
+            self.stats.tags_from_duplicates += 1;
+        }
     }
 
     /// 处理单条资产：校验 -> 复制文件 -> 入账本 -> 攒进当前分片。
