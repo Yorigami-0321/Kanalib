@@ -1,6 +1,7 @@
 import { useCallback, useMemo, useState } from 'react';
 import { gridSources } from '../lib/assetUrl';
-import { formatCount } from '../lib/format';
+import type { Rect } from '../lib/expand';
+import { formatCount, formatDateTime, formatSize, ratingLabel } from '../lib/format';
 import { titleSizeForWidth } from '../lib/world';
 import type { TagTriple, TierPaths, WallItem } from '../source/types';
 import type { TileRect } from '../lib/world';
@@ -21,9 +22,15 @@ export interface WallCardProps {
   enterDelay?: number;
   /** 标签 → 该标签的张数，用来拼角标；拿不到就只显示标签名。 */
   tagCounts?: ReadonlyMap<string, number>;
-  /** 键盘 Enter/Space 打开（和鼠标单击同一条路径：打开灯箱）。 */
-  onOpen: (item: WallItem, index: number) => void;
-  onSummary: (item: WallItem, clientX: number, clientY: number) => void;
+  /** 右键 / 长按概要：信息直接叠在卡片上（Folia 图4 那种），不再弹浮层小卡。 */
+  summary?: boolean;
+  onCloseSummary?: () => void;
+  /**
+   * 双击 / Enter 展开全屏。origin 是卡片矩形，详情页用它做"图片从卡片长到全屏"的
+   * 共享元素动画；键盘路径没有矩形，传 undefined 就直接切。
+   */
+  onOpen: (item: WallItem, index: number, origin?: Rect) => void;
+  onSummary: (item: WallItem) => void;
 }
 
 /** 角标文案：主标签 · 张数；没有标签就退回 宽×高（B1：以前这里是占位的像素宽度）。 */
@@ -42,7 +49,7 @@ function chipTextOf(item: WallItem, tagCounts?: ReadonlyMap<string, number>): st
 
 /**
  * 画布上的一张卡片：绝对定位，标题常驻在左下角（不是 hover 才出现）。
- * 单击/双击由画布统一判定（拖拽与点击靠位移阈值区分），这里只处理右键概要与键盘激活。
+ * 单击选中（内描边高亮）、双击展开全屏由画布统一判定；这里处理右键概要叠层与键盘激活。
  * 标题字号按卡宽分级（world.titleSizeForWidth），最多三行收尾（photo-wall-v3.md:72）。
  */
 export function WallCard({
@@ -54,6 +61,8 @@ export function WallCard({
   enter = false,
   enterDelay = 0,
   tagCounts,
+  summary = false,
+  onCloseSummary,
   onOpen,
   onSummary,
 }: WallCardProps) {
@@ -72,7 +81,7 @@ export function WallCard({
     (event: React.MouseEvent<HTMLDivElement>) => {
       event.preventDefault();
       event.stopPropagation();
-      onSummary(item, event.clientX, event.clientY);
+      onSummary(item);
     },
     [item, onSummary],
   );
@@ -86,6 +95,7 @@ export function WallCard({
       data-index={index}
       data-id={item.id}
       data-current={current ? 'true' : undefined}
+      data-summary={summary ? 'true' : undefined}
       style={{
         left: rect.x,
         top: rect.y,
@@ -103,7 +113,7 @@ export function WallCard({
       }}
       role="button"
       tabIndex={0}
-      aria-label={'打开图片：' + item.n}
+      aria-label={item.n}
       title={item.n}
     >
       {failed ? (
@@ -135,6 +145,54 @@ export function WallCard({
           {item.st > 0 ? ' · ' + '★'.repeat(Math.min(5, Math.round(item.st))) : ''}
         </small>
       </span>
+
+      {summary ? (
+        <div className="tile__info" onPointerDown={(event) => event.stopPropagation()}>
+          <div className="tile__info-bar">
+            <button
+              type="button"
+              className="icon-btn"
+              onClick={() => {
+                onCloseSummary?.();
+                onOpen(item, index);
+              }}
+              title="打开详情"
+              aria-label="打开详情"
+            >
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                <path d="M7 17 17 7" />
+                <path d="M8 7h9v9" />
+              </svg>
+            </button>
+            <button
+              type="button"
+              className="icon-btn"
+              onClick={() => onCloseSummary?.()}
+              title="关闭（Esc 或点别处）"
+              aria-label="关闭概要"
+            >
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" aria-hidden="true">
+                <path d="M6 6l12 12" />
+                <path d="M18 6 6 18" />
+              </svg>
+            </button>
+          </div>
+          <div className="tile__info-body">
+            <strong className="tile__info-name">{item.n}</strong>
+            <span className="tile__info-meta">
+              {formatSize(item.w, item.h)}
+              {item.mtime ? ' · ' + formatDateTime(item.mtime).slice(0, 10) : ''}
+              {item.rt ? ' · ' + ratingLabel(item.rt) : ''}
+            </span>
+            {item.tags.length > 0 ? (
+              <span className="tile__info-tags">
+                {item.tags.slice(0, 4).map((tag) => tag[0]).join(' · ')}
+                {item.tags.length > 4 ? ' …' : ''}
+              </span>
+            ) : null}
+          </div>
+        </div>
+      ) : null}
     </div>
   );
 }

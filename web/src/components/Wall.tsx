@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import type { Rect } from '../lib/expand';
 import type { TierPaths, WallItem } from '../source/types';
 import type { WallPhase } from '../state/useWall';
 import { cellTilesInView, layoutWorld, visibleSlice, type CellSpec } from '../lib/world';
@@ -46,8 +47,16 @@ export interface WallViewProps {
   /** 标签 → 张数，透传给卡片角标。 */
   tagCounts?: ReadonlyMap<string, number>;
   onLoadMore: () => void;
-  onOpen: (item: WallItem, index: number) => void;
-  onSummary: (item: WallItem, clientX: number, clientY: number) => void;
+  /**
+   * 展开全屏（双击 / Enter / 触屏单击）。origin 是卡片矩形，详情页用它把图片
+   * 从卡片位置"长"到全屏；键盘路径没有矩形，传 undefined 就直接切。
+   */
+  onOpen: (item: WallItem, index: number, origin?: Rect) => void;
+  /** 右键 / 长按概要：信息叠在卡片上，不再弹浮层。 */
+  onSummary: (item: WallItem) => void;
+  /** 当前叠着概要层的卡片 id；null 表示没有。 */
+  summaryId?: string | null;
+  onCloseSummary?: () => void;
   onFocusItems?: (items: WallItem[]) => void;
   onRetry: () => void;
 }
@@ -110,6 +119,8 @@ export function WallView({
   onLoadMore,
   onOpen,
   onSummary,
+  summaryId,
+  onCloseSummary,
   onFocusItems,
   onRetry,
 }: WallViewProps) {
@@ -370,6 +381,8 @@ export function WallView({
   const pinch = useRef<{ dist: number; zoom: number; worldX: number; worldY: number } | null>(null);
   /** 触屏长按概要：500ms 内没移动、没落第二根手指才算数。 */
   const longPress = useRef<{ timer: number; id: number; fired: boolean } | null>(null);
+  /** 上一次鼠标抬起命中的卡：360ms 内同一张卡再抬一次就是双击（展开全屏）。 */
+  const lastClick = useRef<{ id: string; t: number } | null>(null);
 
   // ===== 入场动效（§2.5）=====
   // 首载只做淡入 + 上浮 12px；换页签/换筛选走对角线波次。
@@ -432,14 +445,13 @@ export function WallView({
   useEffect(() => clearLongPress, [clearLongPress]);
 
   // 「回到起点」做成全局快捷键：拖完画布手还在鼠标上，没人会先去点一下画布再按 Home。
-  // 输入框里按 Home 要留给光标，灯箱打开时也交给灯箱。
+  // 输入框里按 Home 要留给光标；详情页开着时本组件已卸载，收不到这个监听。
   useEffect(() => {
     if (!infinite) return;
     const onHomeKey = (event: KeyboardEvent) => {
       if (event.key !== 'Home' || event.metaKey || event.ctrlKey || event.altKey) return;
       const target = event.target as Element | null;
       if (target?.closest('input, textarea, select, [contenteditable="true"]')) return;
-      if (document.querySelector('.pswp')) return;
       event.preventDefault();
       stopInertia();
       centerOnWorld(cellWidth / 2, cellHeight / 2);
@@ -455,6 +467,13 @@ export function WallView({
     if (host && pointerId >= 0 && host.hasPointerCapture?.(pointerId)) {
       host.releasePointerCapture(pointerId);
     }
+  };
+
+  /** 卡片矩形（视口坐标）：双击展开动画的起点。 */
+  const rectOf = (tile: HTMLElement | null): Rect | undefined => {
+    if (!tile) return undefined;
+    const box = tile.getBoundingClientRect();
+    return { x: box.left, y: box.top, w: box.width, h: box.height };
   };
 
   /** 双指结束：清基准，剩下那根手指重新起一个拖拽基线（否则抬手后画面推不动）。 */
@@ -543,8 +562,6 @@ export function WallView({
       const item = items[Number(downTile.dataset.index)];
       if (item) {
         const pointerId = event.pointerId;
-        const spotX = event.clientX;
-        const spotY = event.clientY;
         clearLongPress();
         longPress.current = {
           id: pointerId,
@@ -555,7 +572,7 @@ export function WallView({
             if (!state || state.id !== pointerId || pointer.current.moved) return;
             state.fired = true;
             setActiveId(item.id);
-            onSummary(item, spotX, spotY);
+            onSummary(item);
           }, 500),
         };
       }
@@ -666,8 +683,24 @@ export function WallView({
     const index = Number(rawIndex);
     const item = items[index];
     if (!item) return;
+    // 触屏没有 hover 也没有双击习惯：单击直接展开（长按概要是另一条路）。
+    if (event.pointerType !== 'mouse') {
+      setActiveId(item.id);
+      onOpen(item, index, rectOf(tile));
+      return;
+    }
+    // 鼠标：单击=选中高亮（内描边），双击=展开全屏。高亮立刻给反馈，
+    // 双击用同一张卡 360ms 内的第二次抬起判定，不做延迟计时器。
+    const now = performance.now();
+    const last = lastClick.current;
+    if (last && last.id === item.id && now - last.t < 360) {
+      lastClick.current = null;
+      setActiveId(item.id);
+      onOpen(item, index, rectOf(tile));
+      return;
+    }
+    lastClick.current = { id: item.id, t: now };
     setActiveId(item.id);
-    onOpen(item, index);
   };
 
   const onPointerCancel = (event: React.PointerEvent<HTMLDivElement>) => {
@@ -926,14 +959,16 @@ export function WallView({
               enter={enter.on}
               enterDelay={enterDelayOf(tile.rect)}
               tagCounts={tagCounts}
-              onOpen={(openedItem, openedIndex) => {
+              onOpen={(openedItem, openedIndex, origin) => {
                 setActiveId(openedItem.id);
-                onOpen(openedItem, openedIndex);
+                onOpen(openedItem, openedIndex, origin);
               }}
-              onSummary={(item, clientX, clientY) => {
+              onSummary={(item) => {
                 setActiveId(item.id);
-                onSummary(item, clientX, clientY);
+                onSummary(item);
               }}
+              summary={tile.item.id === summaryId}
+              onCloseSummary={onCloseSummary}
             />
           ))}
         </div>

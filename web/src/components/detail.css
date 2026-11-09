@@ -1,16 +1,94 @@
 /* nav-detail · 全屏详情：B2 的修复 + 窄屏换行（photo-wall-v3 §2.2 / §3 规则 7 / 10）
 
-   结构：.view__media（固定画面，contain）+ .view__scroll（信息层，自己滚）。
-   body{overflow:hidden} 保持不动——详情不再依赖它。
+   结构：.view__stage（裁切窗口）→ .view__track（水平轨道，niri 式滑动）→
+   .view__pane（一屏 = 图 + 信息层，整屏跟着图走）。
    styles.css 后加载，覆盖统一靠 .view--detail 前缀的特异性。 */
 
-.view--detail .view__media {
+.view--detail .view__stage {
+  position: absolute;
+  inset: 0;
   z-index: 0;
-  padding: clamp(10px, 2.4vw, 36px);
+  overflow: hidden;
+}
+
+/* 轨道常驻在 -100%：三格里永远显示中间那格。滑动的起止都从这格出发，
+   动画结束换内容时画面不变（旧格移走的那帧和新格就位的那帧是同一张图）。 */
+.view--detail .view__track {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  transform: translateX(-100%);
+  will-change: transform;
+}
+
+.view--detail .view__track--next {
+  animation: pane-next 420ms var(--ease) both;
+}
+
+.view--detail .view__track--prev {
+  animation: pane-prev 420ms var(--ease) both;
+}
+
+@keyframes pane-next {
+  from {
+    transform: translateX(-100%);
+  }
+  to {
+    transform: translateX(-200%);
+  }
+}
+
+@keyframes pane-prev {
+  from {
+    transform: translateX(-100%);
+  }
+  to {
+    transform: translateX(0);
+  }
+}
+
+.view--detail .view__pane {
+  position: relative;
+  flex: 0 0 100%;
+  height: 100%;
+  overflow: hidden;
+}
+
+/* 大图：撑满 pane（contain 保比例，绝不裁切）。以前 width/height:100% 写在
+   grid 自动行的子项上高度解析不出，图按原始比例撑出视口、底部被裁——
+   现在 media 与 img 都用绝对定位钉死在 pane 里，盒子就是视口本身。 */
+.view--detail .view__media {
+  position: absolute;
+  inset: 0;
+  display: block;
+  /* styles.css 的基础值给了 28px padding，会把 contain 图从四边缩进来，
+     顶部就出现一条"黑条遮挡"。详情图要贴到视口边缘，letterbox 交给 contain。 */
+  padding: 0;
 }
 
 .view--detail .view__img {
+  position: absolute;
+  inset: 0;
   display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+}
+
+/* 双击展开（lib/expand.ts）：克隆图飞行期间把真实内容蒙住，落位后露出。
+   1ms 动画 + 440ms delay + both：延迟期内停在 opacity:0，之后一直可见，
+   不需要 JS 计时器去摘类名。 */
+.view--detail.view--expanding .view__track {
+  animation: track-reveal 1ms 440ms both;
+}
+
+@keyframes track-reveal {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
 }
 
 .view--detail .view__scrim {
@@ -250,10 +328,6 @@
 /* ===== 窄屏（§3 规则 10：390px 可浏览） ===== */
 
 @media (max-width: 760px) {
-  .view--detail .view__media {
-    padding: 8px;
-  }
-
   .view--detail .view__info {
     flex-direction: column;
     align-items: stretch;

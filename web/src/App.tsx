@@ -1,12 +1,12 @@
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { accentOf, blendAccents } from './lib/accent';
 import { tierUrl } from './lib/assetUrl';
 import { Detail } from './components/Detail';
-import { closeLightbox, openLightbox, primeLightboxTiers } from './components/Lightbox';
 import { Sidebar, type RailView, type SortMode } from './components/Sidebar';
 import { TagGallery, type TagEntry } from './components/TagGallery';
 import { WallView } from './components/Wall';
-import { categoryLabel, formatCount, formatDateTime, formatSize } from './lib/format';
+import { beginExpand, containRect, flyImage, type Rect } from './lib/expand';
+import { categoryLabel, formatCount } from './lib/format';
 import { detailHref, navigate, tagHref, tagsHref, useRoute, wallHref } from './lib/router';
 import { appendShuffled, hashString } from './lib/shuffle';
 import { DATA_ROOT } from './source/config';
@@ -44,16 +44,15 @@ export function App() {
   const [detailMissing, setDetailMissing] = useState(false);
   const [allLoaded, setAllLoaded] = useState(false);
   const [focusItems, setFocusItems] = useState<WallItem[]>([]);
-  const [summary, setSummary] = useState<{ item: WallItem; x: number; y: number } | null>(null);
+  const [summaryId, setSummaryId] = useState<string | null>(null);
   const [orderSeed] = useState(() => Math.floor(Math.random() * 0x7fffffff));
 
   const scrollMemo = useRef(0);
   const previousRoute = useRef(route);
-  const probedId = useRef<string | null>(null);
   const listHref = useRef(wallHref());
-  // 焦点要还给谁：记录最近一次从墙上 / 灯箱里进入详情的条目 id。
-  // 灯箱自己的 returnFocus 只覆盖"关灯箱"，"灯箱 → 详情 → Esc 回墙"中间换过路由、
-  // 墙还重挂过，PhotoSwipe 的返回值已经失效，所以这里单独留一份。
+  // 焦点要还给谁：记录最近一次从墙上 / 详情里进入详情的条目 id。
+  // "详情 → Esc 回墙"中间换过路由、墙还重挂过，浏览器不会自己把焦点还回去，
+  // 所以这里单独留一份。
   const returnFocusId = useRef<string | null>(null);
   const routeViewRef = useRef(route.view);
   const orderCache = useRef<{ source: readonly WallItem[]; list: WallItem[] }>({ source: [], list: [] });
@@ -302,15 +301,8 @@ export function App() {
       window.requestAnimationFrame(() => window.scrollTo(0, top));
     }
     previousRoute.current = route;
-    setSummary(null);
+    setSummaryId(null);
   }, [route]);
-
-  useEffect(() => {
-    const first = wall.items[0];
-    if (!first || probedId.current === first.id) return;
-    probedId.current = first.id;
-    primeLightboxTiers(wall.paths, first.id);
-  }, [wall.items, wall.paths]);
 
   // 动态强调色：视野里权重最高的几张按 OKLCH 平均。
   const handleFocusItems = useCallback((items: WallItem[]) => setFocusItems(items), []);
@@ -346,11 +338,16 @@ export function App() {
     };
   }, [detailItem, wall.paths]);
 
+  // 概要层关法：Esc、点卡片以外任何地方。叠层内部（按钮）的 pointerdown 不会冒到
+  // window，所以点「打开详情」不会先把层关掉。
   useEffect(() => {
-    if (!summary) return;
-    const close = () => setSummary(null);
+    if (!summaryId) return;
+    const close = (event: PointerEvent) => {
+      if (event.target instanceof Element && event.target.closest('.tile__info')) return;
+      setSummaryId(null);
+    };
     const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') setSummary(null);
+      if (event.key === 'Escape') setSummaryId(null);
     };
     window.addEventListener('pointerdown', close);
     window.addEventListener('keydown', onKeyDown);
@@ -358,46 +355,46 @@ export function App() {
       window.removeEventListener('pointerdown', close);
       window.removeEventListener('keydown', onKeyDown);
     };
-  }, [summary]);
+  }, [summaryId]);
 
-  const handleSummary = useCallback((item: WallItem, clientX: number, clientY: number) => {
-    setSummary({ item, x: clientX, y: clientY });
+  const handleSummary = useCallback((item: WallItem) => {
+    setSummaryId(item.id);
   }, []);
 
+  // 双击 / Enter / 触屏单击：图片从卡片位置"长"到全屏（lib/expand.ts 的克隆飞行），
+  // 详情页自己就是全屏，不再有浮在页面上面的灯箱。
   const handleOpen = useCallback(
-    (item: WallItem, index: number) => {
-      // 灯箱 → 详情 → Esc 回墙时，要把焦点还给这一张。
+    (item: WallItem, _index: number, origin?: Rect) => {
+      setSummaryId(null);
       returnFocusId.current = item.id;
-      openLightbox({
-        items: shown,
-        startIndex: index,
-        paths: wall.paths,
-        onDetail: (id) => navigate(detailHref(id)),
-      });
+      const reduced = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+      if (origin && !reduced) {
+        const target = containRect(item.w, item.h, window.innerWidth, window.innerHeight);
+        beginExpand();
+        flyImage(tierUrl(wall.paths, 't512', item.id), origin, target);
+      }
+      navigate(detailHref(item.id));
     },
-    [shown, wall.paths],
+    [wall.paths],
   );
 
   const handleDetail = useCallback((id: string) => {
     returnFocusId.current = id;
-    closeLightbox();
+    setSummaryId(null);
     navigate(detailHref(id));
   }, []);
 
   const handleBack = useCallback(() => {
-    closeLightbox();
     navigate(listHref.current);
   }, []);
 
   const handleHome = useCallback(() => {
-    closeLightbox();
     setFilters(EMPTY_FILTERS);
     navigate(wallHref());
     window.scrollTo(0, 0);
   }, []);
 
   const handleTags = useCallback(() => {
-    closeLightbox();
     navigate(tagsHref());
     window.scrollTo(0, 0);
   }, []);
@@ -435,7 +432,6 @@ export function App() {
         {detailId ? (
           detailItem ? (
             <Detail
-              key={detailItem.id}
               item={detailItem}
               items={detailBrowseItems}
               paths={wall.paths}
@@ -482,6 +478,8 @@ export function App() {
               onLoadMore={handleLoadMore}
               onOpen={handleOpen}
               onSummary={handleSummary}
+              summaryId={summaryId}
+              onCloseSummary={() => setSummaryId(null)}
               onFocusItems={handleFocusItems}
               onRetry={wall.retry}
             />
@@ -494,122 +492,6 @@ export function App() {
           </p>
         ) : null}
       </main>
-
-      {summary ? (
-        <SummaryCard
-          item={summary.item}
-          x={summary.x}
-          y={summary.y}
-          paths={wall.paths}
-          onOpen={() => {
-            setSummary(null);
-            handleDetail(summary.item.id);
-          }}
-          onClose={() => setSummary(null)}
-        />
-      ) : null}
-    </div>
-  );
-}
-
-interface SummaryCardProps {
-  item: WallItem;
-  x: number;
-  y: number;
-  paths: ReturnType<typeof useWall>['paths'];
-  onOpen: () => void;
-  onClose: () => void;
-}
-
-/** 右键概要：只放最必要的信息，避免变成第二个详情页。 */
-function SummaryCard({ item, x, y, paths, onOpen, onClose }: SummaryCardProps) {
-  // 320 是 .summary 的视觉宽度；测量失败时的兜底值必须和 CSS 一致，否则贴边翻转会算错。
-  const width = 320;
-  const panelRef = useRef<HTMLDivElement | null>(null);
-  const [placed, setPlaced] = useState<{ left: number; top: number } | null>(null);
-
-  // 落点：默认贴在光标右下；右边放不下翻到光标左侧，下边放不下翻到光标上方，
-  // 最后再整块夹进视口（原来的实现写死高 220px，内容一多就顶出屏幕底部）。
-  useLayoutEffect(() => {
-    const node = panelRef.current;
-    if (!node) return;
-    const place = () => {
-      const box = node.getBoundingClientRect();
-      const panelWidth = box.width || width;
-      const panelHeight = box.height || 220;
-      const margin = 12;
-      const gap = 8;
-      let left = x + gap;
-      if (left + panelWidth > window.innerWidth - margin) left = x - panelWidth - gap;
-      left = Math.min(
-        Math.max(margin, left),
-        Math.max(margin, window.innerWidth - panelWidth - margin),
-      );
-      let top = y + gap;
-      if (top + panelHeight > window.innerHeight - margin) top = y - panelHeight - gap;
-      top = Math.min(
-        Math.max(margin, top),
-        Math.max(margin, window.innerHeight - panelHeight - margin),
-      );
-      setPlaced((current) =>
-        current && Math.abs(current.left - left) < 0.5 && Math.abs(current.top - top) < 0.5
-          ? current
-          : { left, top },
-      );
-    };
-    place();
-    window.addEventListener('resize', place);
-    return () => window.removeEventListener('resize', place);
-  }, [x, y, item.id, width]);
-
-  // Esc / 点外部由 App 的 effect 统一处理；这里只保证焦点在浮层内，Tab 不会跑回画布。
-  useEffect(() => {
-    panelRef.current?.focus();
-  }, []);
-
-  return (
-    <div
-      ref={panelRef}
-      className="summary"
-      role="dialog"
-      aria-label={'概要：' + item.n}
-      tabIndex={-1}
-      style={{
-        left: placed ? placed.left : x + 8,
-        top: placed ? placed.top : y + 8,
-        width,
-        visibility: placed ? 'visible' : 'hidden',
-      }}
-      onPointerDown={(event) => event.stopPropagation()}
-    >
-      <div className="summary__cover">
-        <img src={tierUrl(paths, 't256', item.id)} alt={item.n} draggable={false} />
-      </div>
-      <div className="summary__body">
-        <strong className="summary__name">{item.n}</strong>
-        <span className="summary__meta">
-          {formatSize(item.w, item.h)} · {item.mtime ? formatDateTime(item.mtime).slice(0, 10) : '—'}
-        </span>
-        <span className="summary__meta">
-          {item.rt}
-          {item.st > 0 ? ' · ' + '★'.repeat(Math.min(5, Math.round(item.st))) : ''}
-          {item.fav ? ' · 已收藏' : ''}
-        </span>
-        {item.tags.length > 0 ? (
-          <span className="summary__tags">
-            {item.tags.slice(0, 4).map((tag) => tag[0]).join(' · ')}
-            {item.tags.length > 4 ? ' …' : ''}
-          </span>
-        ) : null}
-        <span className="summary__actions">
-          <button type="button" className="ghost" onClick={onOpen}>
-            打开详情
-          </button>
-          <button type="button" className="ghost" onClick={onClose}>
-            关闭
-          </button>
-        </span>
-      </div>
     </div>
   );
 }
