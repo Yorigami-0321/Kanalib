@@ -6,9 +6,7 @@ import type { WallItem } from '../source/types';
 
 export type SortMode = 'random' | 'time' | 'name' | 'stars';
 
-type PanelId = 'search' | 'favorites' | 'ratings' | 'groups' | 'sort' | 'about';
-
-const RATING_ORDER = ['G', 'S', 'Q', 'E'];
+type PanelId = 'search' | 'sort' | 'about';
 
 function Icon({ children, size = 15 }: { children: ReactNode; size?: number }) {
   return (
@@ -138,21 +136,16 @@ const ICON_NEXT = (
   </Icon>
 );
 
-interface PanelEntry {
-  id: PanelId;
-  label: string;
-  icon: ReactNode;
-}
-
-const PANELS: PanelEntry[] = [
-  { id: 'search', label: '搜索', icon: ICON_SEARCH },
-  { id: 'favorites', label: '收藏', icon: ICON_HEART },
-  { id: 'ratings', label: '分级', icon: ICON_SHIELD },
-  { id: 'groups', label: '分组', icon: ICON_FOLDER },
-  { id: 'sort', label: '排序', icon: ICON_SORT },
-];
-
-export type RailView = 'home' | 'tags' | 'tag';
+export type RailView =
+  | 'home'
+  | 'tags'
+  | 'tag'
+  | 'favs'
+  | 'fav'
+  | 'ratings'
+  | 'rating'
+  | 'groups'
+  | 'group';
 
 /** 视图操作（墙页）：缩放与回到起点。离开墙页传 null，整组不渲染。 */
 export interface CanvasOps {
@@ -179,9 +172,11 @@ export interface SidebarProps {
   view: RailView;
   onHome: () => void;
   onTags: () => void;
+  onFavs: () => void;
+  onRatings: () => void;
+  onGroups: () => void;
   filters: FilterState;
   onFilters: (next: FilterState) => void;
-  groups: string[];
   loaded: number;
   total: number;
   shown: number;
@@ -194,16 +189,19 @@ export interface SidebarProps {
 }
 
 /**
- * 左侧的"缝"：120px 黑白竖排页签。默认是实色纸面 + 大投影，
- * 鼠标进入时切成薄玻璃，让底下的墙透出来一点。
+ * 左侧的"缝"：120px 黑白竖排页签。纸面常驻 76% 半透明 + blur（Q6=C′），
+ * 悬停只加深模糊、不改变底色。标签/收藏/分级/分组是四个入口页，
+ * 搜索/排序/关于是浮层面板（Q8）。
  */
 export function Sidebar({
   view,
   onHome,
   onTags,
+  onFavs,
+  onRatings,
+  onGroups,
   filters,
   onFilters,
-  groups,
   loaded,
   total,
   shown,
@@ -260,10 +258,6 @@ export function Sidebar({
     };
   }, [panel]);
 
-  const setRating = (rating: string | null) => {
-    onFilters({ ...filters, ratings: rating ? [rating] : [] });
-  };
-
   const openPanel = (id: PanelId, trigger: HTMLElement | null = null) => {
     if (panel === id) {
       setPanel(null);
@@ -302,26 +296,61 @@ export function Sidebar({
             {ICON_TAG}
             <span className="seam__label">标签</span>
           </button>
+          <button
+            type="button"
+            className={'seam__tab' + (view === 'favs' || view === 'fav' ? ' is-on' : '')}
+            onClick={onFavs}
+            title="收藏"
+            aria-current={view === 'favs' || view === 'fav' ? 'page' : undefined}
+          >
+            {ICON_HEART}
+            <span className="seam__label">收藏</span>
+          </button>
+          <button
+            type="button"
+            className={'seam__tab' + (view === 'ratings' || view === 'rating' ? ' is-on' : '')}
+            onClick={onRatings}
+            title="分级"
+            aria-current={view === 'ratings' || view === 'rating' ? 'page' : undefined}
+          >
+            {ICON_SHIELD}
+            <span className="seam__label">分级</span>
+          </button>
+          <button
+            type="button"
+            className={'seam__tab' + (view === 'groups' || view === 'group' ? ' is-on' : '')}
+            onClick={onGroups}
+            title="分组"
+            aria-current={view === 'groups' || view === 'group' ? 'page' : undefined}
+          >
+            {ICON_FOLDER}
+            <span className="seam__label">分组</span>
+          </button>
 
-          {PANELS.map((entry) => (
-            <button
-              key={entry.id}
-              type="button"
-              className={
-                'seam__tab' +
-                (panel === entry.id ? ' is-on' : '') +
-                (entry.id === 'favorites' && filters.onlyFav ? ' is-on' : '')
-              }
-              id={'seam-panel-trigger-' + entry.id}
-              aria-expanded={panel === entry.id}
-              aria-controls={panel === entry.id ? 'seam-panel' : undefined}
-              onClick={(event) => openPanel(entry.id, event.currentTarget)}
-              title={entry.label}
-            >
-              {entry.icon}
-              <span className="seam__label">{entry.label}</span>
-            </button>
-          ))}
+          <button
+            type="button"
+            className={'seam__tab' + (panel === 'search' || filters.query.trim() ? ' is-on' : '')}
+            id="seam-panel-trigger-search"
+            aria-expanded={panel === 'search'}
+            aria-controls={panel === 'search' ? 'seam-panel' : undefined}
+            onClick={(event) => openPanel('search', event.currentTarget)}
+            title="搜索"
+          >
+            {ICON_SEARCH}
+            <span className="seam__label">搜索</span>
+          </button>
+          <button
+            type="button"
+            className={'seam__tab' + (panel === 'sort' || sort !== 'random' ? ' is-on' : '')}
+            id="seam-panel-trigger-sort"
+            aria-expanded={panel === 'sort'}
+            aria-controls={panel === 'sort' ? 'seam-panel' : undefined}
+            onClick={(event) => openPanel('sort', event.currentTarget)}
+            title="排序"
+          >
+            {ICON_SORT}
+            <span className="seam__label">排序</span>
+          </button>
         </div>
 
         {/* 功能键统一收在缝里（2026-11-09 用户指令）：画布与详情页不再挂任何操作钮。
@@ -418,75 +447,6 @@ export function Sidebar({
                 <button type="button" className="ghost" onClick={() => onFilters({ ...filters, query: '' })}>
                   清空
                 </button>
-              </div>
-            </>
-          ) : null}
-
-          {panel === 'favorites' ? (
-            <>
-              <p className="panel__title">收藏</p>
-              <button
-                type="button"
-                className={'list__row' + (filters.onlyFav ? ' is-on' : '')}
-                onClick={() => onFilters({ ...filters, onlyFav: !filters.onlyFav })}
-              >
-                <span className="mark" />
-                <span className="list__text">只看收藏</span>
-              </button>
-              <p className="panel__hint">收藏状态来自工作台，墙上只读。</p>
-            </>
-          ) : null}
-
-          {panel === 'ratings' ? (
-            <>
-              <p className="panel__title">分级</p>
-              <div className="list">
-                <button
-                  type="button"
-                  className={'list__row' + (filters.ratings.length === 0 ? ' is-on' : '')}
-                  onClick={() => setRating(null)}
-                >
-                  <span className="mark" />
-                  <span className="list__text">全部分级</span>
-                </button>
-                {RATING_ORDER.map((rating) => (
-                  <button
-                    key={rating}
-                    type="button"
-                    className={'list__row' + (filters.ratings.includes(rating) ? ' is-on' : '')}
-                    onClick={() => setRating(rating)}
-                  >
-                    <span className="mark" />
-                    <span className="list__text">{rating}</span>
-                  </button>
-                ))}
-              </div>
-            </>
-          ) : null}
-
-          {panel === 'groups' ? (
-            <>
-              <p className="panel__title">分组</p>
-              <div className="list">
-                <button
-                  type="button"
-                  className={'list__row' + (filters.group === null ? ' is-on' : '')}
-                  onClick={() => onFilters({ ...filters, group: null })}
-                >
-                  <span className="mark" />
-                  <span className="list__text">全部分组</span>
-                </button>
-                {groups.map((group) => (
-                  <button
-                    key={group}
-                    type="button"
-                    className={'list__row' + (filters.group === group ? ' is-on' : '')}
-                    onClick={() => onFilters({ ...filters, group })}
-                  >
-                    <span className="mark" />
-                    <span className="list__text">{group}</span>
-                  </button>
-                ))}
               </div>
             </>
           ) : null}

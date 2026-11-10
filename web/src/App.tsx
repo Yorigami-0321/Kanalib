@@ -1,13 +1,27 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { accentOf, blendAccents } from './lib/accent';
-import { tierUrl } from './lib/assetUrl';
+import { BucketGallery, type BucketEntry } from './components/BucketGallery';
 import { Detail } from './components/Detail';
 import { Sidebar, type RailView, type SortMode } from './components/Sidebar';
 import { TagGallery, type TagEntry } from './components/TagGallery';
 import { WallView, type WallControls } from './components/Wall';
+import { accentOf, blendAccents } from './lib/accent';
+import { tierUrl } from './lib/assetUrl';
 import { beginExpand, containRect, flyImage, type Rect } from './lib/expand';
-import { categoryLabel, formatCount } from './lib/format';
-import { detailHref, navigate, tagHref, tagsHref, useRoute, wallHref } from './lib/router';
+import { categoryLabel, formatCount, ratingLabel } from './lib/format';
+import {
+  detailHref,
+  favHref,
+  favsHref,
+  groupHref,
+  groupsHref,
+  navigate,
+  ratingHref,
+  ratingsHref,
+  tagHref,
+  tagsHref,
+  useRoute,
+  wallHref,
+} from './lib/router';
 import { appendShuffled, hashString } from './lib/shuffle';
 import { DATA_ROOT } from './source/config';
 import { StaticSource } from './source/StaticSource';
@@ -16,9 +30,14 @@ import { useWall } from './state/useWall';
 import type { TagFacet, WallItem } from './source/types';
 
 const EMPTY_TAGS: TagFacet[] = [];
+const RATING_ORDER = ['G', 'S', 'Q', 'E'];
+const FALLBACK_ACCENT = '#8f8f92';
 
 /** 焦点归位的最大重试帧数：虚拟化的卡可能晚一两帧才挂载，8 帧（约 130ms）足够且不会久拖。 */
 const FOCUS_RETRY_FRAMES = 8;
+
+/** 二级墙：这些路由共用「筛选后的一组图 + 标题」形态。 */
+const WALL_VIEWS = new Set(['tag', 'fav', 'rating', 'group']);
 
 function sortItems(items: readonly WallItem[], mode: SortMode): WallItem[] {
   if (mode === 'random') return [...items];
@@ -31,7 +50,7 @@ function sortItems(items: readonly WallItem[], mode: SortMode): WallItem[] {
 
 /**
  * 应用外壳：左侧黑白"缝" + 一张可以拖拽平移的图片空间。
- * 四种页面：首页随机墙、标签总览、单标签墙、详情。
+ * 页面：首页随机墙；标签/收藏/分级/分组四套「封面总览 → 二级墙」；详情。
  */
 export function App() {
   const [source] = useState(() => new StaticSource(DATA_ROOT));
@@ -46,22 +65,23 @@ export function App() {
   const [focusItems, setFocusItems] = useState<WallItem[]>([]);
   const [summaryId, setSummaryId] = useState<string | null>(null);
   const [orderSeed] = useState(() => Math.floor(Math.random() * 0x7fffffff));
+  // 详情页仍保留进入前那条列表的页签高亮（详情本身没有页签）。
+  const [railView, setRailView] = useState<RailView>('home');
 
   const scrollMemo = useRef(0);
   const previousRoute = useRef(route);
   const listHref = useRef(wallHref());
   // 焦点要还给谁：记录最近一次从墙上 / 详情里进入详情的条目 id。
-  // "详情 → Esc 回墙"中间换过路由、墙还重挂过，浏览器不会自己把焦点还回去，
-  // 所以这里单独留一份。
   const returnFocusId = useRef<string | null>(null);
   const routeViewRef = useRef(route.view);
   const orderCache = useRef<{ source: readonly WallItem[]; list: WallItem[] }>({ source: [], list: [] });
   const wallRef = useRef(wall);
-  // 侧栏功能键的操纵句柄：缩放/复位/回到起点经 ref 直调 Wall，不经过 React 状态。
   const wallControls = useRef<WallControls | null>(null);
   wallRef.current = wall;
 
   const detailId = route.view === 'detail' ? route.id : null;
+  const queryActive = isFilterActive(filters);
+  const routeFiltered = WALL_VIEWS.has(route.view);
 
   const orderedItems = useMemo(() => {
     const cache = orderCache.current;
@@ -80,26 +100,45 @@ export function App() {
     return next;
   }, [wall.items, orderSeed]);
 
-  const shown = useMemo(() => {
-    const base =
-      route.view === 'tag'
-        ? orderedItems.filter((item) => item.tags.some((tag) => tag[0] === route.tag))
-        : orderedItems;
-    return sortItems(filterItems(base, filters), sort);
-  }, [orderedItems, filters, sort, route]);
+  /** 当前路由的第一层筛选：标签/收藏/分级/分组各自独立一条路径（Q8）。 */
+  const baseItems = useMemo(() => {
+    switch (route.view) {
+      case 'tag':
+        return orderedItems.filter((item) => item.tags.some((tag) => tag[0] === route.tag));
+      case 'fav':
+        return orderedItems.filter((item) => item.fav);
+      case 'rating':
+        return orderedItems.filter((item) => item.rt === route.rating);
+      case 'group':
+        return orderedItems.filter((item) => item.group === route.group);
+      default:
+        return orderedItems;
+    }
+  }, [orderedItems, route]);
 
-  // 详情页的浏览序列跟用户当前看到的墙（筛后+排序后）一致——lightbox 用的也是 shown。
-  // 只有当这张被筛掉（深链 #/d/<id> 进来）时才退回全库顺序，避免详情里算不出 prev/next。
+  const shown = useMemo(() => sortItems(filterItems(baseItems, filters), sort), [baseItems, filters, sort]);
+
+  // 详情页的浏览序列跟用户当前看到的墙（筛后+排序后）一致。
   const detailBrowseItems = useMemo(() => {
     if (!detailItem) return orderedItems;
     return shown.some((entry) => entry.id === detailItem.id) ? shown : orderedItems;
   }, [detailItem, shown, orderedItems]);
 
-  const signature = filterSignature(filters) + '|' + sort + '|' + (route.view === 'tag' ? route.tag : '');
-  const filtered = isFilterActive(filters);
+  const signature =
+    route.view +
+    ':' +
+    ('tag' in route ? route.tag : '') +
+    ':' +
+    ('rating' in route ? route.rating : '') +
+    ':' +
+    ('group' in route ? route.group : '') +
+    '|' +
+    filterSignature(filters) +
+    '|' +
+    sort;
+  const filtered = queryActive || routeFiltered;
   const total = wall.index?.count ?? wall.items.length;
   const facetTags = wall.index?.facets?.tags ?? EMPTY_TAGS;
-  const view: RailView = route.view === 'tags' ? 'tags' : route.view === 'tag' ? 'tag' : 'home';
 
   const groups = useMemo(() => {
     const fromIndex = wall.index?.facets?.groups;
@@ -109,18 +148,7 @@ export function App() {
     return [...seen].sort();
   }, [wall.index, wall.items]);
 
-  /**
-   * 标签封面：确定性 + 段内不相邻重复。
-   *
-   * 旧做法是 `list[hash(name) % list.length]`，只看单个标签。样本库里 135 个标签却只有
-   * 5 张带标签的图，整段会连着出现同一张照片，看起来像渲染坏了。现在按 categoryKey 分段
-   * 贪心：先避开左邻那张卡的封面，再在本段内挑「已被用作封面次数最少」的候选，
-   * 由 hash(name) 的轮转顺序决定起点与打平。全程不掷随机数，同一份数据刷新结果一致。
-   * 只有单图标签（没有别的候选）允许重复，这是数据决定的，不是策略问题。
-   *
-   * 段内顺序必须和 TagGallery 一致（张数降序、同名按名称）——它会拿 entries 再用同一个
-   * 比较器排一次；这里保持同序，"上一张封面"才对得上真实的相邻关系。
-   */
+  /** 标签封面：确定性 + 段内不相邻重复。规则见 photo-wall-status.md §7。 */
   const tagEntries = useMemo<TagEntry[]>(() => {
     const byTag = new Map<string, WallItem[]>();
     for (const item of wall.items) {
@@ -130,7 +158,6 @@ export function App() {
         else byTag.set(tag[0], [item]);
       }
     }
-    // 候选 id 先排序：wall.items 带会话级 shuffle，直接沿用会让封面每次刷新都变。
     const ordered = facetTags
       .map((facet) => ({
         name: facet.name,
@@ -141,7 +168,6 @@ export function App() {
       }))
       .sort((left, right) => right.count - left.count || left.name.localeCompare(right.name, 'zh-Hans-CN'));
 
-    // 分段独立计数：used 是「封面 → 本段已用次数」，prev 是本段上一张卡的封面。
     const used = new Map<string, Map<string, number>>();
     const prev = new Map<string, string>();
     const covers = new Map<string, string>();
@@ -153,11 +179,8 @@ export function App() {
         counts = new Map();
         used.set(key, counts);
       }
-      // 从 hash 决定的起点开始轮转：同样的"最少使用"里也保留各标签自己的偏好，不至于全挤在字典序第一个。
       const offset = hashString(entry.name) % entry.candidates.length;
       const rotated = entry.candidates.slice(offset).concat(entry.candidates.slice(0, offset));
-      // 先剔除左邻已经用过的那张（相邻不重复优先于均匀），再在剩下的里挑用量最少的；
-      // 只有该标签全部候选都等于左邻时才会重复。打平仍按轮转顺序，结果稳定。
       const pool = rotated.filter((id) => id !== prev.get(key));
       const usable = pool.length > 0 ? pool : rotated;
       let pick = usable[0];
@@ -183,13 +206,51 @@ export function App() {
     }));
   }, [wall.items, facetTags]);
 
-  const tagTotal = useMemo(() => {
-    if (route.view !== 'tag') return 0;
-    const facet = facetTags.find((entry) => entry.name === route.tag);
-    return facet?.count ?? shown.length;
-  }, [facetTags, route, shown.length]);
+  /** 收藏/分级/分组的第一层：计数与封面取原始加载顺序（mtime 降序），刷新稳定。 */
+  const favEntries = useMemo<BucketEntry[]>(() => {
+    const items = wall.items.filter((item) => item.fav);
+    return [
+      {
+        key: 'fav',
+        label: '收藏',
+        count: items.length,
+        coverId: items[0]?.id,
+        href: favHref(),
+      },
+    ];
+  }, [wall.items]);
 
-  /** 角标用的「标签 → 张数」：来自 index.facets（B1）。facets 没到齐时角标只显示标签名。 */
+  const ratingEntries = useMemo<BucketEntry[]>(
+    () =>
+      RATING_ORDER.map((rating) => {
+        const items = wall.items.filter((item) => item.rt === rating);
+        return {
+          key: rating,
+          label: ratingLabel(rating),
+          count: items.length,
+          coverId: items[0]?.id,
+          href: ratingHref(rating),
+        };
+      }),
+    [wall.items],
+  );
+
+  const groupEntries = useMemo<BucketEntry[]>(
+    () =>
+      groups.map((group) => {
+        const items = wall.items.filter((item) => item.group === group);
+        return {
+          key: group,
+          label: group,
+          count: items.length,
+          coverId: items[0]?.id,
+          href: groupHref(group),
+        };
+      }),
+    [groups, wall.items],
+  );
+
+  /** 角标用的「标签 → 张数」：来自 index.facets；facets 没到齐时角标只显示标签名。 */
   const tagCounts = useMemo(() => {
     const map = new Map<string, number>();
     for (const facet of facetTags) map.set(facet.name, facet.count);
@@ -201,14 +262,9 @@ export function App() {
     [],
   );
 
-  // 标签页要全量条目（封面 + 单标签墙都从 items 里按 tag 捞）。
-  // 无限空间（首页无筛选）同理：格子按全量池选图，片段陆续到达会让整屏换图。
-  // useWall.loadMore() 是 void 的（内部 request() 是 fire-and-forget），不能 await；
-  // 改成跟着快照推进：每次分片落地再驱动下一片，直到 hasMore=false。
-  // 注意：首屏 boot/loading 时 hasMore 还是初始值 false（首片没到），此时绝不能据此判定
-  // 「已经全量」——否则 allLoaded 被永久置真，直开 #/tags 只会停在 5,000 条。
-  const infiniteHome = route.view === 'wall' && !filtered;
-  const needAll = route.view === 'tags' || route.view === 'tag' || infiniteHome;
+  // 所有列表/总览页都要全量分片：搜索与封面计数必须在整库上算，
+  // 不能只看已滚到的部分（之前的"筛选只过滤已加载"就是这里的缺口）。
+  const needAll = route.view !== 'detail';
   useEffect(() => {
     if (!needAll || allLoaded) return;
     if (wall.phase === 'boot' || wall.phase === 'loading' || wall.phase === 'error') return;
@@ -216,12 +272,9 @@ export function App() {
       setAllLoaded(true);
       return;
     }
-    // loadMore 在 busy 时会被静默丢弃，所以 loadedShards 也是驱动源：每落一片再要一片。
     wall.loadMore();
   }, [needAll, allLoaded, wall.hasMore, wall.phase, wall.loadedShards, wall.loadMore]);
 
-  // allLoaded 只能表示「这一份数据已经拉全」：retry()/重新 boot 会把分片数清零，
-  // 这时候必须把开关放回去，否则标签页的驱动器永久短路、只剩首片。
   useEffect(() => {
     if (wall.loadedShards === 0) setAllLoaded(false);
   }, [wall.loadedShards]);
@@ -250,30 +303,32 @@ export function App() {
   }, [detailId, wall.items]);
 
   useEffect(() => {
-    if (route.view === 'wall') listHref.current = wallHref();
-    else if (route.view === 'tag') listHref.current = tagHref(route.tag);
+    if (route.view !== 'detail') setRailView(route.view === 'wall' ? 'home' : route.view);
   }, [route]);
 
-  // 焦点归位（status §6 P2-11）：从详情回到列表时，把焦点还给触发那张卡。
-  // 墙是虚拟化的，返回那一帧卡片可能还没挂载，所以在 rAF 里最多重试 8 帧；
-  // 仍找不到（例如卡被筛掉/走远了）就退到画布容器——.canvas 有 tabIndex=0，
-  // 方向键仍能继续浏览，不会把焦点丢给 body。
-  // 只在「详情 → 列表」这一跳触发：进详情不该抢焦点，回标签总览也没有对应卡片。
+  useEffect(() => {
+    if (route.view === 'wall') listHref.current = wallHref();
+    else if (route.view === 'tag') listHref.current = tagHref(route.tag);
+    else if (route.view === 'fav') listHref.current = favHref();
+    else if (route.view === 'rating') listHref.current = ratingHref(route.rating);
+    else if (route.view === 'group') listHref.current = groupHref(route.group);
+  }, [route]);
+
+  // 焦点归位：从详情回到列表时，把焦点还给触发那张卡（虚拟化可能晚一两帧挂载）。
   useEffect(() => {
     const cameFromDetail = routeViewRef.current === 'detail';
     routeViewRef.current = route.view;
     if (route.view === 'detail') {
-      // 详情里换图（相似/前后）或深链进来时，以当前这张为准，避免留下上一次的旧 id。
       returnFocusId.current = route.id;
       return;
     }
-    if (!cameFromDetail || (route.view !== 'wall' && route.view !== 'tag')) return;
+    const isWallRoute = route.view === 'wall' || WALL_VIEWS.has(route.view);
+    if (!cameFromDetail || !isWallRoute) return;
     const id = returnFocusId.current;
     if (!id) return;
     let frame = 0;
     let raf = 0;
     const step = () => {
-      // 不拼属性选择器：id 来自数据，逐张比对 dataset 更稳妥，也省掉转义问题。
       const card = Array.from(document.querySelectorAll<HTMLElement>('.tile')).find(
         (node) => node.dataset.id === id,
       );
@@ -306,11 +361,11 @@ export function App() {
     setSummaryId(null);
   }, [route]);
 
-  // 动态强调色：视野里权重最高的几张按 OKLCH 平均。
   const handleFocusItems = useCallback((items: WallItem[]) => setFocusItems(items), []);
 
+  // 首页：视野里权重最高的几张按 OKLCH 平均。其余入口用各自封面（Q7a C）。
   useEffect(() => {
-    if (focusItems.length === 0) return;
+    if (route.view !== 'wall' || focusItems.length === 0) return;
     let alive = true;
     void (async () => {
       const sampled: { hex: string; weight: number }[] = [];
@@ -326,22 +381,60 @@ export function App() {
     return () => {
       alive = false;
     };
-  }, [focusItems, wall.paths]);
+  }, [focusItems, wall.paths, route.view]);
 
-  // 详情页用这一张图自己的主色。
+  /** 标签/收藏/分级/分组页（含总览）的强调色来源：该入口的封面。 */
+  const accentCoverId = useMemo(() => {
+    switch (route.view) {
+      case 'tag':
+        return tagEntries.find((entry) => entry.name === route.tag)?.coverId;
+      case 'tags':
+        // 总览首屏第一张可见卡是「通用」段第一项，用它而不是全库计数第一项。
+        return (
+          tagEntries.find((entry) => entry.categoryKey === 'general' && entry.coverId)?.coverId ??
+          tagEntries.find((entry) => entry.coverId)?.coverId
+        );
+      case 'fav':
+      case 'favs':
+        return favEntries[0]?.coverId;
+      case 'rating':
+        return ratingEntries.find((entry) => entry.key === route.rating)?.coverId;
+      case 'ratings':
+        return ratingEntries.find((entry) => entry.coverId)?.coverId;
+      case 'group':
+        return groupEntries.find((entry) => entry.key === route.group)?.coverId;
+      case 'groups':
+        return groupEntries[0]?.coverId;
+      default:
+        return null;
+    }
+  }, [route, tagEntries, favEntries, ratingEntries, groupEntries]);
+
   useEffect(() => {
-    if (!detailItem) return;
-    let alive = true;
-    void accentOf(detailItem.id, tierUrl(wall.paths, 't256', detailItem.id)).then((hex) => {
-      if (alive && hex) document.documentElement.style.setProperty('--accent', hex);
-    });
-    return () => {
-      alive = false;
-    };
-  }, [detailItem, wall.paths]);
+    const setAccent = (value: string) => document.documentElement.style.setProperty('--accent', value);
+    if (detailItem) {
+      let alive = true;
+      void accentOf(detailItem.id, tierUrl(wall.paths, 't256', detailItem.id)).then((hex) => {
+        if (alive && hex) setAccent(hex);
+      });
+      return () => {
+        alive = false;
+      };
+    }
+    if (accentCoverId) {
+      let alive = true;
+      void accentOf(accentCoverId, tierUrl(wall.paths, 't256', accentCoverId)).then((hex) => {
+        if (alive) setAccent(hex ?? FALLBACK_ACCENT);
+      });
+      return () => {
+        alive = false;
+      };
+    }
+    // 首页交给上面的聚合 effect；其余没有封面的页面回中性灰，不能残留上一页的颜色。
+    if (route.view !== 'wall') setAccent(FALLBACK_ACCENT);
+  }, [detailItem, accentCoverId, route.view, wall.paths]);
 
-  // 概要层关法：Esc、点卡片以外任何地方。叠层内部（按钮）的 pointerdown 不会冒到
-  // window，所以点「打开详情」不会先把层关掉。
+  // 概要层关法：Esc、点卡片以外任何地方。
   useEffect(() => {
     if (!summaryId) return;
     const close = (event: PointerEvent) => {
@@ -363,8 +456,7 @@ export function App() {
     setSummaryId(item.id);
   }, []);
 
-  // 双击 / Enter / 触屏单击：图片从卡片位置"长"到全屏（lib/expand.ts 的克隆飞行），
-  // 详情页自己就是全屏，不再有浮在页面上面的灯箱。
+  // 双击 / Enter / 触屏单击：图片从卡片位置"长"到全屏。
   const handleOpen = useCallback(
     (item: WallItem, _index: number, origin?: Rect) => {
       setSummaryId(null);
@@ -397,20 +489,47 @@ export function App() {
   }, []);
 
   const handleTags = useCallback(() => {
+    setFilters(EMPTY_FILTERS);
     navigate(tagsHref());
     window.scrollTo(0, 0);
   }, []);
 
+  const handleFavs = useCallback(() => {
+    setFilters(EMPTY_FILTERS);
+    navigate(favsHref());
+    window.scrollTo(0, 0);
+  }, []);
+
+  const handleRatings = useCallback(() => {
+    setFilters(EMPTY_FILTERS);
+    navigate(ratingsHref());
+    window.scrollTo(0, 0);
+  }, []);
+
+  const handleGroups = useCallback(() => {
+    setFilters(EMPTY_FILTERS);
+    navigate(groupsHref());
+    window.scrollTo(0, 0);
+  }, []);
+
   const handleOpenTag = useCallback((tag: string) => {
+    setFilters(EMPTY_FILTERS);
     navigate(tagHref(tag));
     window.scrollTo(0, 0);
   }, []);
 
-  // 依赖只认 loadMore（useWall 里是稳定的 useCallback）：挂 [wall] 会让它每次渲染换身份，
-  // 进而让 Wall.tsx 的预取 effect 每次渲染都重跑。
+  const handleOpenBucket = useCallback((href: string) => {
+    setFilters(EMPTY_FILTERS);
+    navigate(href);
+    window.scrollTo(0, 0);
+  }, []);
+
+  // 依赖只认 loadMore（useWall 里是稳定的 useCallback）。
   const handleLoadMore = useCallback(() => {
     wall.loadMore();
   }, [wall.loadMore]);
+
+  const infiniteHome = route.view === 'wall' && !queryActive && sort === 'random';
 
   // 侧栏功能键：墙页给缩放/回到起点，详情页给返回/翻页，两组互斥。
   const canvasOps = useMemo(
@@ -422,9 +541,9 @@ export function App() {
             onZoomOut: () => wallControls.current?.zoomBy(1 / 1.25),
             onZoomReset: () => wallControls.current?.zoomReset(),
             onHome: () => wallControls.current?.goHome(),
-            homeTitle: route.view === 'wall' && !filtered ? '回到起点（Home）' : '回到顶部（Home）',
+            homeTitle: infiniteHome ? '回到起点（Home）' : '回到顶部（Home）',
           },
-    [filtered, route.view],
+    [infiniteHome, route.view],
   );
 
   const detailIndex = detailItem ? detailBrowseItems.findIndex((e) => e.id === detailItem.id) : -1;
@@ -450,15 +569,55 @@ export function App() {
     [detailBrowseItems, detailIndex, detailItem, handleBack, handleDetail],
   );
 
+  const wallHead = useMemo(() => {
+    switch (route.view) {
+      case 'tag':
+        return { title: route.tag, count: shown.length };
+      case 'fav':
+        return { title: '收藏', count: shown.length };
+      case 'rating':
+        return { title: ratingLabel(route.rating), count: shown.length };
+      case 'group':
+        return { title: route.group, count: shown.length };
+      default:
+        return null;
+    }
+  }, [route, shown.length]);
+
+  const emptyText = queryActive
+    ? '没有符合条件的图片'
+    : route.view === 'fav'
+      ? '还没有收藏的图片'
+      : route.view === 'rating'
+        ? '这个分级还没有图片'
+        : route.view === 'group'
+          ? '这个分组还没有图片'
+          : route.view === 'tag'
+            ? '这个标签还没有图片'
+            : undefined;
+  const emptyHint = queryActive
+    ? '清空搜索或换个关键词。'
+    : route.view === 'fav'
+      ? '在工作台里收藏图片后再发布。'
+      : route.view === 'rating'
+        ? '换个分级或回首页看看。'
+        : route.view === 'group'
+          ? '换个分组或回首页看看。'
+          : undefined;
+
+  const loadingBuckets = !allLoaded && wall.hasMore;
+
   return (
     <div className="app">
       <Sidebar
-        view={view}
+        view={railView}
         onHome={handleHome}
         onTags={handleTags}
+        onFavs={handleFavs}
+        onRatings={handleRatings}
+        onGroups={handleGroups}
         filters={filters}
         onFilters={setFilters}
-        groups={groups}
         loaded={wall.items.length}
         total={total}
         shown={shown.length}
@@ -490,15 +649,45 @@ export function App() {
           <TagGallery
             entries={tagEntries}
             paths={wall.paths}
-            loading={!allLoaded && wall.hasMore}
+            loading={loadingBuckets}
             onOpenTag={handleOpenTag}
+          />
+        ) : route.view === 'favs' ? (
+          <BucketGallery
+            title="收藏"
+            subtitle={formatCount(favEntries[0]?.count ?? 0) + ' 张'}
+            entries={favEntries}
+            paths={wall.paths}
+            loading={loadingBuckets}
+            emptyText="还没有收藏（收藏状态来自工作台）"
+            onOpen={handleOpenBucket}
+          />
+        ) : route.view === 'ratings' ? (
+          <BucketGallery
+            title="分级"
+            subtitle={formatCount(ratingEntries.length) + ' 个分级'}
+            entries={ratingEntries}
+            paths={wall.paths}
+            loading={loadingBuckets}
+            emptyText="这份数据没有分级"
+            onOpen={handleOpenBucket}
+          />
+        ) : route.view === 'groups' ? (
+          <BucketGallery
+            title="分组"
+            subtitle={formatCount(groupEntries.length) + ' 个分组'}
+            entries={groupEntries}
+            paths={wall.paths}
+            loading={loadingBuckets}
+            emptyText="这份数据没有分组"
+            onOpen={handleOpenBucket}
           />
         ) : (
           <>
-            {route.view === 'tag' ? (
+            {wallHead ? (
               <header className="wallhead">
-                <h1 className="wallhead__title">{route.tag}</h1>
-                <span className="wallhead__count">{formatCount(tagTotal)} 张</span>
+                <h1 className="wallhead__title">{wallHead.title}</h1>
+                <span className="wallhead__count">{formatCount(wallHead.count)} 张</span>
               </header>
             ) : null}
 
@@ -508,12 +697,14 @@ export function App() {
               phase={wall.phase}
               hasMore={wall.hasMore}
               resetKey={signature}
-              filtered={filtered || route.view === 'tag'}
+              filtered={filtered}
               infinite={infiniteHome}
               ready={allLoaded}
               worldSeed={orderSeed}
-              stableAppend={route.view === 'wall' && sort === 'random' && !filtered}
+              stableAppend={route.view === 'wall' && sort === 'random' && !queryActive}
               tagCounts={tagCounts}
+              emptyText={emptyText}
+              emptyHint={emptyHint}
               onLoadMore={handleLoadMore}
               onOpen={handleOpen}
               onSummary={handleSummary}

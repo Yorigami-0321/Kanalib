@@ -1,9 +1,15 @@
 import { useEffect, useState } from 'react';
 
 export type Route =
-  | { view: 'wall'; tag: string | null }
+  | { view: 'wall' }
   | { view: 'tags' }
   | { view: 'tag'; tag: string }
+  | { view: 'favs' }
+  | { view: 'fav' }
+  | { view: 'ratings' }
+  | { view: 'rating'; rating: string }
+  | { view: 'groups' }
+  | { view: 'group'; group: string }
   | { view: 'detail'; id: string };
 
 function safeDecode(value: string): string {
@@ -15,8 +21,10 @@ function safeDecode(value: string): string {
 }
 
 /**
- * 四种地址：首页随机墙（#/）、标签总览（#/tags）、单标签墙（#/t/<tag>）、
- * 详情（#/d/<id>）。hash 路由保证静态托管零配置。
+ * 地址：首页随机墙（#/）、标签总览/单标签墙（#/tags、#/t/<tag>）、
+ * 收藏总览/收藏墙（#/favs、#/fav）、分级总览/分级墙（#/ratings、#/r/<G|S|Q|E>）、
+ * 分组总览/分组墙（#/groups、#/g/<group>）、详情（#/d/<id>）。
+ * 四个入口共用「封面总览 → 二级墙」同一套结构（photo-wall-v3 Q8）。
  */
 export function parseRoute(hash: string): Route {
   const clean = hash.replace(/^#/, '');
@@ -25,18 +33,20 @@ export function parseRoute(hash: string): Route {
   if (detail) return { view: 'detail', id: safeDecode(detail[1]) };
   const tagWall = /^\/t\/([^/?#]+)/.exec(clean);
   if (tagWall) return { view: 'tag', tag: safeDecode(tagWall[1]) };
+  const ratingWall = /^\/r\/([^/?#]+)/.exec(clean);
+  if (ratingWall) return { view: 'rating', rating: safeDecode(ratingWall[1]) };
+  const groupWall = /^\/g\/([^/?#]+)/.exec(clean);
+  if (groupWall) return { view: 'group', group: safeDecode(groupWall[1]) };
   if (/^\/tags\/?$/.test(clean)) return { view: 'tags' };
-  const query = clean.indexOf('?');
-  if (query >= 0) {
-    const params = new URLSearchParams(clean.slice(query + 1));
-    const tag = params.get('tag');
-    return { view: 'wall', tag: tag && tag.length > 0 ? tag : null };
-  }
-  return { view: 'wall', tag: null };
+  if (/^\/favs\/?$/.test(clean)) return { view: 'favs' };
+  if (/^\/fav\/?$/.test(clean)) return { view: 'fav' };
+  if (/^\/ratings\/?$/.test(clean)) return { view: 'ratings' };
+  if (/^\/groups\/?$/.test(clean)) return { view: 'groups' };
+  return { view: 'wall' };
 }
 
-export function wallHref(tag?: string | null): string {
-  return tag ? '#/?tag=' + encodeURIComponent(tag) : '#/';
+export function wallHref(): string {
+  return '#/';
 }
 
 export function tagsHref(): string {
@@ -45,6 +55,30 @@ export function tagsHref(): string {
 
 export function tagHref(tag: string): string {
   return '#/t/' + encodeURIComponent(tag);
+}
+
+export function favsHref(): string {
+  return '#/favs';
+}
+
+export function favHref(): string {
+  return '#/fav';
+}
+
+export function ratingsHref(): string {
+  return '#/ratings';
+}
+
+export function ratingHref(rating: string): string {
+  return '#/r/' + encodeURIComponent(rating);
+}
+
+export function groupsHref(): string {
+  return '#/groups';
+}
+
+export function groupHref(group: string): string {
+  return '#/g/' + encodeURIComponent(group);
 }
 
 export function detailHref(id: string): string {

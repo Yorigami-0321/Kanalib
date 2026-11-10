@@ -56,6 +56,10 @@ export interface WallViewProps {
   worldSeed?: number;
   /** 标签 → 张数，透传给卡片角标。 */
   tagCounts?: ReadonlyMap<string, number>;
+  /** 筛选/二级墙为空时的标题；不传用通用文案。 */
+  emptyText?: string;
+  /** 空态第二行提示；不传用「换个标签或清掉筛选再看」。 */
+  emptyHint?: string;
   onLoadMore: () => void;
   /**
    * 展开全屏（双击 / Enter / 触屏单击）。origin 是卡片矩形，详情页用它把图片
@@ -128,6 +132,8 @@ export function WallView({
   ready = true,
   worldSeed = 1,
   tagCounts,
+  emptyText,
+  emptyHint,
   onLoadMore,
   onOpen,
   onSummary,
@@ -973,8 +979,8 @@ export function WallView({
             </>
           ) : filtered ? (
             <>
-              <strong>没有符合条件的图片</strong>
-              换个标签或清掉筛选再看。
+              <strong>{emptyText ?? '没有符合条件的图片'}</strong>
+              {emptyHint ?? '换个标签或清掉筛选再看。'}
             </>
           ) : (
             <>
