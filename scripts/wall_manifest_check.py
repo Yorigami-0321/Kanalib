@@ -315,6 +315,22 @@ def check_item(
             else:
                 report.warn(where, "orig", f"声明了原图 {orig_ext} 但 o/{item_id}.{orig_ext} 不存在（前端会回退 t512）")
                 stats["orig_missing"] += 1
+
+    # 契约可选字段 sharp：0 / 1024 / 2048；声明了档位就必须有文件。
+    if "sharp" in item:
+        sharp = item["sharp"]
+        if isinstance(sharp, bool) or not isinstance(sharp, int) or sharp not in (0, 1024, 2048):
+            report.error(where, "sharp", f"必须是 0 / 1024 / 2048，实际 {brief(sharp)}")
+        else:
+            stats["sharp_declared"] += 1
+            if sharp >= 1024:
+                stats["sharp_1024"] += 1
+                if item_id is not None and f"{item_id}.jpg" not in files["t1024"]:
+                    report.error(where, "sharp", f"声明 t1024 但文件不存在：t1024/{item_id}.jpg")
+            if sharp >= 2048:
+                stats["sharp_2048"] += 1
+                if item_id is not None and f"{item_id}.jpg" not in files["t2048"]:
+                    report.error(where, "sharp", f"声明 t2048 但文件不存在：t2048/{item_id}.jpg")
     return item_id
 
 
@@ -443,7 +459,7 @@ def main(argv: list[str] | None = None) -> int:
     stats: dict[str, int] = {key: 0 for key in (
         "items", "missing", "named", "rated", "fav", "tags", "phash",
         "orig_ref", "orig_ok", "orig_missing", "t512_ok", "t512_missing",
-        "t256_ok", "t1024_ok", "t2048_ok",
+        "t256_ok", "t1024_ok", "t2048_ok", "sharp_declared", "sharp_1024", "sharp_2048",
         "facet_tags", "facet_groups", "text_files", "shards", "dups", "group_ref",
     )}
 
@@ -610,6 +626,8 @@ def main(argv: list[str] | None = None) -> int:
     print(f"  t256 覆盖     {stats['t256_ok']}/{stats['items']}（{t256_ratio:.1f}%，可缺）")
     print(f"  t1024 覆盖    {stats['t1024_ok']}/{stats['items']}（{t1024_ratio:.1f}%，可缺）")
     print(f"  t2048 覆盖    {stats['t2048_ok']}/{stats['items']}（{t2048_ratio:.1f}%，可缺）")
+    print(f"  sharp 声明    {stats['sharp_declared']}/{stats['items']}（t1024 {stats['sharp_1024']}、"
+          f"t2048 {stats['sharp_2048']}；缺失表示旧发布器）")
     print(f"  原图          声明 {stats['orig_ref']} 条，在位 {stats['orig_ok']} 个，缺 {stats['orig_missing']} 个")
     print(f"  facets.tags   {stats['facet_tags']} 项，facets.groups {stats['facet_groups']} 项")
     if not args.no_privacy:
