@@ -11,12 +11,12 @@
 | 项 | 值 |
 |---|---|
 | 分支 / HEAD | `feature/cloud-photo-wall`；轮次起点 `9c3564e`（功能键收进侧栏） |
-| 提交情况 | 本轮锐利档改动未提交（清单见 §9） |
+| 提交情况 | 工作区干净；本轮网页复查补齐已提交 `bca6cd4`…`c182557`（清单见 §9） |
 | 类型检查 | `cd web && npx tsc --noEmit` → exit 0 |
 | 生产构建 | exit 0：CSS 26.78KB（gzip 6.06KB）/ JS 286.49KB（gzip 92.13KB）；体积上升来自新入口与手势，不是 CSS 重复 |
 | 数据 | `web/public/data/` 9899 条 / 2 分片；**t1024/t2048 覆盖 0/9899**（这批数据全部来自已删除的 stress_10k，原图不在）；新发布器对 9899 条都写了 `sharp: 0` |
 | 验证产物 | `.kanalib/audit-final/report.json`（四页+交互回归，failures 空）、`verify2.json`（入口/强调色/详情手势）、`new-*.png` 与 `mobile-detail-tagged.png`；临时夹具与探针已清理 |
-| 改动前备份 | `.kanalib/backups/src-20261109-130014`（2026-11-09 那轮；本轮未改 UI 组件结构） |
+| 改动前备份 | 本轮改动前状态由 `a491b85` 保存，可直接 git 回退；未另建目录备份 |
 
 ## 2. 本轮怎么做的
 
@@ -324,7 +324,7 @@ python scripts/wall_manifest_check.py web/public/data
 - **headless 的帧率不代表真机**：没有 vsync，rAF 基准约 143–145Hz；`p95 ≤33.3ms` 是"两个 60Hz 帧周期"的卡顿红线，不是刷新率。backdrop-filter 由合成器执行，headless 走 SwiftShader，**GPU 侧成本量不出来**。
 - **性能测量必须在无人改代码时跑**：HMR 重载会让探针失效，`wall_perf.mjs` 用 session 令牌判废并自动重试 3 次，报告里出现"重试 N 次"说明当时有人在改文件，数据要重跑。
 
-## 9. 未提交文件清单（本轮：网页复查补齐，2026-11-10）
+## 9. 本轮改动清单（已提交：`bca6cd4`…`c182557`）
 
 ```text
  M web/index.html                          （去掉与 W4 相反的静态 noindex）
@@ -340,7 +340,7 @@ python scripts/wall_manifest_check.py web/public/data
  M web/README.md、docs/backlog/{photo-wall-v3,photo-wall-status,cloud-photo-wall,registry}.md
 ```
 
-> 发布器锐利档、`item.sharp` 与网格/详情选档已在此前提交（`77e00b8`…`a491b85`）。
+> 以上为 2026-11-10 网页复查补齐的改动；发布器锐利档、`item.sharp` 与网格/详情选档已在此前提交（`77e00b8`…`a491b85`）。
 
 ## 10. 提交切分（历史记录）
 
