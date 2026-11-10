@@ -1,8 +1,8 @@
-# 图片墙开发状态（2026-11-10 18:00）
+# 图片墙开发状态（2026-11-10 21:00）
 
 > 分支 `feature/cloud-photo-wall` · 上级计划 [cloud-photo-wall.md](cloud-photo-wall.md) · v3 标准 [photo-wall-v3.md](photo-wall-v3.md)
 >
-> 一句话：**在 W3 锐利档之后，按 v3 拍板口径把网页层重新对照代码与浏览器补齐：收藏/分级/分组做成与标签同构的两级入口；详情支持触摸横滑、Ctrl/双指缩放、放大后拖拽、双击复位，标签按类别分组并默认折叠；强调色按“首页聚合 / 入口用封面 / 详情用本图”分层；无限首页排序改为有限有序墙；搜索在整库分片上执行；去掉与 W4 相反的 noindex；顺手清掉 styles.css 里 8 份重复区块。**
+> 一句话：**在 W3 锐利档与四入口之后，v4 按用户实机反馈补上「单击原位聚焦 + 300px 信息检查器 + 触控板 deltaX/详情横向 wheel」：单击把卡放大并居中、邻卡压暗，双击才进详情；截图 1 的底部信息条删掉，标题/元数据/标签/相似全部进侧栏；详情返回墙上仍保留聚焦与检查器。**
 >
 > 之前的“详情水平滑动/排序已实现”只在动画和有限墙层面成立，触摸手势、入口结构、标签分组等并未落地；本轮以代码 + 浏览器实测为准重新核过。
 
@@ -13,9 +13,9 @@
 | 分支 / HEAD | `feature/cloud-photo-wall`；轮次起点 `9c3564e`（功能键收进侧栏） |
 | 提交情况 | 工作区干净；本轮网页复查补齐已提交 `bca6cd4`…`c182557`（清单见 §9） |
 | 类型检查 | `cd web && npx tsc --noEmit` → exit 0 |
-| 生产构建 | exit 0：CSS 26.78KB（gzip 6.06KB）/ JS 286.49KB（gzip 92.13KB）；体积上升来自新入口与手势，不是 CSS 重复 |
+| 生产构建 | exit 0：CSS 28.15KB（gzip 6.36KB）/ JS 292.83KB（gzip 94.31KB）；体积上升来自 v4 检查器/聚焦/手势 |
 | 数据 | `web/public/data/` 9899 条 / 2 分片；**t1024/t2048 覆盖 0/9899**（这批数据全部来自已删除的 stress_10k，原图不在）；新发布器对 9899 条都写了 `sharp: 0` |
-| 验证产物 | `.kanalib/audit-final/report.json`（四页+交互回归，failures 空）、`verify2.json`（入口/强调色/详情手势）、`new-*.png` 与 `mobile-detail-tagged.png`；临时夹具与探针已清理 |
+| 验证产物 | `.kanalib/v4/report.json` + `spotlight/detail-inspector/mobile-spotlight.png`（v4 聚焦/检查器/触控板）、`.kanalib/v4/full3/report.json`（四页+交互回归，failures 空）；临时夹具与探针已清理 |
 | 改动前备份 | 本轮改动前状态由 `a491b85` 保存，可直接 git 回退；未另建目录备份 |
 
 ## 2. 本轮怎么做的
@@ -203,16 +203,18 @@ Lead 统筹，编码分给三个 teammate（写域隔离，只有 verifier 能 b
 - 详情相似条数量由 pHash 距离决定；`anime_chibi.png` 本轮为 0，邻图有 6，属数据分布，不是布局缺失。
 - 收藏/分级/分组的第一层计数与封面取原始 mtime 顺序，刷新稳定；收藏当前为 0 张，所以收藏总览是空白封面卡。
 
-### 4.10 用户反馈：单击聚焦 / 触控板横滑 / 信息侧栏（2026-11-10，调研完成、待实施）
+### 4.10 用户反馈：单击聚焦 / 触控板横滑 / 信息侧栏（2026-11-10，已实施）
 
-用户在实机复查后指出四件事，均已复现并登记在 [photo-wall-focus-mode.md](photo-wall-focus-mode.md)：
+用户四条实机反馈（[photo-wall-focus-mode.md](photo-wall-focus-mode.md) §1）：单击只选中、触控板横滑无反应、详情底部信息条没搬进侧栏、侧栏信息不全。本轮按该文档 §9 的推荐全部落地：
 
-1. 单击应把图片放大到比邻卡大、占据视觉中心，但**不是**全屏详情；现在单击只选中（代码 `Wall.tsx` 的 `onPointerUp` 只 `setActiveId`）。
-2. 电脑触控板双指左右划无反应；墙的 wheel 只读 `deltaY`，详情的 wheel 只处理 Ctrl/⌘ 缩放。
-3. 详情底部信息条（截图 1 的标题/元数据/相似条）应删除并搬进侧栏；现在仍在 `.view__info`。
-4. 侧栏信息不全、不美观；需要 300px 检查器（元数据/标签分组/相似/操作）。
+| 反馈 | 实现 | 实测 |
+|---|---|---|
+| 单击应原位放大、占视觉中心，但不是全屏详情 | 单击把卡片 `scale` 到内容区 56%/74% 目标、相机 360ms 居中、邻卡 `brightness(.55)`；不跳路由；双击/Enter 才进详情 | 卡片中心 `(930,450)` = 内容区中心；scale 1.05–2.8；检查器 300px；45–53 张邻卡压暗；Esc 关闭；从详情返回仍保持聚焦 |
+| 触控板双指左右划没反应 | 墙 wheel 同时吃 `deltaX/deltaY`；Shift+wheel 兜底；详情 1× 时 deltaX 累积 80px/冷却 450ms 切图，放大后改平移；`ctrlKey/metaKey` 才缩放 | 墙 `deltaX=80` → world e -80；详情 `deltaX=120` → 下一张、`-120` → 上一张；390 触摸横滑仍生效 |
+| 截图 1 底部信息条没删、也没进侧栏 | 删除 `Detail` 的 `.view__info/.view__scroll`；标题/尺寸/日期/分级/星级/分组/标签/相似/原图全部进 300px 检查器；`I`/信息钮可收起 | 详情 `oldInfo=0`、stageLeft 420；检查器标签 11 chip、相似 6；关闭 → stageLeft 0、重开回 420 |
+| 侧栏信息不全/不美观 | 检查器分组：标题、两列元数据、按类别标签（默认 18、每组 6）、3 列相似、打开详情/原图；95% 纸面 + 投影，无 backdrop-filter | 1440/390 截图见 `.kanalib/v4/`；390 为底部 sheet（`x=64,w=326,h=464`、overflow 0），聚焦卡在 sheet 上方居中 |
 
-调研结论与实施规格见 [photo-wall-focus-mode.md](photo-wall-focus-mode.md)：单击=原位聚焦 + 相机居中 + 信息栏；双击=详情；详情画面只留图；触控板 deltaX 平移/切图、ctrlKey 捏合；侧栏采用 120px 缝 + 300px 检查器（备选 300px 单列）。**代码未动**，等 §9 的开放问题拍板。
+实施状态与偏差（墙上相似图统一进详情、详情信息隐藏不跨页保留）见 [photo-wall-focus-mode.md](photo-wall-focus-mode.md) §11。
 
 ## 5. 仍未解决
 
@@ -335,23 +337,28 @@ python scripts/wall_manifest_check.py web/public/data
 - **headless 的帧率不代表真机**：没有 vsync，rAF 基准约 143–145Hz；`p95 ≤33.3ms` 是"两个 60Hz 帧周期"的卡顿红线，不是刷新率。backdrop-filter 由合成器执行，headless 走 SwiftShader，**GPU 侧成本量不出来**。
 - **性能测量必须在无人改代码时跑**：HMR 重载会让探针失效，`wall_perf.mjs` 用 session 令牌判废并自动重试 3 次，报告里出现"重试 N 次"说明当时有人在改文件，数据要重跑。
 
-## 9. 本轮改动清单（已提交：`bca6cd4`…`c182557`）
+## 9. 本轮改动清单（v4）
 
 ```text
- M web/index.html                          （去掉与 W4 相反的静态 noindex）
- M web/src/App.tsx                         （四入口路由、强调色分层、排序/搜索、整库加载）
- M web/src/components/Sidebar.tsx          （收藏/分级/分组改入口；搜索/排序仍是面板）
- M web/src/components/Detail.tsx           （触摸横滑、缩放平移、标签分组折叠）
- M web/src/components/Wall.tsx             （emptyText/emptyHint）
- M web/src/components/detail.css           （手势层指针、缩放、标签组）
- M web/src/lib/router.ts                   （fav/rating/group 路由）
- M web/src/state/filters.ts                （只保留文件名搜索）
- M web/src/styles.css                      （去重 3009→1288 行；切页淡入）
-?? web/src/components/BucketGallery.tsx    （收藏/分级/分组第一层封面墙）
- M web/README.md、docs/backlog/{photo-wall-v3,photo-wall-status,cloud-photo-wall,registry}.md
+ M web/src/App.tsx                       （聚焦/检查器状态、详情让位、触控板、诊断开关）
+ M web/src/components/Wall.tsx           （单击聚焦、相机锚点/居中、deltaX、Esc、聚焦恢复）
+ M web/src/components/WallCard.tsx       （聚焦高分辨率档、scale、隐藏卡上信息）
+ M web/src/components/Sidebar.tsx        （挂载检查器；详情信息钮）
+ M web/src/components/Detail.tsx         （删底部信息层；横向 wheel；I 开关）
+ M web/src/components/detail.css         （stage 让位检查器；只留图与手势）
+ M web/src/components/Inspector.tsx      （新：300px 信息检查器）
+ M web/src/components/inspector.css      （新：检查器/底部 sheet）
+ M web/src/components/GestureDebug.tsx   （新：?gestures=1 诊断）
+ M web/src/components/gesturedebug.css   （新）
+ M web/src/lib/layout.ts                 （新：缝/检查器/断点常量）
+ M web/src/lib/itemDetail.ts             （新：标签分组/相似）
+ M web/src/lib/expand.ts                 （containRect 支持内容区偏移）
+ M web/src/styles.css                    （聚焦压暗/缩放、--inspector-w）
+ M scripts/wall_shots.mjs                （390 首帧等待加固）
+ M web/README.md、docs/backlog/{photo-wall-focus-mode,photo-wall-status,cloud-photo-wall,registry}.md
 ```
 
-> 以上为 2026-11-10 网页复查补齐的改动；发布器锐利档、`item.sharp` 与网格/详情选档已在此前提交（`77e00b8`…`a491b85`）。
+> 上一轮四入口/详情手势/整库搜索已提交（`bca6cd4`…`c182557`）；发布器锐利档与 `item.sharp` 在 `77e00b8`…`a491b85`。
 
 ## 10. 提交切分（历史记录）
 
