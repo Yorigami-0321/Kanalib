@@ -21,28 +21,49 @@ export function gridSources(paths: TierPaths, item: WallItem): string[] {
   return [tierUrl(paths, 't256', item.id), tierUrl(paths, 't512', item.id)];
 }
 
+/** 锐利档从高到低；`sharp` 缺省（旧数据）时两档都要试探。 */
+const SHARP_TIERS = [
+  { edge: 2048, tier: 't2048' },
+  { edge: 1024, tier: 't1024' },
+] as const;
+
+function availableSharpTiers(item: WallItem): ('t2048' | 't1024')[] {
+  const sharp = item.sharp;
+  if (sharp === undefined) return SHARP_TIERS.map(({ tier }) => tier);
+  return SHARP_TIERS.filter(({ edge }) => sharp >= edge).map(({ tier }) => tier);
+}
+
 /**
  * 网格 srcset：按卡片在屏幕上的实际显示宽度选档（相机缩放已经乘进 sizes）。
- * 只列有硬保证的两档——t1024 是可选产出，混进来会让没生成的条目白跑一次 404。
+ * 只列条目声明的档位：旧数据没有 `sharp` 时退回 t256/t512，避免大图白白 404。
  */
 export function gridImageAttrs(
   paths: TierPaths,
   item: WallItem,
   displayWidth: number,
 ): { srcSet: string; sizes: string } {
+  const entries = [
+    `${tierUrl(paths, 't256', item.id)} 256w`,
+    `${tierUrl(paths, 't512', item.id)} 512w`,
+  ];
+  if (item.sharp !== undefined && item.sharp >= 1024) {
+    entries.push(`${tierUrl(paths, 't1024', item.id)} 1024w`);
+  }
+  if (item.sharp !== undefined && item.sharp >= 2048) {
+    entries.push(`${tierUrl(paths, 't2048', item.id)} 2048w`);
+  }
   return {
-    srcSet: `${tierUrl(paths, 't256', item.id)} 256w, ${tierUrl(paths, 't512', item.id)} 512w`,
+    srcSet: entries.join(', '),
     sizes: `${Math.max(1, Math.round(displayWidth))}px`,
   };
 }
 
-/** 详情页大图：原图 → t2048 → t1024 → t512；缺档由 onError 逐级回退（契约 §6.2）。 */
+/** 详情页大图：原图 → 声明的锐利档（高→低）→ t512；旧数据缺 sharp 时逐档试探。 */
 export function detailSources(paths: TierPaths, item: WallItem): string[] {
   const sources: string[] = [];
   const original = originalUrl(paths, item);
   if (original) sources.push(original);
-  sources.push(tierUrl(paths, 't2048', item.id));
-  sources.push(tierUrl(paths, 't1024', item.id));
+  for (const tier of availableSharpTiers(item)) sources.push(tierUrl(paths, tier, item.id));
   sources.push(tierUrl(paths, 't512', item.id));
   return sources;
 }

@@ -74,6 +74,8 @@ export function normalizeItem(raw: unknown): WallItem | null {
   if (ph.length > 0) item.ph = ph.toLowerCase();
   const orig = str(raw.orig, '');
   if (orig.length > 0) item.orig = orig.replace(/^\./, '').toLowerCase();
+  // 契约 §4：sharp 只认 0/1024/2048；缺省表示旧数据未声明。
+  if (raw.sharp === 0 || raw.sharp === 1024 || raw.sharp === 2048) item.sharp = raw.sharp;
   if (typeof groupRaw === 'string' && groupRaw.length > 0) item.group = groupRaw;
   return item;
 }
