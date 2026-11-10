@@ -11,9 +11,9 @@
 | 分支 / HEAD | `feature/cloud-photo-wall`；轮次起点 `9c3564e`（功能键收进侧栏） |
 | 提交情况 | 本轮锐利档改动未提交（清单见 §9） |
 | 类型检查 | `cd web && npx tsc --noEmit` → exit 0 |
-| 生产构建 | exit 0：CSS 25.33KB（gzip 5.84KB）/ JS 278.83KB（gzip 89.88KB） |
-| 数据 | `web/public/data/` 9899 条 / 2 分片；**t1024/t2048 覆盖 0/9899**（这批数据全部来自已删除的 stress_10k，原图不在） |
-| 验证产物 | `.kanalib/wall-shots-tiers/report.json`（四页+交互回归，failures 空）；锐利档夹具端到端与浏览器探针见 §4.7（临时夹具已清理） |
+| 生产构建 | exit 0：CSS 25.33KB（gzip 5.84KB）/ JS 279.23KB（gzip 90.05KB） |
+| 数据 | `web/public/data/` 9899 条 / 2 分片；**t1024/t2048 覆盖 0/9899**（这批数据全部来自已删除的 stress_10k，原图不在）；新发布器对 9899 条都写了 `sharp: 0` |
+| 验证产物 | `.kanalib/wall-shots-sharp/report.json`（四页+交互回归，failures 空）；锐利档夹具端到端与浏览器探针见 §4.7/§4.8（临时夹具已清理） |
 | 改动前备份 | `.kanalib/backups/src-20261109-130014`（2026-11-09 那轮；本轮未改 UI 组件结构） |
 
 ## 2. 本轮怎么做的
@@ -166,6 +166,19 @@ Lead 统筹，编码分给三个 teammate（写域隔离，只有 verifier 能 b
 
 **开发数据的限制**：现有 9899 条全部来自已删除的 `stress_10k`，`assets.path` 指向的原图不存在；样例库 14 条的缩略图缓存也已不在（t512 源缺失），所以这批数据既不能补原图也不能补锐利档。t1024/t2048 的清晰度收益要等接入真实图库后复验，**不能拿当前墙的观感当基线**。
 
+### 4.8 锐利档声明 `sharp`（2026-11-10，续）
+
+| 项 | 实现 | 实测 |
+|---|---|---|
+| 发布器声明 | 每条 item 写 `sharp` = 该条目最高可用锐利档（`0`/`1024`/`2048`），与账本/实际文件一致；`--no-tiers` 时全写 0 | 夹具 6 张真实图（3840×2160、2480×4016、1300×1149、744×988、557×697、280×175）：sharp 依次 2048/2048/1024/0/0/0；14 条契约测试加了 5 处 sharp 断言 |
+| 网格选档 | srcset 基础两档，`sharp>=1024/2048` 才追加 `t1024 1024w` / `t2048 2048w`；`sizes` 仍为显示宽×相机缩放 | 1440 视口、DPR2.5：大卡 413px 选 **t2048**、中卡 427px 选 **t1024**、小卡 484px 选 t512；小卡 srcset 只有 `t256/t512` |
+| 详情不试探 | 按 `sharp` 只请求存在的档位；`0` 直接 t512 | MutationObserver 记录：大图 srcLog `['t2048']`、中图 `['t1024']`、小图 `['t512']`，各只一次；真实数据（9899 条 sharp=0）详情 srcLog `['t512']` |
+| 旧数据兼容 | `sharp` 缺省时退回逐档试探 | 删掉大图的 sharp 与 t2048 文件后：srcLog `['t2048','t1024']`，最终落到 1024，画面正常 |
+| 契约校验 | `sharp` 值域 0/1024/2048；声明 t1024/t2048 时文件必须存在 | 重导后 `sharp 声明 9899/9899（t1024 0、t2048 0）`，validator exit 0（8 条既有 rating 警告） |
+| 回归 | 类型检查 + 生产构建 + 四页脚本 | tsc exit 0；build CSS 25.33KB / JS 279.23KB（gzip 5.84/90.05）；`wall_shots` 135 标签、390 窄屏，failures 空 |
+
+**口径**：`sharp` 缺失 ≠ 无档位，而是“旧发布器没声明”；新发布器**总是**写（含 0）。这样前端既能对旧数据保持兼容，也不再为无档条目制造 404。
+
 ## 5. 仍未解决
 
 ### 5.1 重复副本的标签曾丢失（2026-11-09 已修，数据已重导）
@@ -185,7 +198,7 @@ Lead 统筹，编码分给三个 teammate（写域隔离，只有 verifier 能 b
 
 ### 5.2 质量档位（依赖 F-080）——**2026-11-10 已实现**
 
-- 导出已产出 `t1024/t2048`（q90、sRGB、EXIF 方向、Lanczos3、不放大），前端详情逐档回退（§4.7）。
+- 导出已产出 `t1024/t2048`（q90、sRGB、EXIF 方向、Lanczos3、不放大），每条 item 写 `sharp` 声明可用档，前端详情逐档选档、不再 404 试探（§4.7/§4.8）。
 - 当前开发数据覆盖 0/9899：源图库已删除，只剩缩略图缓存。真实图库接入后需要重跑一次发布，并用 `wall_manifest_check.py` 看两档覆盖率。
 - 原图仍由 `--with-originals` 控制；不发布原图时详情最高用 t2048，发布时优先原图。
 
@@ -287,23 +300,21 @@ python scripts/wall_manifest_check.py web/public/data
 - **headless 的帧率不代表真机**：没有 vsync，rAF 基准约 143–145Hz；`p95 ≤33.3ms` 是"两个 60Hz 帧周期"的卡顿红线，不是刷新率。backdrop-filter 由合成器执行，headless 走 SwiftShader，**GPU 侧成本量不出来**。
 - **性能测量必须在无人改代码时跑**：HMR 重载会让探针失效，`wall_perf.mjs` 用 session 令牌判废并自动重试 3 次，报告里出现"重试 N 次"说明当时有人在改文件，数据要重跑。
 
-## 9. 未提交文件清单（本轮，2026-11-10）
+## 9. 未提交文件清单（本轮续作，2026-11-10）
 
 ```text
- M crates/kanalib-publish/Cargo.toml、Cargo.lock   （image 依赖）
- M crates/kanalib-publish/src/publish.rs           （t1024/t2048 生成、账本增量、统计）
- M crates/kanalib-publish/src/manifest.rs          （paths.t2048）
- M crates/kanalib-publish/src/main.rs              （--no-tiers）
- M crates/kanalib-publish/tests/publish_contract.rs（5 条锐利档测试；夹具改真实图片）
+ M crates/kanalib-publish/src/manifest.rs          （item.sharp）
+ M crates/kanalib-publish/src/publish.rs           （sync_sharp_tiers 返回最高可用档）
+ M crates/kanalib-publish/tests/publish_contract.rs（sharp 断言）
  M crates/kanalib-publish/README.md
- M web/src/source/types.ts、web/src/lib/assetUrl.ts（t2048 + srcset/回退链）
- M web/src/components/WallCard.tsx、Wall.tsx       （displayScale → srcset sizes）
- M scripts/wall_manifest_check.py                  （t1024/t2048 覆盖统计）
- M docs/backlog/{photo-wall-contract,cloud-photo-wall,photo-wall-status,registry}.md
- M web/README.md                                   （按 v3 现状重写）
+ M web/src/source/types.ts、StaticSource.ts        （sharp 字段与归一化）
+ M web/src/lib/assetUrl.ts                         （srcset/详情按 sharp 选档）
+ M scripts/wall_manifest_check.py                  （sharp 值域与文件一致性）
+ M docs/backlog/{photo-wall-contract,cloud-photo-wall,photo-wall-status}.md
+ M web/README.md
 ```
 
-> v3 及之前的清单见 §10（历史记录，勿再按它判断当前工作区）。
+> 上一轮（发布器锐利档 + 前端接入）已按 feat/test/docs 四笔提交（`77e00b8`…`4f61545`）。
 
 ## 10. 提交切分（历史记录）
 
