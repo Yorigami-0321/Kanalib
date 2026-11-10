@@ -264,6 +264,164 @@ async function main() {
     report.shots.home = await shot('v3f-home');
     report.home = homeStats;
 
+    // 1b) 聚焦挤压：邻图被挤动、无细条、点邻卡不换位、相机不居中
+    const focusPick = await evaluate(`(() => {
+      const seam = document.querySelector('.seam')?.getBoundingClientRect().right ?? 120;
+      const safe = { left: seam + 340, top: 90, right: innerWidth - 40, bottom: innerHeight - 120 };
+      const contentCenter = (safe.left + (innerWidth - 24)) / 2;
+      let best = null;
+      for (const tile of document.querySelectorAll('.tile')) {
+        const box = tile.getBoundingClientRect();
+        const w = Math.min(box.right, safe.right) - Math.max(box.left, safe.left);
+        const h = Math.min(box.bottom, safe.bottom) - Math.max(box.top, safe.top);
+        if (w < 80 || h < 80) continue;
+        const cx = Math.max(box.left, safe.left) + w / 2;
+        const cy = Math.max(box.top, safe.top) + h / 2;
+        const off = Math.abs(cx - contentCenter);
+        if (off < 120) continue;
+        if (!best || w * h > best.area) best = { area: w * h, x: Math.round(cx), y: Math.round(cy), off };
+      }
+      const tile = best ? document.elementFromPoint(best.x, best.y)?.closest('.tile') : null;
+      if (!tile) return null;
+      window.__focusNode = tile;
+      window.__focusStart = [tile.offsetLeft, tile.offsetTop, tile.offsetWidth, tile.offsetHeight];
+      document.querySelectorAll('.tile').forEach((node) => {
+        node.__probe = { left: node.offsetLeft, top: node.offsetTop, w: node.offsetWidth, h: node.offsetHeight };
+      });
+      return { x: best.x, y: best.y, id: tile.dataset.id, offCenter: best.off };
+    })()`);
+    if (focusPick) {
+      await cdp.send('Input.dispatchMouseEvent', { type: 'mousePressed', x: focusPick.x, y: focusPick.y, button: 'left', buttons: 1, clickCount: 1 });
+      await cdp.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: focusPick.x, y: focusPick.y, button: 'left', buttons: 0, clickCount: 1 });
+      await sleep(750);
+      report.focus = await evaluate(`(() => {
+        const hero = document.querySelector('.tile--spotlight');
+        if (!hero) return { ok: false };
+        const inspector = document.querySelector('.inspector');
+        const seam = document.querySelector('.seam')?.getBoundingClientRect().right ?? 120;
+        const contentLeft = inspector ? inspector.getBoundingClientRect().right : seam;
+        const contentCenter = contentLeft + (innerWidth - contentLeft) / 2;
+        const box = hero.getBoundingClientRect();
+        let moved = 0;
+        let strips = 0;
+        let minW = Infinity;
+        let minH = Infinity;
+        for (const tile of document.querySelectorAll('.tile')) {
+          if (tile === hero) continue;
+          const probe = tile.__probe;
+          if (
+            probe &&
+            (Math.abs(probe.left - tile.offsetLeft) > 1 ||
+              Math.abs(probe.top - tile.offsetTop) > 1 ||
+              Math.abs(probe.w - tile.offsetWidth) > 1 ||
+              Math.abs(probe.h - tile.offsetHeight) > 1)
+          ) moved += 1;
+          minW = Math.min(minW, tile.offsetWidth);
+          minH = Math.min(minH, tile.offsetHeight);
+          if (
+            (tile.offsetHeight < 70 && tile.offsetWidth > 140) ||
+            (tile.offsetWidth < 70 && tile.offsetHeight > 140)
+          ) strips += 1;
+        }
+        const start = window.__focusStart;
+        const anchorDelta = start
+          ? [
+              Math.round(hero.offsetLeft + hero.offsetWidth / 2 - (start[0] + start[2] / 2)),
+              Math.round(hero.offsetTop + hero.offsetHeight / 2 - (start[1] + start[3] / 2)),
+            ]
+          : null;
+        return {
+          ok: true,
+          sameNode: hero === window.__focusNode,
+          moved,
+          strips,
+          minW,
+          minH,
+          centerDelta: Math.round(box.left + box.width / 2 - contentCenter),
+          anchorDelta,
+          inSafe: box.left >= contentLeft - 1 && box.top >= -1 && box.right <= innerWidth + 1 && box.bottom <= innerHeight + 1,
+        };
+      })()`);
+      report.focus.pickOffCenter = focusPick.offCenter;
+      report.shots.focus = await shot('v3f-focus');
+      if (!report.focus.ok) report.failures.push('聚焦：没有出现聚焦卡');
+      if (report.focus.ok && !report.focus.sameNode) report.failures.push('聚焦卡被卸载重挂');
+      if (report.focus.ok && report.focus.moved === 0) report.failures.push('聚焦后邻图没有被挤压');
+      if (report.focus.ok && report.focus.strips > 0) report.failures.push('聚焦后出现细条卡');
+      // 初次放大会被格子边界夹一下（锚点靠近边缘时最多几十像素），允许 80px；
+      // 真正要防的是“点邻卡时图片横向搬到英雄位”，那一条单独卡 16px。
+      if (report.focus.ok && Math.abs(report.focus.anchorDelta?.[0] ?? 0) > 80) {
+        report.failures.push('聚焦卡横向离开点击位置');
+      }
+      if (report.focus.ok && Math.abs(report.focus.centerDelta) < 40) {
+        report.failures.push('聚焦卡被锁到内容区中心');
+      }
+
+      // 点一张可见邻卡：切放大对象，但新英雄留在被点卡的位置，不换位/不居中。
+      const neighbor = await evaluate(`(() => {
+        const hero = document.querySelector('.tile--spotlight');
+        const seam = document.querySelector('.seam')?.getBoundingClientRect().right ?? 120;
+        const inspector = document.querySelector('.inspector')?.getBoundingClientRect().right ?? 0;
+        const contentLeft = Math.max(seam, inspector);
+        for (const tile of document.querySelectorAll('.tile')) {
+          if (tile === hero) continue;
+          const box = tile.getBoundingClientRect();
+          const cx = Math.round(Math.max(box.left, contentLeft + 20) + Math.min(box.width, 160) / 2);
+          const cy = Math.round(box.top + Math.min(box.height, 160) / 2);
+          if (cx < contentLeft + 20 || cx > innerWidth - 20 || cy < 70 || cy > innerHeight - 20) continue;
+          if (document.elementFromPoint(cx, cy)?.closest('.tile') !== tile) continue;
+          window.__nextStart = [tile.offsetLeft, tile.offsetTop, tile.offsetWidth, tile.offsetHeight];
+          return { x: cx, y: cy, id: tile.dataset.id };
+        }
+        return null;
+      })()`);
+      if (neighbor) {
+        await cdp.send('Input.dispatchMouseEvent', { type: 'mousePressed', x: neighbor.x, y: neighbor.y, button: 'left', buttons: 1, clickCount: 1 });
+        await cdp.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: neighbor.x, y: neighbor.y, button: 'left', buttons: 0, clickCount: 1 });
+        await sleep(700);
+        report.focusSwitch = await evaluate(`(() => {
+          const hero = document.querySelector('.tile--spotlight');
+          if (!hero) return { ok: false };
+          const inspector = document.querySelector('.inspector');
+          const seam = document.querySelector('.seam')?.getBoundingClientRect().right ?? 120;
+          const contentLeft = inspector ? inspector.getBoundingClientRect().right : seam;
+          const contentCenter = contentLeft + (innerWidth - contentLeft) / 2;
+          const box = hero.getBoundingClientRect();
+          const start = window.__nextStart;
+          const anchorDelta = start
+            ? [
+                Math.round(hero.offsetLeft + hero.offsetWidth / 2 - (start[0] + start[2] / 2)),
+                Math.round(hero.offsetTop + hero.offsetHeight / 2 - (start[1] + start[3] / 2)),
+              ]
+            : null;
+          return {
+            ok: true,
+            id: hero.dataset.id,
+            centerDelta: Math.round(box.left + box.width / 2 - contentCenter),
+            anchorDelta,
+            inSafe: box.left >= contentLeft - 1 && box.top >= -1 && box.right <= innerWidth + 1 && box.bottom <= innerHeight + 1,
+          };
+        })()`);
+        report.shots.focusSwitch = await shot('v3f-focus-switch');
+        if (!report.focusSwitch.ok) report.failures.push('点邻卡：没有出现新的聚焦卡');
+        if (report.focusSwitch.id !== neighbor.id) report.failures.push('点邻卡：放大对象不是被点的卡');
+        if (Math.abs(report.focusSwitch.anchorDelta?.[0] ?? 0) > 16) {
+          report.failures.push('点邻卡：被点图片横向换位');
+        }
+        if (!report.focusSwitch.inSafe) report.failures.push('点邻卡：英雄卡不在可见安全区');
+        if (Math.abs(report.focusSwitch.centerDelta) < 40) report.failures.push('点邻卡：被锁到内容区中心');
+      } else {
+        report.failures.push('点邻卡：找不到可点击的邻卡');
+      }
+
+      // 关掉聚焦，继续详情页用例
+      await cdp.send('Input.dispatchKeyEvent', { type: 'keyDown', key: 'Escape', code: 'Escape', windowsVirtualKeyCode: 27 });
+      await cdp.send('Input.dispatchKeyEvent', { type: 'keyUp', key: 'Escape', code: 'Escape', windowsVirtualKeyCode: 27 });
+      await sleep(350);
+    } else {
+      report.failures.push('聚焦：首页找不到可点击的卡片');
+    }
+
     // 2) 详情（用首页第一张）
     if (homeStats.firstId) {
       await go('#/d/' + homeStats.firstId, 2000);
@@ -302,22 +460,23 @@ async function main() {
       // 无限画布上几乎没有"整张都在视口里"的卡（格子会故意切边），
       // 所以取"与安全区相交面积最大"的那张，再点相交区域的中心。
       const safe = { left: seam + 40, top: 90, right: innerWidth - 60, bottom: innerHeight - 120 };
-      let best = null;
+      // 概要层直接叠在卡片上：卡片只露一半时，层也必然有一半在视口外。
+      // 这里优先拿"整张都在安全区里"的卡；没有才退回相交面积最大的那张。
+      let fallback = null;
       for (const tile of document.querySelectorAll('.tile')) {
         const box = tile.getBoundingClientRect();
         const w = Math.min(box.right, safe.right) - Math.max(box.left, safe.left);
         const h = Math.min(box.bottom, safe.bottom) - Math.max(box.top, safe.top);
         if (w < 60 || h < 60) continue;
-        const area = w * h;
-        if (!best || area > best.area) {
-          best = {
-            area,
-            x: Math.round(Math.max(box.left, safe.left) + w / 2),
-            y: Math.round(Math.max(box.top, safe.top) + h / 2),
-          };
+        const x = Math.round(Math.max(box.left, safe.left) + w / 2);
+        const y = Math.round(Math.max(box.top, safe.top) + h / 2);
+        if (box.left >= safe.left && box.right <= safe.right && box.top >= safe.top && box.bottom <= safe.bottom) {
+          return { x, y };
         }
+        const area = w * h;
+        if (!fallback || area > fallback.area) fallback = { area, x, y };
       }
-      return best ? { x: best.x, y: best.y } : null;
+      return fallback ? { x: fallback.x, y: fallback.y } : null;
     })()`);
     if (spot) {
       await cdp.send('Input.dispatchMouseEvent', { type: 'mousePressed', x: spot.x, y: spot.y, button: 'right', buttons: 2, clickCount: 1 });
