@@ -50,8 +50,9 @@
 | [cloud-photo-wall.md](cloud-photo-wall.md) | 云端无界图片墙计划（F-080–F-083）：后端复用面/开源调研/架构/本地精简提案/决策点 |
 | [photo-wall-contract.md](photo-wall-contract.md) | 图片墙静态导出契约 v1：目录布局/index.json/分片/item 字段/id 规则/前端读取规则/不变量 |
 | [photo-wall-design.md](photo-wall-design.md) | 图片墙视觉与信息架构改版 v2：左侧边栏/密集拼贴/展示型详情页（已被 v3 取代，留档） |
-| [photo-wall-v3.md](photo-wall-v3.md) | 图片墙 v3 标准：空间画布/黑白竖排缝/动态强调色/标签两层/全屏详情 + 十一条硬规则（第 11 条 L0 全向无界待做） + 待确认问题与裁定 |
-| [photo-wall-status.md](photo-wall-status.md) | 图片墙开发状态：v3 落地与复验结论、硬规则对照、未解决项（asset_tags join / 高质量档）、提交切分 |
+| [photo-wall-v3.md](photo-wall-v3.md) | 图片墙 v3 标准：空间画布/黑白竖排缝/动态强调色/四套两级入口/全屏详情 + 十一条硬规则（全部已落地） |
+| [photo-wall-focus-mode.md](photo-wall-focus-mode.md) | 图片墙 v4 调研与设计：单击原位聚焦、触控板双指横滑/捏合、详情信息搬进侧栏检查器（待拍板后实施） |
+| [photo-wall-status.md](photo-wall-status.md) | 图片墙开发状态：v3/v4 落地与复验结论、硬规则对照、触控板/聚焦卡/侧栏信息实测、提交切分 |
 | [next-steps.md](next-steps.md) | 2026-11-04 暂停点：后续任务分类、优先级、红线与命令速查（未验收项保持未勾选） |
 | [manual-acceptance.md](manual-acceptance.md) | 手动验收总清单：前台/GUI/UIA/真实输入/长耗时项、夹具、证据与已通过项索引 |
 | [../TESTING-PROCESS.md](../TESTING-PROCESS.md) | 轻量测试流程：测试分层、风险定档、改动类型矩阵、门禁与反过度测试约束 |
