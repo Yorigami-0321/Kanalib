@@ -134,7 +134,7 @@ def list_names(path: pathlib.Path | None) -> set[str]:
 
 def check_paths_block(root: pathlib.Path, report: Report, paths: object) -> dict[str, pathlib.Path | None]:
     """校验 index.paths 并给出各档位目录的实际路径（缺省按契约第 1 节默认值兜底）。"""
-    defaults = {"t256": "t256/", "t512": "t512/", "t1024": "t1024/", "original": "o/"}
+    defaults = {"t256": "t256/", "t512": "t512/", "t1024": "t1024/", "t2048": "t2048/", "original": "o/"}
     resolved: dict[str, pathlib.Path | None] = {}
     if not isinstance(paths, dict):
         report.error("index.json", "paths", f"必须是对象，实际 {type(paths).__name__}")
@@ -305,6 +305,10 @@ def check_item(
             stats["t512_missing"] += 1
         if f"{item_id}.jpg" in files["t256"]:
             stats["t256_ok"] += 1
+        if f"{item_id}.jpg" in files["t1024"]:
+            stats["t1024_ok"] += 1
+        if f"{item_id}.jpg" in files["t2048"]:
+            stats["t2048_ok"] += 1
         if orig_ext is not None:
             if f"{item_id}.{orig_ext}" in files["orig"]:
                 stats["orig_ok"] += 1
@@ -439,7 +443,8 @@ def main(argv: list[str] | None = None) -> int:
     stats: dict[str, int] = {key: 0 for key in (
         "items", "missing", "named", "rated", "fav", "tags", "phash",
         "orig_ref", "orig_ok", "orig_missing", "t512_ok", "t512_missing",
-        "t256_ok", "facet_tags", "facet_groups", "text_files", "shards", "dups", "group_ref",
+        "t256_ok", "t1024_ok", "t2048_ok",
+        "facet_tags", "facet_groups", "text_files", "shards", "dups", "group_ref",
     )}
 
     print(f"图片墙导出目录契约校验 v1 —— {root.resolve()}")
@@ -483,6 +488,8 @@ def main(argv: list[str] | None = None) -> int:
     files = {
         "t256": list_names(paths.get("t256")),
         "t512": list_names(paths.get("t512")),
+        "t1024": list_names(paths.get("t1024")),
+        "t2048": list_names(paths.get("t2048")),
         "orig": list_names(paths.get("original")),
     }
     for key, label in (("t512", "t512/"), ("t256", "t256/")):
@@ -593,12 +600,16 @@ def main(argv: list[str] | None = None) -> int:
             print(f"  …… 另有 {hidden} 条警告未打印（--max-errors {report.max_print}）")
 
     t256_ratio = (100.0 * stats["t256_ok"] / stats["items"]) if stats["items"] else 0.0
+    t1024_ratio = (100.0 * stats["t1024_ok"] / stats["items"]) if stats["items"] else 0.0
+    t2048_ratio = (100.0 * stats["t2048_ok"] / stats["items"]) if stats["items"] else 0.0
     print("\n—— 统计 ——")
     print(f"  分片          {stats['shards']} 片（shard_size={shard_size}，index.count={total_count}）")
     print(f"  条目          {stats['items']} 条，tags {stats['tags']} 个，fav {stats['fav']} 条，"
           f"ph {stats['phash']} 条，分组 {stats['group_ref']} 条")
     print(f"  t512 覆盖     {stats['t512_ok']}/{stats['items']}")
     print(f"  t256 覆盖     {stats['t256_ok']}/{stats['items']}（{t256_ratio:.1f}%，可缺）")
+    print(f"  t1024 覆盖    {stats['t1024_ok']}/{stats['items']}（{t1024_ratio:.1f}%，可缺）")
+    print(f"  t2048 覆盖    {stats['t2048_ok']}/{stats['items']}（{t2048_ratio:.1f}%，可缺）")
     print(f"  原图          声明 {stats['orig_ref']} 条，在位 {stats['orig_ok']} 个，缺 {stats['orig_missing']} 个")
     print(f"  facets.tags   {stats['facet_tags']} 项，facets.groups {stats['facet_groups']} 项")
     if not args.no_privacy:
