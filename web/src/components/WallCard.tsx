@@ -1,5 +1,5 @@
-import { useCallback, useMemo, useState } from 'react';
-import { gridImageAttrs, gridSources } from '../lib/assetUrl';
+import { useCallback, useEffect, useMemo, useState } from 'react';
+import { detailSources, gridImageAttrs, gridSources } from '../lib/assetUrl';
 import type { Rect } from '../lib/expand';
 import { formatCount, formatDateTime, formatSize, ratingLabel } from '../lib/format';
 import { titleSizeForWidth } from '../lib/world';
@@ -13,6 +13,10 @@ export interface WallCardProps {
   rect: TileRect;
   /** 画布相机缩放；用于按屏幕实际宽度选缩略档（srcset）。 */
   displayScale?: number;
+  /** 单击聚焦：卡片原位放大、压暗邻卡、信息进侧栏。 */
+  spotlight?: boolean;
+  /** 聚焦时的 CSS scale；1 表示只居中不缩放。 */
+  spotlightScale?: number;
   /** 这张卡是不是"当前项"（刚点开 / 刚右键看概要的那一张）。 */
   current?: boolean;
   /**
@@ -60,6 +64,8 @@ export function WallCard({
   paths,
   rect,
   displayScale = 1,
+  spotlight = false,
+  spotlightScale = 1,
   current,
   enter = false,
   enterDelay = 0,
@@ -69,10 +75,18 @@ export function WallCard({
   onOpen,
   onSummary,
 }: WallCardProps) {
-  const sources = gridSources(paths, item);
+  // 网格用 t256/t512；聚焦时换成详情档（原图 → t2048 → t1024 → t512）。
+  const sources = spotlight ? detailSources(paths, item) : gridSources(paths, item);
   const [tierIndex, setTierIndex] = useState(0);
   const [failed, setFailed] = useState(false);
   const [loaded, setLoaded] = useState(false);
+
+  // 聚焦切换时换一套 sources，失败档与加载态必须归零。
+  useEffect(() => {
+    setTierIndex(0);
+    setFailed(false);
+    setLoaded(false);
+  }, [spotlight, item.id]);
 
   // updater 必须是纯函数（StrictMode 下会跑两次），降级判定放在外面。
   const handleError = useCallback(() => {
@@ -92,23 +106,26 @@ export function WallCard({
   const chip = useMemo(() => chipTextOf(item, tagCounts), [item, tagCounts]);
   // 没有回退到 t512 时才让浏览器按显示宽度选档；一旦降级就固定用 src，避免再次 404。
   const gridAttrs = useMemo(
-    () => (tierIndex === 0 ? gridImageAttrs(paths, item, rect.w * displayScale) : null),
-    [tierIndex, paths, item, rect.w, displayScale],
+    () => (!spotlight && tierIndex === 0 ? gridImageAttrs(paths, item, rect.w * displayScale) : null),
+    [spotlight, tierIndex, paths, item, rect.w, displayScale],
   );
   const titleSize = titleSizeForWidth(rect.w);
 
   return (
     <div
-      className={'tile' + (enter ? ' tile--enter' : '')}
+      className={
+        'tile' + (enter ? ' tile--enter' : '') + (spotlight ? ' tile--spotlight' : '')
+      }
       data-index={index}
       data-id={item.id}
-      data-current={current ? 'true' : undefined}
+      data-current={current || spotlight ? 'true' : undefined}
       data-summary={summary ? 'true' : undefined}
       style={{
         left: rect.x,
         top: rect.y,
         width: rect.w,
         height: rect.h,
+        transform: spotlight && spotlightScale !== 1 ? `scale(${spotlightScale})` : undefined,
         animationDelay: enter && enterDelay > 0 ? enterDelay + 'ms' : undefined,
       }}
       onContextMenu={handleContextMenu}

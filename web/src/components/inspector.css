@@ -1,0 +1,327 @@
+/* v4 信息检查器：桌面为 300px 左侧栏，≤900px 为底部 sheet。
+   材质用 95% 纸面 + 投影，不做常驻 backdrop-filter（300px 每帧重算太贵）。 */
+
+.inspector {
+  position: fixed;
+  top: 0;
+  bottom: 0;
+  left: var(--seam-w);
+  z-index: 38;
+  display: flex;
+  width: 300px;
+  flex-direction: column;
+  overflow: hidden;
+  border-right: 1px solid var(--hairline);
+  background: color-mix(in srgb, var(--surface) 95%, transparent);
+  box-shadow: 24px 0 64px rgba(0, 0, 0, 0.42);
+  animation: inspector-in 180ms var(--ease);
+}
+
+@keyframes inspector-in {
+  from {
+    opacity: 0;
+    transform: translateX(-8px);
+  }
+}
+
+.inspector__handle {
+  display: none;
+}
+
+.inspector__scroll {
+  flex: 1;
+  min-height: 0;
+  padding: 18px 18px 26px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-color: rgba(247, 244, 238, 0.18) transparent;
+  scrollbar-width: thin;
+}
+
+.inspector__scroll::-webkit-scrollbar {
+  width: 7px;
+}
+
+.inspector__scroll::-webkit-scrollbar-thumb {
+  border-radius: 4px;
+  background: rgba(247, 244, 238, 0.16);
+}
+
+.inspector__head {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+  margin: -18px -18px 0;
+  padding: 18px 18px 12px;
+  background: linear-gradient(
+    180deg,
+    color-mix(in srgb, var(--surface) 98%, transparent) 74%,
+    color-mix(in srgb, var(--surface) 0%, transparent) 100%
+  );
+}
+
+.inspector__eyebrow {
+  margin: 0 0 6px;
+  color: rgba(247, 244, 238, 0.42);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+}
+
+.inspector__title {
+  margin: 0;
+  color: var(--ink);
+  font-size: 20px;
+  font-weight: 600;
+  letter-spacing: -0.025em;
+  line-height: 1.18;
+  overflow-wrap: anywhere;
+}
+
+.inspector__close {
+  display: grid;
+  width: 28px;
+  height: 28px;
+  flex: none;
+  place-items: center;
+  border: 0;
+  border-radius: 50%;
+  color: rgba(247, 244, 238, 0.68);
+  background: rgba(247, 244, 238, 0.08);
+  cursor: pointer;
+  transition:
+    color 160ms var(--ease),
+    background-color 160ms var(--ease);
+}
+
+.inspector__close:hover {
+  color: #fff;
+  background: rgba(247, 244, 238, 0.16);
+}
+
+.inspector__meta {
+  display: grid;
+  grid-template-columns: 52px minmax(0, 1fr);
+  gap: 7px 12px;
+  margin: 16px 0 0;
+  font-variant-numeric: tabular-nums;
+}
+
+.inspector__meta dt {
+  color: rgba(247, 244, 238, 0.38);
+  font-size: 11px;
+  letter-spacing: 0.04em;
+}
+
+.inspector__meta dd {
+  margin: 0;
+  color: rgba(247, 244, 238, 0.82);
+  font-size: 12px;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+}
+
+.inspector__section {
+  margin-top: 18px;
+  padding-top: 14px;
+  border-top: 1px solid var(--hairline);
+}
+
+.inspector__section h3 {
+  margin: 0 0 10px;
+  color: rgba(247, 244, 238, 0.42);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+}
+
+.inspector__tags {
+  display: flex;
+  flex-direction: column;
+  gap: 11px;
+}
+
+.inspector__taggroup {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.inspector__taggroup-label {
+  color: rgba(247, 244, 238, 0.4);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.14em;
+}
+
+.inspector__chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.inspector__chip {
+  padding: 4px 9px;
+  border: 0;
+  border-radius: 2px;
+  color: rgba(247, 244, 238, 0.8);
+  background: rgba(247, 244, 238, 0.08);
+  box-shadow: inset 0 0 0 1px rgba(247, 244, 238, 0.08);
+  font-size: 12px;
+  line-height: 1.25;
+  overflow-wrap: anywhere;
+  cursor: pointer;
+  transition:
+    color 160ms var(--ease),
+    background-color 160ms var(--ease);
+}
+
+.inspector__chip:hover {
+  color: var(--ink);
+  background: rgba(247, 244, 238, 0.14);
+}
+
+.inspector__chip--more {
+  cursor: default;
+  opacity: 0.55;
+}
+
+.inspector__toggle {
+  align-self: flex-start;
+  padding: 4px 9px;
+  border: 0;
+  border-radius: 2px;
+  color: color-mix(in srgb, var(--accent) 62%, #fff);
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.inspector__toggle:hover {
+  background: color-mix(in srgb, var(--accent) 22%, transparent);
+}
+
+.inspector__similar {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 6px;
+}
+
+.inspector__similar-item {
+  overflow: hidden;
+  aspect-ratio: 1;
+  padding: 0;
+  border: 0;
+  border-radius: 4px;
+  background: #101012;
+  cursor: pointer;
+}
+
+.inspector__similar-item img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  transition: filter 160ms var(--ease);
+}
+
+.inspector__similar-item:hover img {
+  filter: saturate(1.08) brightness(1.06);
+}
+
+.inspector__hint {
+  margin: 0;
+  color: rgba(247, 244, 238, 0.42);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.inspector__actions {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 20px;
+  padding-top: 14px;
+  border-top: 1px solid var(--hairline);
+}
+
+.inspector__primary {
+  padding: 9px 12px;
+  border: 0;
+  border-radius: 3px;
+  color: #08080a;
+  background: var(--ink);
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  cursor: pointer;
+  transition: filter 160ms var(--ease);
+}
+
+.inspector__primary:hover {
+  filter: brightness(0.92);
+}
+
+.inspector__link {
+  color: color-mix(in srgb, var(--accent) 62%, #fff);
+  font-size: 12px;
+  text-decoration: none;
+}
+
+.inspector__link:hover {
+  text-decoration: underline;
+}
+
+@media (max-width: 900px) {
+  .inspector {
+    top: auto;
+    right: 0;
+    bottom: 0;
+    left: var(--seam-w);
+    width: auto;
+    max-height: 55vh;
+    border-top: 1px solid var(--hairline);
+    border-right: 0;
+    border-radius: 14px 14px 0 0;
+    box-shadow: 0 -24px 64px rgba(0, 0, 0, 0.5);
+    animation: inspector-sheet-in 220ms var(--ease);
+  }
+
+  @keyframes inspector-sheet-in {
+    from {
+      opacity: 0;
+      transform: translateY(18px);
+    }
+  }
+
+  .inspector__handle {
+    display: block;
+    width: 36px;
+    height: 4px;
+    flex: none;
+    margin: 8px auto 0;
+    border-radius: 2px;
+    background: rgba(247, 244, 238, 0.24);
+  }
+
+  .inspector__scroll {
+    padding: 10px 16px 22px;
+  }
+
+  .inspector__head {
+    margin: -10px -16px 0;
+    padding: 12px 16px 10px;
+  }
+}
+
+@media (max-width: 430px) {
+  .inspector__title {
+    font-size: 19px;
+  }
+}

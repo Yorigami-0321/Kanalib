@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { BucketGallery, type BucketEntry } from './components/BucketGallery';
+import { GestureDebug } from './components/GestureDebug';
 import { Detail } from './components/Detail';
 import { Sidebar, type RailView, type SortMode } from './components/Sidebar';
 import { TagGallery, type TagEntry } from './components/TagGallery';
@@ -22,6 +23,7 @@ import {
   useRoute,
   wallHref,
 } from './lib/router';
+import { INSPECTOR_WIDTH, readLayoutMetrics } from './lib/layout';
 import { appendShuffled, hashString } from './lib/shuffle';
 import { DATA_ROOT } from './source/config';
 import { StaticSource } from './source/StaticSource';
@@ -33,8 +35,8 @@ const EMPTY_TAGS: TagFacet[] = [];
 const RATING_ORDER = ['G', 'S', 'Q', 'E'];
 const FALLBACK_ACCENT = '#8f8f92';
 
-/** 焦点归位的最大重试帧数：虚拟化的卡可能晚一两帧才挂载，8 帧（约 130ms）足够且不会久拖。 */
-const FOCUS_RETRY_FRAMES = 8;
+/** 焦点归位的最大重试帧数：从详情返回聚焦时相机要 360ms 居中，卡才进可见集合；30 帧约 500ms。 */
+const FOCUS_RETRY_FRAMES = 30;
 
 /** 二级墙：这些路由共用「筛选后的一组图 + 标题」形态。 */
 const WALL_VIEWS = new Set(['tag', 'fav', 'rating', 'group']);
@@ -64,7 +66,15 @@ export function App() {
   const [allLoaded, setAllLoaded] = useState(false);
   const [focusItems, setFocusItems] = useState<WallItem[]>([]);
   const [summaryId, setSummaryId] = useState<string | null>(null);
+  const [spotlightItem, setSpotlightItem] = useState<WallItem | null>(null);
+  const [spotlightAnchor, setSpotlightAnchor] = useState<{ x: number; y: number } | null>(null);
+  const [detailInfoHidden, setDetailInfoHidden] = useState(false);
+  const [layout, setLayout] = useState(readLayoutMetrics);
   const [orderSeed] = useState(() => Math.floor(Math.random() * 0x7fffffff));
+  const gestureDebug = useMemo(
+    () => typeof window !== 'undefined' && new URLSearchParams(window.location.search).has('gestures'),
+    [],
+  );
   // 详情页仍保留进入前那条列表的页签高亮（详情本身没有页签）。
   const [railView, setRailView] = useState<RailView>('home');
 
@@ -78,6 +88,16 @@ export function App() {
   const wallRef = useRef(wall);
   const wallControls = useRef<WallControls | null>(null);
   wallRef.current = wall;
+
+  useEffect(() => {
+    if (!spotlightItem) setSpotlightAnchor(null);
+  }, [spotlightItem]);
+
+  useEffect(() => {
+    const onResize = () => setLayout(readLayoutMetrics());
+    window.addEventListener('resize', onResize);
+    return () => window.removeEventListener('resize', onResize);
+  }, []);
 
   const detailId = route.view === 'detail' ? route.id : null;
   const queryActive = isFilterActive(filters);
@@ -123,6 +143,14 @@ export function App() {
     if (!detailItem) return orderedItems;
     return shown.some((entry) => entry.id === detailItem.id) ? shown : orderedItems;
   }, [detailItem, shown, orderedItems]);
+
+  const inspectorItem = detailItem && !detailInfoHidden ? detailItem : route.view !== 'detail' ? spotlightItem : null;
+  const inspectorOpen = Boolean(inspectorItem);
+  const inspectorMode: 'spotlight' | 'detail' = detailItem ? 'detail' : 'spotlight';
+  const wallInfoInset =
+    inspectorOpen && route.view !== 'detail' && layout.wide ? layout.seam + INSPECTOR_WIDTH : 0;
+  const wallInfoBottom =
+    inspectorOpen && route.view !== 'detail' && !layout.wide ? Math.round(window.innerHeight * 0.55) : 0;
 
   const signature =
     route.view +
@@ -365,7 +393,7 @@ export function App() {
 
   // 首页：视野里权重最高的几张按 OKLCH 平均。其余入口用各自封面（Q7a C）。
   useEffect(() => {
-    if (route.view !== 'wall' || focusItems.length === 0) return;
+    if (route.view !== 'wall' || spotlightItem || focusItems.length === 0) return;
     let alive = true;
     void (async () => {
       const sampled: { hex: string; weight: number }[] = [];
@@ -381,7 +409,7 @@ export function App() {
     return () => {
       alive = false;
     };
-  }, [focusItems, wall.paths, route.view]);
+  }, [focusItems, wall.paths, route.view, spotlightItem]);
 
   /** 标签/收藏/分级/分组页（含总览）的强调色来源：该入口的封面。 */
   const accentCoverId = useMemo(() => {
@@ -421,6 +449,15 @@ export function App() {
         alive = false;
       };
     }
+    if (spotlightItem) {
+      let alive = true;
+      void accentOf(spotlightItem.id, tierUrl(wall.paths, 't256', spotlightItem.id)).then((hex) => {
+        if (alive) setAccent(hex ?? FALLBACK_ACCENT);
+      });
+      return () => {
+        alive = false;
+      };
+    }
     if (accentCoverId) {
       let alive = true;
       void accentOf(accentCoverId, tierUrl(wall.paths, 't256', accentCoverId)).then((hex) => {
@@ -432,7 +469,7 @@ export function App() {
     }
     // 首页交给上面的聚合 effect；其余没有封面的页面回中性灰，不能残留上一页的颜色。
     if (route.view !== 'wall') setAccent(FALLBACK_ACCENT);
-  }, [detailItem, accentCoverId, route.view, wall.paths]);
+  }, [detailItem, spotlightItem, accentCoverId, route.view, wall.paths]);
 
   // 概要层关法：Esc、点卡片以外任何地方。
   useEffect(() => {
@@ -460,22 +497,47 @@ export function App() {
   const handleOpen = useCallback(
     (item: WallItem, _index: number, origin?: Rect) => {
       setSummaryId(null);
+      setDetailInfoHidden(false);
       returnFocusId.current = item.id;
       const reduced = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
       if (origin && !reduced) {
-        const target = containRect(item.w, item.h, window.innerWidth, window.innerHeight);
+        // 详情默认带信息检查器：落点跳过 seam + 300px；窄屏是底部 sheet，图仍全宽。
+        const areaX = layout.wide ? layout.seam + INSPECTOR_WIDTH : 0;
+        const target = containRect(
+          item.w,
+          item.h,
+          window.innerWidth - areaX,
+          window.innerHeight,
+          areaX,
+          0,
+        );
         beginExpand();
         flyImage(tierUrl(wall.paths, 't512', item.id), origin, target);
       }
       navigate(detailHref(item.id));
     },
-    [wall.paths],
+    [layout, wall.paths],
   );
 
   const handleDetail = useCallback((id: string) => {
     returnFocusId.current = id;
     setSummaryId(null);
+    setDetailInfoHidden(false);
     navigate(detailHref(id));
+  }, []);
+
+  const handleSpotlight = useCallback((item: WallItem | null, anchor?: { x: number; y: number }) => {
+    setSpotlightItem(item);
+    setSpotlightAnchor(anchor ?? null);
+  }, []);
+
+  const handleCloseInspector = useCallback(() => {
+    if (detailItem) setDetailInfoHidden(true);
+    else setSpotlightItem(null);
+  }, [detailItem]);
+
+  const handleToggleInfo = useCallback(() => {
+    setDetailInfoHidden((value) => !value);
   }, []);
 
   const handleBack = useCallback(() => {
@@ -484,42 +546,49 @@ export function App() {
 
   const handleHome = useCallback(() => {
     setFilters(EMPTY_FILTERS);
+    setSpotlightItem(null);
     navigate(wallHref());
     window.scrollTo(0, 0);
   }, []);
 
   const handleTags = useCallback(() => {
     setFilters(EMPTY_FILTERS);
+    setSpotlightItem(null);
     navigate(tagsHref());
     window.scrollTo(0, 0);
   }, []);
 
   const handleFavs = useCallback(() => {
     setFilters(EMPTY_FILTERS);
+    setSpotlightItem(null);
     navigate(favsHref());
     window.scrollTo(0, 0);
   }, []);
 
   const handleRatings = useCallback(() => {
     setFilters(EMPTY_FILTERS);
+    setSpotlightItem(null);
     navigate(ratingsHref());
     window.scrollTo(0, 0);
   }, []);
 
   const handleGroups = useCallback(() => {
     setFilters(EMPTY_FILTERS);
+    setSpotlightItem(null);
     navigate(groupsHref());
     window.scrollTo(0, 0);
   }, []);
 
   const handleOpenTag = useCallback((tag: string) => {
     setFilters(EMPTY_FILTERS);
+    setSpotlightItem(null);
     navigate(tagHref(tag));
     window.scrollTo(0, 0);
   }, []);
 
   const handleOpenBucket = useCallback((href: string) => {
     setFilters(EMPTY_FILTERS);
+    setSpotlightItem(null);
     navigate(href);
     window.scrollTo(0, 0);
   }, []);
@@ -540,7 +609,10 @@ export function App() {
             onZoomIn: () => wallControls.current?.zoomBy(1.25),
             onZoomOut: () => wallControls.current?.zoomBy(1 / 1.25),
             onZoomReset: () => wallControls.current?.zoomReset(),
-            onHome: () => wallControls.current?.goHome(),
+            onHome: () => {
+              setSpotlightItem(null);
+              wallControls.current?.goHome();
+            },
             homeTitle: infiniteHome ? '回到起点（Home）' : '回到顶部（Home）',
           },
     [infiniteHome, route.view],
@@ -607,8 +679,22 @@ export function App() {
 
   const loadingBuckets = !allLoaded && wall.hasMore;
 
+  const inspector = inspectorItem
+    ? {
+        item: inspectorItem,
+        items: detailItem ? detailBrowseItems : shown,
+        paths: wall.paths,
+        mode: inspectorMode,
+        onClose: handleCloseInspector,
+        onOpenDetail: handleDetail,
+        onBack: detailItem ? handleBack : undefined,
+        onTagClick: handleOpenTag,
+        onSimilar: handleDetail,
+      }
+    : null;
+
   return (
-    <div className="app">
+    <div className={'app' + (inspectorOpen ? ' has-inspector' : '')}>
       <Sidebar
         view={railView}
         onHome={handleHome}
@@ -627,6 +713,9 @@ export function App() {
         focusItem={focusItems[0] ?? null}
         canvas={canvasOps}
         detail={detailOps}
+        inspector={inspector}
+        detailInfoHidden={detailItem ? detailInfoHidden : undefined}
+        onToggleInfo={detailItem ? handleToggleInfo : undefined}
       />
 
       <main className="stage">
@@ -636,9 +725,10 @@ export function App() {
               item={detailItem}
               items={detailBrowseItems}
               paths={wall.paths}
+              infoOpen={!detailInfoHidden}
               onBack={handleBack}
               onOpenDetail={handleDetail}
-              onTagClick={handleOpenTag}
+              onToggleInfo={handleToggleInfo}
             />
           ) : (
             <p className="stage__hint">
@@ -705,6 +795,11 @@ export function App() {
               tagCounts={tagCounts}
               emptyText={emptyText}
               emptyHint={emptyHint}
+              spotlightId={spotlightItem?.id ?? null}
+              spotlightAnchor={spotlightAnchor}
+              onSpotlightChange={handleSpotlight}
+              infoInset={wallInfoInset}
+              infoInsetBottom={wallInfoBottom}
               onLoadMore={handleLoadMore}
               onOpen={handleOpen}
               onSummary={handleSummary}
@@ -723,6 +818,7 @@ export function App() {
           </p>
         ) : null}
       </main>
+      {gestureDebug ? <GestureDebug /> : null}
     </div>
   );
 }

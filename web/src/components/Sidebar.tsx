@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState, type ReactNode } from 'react';
 import { formatCount } from '../lib/format';
 import './sidebar.css';
+import { Inspector, type InspectorProps } from './Inspector';
 import { EMPTY_FILTERS, type FilterState } from '../state/filters';
 import type { WallItem } from '../source/types';
 
@@ -186,6 +187,11 @@ export interface SidebarProps {
   focusItem?: WallItem | null;
   canvas?: CanvasOps | null;
   detail?: DetailOps | null;
+  /** 当前聚焦/详情图的信息检查器；null 时不渲染。 */
+  inspector?: InspectorProps | null;
+  /** 详情页信息栏是否收起（undefined = 不显示信息开关）。 */
+  detailInfoHidden?: boolean;
+  onToggleInfo?: () => void;
 }
 
 /**
@@ -211,6 +217,9 @@ export function Sidebar({
   focusItem,
   canvas,
   detail,
+  inspector,
+  detailInfoHidden,
+  onToggleInfo,
 }: SidebarProps) {
   const [panel, setPanel] = useState<PanelId | null>(null);
   const panelRef = useRef<HTMLDivElement | null>(null);
@@ -395,6 +404,16 @@ export function Sidebar({
             >
               {ICON_NEXT}
             </button>
+            {detailInfoHidden !== undefined && onToggleInfo ? (
+              <button
+                type="button"
+                className={'seam__tab seam__tab--icon' + (detailInfoHidden ? '' : ' is-on')}
+                onClick={onToggleInfo}
+                title={detailInfoHidden ? '显示信息（I）' : '收起信息（I）'}
+              >
+                {ICON_INFO}
+              </button>
+            ) : null}
             <span className="seam__count">
               {String(detail.index + 1).padStart(2, '0')} / {formatCount(detail.total)}
             </span>
@@ -501,6 +520,8 @@ export function Sidebar({
           ) : null}
         </div>
       ) : null}
+
+      {inspector ? <Inspector key={inspector.item.id} {...inspector} /> : null}
     </>
   );
 }

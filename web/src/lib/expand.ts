@@ -26,13 +26,20 @@ export function expanding(): boolean {
   return performance.now() < windowUntil;
 }
 
-/** contain 模式下图片实际占用的矩形（原点=视口左上）。 */
-export function containRect(nw: number, nh: number, vw: number, vh: number): Rect {
-  if (!nw || !nh || !vw || !vh) return { x: 0, y: 0, w: vw, h: vh };
+/** contain 模式下图片实际占用的矩形；(offsetX, offsetY) 用于详情让开侧栏检查器后的内容区。 */
+export function containRect(
+  nw: number,
+  nh: number,
+  vw: number,
+  vh: number,
+  offsetX = 0,
+  offsetY = 0,
+): Rect {
+  if (!nw || !nh || !vw || !vh) return { x: offsetX, y: offsetY, w: vw, h: vh };
   const scale = Math.min(vw / nw, vh / nh);
   const w = nw * scale;
   const h = nh * scale;
-  return { x: (vw - w) / 2, y: (vh - h) / 2, w, h };
+  return { x: offsetX + (vw - w) / 2, y: offsetY + (vh - h) / 2, w, h };
 }
 
 /**

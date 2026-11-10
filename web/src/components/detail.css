@@ -1,8 +1,5 @@
-/* nav-detail · 全屏详情：B2 的修复 + 窄屏换行（photo-wall-v3 §2.2 / §3 规则 7 / 10）
-
-   结构：.view__stage（裁切窗口）→ .view__track（水平轨道，niri 式滑动）→
-   .view__pane（一屏 = 图 + 信息层，整屏跟着图走）。
-   styles.css 后加载，覆盖统一靠 .view--detail 前缀的特异性。 */
+/* v4 详情：画面只留图，信息在左侧检查器。
+   stage 在检查器展开时让出 seam + 300px；≤900px 检查器是底部 sheet，图仍全宽。 */
 
 .view--detail .view__stage {
   position: absolute;
@@ -11,8 +8,12 @@
   overflow: hidden;
 }
 
+.view--detail.view--detail-info .view__stage {
+  left: calc(var(--seam-w) + var(--inspector-w, 0px));
+}
+
 /* 轨道常驻在 -100%：三格里永远显示中间那格。滑动的起止都从这格出发，
-   动画结束换内容时画面不变（旧格移走的那帧和新格就位的那帧是同一张图）。 */
+   动画结束换内容时画面不变。 */
 .view--detail .view__track {
   position: absolute;
   inset: 0;
@@ -54,15 +55,11 @@
   overflow: hidden;
 }
 
-/* 大图：撑满 pane（contain 保比例，绝不裁切）。以前 width/height:100% 写在
-   grid 自动行的子项上高度解析不出，图按原始比例撑出视口、底部被裁——
-   现在 media 与 img 都用绝对定位钉死在 pane 里，盒子就是视口本身。 */
+/* 大图：撑满 pane（contain 保比例，绝不裁切）。 */
 .view--detail .view__media {
   position: absolute;
   inset: 0;
   display: block;
-  /* styles.css 的基础值给了 28px padding，会把 contain 图从四边缩进来，
-     顶部就出现一条"黑条遮挡"。详情图要贴到视口边缘，letterbox 交给 contain。 */
   padding: 0;
   /* 触摸手势全部交给图片自己：单指横滑换图、双指缩放、放大后拖拽。 */
   touch-action: none;
@@ -85,9 +82,7 @@
   object-fit: contain;
 }
 
-/* 双击展开（lib/expand.ts）：克隆图飞行期间把真实内容蒙住，落位后露出。
-   1ms 动画 + 440ms delay + both：延迟期内停在 opacity:0，之后一直可见，
-   不需要 JS 计时器去摘类名。 */
+/* 双击展开（lib/expand.ts）：克隆图飞行期间把真实内容蒙住，落位后露出。 */
 .view--detail.view--expanding .view__track {
   animation: track-reveal 1ms 440ms both;
 }
@@ -105,306 +100,9 @@
   z-index: 1;
 }
 
-/* ===== 信息层：自己的滚动容器（B2） ===== */
-
-.view--detail .view__scroll {
-  position: absolute;
-  inset: 0;
-  z-index: 2;
-  overflow-x: hidden;
-  overflow-y: auto;
-  overscroll-behavior: contain;
-  /* 透明区域必须让指针穿到下面的图上，否则整屏都被信息层拦住，
-     双指缩放/横滑永远收不到事件。真正的内容（.view__info）再单独接指针。 */
-  pointer-events: none;
-  scrollbar-color: rgba(247, 244, 238, 0.2) transparent;
-  scrollbar-width: thin;
-}
-
-.view--detail .view__scroll::-webkit-scrollbar {
-  width: 8px;
-}
-
-.view--detail .view__scroll::-webkit-scrollbar-track {
-  background: transparent;
-}
-
-.view--detail .view__scroll::-webkit-scrollbar-thumb {
-  border-radius: 4px;
-  background: rgba(247, 244, 238, 0.16);
-}
-
-.view--detail .view__scroll::-webkit-scrollbar-thumb:hover {
-  background: rgba(247, 244, 238, 0.26);
-}
-
-.view--detail .view__inner {
-  display: flex;
-  flex-direction: column;
-  min-height: 100%;
-  pointer-events: none;
-}
-
-/* 内容不满一屏时贴底；超长时随内容长高并从头滚动（不用 justify-content:center，
-   那会让溢出部分滚不到）。 */
-.view--detail .view__info {
-  position: static;
-  display: flex;
-  flex-direction: row;
-  align-items: flex-end;
-  justify-content: space-between;
-  gap: clamp(18px, 3vw, 48px);
-  margin-top: auto;
-  /* D1：.view 是 fixed inset:0，但左侧 .seam（z-index 40 > .view 的 30）浮在上面，
-     所以内容层必须自己让开 --seam-w；桌面 120px、≤900px 时 64px（styles.css 覆盖该变量）。
-     图（.view__media）不动，仍然占满全屏。 */
-  padding: clamp(72px, 15vh, 150px) clamp(14px, 3vw, 40px) clamp(18px, 3vh, 34px)
-    calc(var(--seam-w) + 24px);
-  background: linear-gradient(
-    180deg,
-    rgba(5, 5, 5, 0) 0%,
-    rgba(5, 5, 5, 0.5) 32%,
-    rgba(5, 5, 5, 0.9) 64%,
-    /* 终色必须与 styles.css:951 的 .view background(#050505) 严丝合缝，
-       token --bg 是 #070707，差 2 级会在接缝处露边，所以这里写死。 */
-    #050505 100%
-  );
-  pointer-events: auto;
-  touch-action: pan-y;
-}
-
-.view--detail .view__text {
-  flex: 1 1 auto;
-  min-width: 0;
-  max-width: min(58ch, 100%);
-}
-
-/* 详情标题：§2.2 clamp(28px, 3vw, 44px)，长标题折行不截断 */
-.view--detail .view__title {
-  margin: 0;
-  color: var(--ink);
-  font-size: clamp(28px, 3vw, 44px);
-  font-weight: 600;
-  letter-spacing: -0.035em;
-  line-height: 1.02;
-  text-wrap: balance;
-  overflow-wrap: anywhere;
-  word-break: break-word;
-}
-
-.view--detail .view__meta {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: baseline;
-  margin: 10px 0 0;
-  color: rgba(247, 244, 238, 0.6);
-  font-size: 13px;
-}
-
-.view--detail .view__meta span {
-  white-space: nowrap;
-}
-
-/* 元信息之间用发丝点分隔，换行时跟着走，不出现孤零零的 "·" */
-.view--detail .view__meta span + span::before {
-  content: '·';
-  margin: 0 10px;
-  color: rgba(247, 244, 238, 0.28);
-}
-
-.view--detail .view__tags {
-  gap: 6px;
-  margin-top: 14px;
-}
-
-/* ===== 标签：按类别分组，默认只露前 18 个，展开后容器自己滚 ===== */
-
-.view--detail .view__taggroups {
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-  margin-top: 14px;
-}
-
-.view--detail .view__taggroup-list {
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-}
-
-.view--detail .view__taggroups.is-expanded .view__taggroup-list {
-  max-height: 34vh;
-  overflow-y: auto;
-  overscroll-behavior: contain;
-  padding-right: 6px;
-  scrollbar-color: rgba(247, 244, 238, 0.2) transparent;
-  scrollbar-width: thin;
-}
-
-.view--detail .view__taggroup {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-}
-
-.view--detail .view__taggroup-label {
-  color: rgba(247, 244, 238, 0.42);
-  font-size: 11px;
-  font-weight: 700;
-  letter-spacing: 0.14em;
-}
-
-.view--detail .view__taggroup-chips {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-}
-
-.view--detail .chip--more {
-  cursor: default;
-  opacity: 0.55;
-}
-
-.view--detail .view__tags-toggle {
-  align-self: flex-start;
-  margin-top: 2px;
-  padding: 5px 10px;
-  border: 0;
-  border-radius: 2px;
-  color: rgba(247, 244, 238, 0.62);
-  background: rgba(8, 8, 9, 0.42);
-  box-shadow: inset 0 0 0 1px rgba(247, 244, 238, 0.1);
-  font-size: 12px;
-  cursor: pointer;
-}
-
-.view--detail .view__tags-toggle:hover {
-  color: var(--ink);
-  background: rgba(247, 244, 238, 0.1);
-}
-
-/* 原图入口放在元信息行，不再混在标签 chip 里。 */
-.view--detail .view__original {
-  color: color-mix(in srgb, var(--accent) 62%, #fff);
-  text-decoration: none;
-  white-space: nowrap;
-}
-
-.view--detail .view__original:hover {
-  text-decoration: underline;
-}
-
-/* 详情里的标签 chip：压在图上，需要自己的底与描边 */
-.view--detail .chip {
-  display: inline-flex;
-  max-width: 100%;
-  min-height: 28px;
-  align-items: center;
-  padding: 5px 11px;
-  border-radius: 2px;
-  color: rgba(247, 244, 238, 0.82);
-  background: rgba(8, 8, 9, 0.52);
-  box-shadow: inset 0 0 0 1px rgba(247, 244, 238, 0.12);
-  font-size: 13px;
-  line-height: 1.25;
-  overflow-wrap: anywhere;
-  text-align: left;
-  transition:
-    background-color 160ms var(--ease),
-    color 160ms var(--ease);
-}
-
-.view--detail .chip:hover {
-  color: var(--ink);
-  background: rgba(247, 244, 238, 0.14);
-}
-
-/* 混色锚点必须是纯白：拿 --ink(#f7f4ee) 当锚点混出来会发米，达不到「accent 提亮」的意图 */
-.view--detail .chip--accent {
-  color: color-mix(in srgb, var(--accent) 62%, #fff);
-  background: color-mix(in srgb, var(--accent) 18%, rgba(8, 8, 9, 0.6));
-  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 40%, transparent);
-}
-
-/* ===== 右下相似条 ===== */
-
-.view--detail .view__similar {
-  display: flex;
-  max-width: 100%;
-  flex: 0 0 auto;
-  flex-direction: column;
-  align-items: flex-end;
-  gap: 8px;
-}
-
-.view--detail .view__similar-label {
-  color: rgba(247, 244, 238, 0.42);
-  font-size: 13px;
-  letter-spacing: 0.18em;
-  text-transform: uppercase;
-}
-
-.view--detail .view__similar-strip {
-  display: flex;
-  max-width: 100%;
-  gap: 6px;
-  overflow-x: auto;
-  padding-bottom: 2px;
-  scrollbar-width: none;
-}
-
-.view--detail .view__similar-strip::-webkit-scrollbar {
-  display: none;
-}
-
-.view--detail .view__similar-strip .similar__item {
-  flex: none;
-  border-radius: 4px;
-}
-
-/* ===== 窄屏（§3 规则 10：390px 可浏览） ===== */
-
-@media (max-width: 760px) {
-  .view--detail .view__info {
-    flex-direction: column;
-    align-items: stretch;
-    gap: 16px;
-    padding: clamp(56px, 12vh, 110px) 16px 20px calc(var(--seam-w) + 16px);
-  }
-
-  .view--detail .view__text {
-    max-width: 100%;
-  }
-
-  .view--detail .view__similar {
-    align-items: flex-start;
-  }
-}
-
-@media (max-width: 430px) {
-  .view--detail .view__title {
-    font-size: 27px;
-    line-height: 1.06;
-  }
-
-  .view--detail .view__info {
-    padding-right: 14px;
-    padding-left: calc(var(--seam-w) + 14px);
-  }
-
-  /* 窄屏相似条：旧版 6 张 48px 挤成 300px 的碎条，既不好点、也没有"还能滑"的暗示。
-     现在按"可视宽度放 4.5 张"反推单张宽度——4 张整、右侧露出半张，滚动意图一眼可见，
-     单张也不小于 56px（拇指可点）。用百分比而不是死值，390/414/430 下都保持同一比例；
-     max(56px, …) 保证 360 这类更窄的机型不会缩到点不准。 */
-  .view--detail .view__similar-strip {
-    width: 100%;
-    gap: 6px;
-    overscroll-behavior-x: contain;
-  }
-
-  .view--detail .view__similar-strip .similar__item {
-    width: max(56px, calc((100% - 24px) / 4.5));
-    height: auto;
-    aspect-ratio: 1;
+@media (max-width: 900px) {
+  /* 窄屏检查器是底部 sheet，图保持全宽；seam 仍在最左侧浮着。 */
+  .view--detail.view--detail-info .view__stage {
+    left: 0;
   }
 }

@@ -122,6 +122,17 @@ a {
   min-height: 100vh;
 }
 
+/* 信息检查器展开时，详情 stage 让出 seam + 300px；窄屏是底部 sheet，不占水平空间。 */
+.app.has-inspector {
+  --inspector-w: 300px;
+}
+
+@media (max-width: 900px) {
+  .app.has-inspector {
+    --inspector-w: 0px;
+  }
+}
+
 .stage {
   position: relative;
   z-index: 3;
@@ -503,6 +514,34 @@ a {
 .tile:hover {
   filter: saturate(1.08) brightness(1.05);
   z-index: 3;
+}
+
+/* ===== 单击聚焦（v4）：原位放大、相机居中、邻卡压暗；信息在左侧检查器 ===== */
+.canvas.has-spotlight .tile:not(.tile--spotlight) {
+  filter: brightness(0.55) saturate(0.85);
+  transition: filter 240ms var(--ease);
+}
+
+.tile--spotlight {
+  z-index: 12;
+  overflow: hidden;
+  box-shadow: 0 24px 64px rgba(0, 0, 0, 0.55);
+  transform-origin: 50% 50%;
+  transition:
+    transform 360ms var(--ease),
+    filter 240ms var(--ease),
+    box-shadow 240ms var(--ease);
+}
+
+.tile--spotlight:hover {
+  filter: none;
+}
+
+/* 信息已经进了检查器；聚焦卡只留图。 */
+.tile--spotlight .tile__shade,
+.tile--spotlight .tile__chip,
+.tile--spotlight .tile__copy {
+  opacity: 0;
 }
 
 /* 硬规则 6：焦点与当前项都走内描边，没有任何外发光。 */

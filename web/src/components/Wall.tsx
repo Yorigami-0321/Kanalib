@@ -60,6 +60,15 @@ export interface WallViewProps {
   emptyText?: string;
   /** 空态第二行提示；不传用「换个标签或清掉筛选再看」。 */
   emptyHint?: string;
+  /** 当前聚焦卡 id（受控）；单击卡片时由视图层上抛。 */
+  spotlightId?: string | null;
+  /** 聚焦卡的世界坐标中心；从详情返回时用它恢复聚焦位置。 */
+  spotlightAnchor?: { x: number; y: number } | null;
+  onSpotlightChange?: (item: WallItem | null, anchor?: { x: number; y: number }) => void;
+  /** 聚焦/信息栏占用的右侧宽度；相机在它之外的内容区居中。 */
+  infoInset?: number;
+  /** 窄屏底部 sheet 占用的高度；聚焦卡在它上方的可见区居中。 */
+  infoInsetBottom?: number;
   onLoadMore: () => void;
   /**
    * 展开全屏（双击 / Enter / 触屏单击）。origin 是卡片矩形，详情页用它把图片
@@ -134,6 +143,11 @@ export function WallView({
   tagCounts,
   emptyText,
   emptyHint,
+  spotlightId,
+  spotlightAnchor,
+  onSpotlightChange,
+  infoInset = 0,
+  infoInsetBottom = 0,
   onLoadMore,
   onOpen,
   onSummary,
@@ -148,6 +162,8 @@ export function WallView({
   const [camera, setCamera] = useState<Camera>({ x: 0, y: 0, zoom: 1 });
   const [dragging, setDragging] = useState(false);
   const [activeId, setActiveId] = useState<string | null>(null);
+  /** 聚焦/回起点时让 .world 的 transform 走 360ms 过渡；用户一动手就关掉。 */
+  const [cameraTween, setCameraTween] = useState(false);
 
   // 缩放比例提示（P2-9）：瞬态交互反馈，不是常驻计数——不缩放就不存在、不进焦点序列、不吃指针。
   // 四个缩放入口（Ctrl/⌘+滚轮、双指、键盘 +/-）统一走 flashZoom，由它重排同一条 800ms 计时器。
@@ -292,8 +308,17 @@ export function WallView({
   }, []);
 
   // 换筛选/换页：屏幕中央回到世界起点（格子 0,0 的中心）。
+  const firstReset = useRef(true);
+  const spotlightIdRef = useRef(spotlightId);
+  spotlightIdRef.current = spotlightId;
   useEffect(() => {
-    setActiveId(null);
+    // 首次挂载可能是从详情返回：保留 App 传进来的聚焦卡；之后的筛选/换页才清空。
+    const currentSpotlight = spotlightIdRef.current;
+    const keepSpotlight = firstReset.current && currentSpotlight;
+    firstReset.current = false;
+    setActiveId(keepSpotlight ? currentSpotlight : null);
+    if (!keepSpotlight) onSpotlightChange?.(null);
+    setCameraTween(false);
     // 上一轮的撞墙回弹不能跨筛选/换页带到新画面。
     stopBounce();
     if (infinite) {
@@ -303,7 +328,7 @@ export function WallView({
     }
     const cam = cameraRef.current;
     moveCamera({ x: Math.max(0, (worldWidth * cam.zoom - viewWidth) / 2), y: 0, zoom: cam.zoom });
-  }, [resetKey]);
+  }, [resetKey, onSpotlightChange]);
 
   // 视口变窄/旋转/世界重排后，相机可能留在越界位置（典型症状：390 宽时右侧空一大条）。
   // 这里把相机夹回合法区间——只在真的越界时才写状态，避免自激重渲染。
@@ -468,10 +493,16 @@ export function WallView({
     [],
   );
 
-  /** 让世界坐标 (wx, wy) 落在视口中心。 */
+  /** 让世界坐标 (wx, wy) 落在内容区中心；rightInset/bottomInset 为聚焦时侧栏/sheet 占用的空间。 */
   const centerOnWorld = useCallback(
-    (wx: number, wy: number, zoom = cameraRef.current.zoom) => {
-      moveCameraRef.current({ zoom, x: wx * zoom - viewWidth / 2, y: wy * zoom - size.h / 2 });
+    (wx: number, wy: number, zoom = cameraRef.current.zoom, rightInset = 0, bottomInset = 0) => {
+      const availableW = Math.max(200, viewWidth - rightInset);
+      const availableH = Math.max(200, size.h - bottomInset);
+      moveCameraRef.current({
+        zoom,
+        x: wx * zoom - rightInset - availableW / 2,
+        y: wy * zoom - availableH / 2,
+      });
     },
     [size.h, viewWidth],
   );
@@ -573,6 +604,7 @@ export function WallView({
     const interactive = element?.closest(INTERACTIVE);
     if (interactive && !interactive.classList.contains('tile')) return;
     stopInertia();
+    setCameraTween(false);
     // 新手势从合法相机重新起算：上一轮未走完的回弹直接归零。
     stopBounce();
     const host = event.currentTarget as HTMLElement;
@@ -739,18 +771,18 @@ export function WallView({
       return;
     }
     const rawIndex = tile?.dataset.index;
-    if (rawIndex === undefined) return;
+    if (rawIndex === undefined) {
+      // 点空白 = 退出聚焦；同时清掉双击记忆，避免下一次点卡被误判成双击。
+      lastClick.current = null;
+      setActiveId(null);
+      onSpotlightChange?.(null);
+      return;
+    }
     const index = Number(rawIndex);
     const item = items[index];
     if (!item) return;
-    // 触屏没有 hover 也没有双击习惯：单击直接展开（长按概要是另一条路）。
-    if (event.pointerType !== 'mouse') {
-      setActiveId(item.id);
-      onOpen(item, index, rectOf(tile));
-      return;
-    }
-    // 鼠标：单击=选中高亮（内描边），双击=展开全屏。高亮立刻给反馈，
-    // 双击用同一张卡 360ms 内的第二次抬起判定，不做延迟计时器。
+    // 鼠标/触屏统一：第一次抬起 = 聚焦（原位放大 + 信息栏）；同一张卡 360ms
+    // 内的第二次抬起 = 展开全屏详情。长按概要仍是另一条路。
     const now = performance.now();
     const last = lastClick.current;
     if (last && last.id === item.id && now - last.t < 360) {
@@ -761,6 +793,15 @@ export function WallView({
     }
     lastClick.current = { id: item.id, t: now };
     setActiveId(item.id);
+    const box = tile?.getBoundingClientRect();
+    const cam = cameraRef.current;
+    const anchor = box
+      ? {
+          x: (box.left + box.width / 2 - worldInset + cam.x) / cam.zoom,
+          y: (box.top + box.height / 2 + cam.y) / cam.zoom,
+        }
+      : undefined;
+    onSpotlightChange?.(item, anchor);
   };
 
   const onPointerCancel = (event: React.PointerEvent<HTMLDivElement>) => {
@@ -796,8 +837,15 @@ export function WallView({
         return;
       }
       // deltaMode：0=像素、1=行、2=页。触控板给的是像素，鼠标滚轮常给行。
-      const scale = event.deltaMode === 1 ? 16 : event.deltaMode === 2 ? sizeRef.current.h : 1;
-      moveCameraRef.current({ ...cam, y: cam.y + event.deltaY * scale });
+      const unit = event.deltaMode === 1 ? 16 : event.deltaMode === 2 ? sizeRef.current.h : 1;
+      const dx = event.deltaX * unit;
+      const dy = event.deltaY * unit;
+      // Shift+wheel 是鼠标横向滚动的兜底；触控板双指横滑直接给 deltaX。
+      const horizontal = event.shiftKey && Math.abs(dx) < 0.5 ? dy : dx;
+      const vertical = event.shiftKey && Math.abs(dx) < 0.5 ? 0 : dy;
+      if (Math.abs(horizontal) + Math.abs(vertical) < 0.2) return;
+      setCameraTween(false);
+      moveCameraRef.current({ ...cam, x: cam.x + horizontal, y: cam.y + vertical });
     };
     host.addEventListener('wheel', onWheelNative, { passive: false });
     return () => host.removeEventListener('wheel', onWheelNative);
@@ -848,8 +896,21 @@ export function WallView({
         camera.zoom +
         ')',
       transformOrigin: '0 0',
+      transition: cameraTween ? 'transform 360ms var(--ease)' : undefined,
     }),
-    [bounce.x, bounce.y, camera, infinite, layout.height, origin.x, origin.y, size.h, worldInset, worldWidth],
+    [
+      bounce.x,
+      bounce.y,
+      camera,
+      cameraTween,
+      infinite,
+      layout.height,
+      origin.x,
+      origin.y,
+      size.h,
+      worldInset,
+      worldWidth,
+    ],
   );
 
   const slice = useMemo(() => {
@@ -931,6 +992,79 @@ export function WallView({
         : layout.tiles.slice(slice.start, slice.end),
     [cellTiles, infinite, layout.tiles, origin.x, origin.y, slice.start, slice.end],
   );
+  // 聚焦卡：等它进入当前可见集合后，把相机移到内容区中心；infoInset 变化（信息栏开合）也重新居中。
+  const spotlightKey = spotlightId
+    ? spotlightId +
+      ':' +
+      (spotlightAnchor ? spotlightAnchor.x + ',' + spotlightAnchor.y : 'n') +
+      ':' +
+      infoInset +
+      ':' +
+      infoInsetBottom
+    : null;
+  const centeredSpot = useRef<string | null>(null);
+  useEffect(() => {
+    if (!spotlightId || !spotlightKey) {
+      centeredSpot.current = null;
+      return;
+    }
+    if (centeredSpot.current === spotlightKey) return;
+    let target = spotlightAnchor;
+    if (!target) {
+      const tile = visible.find((entry) => entry.item.id === spotlightId);
+      if (!tile) return;
+      target = {
+        x: tile.rect.x + tile.rect.w / 2 + origin.x,
+        y: tile.rect.y + tile.rect.h / 2 + origin.y,
+      };
+    }
+    centeredSpot.current = spotlightKey;
+    setCameraTween(true);
+    centerOnWorld(target.x, target.y, camera.zoom, infoInset, infoInsetBottom);
+    const timer = window.setTimeout(() => setCameraTween(false), 430);
+    return () => window.clearTimeout(timer);
+  }, [spotlightId, spotlightAnchor, spotlightKey, visible, origin.x, origin.y, camera.zoom, infoInset, infoInsetBottom, centerOnWorld]);
+
+  // 检查器关闭（spotlightId 变 null）时，选中内描边也跟着收掉。
+  useEffect(() => {
+    if (!spotlightId) setActiveId(null);
+  }, [spotlightId]);
+
+  // Esc 退出聚焦；侧栏面板打开的 Esc 归面板处理。
+  useEffect(() => {
+    if (!spotlightId) return;
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== 'Escape' || event.defaultPrevented) return;
+      const target = event.target as Element | null;
+      if (target?.closest('input, textarea, select')) return;
+      if (document.querySelector('.panel')) return;
+      // 概要层自己处理 Esc；不要顺手把聚焦也关掉。
+      if (summaryId) return;
+      onSpotlightChange?.(null);
+      setActiveId(null);
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [spotlightId, summaryId, onSpotlightChange]);
+
+  const spotlightTile = spotlightId
+    ? visible.find((entry) => entry.item.id === spotlightId)
+    : undefined;
+  const availableW = Math.max(200, viewWidth - infoInset);
+  const availableH = Math.max(200, size.h - infoInsetBottom);
+  const spotlightScale = spotlightTile
+    ? Math.min(
+        2.8,
+        Math.max(
+          1,
+          Math.min(
+            (availableW * 0.56) / Math.max(1, spotlightTile.rect.w * camera.zoom),
+            (availableH * 0.74) / Math.max(1, spotlightTile.rect.h * camera.zoom),
+          ),
+        ),
+      )
+    : 1;
+
   // 对角线波次从视野左上角起算（不是世界原点）：否则滚到中段换页签时会整屏一起延迟。
   const waveLeft = camera.x / camera.zoom - origin.x;
   const waveTop = camera.y / camera.zoom - origin.y;
@@ -949,7 +1083,7 @@ export function WallView({
 
   return (
     <div
-      className={'canvas' + (dragging ? ' is-grabbing' : '')}
+      className={'canvas' + (dragging ? ' is-grabbing' : '') + (spotlightId ? ' has-spotlight' : '')}
       ref={viewportRef}
       tabIndex={0}
       role="region"
@@ -1000,6 +1134,8 @@ export function WallView({
               rect={tile.rect}
               displayScale={camera.zoom}
               current={tile.item.id === activeId}
+              spotlight={tile.item.id === spotlightId}
+              spotlightScale={tile.item.id === spotlightId ? spotlightScale : 1}
               enter={enter.on}
               enterDelay={enterDelayOf(tile.rect)}
               tagCounts={tagCounts}
