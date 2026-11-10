@@ -11,7 +11,7 @@
 | 项 | 值 |
 |---|---|
 | 分支 / HEAD | `feature/cloud-photo-wall`；轮次起点 `9c3564e`（功能键收进侧栏） |
-| 提交情况 | 工作区干净；本轮网页复查补齐已提交 `bca6cd4`…`c182557`（清单见 §9） |
+| 提交情况 | 工作区干净；v4 已提交 `5699cb5`…`4f5c369`；上一轮四入口 `bca6cd4`…`c182557`（清单见 §9） |
 | 类型检查 | `cd web && npx tsc --noEmit` → exit 0 |
 | 生产构建 | exit 0：CSS 28.15KB（gzip 6.36KB）/ JS 292.83KB（gzip 94.31KB）；体积上升来自 v4 检查器/聚焦/手势 |
 | 数据 | `web/public/data/` 9899 条 / 2 分片；**t1024/t2048 覆盖 0/9899**（这批数据全部来自已删除的 stress_10k，原图不在）；新发布器对 9899 条都写了 `sharp: 0` |
@@ -337,7 +337,7 @@ python scripts/wall_manifest_check.py web/public/data
 - **headless 的帧率不代表真机**：没有 vsync，rAF 基准约 143–145Hz；`p95 ≤33.3ms` 是"两个 60Hz 帧周期"的卡顿红线，不是刷新率。backdrop-filter 由合成器执行，headless 走 SwiftShader，**GPU 侧成本量不出来**。
 - **性能测量必须在无人改代码时跑**：HMR 重载会让探针失效，`wall_perf.mjs` 用 session 令牌判废并自动重试 3 次，报告里出现"重试 N 次"说明当时有人在改文件，数据要重跑。
 
-## 9. 本轮改动清单（v4）
+## 9. 本轮改动清单（v4，已提交 `5699cb5`…`4f5c369`）
 
 ```text
  M web/src/App.tsx                       （聚焦/检查器状态、详情让位、触控板、诊断开关）
