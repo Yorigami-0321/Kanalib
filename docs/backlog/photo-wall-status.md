@@ -198,7 +198,7 @@ Lead 统筹，编码分给三个 teammate（写域隔离，只有 verifier 能 b
 | Q7a 强调色分层 | 标签页/总览不取封面，详情色会残留到下一页 | 首页聚合视野；标签/收藏/分级/分组（总览与二级墙）用该入口封面；详情用本图；无封面回中性灰 | 标签总览 `rgb(186,163,87)` = 首个通用封面的黄；`1girl` 同色；`outdoors` `rgb(167,144,210)`；详情用本图色 |
 | 排序 | 无限首页的排序只改变随机池，画面仍随机；排序控件等于无效 | `sort !== random` 时首页切为有限有序墙（`infiniteHome` 只在随机且无搜索时成立） | 切「文件名」后可见卡 `data-index` 0–14，名称严格升序；回到随机恢复无限 |
 | 搜索范围 | 仅在已加载分片上过滤；筛选后停止拉全库 | 所有列表/总览页 `needAll=true`，分片拉全后再过滤；搜索面板只筛文件名 | 搜 `synthetic_00001`（第二分片）命中 1 张；`#/r/G` 计数 9,899 与库一致 |
-| W4 noindex | index.html 写死 `noindex, nofollow`，与「公开只读、默认可收录」相反 | 去掉静态 noindex；需要私密部署时在托管层加 `X-Robots-Tag` 或重新加 meta | 浏览器 `meta[name=robots]` 为 null |
+| W4 noindex | index.html 写死 `noindex, nofollow`，与「公开只读、默认可收录」相反 | 去掉静态 noindex；需要私密部署时在托管层加 `X-Robots-Tag` 或重新加 meta。**2026-11-10 用户改选「公开但 noindex」，已恢复 meta（见 §5.2.1）** | 浏览器 `meta[name=robots]` 为 `noindex, nofollow` |
 | Q4 切页 | 总览/二级墙无淡入 | `.tags` 与 `.wallhead` 加 350ms `page-in` 淡入 | 总览首屏截图正常；无位移 |
 | 代码 | `styles.css` 3009 行，二级墙/标签/详情区块重复 8 次 | 删除 6 份完全相同的副本与 1 份重复的二级墙/标签段；保留概要层与最终生效的详情基底 | 3009 → 1288 行；tsc/构建/wall_shots 全过，截图无回归 |
 

@@ -69,6 +69,7 @@ VITE_WALL_DATA=./wall_export/
 `vite.config.ts` 里 `base: './'`，因此可以部署在任意子路径（例如 `https://host/photos/`），不需要改配置。
 
 数据目录与站点同源时直接放 `dist/data/`；数据放 CDN 时用 `VITE_WALL_DATA` 指过去（注意 CORS：`index.json` 与分片需要允许跨域读取）。
+当前 `index.html` 已按 2026-11-10 的决定写入 `<meta name="robots" content="noindex, nofollow">`；若以后要允许收录，移除该 meta 或在托管层覆盖。
 
 ## 数据层
 
