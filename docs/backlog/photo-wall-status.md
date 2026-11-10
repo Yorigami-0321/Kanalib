@@ -18,7 +18,7 @@
 | 提交情况 | v5.2 代码/测试已提交 `029edc7`…`39fcf71`；v4 `5699cb5`…`4f5c369`；四入口 `bca6cd4`…`c182557`（清单见 §9；本行数据随文档提交） |
 | 类型检查 | `cd web && npx tsc --noEmit` → exit 0 |
 | 生产构建 | exit 0：CSS 33.89KB（gzip 7.51KB）/ JS 303.55KB（gzip 98.04KB）；v5 增量来自渐进加载、环境层、放映与新交互，v5.1 单色/留白，v5.2 锚定挤压 + 键盘焦点平移 |
-| 数据 | 合成库 `web/public/data/` 9899 条（t1024/t2048 0/9899，仅用于回归）；**真实库 `web/public/data-bili/`** 937 条、t1024 785（83.8%）、t2048 346（36.9%）、2,000 facets 标签 / 73 分组，源 `D:\Pictures\bili` 只读；两目录均在 `.gitignore` |
+| 数据 | **默认数据 `web/public/data/` 已是真实库**：937 条、t1024 785（83.8%）、t2048 346（36.9%）、2,000 facets 标签 / 73 分组；源 `D:\Pictures\bili` 只读。合成 9899 条与测试图片已按用户要求删除（清单见 `.kanalib/cleanup-manifest-2026-11-10*.json`） |
 | 验证产物 | `web/screenshots/probe/probe.json` + home/mono/spotlight/detail/detail-slide/detail-next/matte/playing/tags/tag/tag-focus/home-390.png（v5/v5.1 视觉 + 单色/留白 + 放映 + 复制深链）、`web/screenshots/final3/report.json`（四页+交互+390+双指，failures 空）、`web/screenshots/perf-report.json`（30s 拖拽/对比度） |
 | 改动前备份 | 本轮改动前状态由 `a491b85` 保存，可直接 git 回退；未另建目录备份 |
 
@@ -316,7 +316,8 @@ Lead 统筹，编码分给三个 teammate（写域隔离，只有 verifier 能 b
 
 - 源：952 个文件 / 2.12 GiB（952 个图片扩展名，无 `.kanalib` 侧车）。扫描前后记录 `source-before.json` 并逐文件比对路径、大小、mtime：**完全一致**，未在源目录写任何文件。
 - 隔离数据根：`.kanalib/bili-real`（DB/缩略图在这里，55 MiB）；首次 headless 扫描 206s：imported 952、unchanged 0、thumb_errors 1（`bili2/maomi_...png` 是坏 PNG）、exact 重复 13 组；`KANALIB_SKIP_TAG=1` 先跑通视觉链路。
-- 导出到 `web/public/data-bili`（404 MiB，已加入 `web/.gitignore`）：**937 条**（重复 id 14、宽高 0 一条）；t512/t256 覆盖 937/937，t1024 **785/937（83.8%）**，t2048 **346/937（36.9%）**；`sharp` 声明 937 条；`wall_manifest_check.py` 0 警告。
+- 导出到默认 `web/public/data`（405 MiB，已加入 `web/.gitignore`）：**937 条**（重复 id 14、宽高 0 一条）；t512/t256 覆盖 937/937，t1024 **785/937（83.8%）**，t2048 **346/937（36.9%）**；`sharp` 声明 937 条；未打标版本 manifest 0 警告，打标后 1,244 条 `rating`/`style` 类别透传警告（非错误）。
+- 2026-11-10 用户要求“之后默认真实库，把测试用图片全部删掉”：`web/public/data-bili` 已改名为默认 `data`；删除 `data-synthetic`、`web/dist`、`web/screenshots` 及 `.kanalib` 下 42 个测试图库/证据目录、根目录 211 张测试截图与 4 个测试浏览器 profile，共 **176,657 张图 / 3.27GB**；保留 `bili-real`（真实派生 DB/缩略图，67MB）、`backups`、文档和清理清单。
 - 真实库视觉探针（937 条）：首屏 72 卡、pending 0；详情实际加载 **t1024**；聚焦 `strips: 0`、点邻卡 `anchorDelta.x: 0`、相机未居中；Tab 6/6 在视口内；console errors 空。
 - 实库暴露的基础格位问题：`pickStrip` 允许第一张竖图只有 60px 宽，标题被切；已改为所有入选卡先过 `min(行宽×0.45, 96)`，整行无宽卡才降级。合成库 gate 复测邻卡最小宽度 62→116px。
 - 打标（sidecar，模型/runtime 从项目根只读接入隔离根）：951/952 成功、1 张 6496×18898 报 `image too large`；写入 **40,095** 条标签链接；扫描/打标期间源目录逐文件比对仍完全一致。

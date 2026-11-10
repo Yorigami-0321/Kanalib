@@ -52,7 +52,7 @@ npm run preview    # http://127.0.0.1:4273，服务 dist/
 
 ### 指向真实数据目录
 
-默认数据根是站点相对的 `./data/`。若数据由别的域名/CDN 提供，构建（或 dev 时的 `.env.local`）里覆盖：
+默认数据根是站点相对的 `./data/`。本地工作区现在默认就是 `D:\Pictures\bili` 的真实库导出（937 条）；合成库与测试图片已按用户要求清理。若数据由别的域名/CDN 提供，构建（或 dev 时的 `.env.local`）里覆盖：
 
 ```bash
 # .env.local（web/ 下，已被 .gitignore 忽略）
