@@ -58,6 +58,16 @@ export function gridImageAttrs(
   };
 }
 
+/** 聚焦卡：只取 sharp 声明存在的锐利档，最后 t512；不拿未产出的档去 404。 */
+export function spotlightSources(paths: TierPaths, item: WallItem): string[] {
+  const sources: string[] = [];
+  const sharp = item.sharp;
+  if (sharp !== undefined && sharp >= 2048) sources.push(tierUrl(paths, 't2048', item.id));
+  if (sharp !== undefined && sharp >= 1024) sources.push(tierUrl(paths, 't1024', item.id));
+  sources.push(tierUrl(paths, 't512', item.id));
+  return sources;
+}
+
 /** 详情页大图：原图 → 声明的锐利档（高→低）→ t512；旧数据缺 sharp 时逐档试探。 */
 export function detailSources(paths: TierPaths, item: WallItem): string[] {
   const sources: string[] = [];

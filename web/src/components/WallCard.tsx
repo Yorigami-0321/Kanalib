@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { detailSources, gridImageAttrs, gridSources } from '../lib/assetUrl';
+import { gridImageAttrs, gridSources, spotlightSources } from '../lib/assetUrl';
 import type { Rect } from '../lib/expand';
 import { formatCount, formatDateTime, formatSize, ratingLabel } from '../lib/format';
 import { titleSizeForWidth } from '../lib/world';
@@ -13,10 +13,8 @@ export interface WallCardProps {
   rect: TileRect;
   /** 画布相机缩放；用于按屏幕实际宽度选缩略档（srcset）。 */
   displayScale?: number;
-  /** 单击聚焦：卡片原位放大、压暗邻卡、信息进侧栏。 */
+  /** 单击聚焦：卡片在布局里占更大的 rect（周围图被挤开），信息进侧栏。 */
   spotlight?: boolean;
-  /** 聚焦时的 CSS scale；1 表示只居中不缩放。 */
-  spotlightScale?: number;
   /** 这张卡是不是"当前项"（刚点开 / 刚右键看概要的那一张）。 */
   current?: boolean;
   /**
@@ -65,7 +63,6 @@ export function WallCard({
   rect,
   displayScale = 1,
   spotlight = false,
-  spotlightScale = 1,
   current,
   enter = false,
   enterDelay = 0,
@@ -75,17 +72,17 @@ export function WallCard({
   onOpen,
   onSummary,
 }: WallCardProps) {
-  // 网格用 t256/t512；聚焦时换成详情档（原图 → t2048 → t1024 → t512）。
-  const sources = spotlight ? detailSources(paths, item) : gridSources(paths, item);
+  // 网格用 t256/t512；聚焦时按 sharp 声明换锐利档（t2048/t1024 → t512）。
+  const sources = spotlight ? spotlightSources(paths, item) : gridSources(paths, item);
   const [tierIndex, setTierIndex] = useState(0);
   const [failed, setFailed] = useState(false);
   const [loaded, setLoaded] = useState(false);
 
-  // 聚焦切换时换一套 sources，失败档与加载态必须归零。
+  // 聚焦切换时换一套 sources，失败档归零；加载态不重置——已经显示的图继续可见，
+  // 等新档 onLoad 再换帧（否则缓存图先 load、effect 后跑会把 is-loaded 永久清掉）。
   useEffect(() => {
     setTierIndex(0);
     setFailed(false);
-    setLoaded(false);
   }, [spotlight, item.id]);
 
   // updater 必须是纯函数（StrictMode 下会跑两次），降级判定放在外面。
@@ -125,7 +122,6 @@ export function WallCard({
         top: rect.y,
         width: rect.w,
         height: rect.h,
-        transform: spotlight && spotlightScale !== 1 ? `scale(${spotlightScale})` : undefined,
         animationDelay: enter && enterDelay > 0 ? enterDelay + 'ms' : undefined,
       }}
       onContextMenu={handleContextMenu}
@@ -150,7 +146,10 @@ export function WallCard({
           srcSet={gridAttrs?.srcSet}
           sizes={gridAttrs?.sizes}
           alt={item.n}
-          loading="lazy"
+          // 画布本身已经把 DOM 限制在视口附近，再叠加浏览器懒加载会因为 .world 的
+          // translate 只触发左上角一小撮，其余卡一直是空的。这里全量即时加载。
+          loading="eager"
+          fetchPriority={spotlight ? 'high' : 'auto'}
           decoding="async"
           draggable={false}
           onLoad={() => setLoaded(true)}

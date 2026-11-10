@@ -391,3 +391,193 @@ export function cellTilesInView(
   }
   return tiles;
 }
+
+/* ===== v4 单击聚焦：原位重排（不是浮层缩放） =====
+ *
+ * 用户要的是"点开一张，周围的图被挤开，所有图仍在同一层"。
+ * - 无限画布：重排被点中的那个格子（格子边界不变，邻格不动），英雄卡占左上大块，
+ *   右边一列 + 底部一片网格装下该格其余条目；
+ * - 有限墙：英雄卡放在世界顶部的大块，前几张其余图放右侧列，剩下的顺延到下方行。
+ */
+
+interface GridEntry {
+  item: WallItem;
+  index: number;
+}
+
+function gridRects(
+  entries: readonly GridEntry[],
+  box: { x: number; y: number; w: number; h: number },
+  columns: number,
+  gap: number,
+): { item: WallItem; index: number; rect: TileRect }[] {
+  const count = entries.length;
+  if (count === 0) return [];
+  const cols = Math.max(1, Math.min(columns, count));
+  const rows = Math.ceil(count / cols);
+  const cellW = Math.max(1, (box.w - gap * (cols - 1)) / cols);
+  const cellH = Math.max(1, (box.h - gap * (rows - 1)) / rows);
+  return entries.map((entry, position) => {
+    const row = Math.floor(position / cols);
+    const col = position % cols;
+    return {
+      item: entry.item,
+      index: entry.index,
+      rect: {
+        x: box.x + col * (cellW + gap),
+        y: box.y + row * (cellH + gap),
+        w: cellW,
+        h: cellH,
+      },
+    };
+  });
+}
+
+/** 重排一个格子：hero 占左上大块，右侧列 + 底部网格装下同格其余条目。 */
+export function layoutSpotlightCell(spec: CellSpec, b: number, c: number, heroId: string): PlacedTile[] {
+  const normal = layoutCell(spec, b, c);
+  const hero = normal.find((tile) => tile.item.id === heroId);
+  if (!hero || normal.length <= 1) return normal;
+
+  const gap = spec.gap;
+  const innerW = Math.max(1, spec.cellWidth - gap);
+  const innerH = Math.max(1, spec.cellHeight - gap);
+  const originX = c * spec.cellWidth;
+  const originY = b * spec.cellHeight;
+  const cell = { b, c };
+  const ratio = hero.item.w > 0 && hero.item.h > 0 ? hero.item.w / hero.item.h : 1;
+  const narrow = innerW < 620;
+
+  let heroW: number;
+  let heroH: number;
+  if (narrow) {
+    // 窄格子：英雄整行，底下用 2–3 列网格装其余图。
+    heroW = innerW;
+    heroH = Math.min(innerH * 0.62, Math.max(innerH * 0.42, innerW / ratio));
+  } else {
+    const maxW = innerW * 0.62;
+    const maxH = innerH * 0.7;
+    heroW = maxW;
+    heroH = maxW / ratio;
+    if (heroH > maxH) {
+      heroH = maxH;
+      heroW = maxH * ratio;
+    }
+    // 至少给右侧列/底部留出 140/110px，不然周围图会缩成细条。
+    heroW = Math.min(heroW, innerW - gap - 140);
+    heroH = Math.min(heroH, innerH - gap - 110);
+    heroW = Math.max(innerW * 0.46, heroW);
+    heroH = Math.max(innerH * 0.46, heroH);
+  }
+
+  const out: PlacedTile[] = [
+    { item: hero.item, index: hero.index, rect: { x: originX, y: originY, w: heroW, h: heroH }, cell },
+  ];
+  const rest = normal
+    .filter((tile) => tile.item.id !== heroId)
+    .map((tile) => ({ item: tile.item, index: tile.index }));
+
+  if (narrow) {
+    const bottom = { x: originX, y: originY + heroH + gap, w: innerW, h: Math.max(1, innerH - heroH - gap) };
+    const cols = Math.max(2, Math.min(4, Math.ceil(rest.length / 2)));
+    for (const entry of gridRects(rest, bottom, cols, gap)) {
+      out.push({ ...entry, cell });
+    }
+    return out;
+  }
+
+  const rightCount = Math.min(rest.length, Math.max(2, Math.round(rest.length * 0.35)));
+  const right = rest.slice(0, rightCount);
+  const bottom = rest.slice(rightCount);
+  const rightW = Math.max(1, innerW - heroW - gap);
+  const rightBox = { x: originX + heroW + gap, y: originY, w: rightW, h: heroH };
+  for (const entry of gridRects(right, rightBox, 1, gap)) {
+    out.push({ ...entry, cell });
+  }
+  const bottomBox = {
+    x: originX,
+    y: originY + heroH + gap,
+    w: innerW,
+    h: Math.max(1, innerH - heroH - gap),
+  };
+  const cols = Math.max(2, Math.min(6, Math.ceil(Math.sqrt(Math.max(1, bottom.length) * (bottomBox.w / bottomBox.h)))));
+  for (const entry of gridRects(bottom, bottomBox, cols, gap)) {
+    out.push({ ...entry, cell });
+  }
+  return out;
+}
+
+/** 有限墙的聚焦重排：英雄卡居中大块，其余图右侧列 + 下方正常行，全部顺延。 */
+export function layoutFeaturedWorld(
+  items: readonly WallItem[],
+  options: WorldOptions,
+  heroId: string,
+  focus: { centerX: number; viewHeight: number; bottomInset: number },
+): { tiles: LaidTile[]; height: number } {
+  const heroIndex = items.findIndex((item) => item.id === heroId);
+  if (heroIndex < 0) return layoutWorld(items, options);
+  const hero = items[heroIndex];
+  const rest: GridEntry[] = items
+    .map((item, index) => ({ item, index }))
+    .filter((entry) => entry.index !== heroIndex);
+  const { width, gap, targetHeight } = options;
+  const ratio = hero.w > 0 && hero.h > 0 ? hero.w / hero.h : 1;
+
+  // 英雄尺寸：优先按原图比例，夹到世界宽 58% / 2.3 行高；至少给右侧列留 180px。
+  const maxH = targetHeight * 2.3;
+  let heroW = Math.min(width * 0.58, maxH * ratio);
+  let heroH = heroW / ratio;
+  if (heroH > maxH) {
+    heroH = maxH;
+    heroW = maxH * ratio;
+  }
+  // 相机会把英雄移到内容区中心；世界从 x=0 起，英雄必须至少居中到 centerX。
+  let heroX = Math.max(0, Math.round(focus.centerX - heroW / 2));
+  heroW = Math.min(heroW, width - heroX);
+  const rightW = width - heroX - heroW - gap;
+  const useRightColumn = rightW >= 180;
+
+  const rightItems = useRightColumn ? rest.slice(0, Math.min(rest.length, 4)) : [];
+  const belowItems = rest.slice(rightItems.length);
+  // 顶部留白让英雄在无 bottom pad 的有限相机(>=0)里也能落在可见区中心。
+  const visibleHeight = Math.max(200, focus.viewHeight - focus.bottomInset);
+  const topPad = Math.max(0, Math.round(visibleHeight / 2 - heroH / 2));
+
+  const tiles: LaidTile[] = [
+    {
+      item: hero,
+      index: heroIndex,
+      rect: { x: heroX, y: topPad, w: heroW, h: heroH },
+    },
+  ];
+  if (useRightColumn) {
+    const rightBox = { x: heroX + heroW + gap, y: topPad, w: Math.max(1, rightW), h: heroH };
+    for (const entry of gridRects(rightItems, rightBox, 1, gap)) {
+      tiles.push({ ...entry });
+    }
+  }
+
+  const belowOffset = topPad + heroH + gap;
+  if (belowItems.length > 0) {
+    const below = layoutWorld(
+      belowItems.map((entry) => entry.item),
+      {
+        ...options,
+        width,
+        targetHeight,
+        includePartialRow: true,
+        stretchPartialRow: true,
+      },
+    );
+    for (const tile of below.tiles) {
+      const entry = belowItems[tile.index];
+      tiles.push({
+        item: entry.item,
+        index: entry.index,
+        rect: { ...tile.rect, y: tile.rect.y + belowOffset },
+      });
+    }
+    return { tiles, height: belowOffset + below.height };
+  }
+  return { tiles, height: topPad + heroH };
+}

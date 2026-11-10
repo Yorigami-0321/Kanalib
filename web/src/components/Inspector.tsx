@@ -138,7 +138,7 @@ export function Inspector({
                   aria-label={entry.n}
                   onClick={() => onSimilar(entry.id)}
                 >
-                  <img src={tierUrl(paths, 't256', entry.id)} alt="" loading="lazy" decoding="async" />
+                  <img src={tierUrl(paths, 't256', entry.id)} alt="" decoding="async" />
                 </button>
               ))}
             </div>

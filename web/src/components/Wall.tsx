@@ -2,7 +2,14 @@ import { useCallback, useEffect, useMemo, useRef, useState, type RefObject } fro
 import type { Rect } from '../lib/expand';
 import type { TierPaths, WallItem } from '../source/types';
 import type { WallPhase } from '../state/useWall';
-import { cellTilesInView, layoutWorld, visibleSlice, type CellSpec } from '../lib/world';
+import {
+  cellTilesInView,
+  layoutFeaturedWorld,
+  layoutSpotlightCell,
+  layoutWorld,
+  visibleSlice,
+  type CellSpec,
+} from '../lib/world';
 import { WallCard } from './WallCard';
 
 /** 侧栏功能键的操纵句柄：按钮走 ref 直接调用，不经过 React 状态（缩放不触发全树重渲染）。 */
@@ -211,20 +218,38 @@ export function WallView({
   // 否则可能整页空白；数据全部到齐后再拉伸最后一行，视觉上收口。
   const includePartialRow = !(stableAppend && hasMore);
   const stretchPartialRow = !hasMore;
-  const layout = useMemo(
-    () =>
-      // 无限空间不排整墙：一万条跑一遍 justified rows 纯属浪费，格子按需生成就够了。
-      infinite
-        ? { tiles: [], height: 0 }
-        : layoutWorld(items, {
-            width: worldWidth,
-            gap: GAP,
-            targetHeight: rowTargetHeight,
-            includePartialRow,
-            stretchPartialRow,
-          }),
-    [infinite, items, worldWidth, rowTargetHeight, includePartialRow, stretchPartialRow],
-  );
+  const layout = useMemo(() => {
+    // 无限空间不排整墙：一万条跑一遍 justified rows 纯属浪费，格子按需生成就够了。
+    if (infinite) return { tiles: [], height: 0 };
+    const options = {
+      width: worldWidth,
+      gap: GAP,
+      targetHeight: rowTargetHeight,
+      includePartialRow,
+      stretchPartialRow,
+    };
+    if (spotlightId && items.some((item) => item.id === spotlightId)) {
+      return layoutFeaturedWorld(items, options, spotlightId, {
+        centerX: worldInset + infoInset + Math.max(200, viewWidth - infoInset) / 2,
+        viewHeight: size.h,
+        bottomInset: infoInsetBottom,
+      });
+    }
+    return layoutWorld(items, options);
+  }, [
+    infinite,
+    items,
+    worldWidth,
+    rowTargetHeight,
+    includePartialRow,
+    stretchPartialRow,
+    spotlightId,
+    worldInset,
+    infoInset,
+    infoInsetBottom,
+    viewWidth,
+    size.h,
+  ]);
   const layoutRef = useRef(layout);
   layoutRef.current = layout;
 
@@ -251,16 +276,50 @@ export function WallView({
     w: viewWidth / camera.zoom,
     h: size.h / camera.zoom,
   };
-  const cellTiles = useMemo(
-    () =>
-      infinite && ready
-        ? // 缓冲区按格子尺度取（约 1/3 格）：固定 420px 在窄屏上等于多预取两屏，
-          // DOM 卡片数会翻倍，违反"数量恒定"。
-          cellTilesInView(cellSpec, viewRect, Math.round(Math.min(cellWidth, cellHeight) * 0.35))
-        : [],
-    // viewRect 是每帧新建的对象，依赖拆成 4 个数字，避免无谓重算。
-    [infinite, ready, cellSpec, cellHeight, cellWidth, viewRect.x, viewRect.y, viewRect.w, viewRect.h],
-  );
+  // 聚焦卡所在的格子：用锚点反推格号，格子内部重排；邻格不动。
+  const spotlightCell = useMemo(() => {
+    if (!infinite || !spotlightId || !spotlightAnchor) return null;
+    return {
+      b: Math.floor(spotlightAnchor.y / cellHeight),
+      c: Math.floor(spotlightAnchor.x / cellWidth),
+      itemId: spotlightId,
+    };
+  }, [infinite, spotlightId, spotlightAnchor, cellHeight, cellWidth]);
+
+  const cellTiles = useMemo(() => {
+    if (!infinite || !ready) return [];
+    // 缓冲区按格子尺度取（约 1/3 格）：固定 420px 在窄屏上等于多预取两屏，
+    // DOM 卡片数会翻倍，违反"数量恒定"。
+    const base = cellTilesInView(
+      cellSpec,
+      viewRect,
+      Math.round(Math.min(cellWidth, cellHeight) * 0.35),
+    );
+    if (!spotlightCell) return base;
+    const others = base.filter(
+      (tile) => !(tile.cell.b === spotlightCell.b && tile.cell.c === spotlightCell.c),
+    );
+    return [
+      ...others,
+      ...layoutSpotlightCell(
+        cellSpec,
+        spotlightCell.b,
+        spotlightCell.c,
+        spotlightCell.itemId,
+      ),
+    ];
+  }, [
+    infinite,
+    ready,
+    cellSpec,
+    cellHeight,
+    cellWidth,
+    viewRect.x,
+    viewRect.y,
+    viewRect.w,
+    viewRect.h,
+    spotlightCell,
+  ]);
 
   const clampCamera = useCallback(
     (cam: Camera): Camera => {
@@ -1009,21 +1068,54 @@ export function WallView({
       return;
     }
     if (centeredSpot.current === spotlightKey) return;
-    let target = spotlightAnchor;
+    let target: { x: number; y: number } | null = null;
+    if (infinite && spotlightCell) {
+      const hero = layoutSpotlightCell(
+        cellSpec,
+        spotlightCell.b,
+        spotlightCell.c,
+        spotlightCell.itemId,
+      ).find((tile) => tile.item.id === spotlightId);
+      if (hero) {
+        target = { x: hero.rect.x + hero.rect.w / 2, y: hero.rect.y + hero.rect.h / 2 };
+      }
+    } else if (!infinite) {
+      const hero = layout.tiles.find((tile) => tile.item.id === spotlightId);
+      if (hero) {
+        target = { x: hero.rect.x + hero.rect.w / 2, y: hero.rect.y + hero.rect.h / 2 };
+      }
+    }
     if (!target) {
       const tile = visible.find((entry) => entry.item.id === spotlightId);
-      if (!tile) return;
-      target = {
-        x: tile.rect.x + tile.rect.w / 2 + origin.x,
-        y: tile.rect.y + tile.rect.h / 2 + origin.y,
-      };
+      if (tile) {
+        target = {
+          x: tile.rect.x + tile.rect.w / 2 + origin.x,
+          y: tile.rect.y + tile.rect.h / 2 + origin.y,
+        };
+      }
     }
+    if (!target) return;
     centeredSpot.current = spotlightKey;
     setCameraTween(true);
     centerOnWorld(target.x, target.y, camera.zoom, infoInset, infoInsetBottom);
     const timer = window.setTimeout(() => setCameraTween(false), 430);
     return () => window.clearTimeout(timer);
-  }, [spotlightId, spotlightAnchor, spotlightKey, visible, origin.x, origin.y, camera.zoom, infoInset, infoInsetBottom, centerOnWorld]);
+  }, [
+    spotlightId,
+    spotlightAnchor,
+    spotlightKey,
+    spotlightCell,
+    cellSpec,
+    infinite,
+    layout.tiles,
+    visible,
+    origin.x,
+    origin.y,
+    camera.zoom,
+    infoInset,
+    infoInsetBottom,
+    centerOnWorld,
+  ]);
 
   // 检查器关闭（spotlightId 变 null）时，选中内描边也跟着收掉。
   useEffect(() => {
@@ -1047,24 +1139,6 @@ export function WallView({
     return () => window.removeEventListener('keydown', onKeyDown);
   }, [spotlightId, summaryId, onSpotlightChange]);
 
-  const spotlightTile = spotlightId
-    ? visible.find((entry) => entry.item.id === spotlightId)
-    : undefined;
-  const availableW = Math.max(200, viewWidth - infoInset);
-  const availableH = Math.max(200, size.h - infoInsetBottom);
-  const spotlightScale = spotlightTile
-    ? Math.min(
-        2.8,
-        Math.max(
-          1,
-          Math.min(
-            (availableW * 0.56) / Math.max(1, spotlightTile.rect.w * camera.zoom),
-            (availableH * 0.74) / Math.max(1, spotlightTile.rect.h * camera.zoom),
-          ),
-        ),
-      )
-    : 1;
-
   // 对角线波次从视野左上角起算（不是世界原点）：否则滚到中段换页签时会整屏一起延迟。
   const waveLeft = camera.x / camera.zoom - origin.x;
   const waveTop = camera.y / camera.zoom - origin.y;
@@ -1083,7 +1157,7 @@ export function WallView({
 
   return (
     <div
-      className={'canvas' + (dragging ? ' is-grabbing' : '') + (spotlightId ? ' has-spotlight' : '')}
+      className={'canvas' + (dragging ? ' is-grabbing' : '')}
       ref={viewportRef}
       tabIndex={0}
       role="region"
@@ -1135,7 +1209,6 @@ export function WallView({
               displayScale={camera.zoom}
               current={tile.item.id === activeId}
               spotlight={tile.item.id === spotlightId}
-              spotlightScale={tile.item.id === spotlightId ? spotlightScale : 1}
               enter={enter.on}
               enterDelay={enterDelayOf(tile.rect)}
               tagCounts={tagCounts}

@@ -209,7 +209,9 @@ Lead 统筹，编码分给三个 teammate（写域隔离，只有 verifier 能 b
 
 | 反馈 | 实现 | 实测 |
 |---|---|---|
-| 单击应原位放大、占视觉中心，但不是全屏详情 | 单击把卡片 `scale` 到内容区 56%/74% 目标、相机 360ms 居中、邻卡 `brightness(.55)`；不跳路由；双击/Enter 才进详情 | 卡片中心 `(930,450)` = 内容区中心；scale 1.05–2.8；检查器 300px；45–53 张邻卡压暗；Esc 关闭；从详情返回仍保持聚焦 |
+| 单击应原位放大、占视觉中心，但不是全屏详情 | 单击把卡片在布局里换成更大的 rect（`layoutSpotlightCell`/`layoutFeaturedWorld`），同格余图重排到右列/底带、相邻格被推开；相机居中；不跳路由；双击/Enter 才进详情 | 卡片中心 `(930,450)` = 内容区中心；首页 329×289 → 473×448；`overlap: 0`、`transformTiles: 0`、`zTiles: 0`；Esc 关闭；从详情返回仍保持聚焦 |
+| 聚焦要“挤压邻图、都在一层” | 去掉 `transform: scale`、聚焦 z-index、邻卡压暗；改为 `left/top/width/height` 320ms 过渡；`.tile:hover` 的 `z-index: 3` 也删除 | 聚焦卡 `z-index: auto`、`transform: none`；所有卡同层；探针见 `.kanalib/v4/reflow.json` |
+| 网格图片黑块 | 画布已虚拟化，`loading="lazy"` 在 `.world` 平移下只触发左上角一小撮；改为 `loading="eager"`，聚焦卡 `fetchpriority="high"` | 冷载 45 张可见卡约 6s 全部加载；`reflow-home/finite/mobile.png` 无黑卡 |
 | 触控板双指左右划没反应 | 墙 wheel 同时吃 `deltaX/deltaY`；Shift+wheel 兜底；详情 1× 时 deltaX 累积 80px/冷却 450ms 切图，放大后改平移；`ctrlKey/metaKey` 才缩放 | 墙 `deltaX=80` → world e -80；详情 `deltaX=120` → 下一张、`-120` → 上一张；390 触摸横滑仍生效 |
 | 截图 1 底部信息条没删、也没进侧栏 | 删除 `Detail` 的 `.view__info/.view__scroll`；标题/尺寸/日期/分级/星级/分组/标签/相似/原图全部进 300px 检查器；`I`/信息钮可收起 | 详情 `oldInfo=0`、stageLeft 420；检查器标签 11 chip、相似 6；关闭 → stageLeft 0、重开回 420 |
 | 侧栏信息不全/不美观 | 检查器分组：标题、两列元数据、按类别标签（默认 18、每组 6）、3 列相似、打开详情/原图；95% 纸面 + 投影，无 backdrop-filter | 1440/390 截图见 `.kanalib/v4/`；390 为底部 sheet（`x=64,w=326,h=464`、overflow 0），聚焦卡在 sheet 上方居中 |
@@ -342,7 +344,7 @@ python scripts/wall_manifest_check.py web/public/data
 ```text
  M web/src/App.tsx                       （聚焦/检查器状态、详情让位、触控板、诊断开关）
  M web/src/components/Wall.tsx           （单击聚焦、相机锚点/居中、deltaX、Esc、聚焦恢复）
- M web/src/components/WallCard.tsx       （聚焦高分辨率档、scale、隐藏卡上信息）
+ M web/src/components/WallCard.tsx       （聚焦锐利档、布局重排、即时加载、隐藏卡上信息）
  M web/src/components/Sidebar.tsx        （挂载检查器；详情信息钮）
  M web/src/components/Detail.tsx         （删底部信息层；横向 wheel；I 开关）
  M web/src/components/detail.css         （stage 让位检查器；只留图与手势）
@@ -353,7 +355,7 @@ python scripts/wall_manifest_check.py web/public/data
  M web/src/lib/layout.ts                 （新：缝/检查器/断点常量）
  M web/src/lib/itemDetail.ts             （新：标签分组/相似）
  M web/src/lib/expand.ts                 （containRect 支持内容区偏移）
- M web/src/styles.css                    （聚焦压暗/缩放、--inspector-w）
+ M web/src/styles.css                    （聚焦尺寸过渡/同层、--inspector-w）
  M scripts/wall_shots.mjs                （390 首帧等待加固）
  M web/README.md、docs/backlog/{photo-wall-focus-mode,photo-wall-status,cloud-photo-wall,registry}.md
 ```

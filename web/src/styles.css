@@ -505,43 +505,34 @@ a {
   background: #101012;
   contain: layout paint;
   cursor: pointer;
+  /* 聚焦时卡片在布局里换到更大的 rect：位置/尺寸走 320ms，周围图被平滑挤开。 */
   transition:
+    left 320ms var(--ease),
+    top 320ms var(--ease),
+    width 320ms var(--ease),
+    height 320ms var(--ease),
     filter 160ms var(--ease),
     box-shadow 180ms var(--ease);
 }
 
-/* 硬规则 3：hover 只用一个通道（滤镜），不再叠加描边/位移/字号。 */
+/* 硬规则 3：hover 只用一个通道（滤镜），不再叠加描边/位移/字号。
+   也不抬 z-index：所有卡片始终在同一层，聚焦靠布局重排而不是叠层。 */
 .tile:hover {
   filter: saturate(1.08) brightness(1.05);
-  z-index: 3;
 }
 
-/* ===== 单击聚焦（v4）：原位放大、相机居中、邻卡压暗；信息在左侧检查器 ===== */
-.canvas.has-spotlight .tile:not(.tile--spotlight) {
-  filter: brightness(0.55) saturate(0.85);
-  transition: filter 240ms var(--ease);
-}
-
-.tile--spotlight {
-  z-index: 12;
-  overflow: hidden;
-  box-shadow: 0 24px 64px rgba(0, 0, 0, 0.55);
-  transform-origin: 50% 50%;
-  transition:
-    transform 360ms var(--ease),
-    filter 240ms var(--ease),
-    box-shadow 240ms var(--ease);
-}
-
-.tile--spotlight:hover {
-  filter: none;
-}
-
+/* ===== 单击聚焦（v4）：格子/有限墙局部重排，英雄卡占更大的 rect；所有图仍在同一层 ===== */
 /* 信息已经进了检查器；聚焦卡只留图。 */
 .tile--spotlight .tile__shade,
 .tile--spotlight .tile__chip,
 .tile--spotlight .tile__copy {
   opacity: 0;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .tile {
+    transition: none;
+  }
 }
 
 /* 硬规则 6：焦点与当前项都走内描边，没有任何外发光。 */
