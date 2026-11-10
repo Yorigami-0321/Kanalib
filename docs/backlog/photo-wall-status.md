@@ -4,6 +4,10 @@
 >
 > 一句话：**在 W3 锐利档与四入口之后，v4 按用户实机反馈补上「单击原位聚焦 + 300px 信息检查器 + 触控板 deltaX/详情横向 wheel」：单击把卡放大并居中、邻卡压暗，双击才进详情；截图 1 的底部信息条删掉，标题/元数据/标签/相似全部进侧栏；详情返回墙上仍保留聚焦与检查器。**
 >
+> v5（2026-11-10 下午）：按“成熟、流畅、沉浸、美观”再做一轮体验收尾——渐进模糊加载与骨架扫光、hover 微缩放、聚焦压暗、窄屏字号/角标收敛、详情环境模糊背景、滑动轨道 pane 顺序修正（消除中段黑屏）、邻图预解码、滚轮 rAF 缓动、检查器实色化与复制深链/全屏、P 自动放映 + 4.2s 进度线、有限墙垂直居中。
+>
+> v5.1（2026-11-10 晚，参考 recent.design）：按 Harry Atkins 加 **单色预览（N）**，按 Meech213 / Cathy Dolle 加**留白视图（M）+ 极简图注**；参考清单见 §8.2。
+>
 > 之前的“详情水平滑动/排序已实现”只在动画和有限墙层面成立，触摸手势、入口结构、标签分组等并未落地；本轮以代码 + 浏览器实测为准重新核过。
 
 ## 1. 当前状态速览
@@ -13,9 +17,9 @@
 | 分支 / HEAD | `feature/cloud-photo-wall`；轮次起点 `9c3564e`（功能键收进侧栏） |
 | 提交情况 | 工作区干净；v4 已提交 `5699cb5`…`4f5c369`；上一轮四入口 `bca6cd4`…`c182557`（清单见 §9） |
 | 类型检查 | `cd web && npx tsc --noEmit` → exit 0 |
-| 生产构建 | exit 0：CSS 28.15KB（gzip 6.36KB）/ JS 292.83KB（gzip 94.31KB）；体积上升来自 v4 检查器/聚焦/手势 |
+| 生产构建 | exit 0：CSS 33.89KB（gzip 7.51KB）/ JS 303.51KB（gzip 98.05KB）；v5 增量来自渐进加载、环境层、放映与新交互，v5.1 单色/留白，v5.2 锚定挤压 + 键盘焦点平移 |
 | 数据 | `web/public/data/` 9899 条 / 2 分片；**t1024/t2048 覆盖 0/9899**（这批数据全部来自已删除的 stress_10k，原图不在）；新发布器对 9899 条都写了 `sharp: 0` |
-| 验证产物 | `.kanalib/v4/report.json` + `spotlight/detail-inspector/mobile-spotlight.png`（v4 聚焦/检查器/触控板）、`.kanalib/v4/full3/report.json`（四页+交互回归，failures 空）；临时夹具与探针已清理 |
+| 验证产物 | `web/screenshots/probe/probe.json` + home/mono/spotlight/detail/detail-slide/detail-next/matte/playing/tags/tag/tag-focus/home-390.png（v5/v5.1 视觉 + 单色/留白 + 放映 + 复制深链）、`web/screenshots/final3/report.json`（四页+交互+390+双指，failures 空）、`web/screenshots/perf-report.json`（30s 拖拽/对比度） |
 | 改动前备份 | 本轮改动前状态由 `a491b85` 保存，可直接 git 回退；未另建目录备份 |
 
 ## 2. 本轮怎么做的
@@ -209,14 +213,81 @@ Lead 统筹，编码分给三个 teammate（写域隔离，只有 verifier 能 b
 
 | 反馈 | 实现 | 实测 |
 |---|---|---|
-| 单击应原位放大、占视觉中心，但不是全屏详情 | 单击把卡片在布局里换成更大的 rect（`layoutSpotlightCell`/`layoutFeaturedWorld`），同格余图重排到右列/底带、相邻格被推开；相机居中；不跳路由；双击/Enter 才进详情 | 卡片中心 `(930,450)` = 内容区中心；首页 329×289 → 473×448；`overlap: 0`、`transformTiles: 0`、`zTiles: 0`；Esc 关闭；从详情返回仍保持聚焦 |
-| 聚焦要“挤压邻图、都在一层” | 去掉 `transform: scale`、聚焦 z-index、邻卡压暗；改为 `left/top/width/height` 320ms 过渡；`.tile:hover` 的 `z-index: 3` 也删除 | 聚焦卡 `z-index: auto`、`transform: none`；所有卡同层；探针见 `.kanalib/v4/reflow.json` |
+| 单击应原位放大、占视觉中心，但不是全屏详情 | 单击把卡片在布局里换成更大的 rect（`layoutSpotlightCell`/`layoutFeaturedWorld`），同格余图重排到右列/底带、相邻格被推开；相机居中；不跳路由；双击/Enter 才进详情。**v5.2 已改判：原位按比例放大、邻卡不重排、相机不动，见 §4.12** | 卡片中心 `(930,450)` = 内容区中心；首页 329×289 → 473×448；`overlap: 0`、`transformTiles: 0`、`zTiles: 0`；Esc 关闭；从详情返回仍保持聚焦（该组数据为 v4 历史口径） |
+| 聚焦要“挤压邻图、都在一层” | 去掉 `transform: scale`、聚焦 z-index、邻卡压暗；改为 `left/top/width/height` 320ms 过渡；`.tile:hover` 的 `z-index: 3` 也删除。**v5.2 改判：不重排，只压暗；英雄卡 z-index 3 + 投影，见 §4.12** | 聚焦卡 `z-index: auto`、`transform: none`；所有卡同层；探针见 `.kanalib/v4/reflow.json`（v4 历史口径） |
 | 网格图片黑块 | 画布已虚拟化，`loading="lazy"` 在 `.world` 平移下只触发左上角一小撮；改为 `loading="eager"`，聚焦卡 `fetchpriority="high"` | 冷载 45 张可见卡约 6s 全部加载；`reflow-home/finite/mobile.png` 无黑卡 |
 | 触控板双指左右划没反应 | 墙 wheel 同时吃 `deltaX/deltaY`；Shift+wheel 兜底；详情 1× 时 deltaX 累积 80px/冷却 450ms 切图，放大后改平移；`ctrlKey/metaKey` 才缩放 | 墙 `deltaX=80` → world e -80；详情 `deltaX=120` → 下一张、`-120` → 上一张；390 触摸横滑仍生效 |
 | 截图 1 底部信息条没删、也没进侧栏 | 删除 `Detail` 的 `.view__info/.view__scroll`；标题/尺寸/日期/分级/星级/分组/标签/相似/原图全部进 300px 检查器；`I`/信息钮可收起 | 详情 `oldInfo=0`、stageLeft 420；检查器标签 11 chip、相似 6；关闭 → stageLeft 0、重开回 420 |
 | 侧栏信息不全/不美观 | 检查器分组：标题、两列元数据、按类别标签（默认 18、每组 6）、3 列相似、打开详情/原图；95% 纸面 + 投影，无 backdrop-filter | 1440/390 截图见 `.kanalib/v4/`；390 为底部 sheet（`x=64,w=326,h=464`、overflow 0），聚焦卡在 sheet 上方居中 |
 
 实施状态与偏差（墙上相似图统一进详情、详情信息隐藏不跨页保留）见 [photo-wall-focus-mode.md](photo-wall-focus-mode.md) §11。
+
+### 4.11 成熟度与动效收尾（2026-11-10 下午，v5）
+
+用户目标：把展示做到“成熟、有流畅动画特效、沉浸、美观”。参考物：Wix Pro Gallery 的模糊占位、Apple Photos/Unsplash 的环境图、Google 的 scroll/view timeline 与常见 1500ms 骨架扫光（来源见 §8.1）。本轮按“先取证、再改、再复拍”执行，生产预览（`vite preview`）上全部复测。
+
+| 项 | 实现 | 实测 |
+|---|---|---|
+| 网格渐进加载 | 未就绪时 `blur(14px) + scale(1.035)`，`onLoad` 后 700ms 内回到 1x 清晰；`.tile::before` 1.5s 低对比扫光，仅 `:has(img:not(.is-loaded))` 时出现 | 冷载 `pending 0` 用时 0.6–0.8s；慢网络下骨架可见，图片到帧后无布局抖动 |
+| hover / 聚焦层次 | hover 只保留滤镜 + 2px 抬升 + 1.045 图片微缩放；聚焦时非英雄卡 `opacity .52 / saturate .55 / brightness .7`，英雄卡 18px 圆角 + 内描边；`.canvas.is-spotlight` 由 `spotlightId` 驱动 | 既有 hover 断言仍为 `saturate(1.08) brightness(1.05)`，`detailOpacity 1`；聚焦截图邻卡明显压暗、所有卡同层 |
+| 窄屏字号/角标 | `titleSizeForWidth` 细分 10/11/12.5/15/18/23/27；≤760 标题两行、9px 角标；≤560 直接隐藏尺寸角标 | 390×844：世界 326、无横向溢出；示例卡 142–191px 宽，标题 10–12.5px，chip `display:none` |
+| 详情环境层 | 同图 t512 铺满 view，`blur(52px) brightness(.44)` + 暗角；`contain` 留边不再纯黑 | 详情 stage 1020×900；环境层 `background-image` 指向当前图 t512；截图中心锐利、四周延伸同色 |
+| 滑动轨道修正 | 原 pane 顺序把“下一张”放在动画终点前的空格，220ms 时只剩旧图右缘 → 黑屏；改为 next=`[空,旧,新]`、prev=`[新,旧,空]`，目标屏跳过淡入 | 1440 下 → 键：220ms 截图为旧图左缘 + 新图主体；900ms 后 hash 前进、三个 pane 均 `loaded`；此前同一时刻为纯黑 |
+| 邻图预取 | 详情 mount 时对前后各一张 t512 `new Image()` + `decode()` | 滑动目标屏 `loaded:true`，无需等 onLoad |
+| 滚轮缓动 | 墙 wheel 的 pan/zoom 走 170ms rAF ease-out，离散滚轮目标可连续叠加；拖拽/第二指/按钮会立刻 `stopGlide` | Ctrl+wheel 1→1.528（既有断言）；drag 断言通过，无残留惯性 |
+| 检查器 | 背景改实色渐变（消除墙标题透字）；相似项 hover 2px 抬升 + accent 内描边；新增“复制链接 / 全屏（F）”；复制的是 `#/d/<id>` 深链 | 按钮文案 `✓ 已复制链接`；剪贴板回读 `http://127.0.0.1:4273/#/d/<当前 id>`；检查器宽 300 |
+| 自动放映 | 侧栏详情组新增 ▶/❚❚（P 键同义），每 4.2s 切下一张、到尾回环；底部 2px accent 进度线随换图重置；离开详情自动停 | 点击 ▶ 后 `bar:true`、`aria-pressed:true`；4.2s 后 hash 前进；暂停后进度线卸载 |
+| 单色预览（N） | 参考 Harry Atkins 的 Monochrome：侧栏底部新增半实心圆按钮，`N` 同义；`.app.is-mono` 只给网格/标签封面/相似条/详情图和环境层去色，UI 与动态强调色保留；图片自身的 filter 过渡负责淡入淡出 | `appClass: app is-mono`、`pressed: true`、图片 `grayscale(0.976) contrast(1.039)`；强调色仍为该视野的 `rgb(199,122,145)`；恢复彩色不报错 |
+| 留白视图（M） | 参考 Meech213 的 print-style 与 Cathy Dolle 的极简画廊：详情侧栏新增画框按钮，`M` 同义；图片按 `--matte-x/-y/-b` 显式算宽高，`drop-shadow` 跟随实际像素；信息收起时底部出现文件名 + 尺寸的极简图注，环境层压到 22% | `classOn:true`；1440 下图框 `[130,72,1181,729]`（4:3 内容居中）、图注 `[130,848]` 横跨图框；390 下留白 16/18px、图注隐藏 |
+| 有限墙居中 | 内容高度小于视口时，`.world` 加纯视觉垂直余量（camera 不变），只有 3 张图的标签墙不再贴顶 | `#/t/1girl` 3 张卡垂直居中；无限首页与可滚动有限墙不受影响 |
+| 路由守卫 | 直接改 hash 进 `/tags` 等总览页时清掉残留 spotlight/summary | 总览截图不再被上一页检查器遮挡 |
+| 测试脚本 | 右键概要用例优先选“整卡在安全区”的样本；半出屏卡本来就会让贴卡概要在视口外 | `wall_shots` final：failures 空，summary `inViewport:true` |
+
+**性能与回归**（`wall_perf.mjs`，生产预览，headless/SwiftShader）：
+
+| 项 | 实测 | 结论 |
+|---|---|---|
+| 30s 连续拖拽 | 堆 5.39→6.73MB（+24.7%）；DOM 45–75；帧 p50 7ms / p95 7.3ms / p99 14ms；掉帧 0.05%；长任务 0；主线程 55% | 达标 |
+| backdrop-filter 开关 | p95 7.3 vs 7.3、p99 14 vs 14.1、掉帧 0.05% vs 0、占用 55% vs 57% | 主线程无差；GPU 侧仍无结论 |
+| 侧栏对比度 | 次级文字最差 5.78:1、主文字 11.49:1 | 达标 |
+| 四页 + 交互 + 390 + 双指 | failures 空；两次复跑横走 35,435–36,041px / 竖走 8,777–8,814px，覆盖 89.3–95.3% / 90.6–91.3%；双指 1→1.6 | 达标 |
+
+**口径与风险**：
+- 现有 9899 条是合成渐变图，环境层/模糊在真实照片上的观感与 GPU 代价需接入真实库后复验；本轮只证明结构与主线程帧率。
+- 大图淡入从 420ms 缩到 160ms；滑动目标屏完全不淡入，避免 520ms 动画中出现半屏空窗。
+- 自动放映没有任何持久化，刷新/离开详情即停；这是只读展示墙，不写本地存储。
+
+#### 4.12 聚焦挤压返修：细条、锁中心、跳变（2026-11-10 v5.2）
+
+用户明确要求**保留“图片挤到周边”的效果**，只修三件事：邻图变细条、点邻图/切图后强制锁中心、从小到大过渡不自然。挤压重排保留，算法与动效重写：
+
+| # | 根因 | 修法 |
+|---|---|---|
+| 1 | 右列/底带固定 1 列或按行数硬分，条目一多单元格就变成 300×90 的横向细条 | `gridColumns()` 按“剩余区域宽高比 × 平均图片比例”选列，并惩罚短边 <88px 的方案；右列不再写死 1 列 |
+| 2 | 卡片 `key` 与渲染顺序都跟着 rect/布局顺序变，重排时 React 移动/重挂节点，宽高 transition 被打断 | `key`/排序改成 `item.id + 格子 + index`。重排只改 rect，DOM 节点不移动，挤压与放大都能连续过渡 |
+| 3 | 每次聚焦都调 `centerOnWorld`，新英雄卡被强制拉到内容区中心；点邻卡、开关检查器都会重演 | 去掉强制居中，只在英雄卡被缝/检查器/sheet 遮住时做**最小平移** |
+| 4 | 重排把英雄固定放在格子左上角：点邻卡后，新图被搬到英雄位、旧英雄被排到邻位 → 视觉上“交换图片” | 点击瞬间记录被点卡片的 world rect，`layoutSpotlightCell` / `layoutFeaturedWorld` 以它为锚；新英雄留在原地放大，邻图围到它周围 |
+
+英雄卡仍占大块，其余图继续挤到英雄四周（右列/底带，按空间方向自动选择）；锚点矩形来自点击时的 DOM rect，已包含 rebase/verticalSlack 修正。展开 420ms `cubic-bezier(.4,0,.2,1)`，基础收回 320ms；相机仅必要时 420ms 补位。
+
+实测（`scripts/wall_visual_probe.mjs`，1440×900，生产预览）：
+
+| 指标 | 实测 | 结论 |
+|---|---|---|
+| 放大中间帧 | 起始 `[478,126,268,254]` → 150ms `[430,126,363,320]` → 最终 `[444,126,473,397]` | 宽高都有真实中间态 |
+| DOM 身份 | `focusMid.sameNode: true`、`spotlight.sameNode: true` | 重排时未卸载重挂 |
+| 挤压结果 | `moved: 12`（邻卡确实被挤动）、`strips: 0`、最小邻卡 `133×114` | 保留挤压，没有细条 |
+| 图片是否被搬位 | 初始 `anchorDelta: [0,72]`、点邻卡 `[0,-20]`；x 均为 0 | 被点图片留在原处放大，不再交换位置 |
+| 相机 | 初始 `camDelta: 69`、点邻卡 `camDelta: 169`、`centerDelta: -249` | 仅避让检查器，不是居中锁定 |
+| 点邻卡 | 新英雄 `[444,369,473,397]`、`inSafe: true` | 只切换放大对象 |
+| 二级墙 | 英雄 `[515,142,493,616]`、`centerDelta: -169` | 锚定点击位置 + 挤压，非居中 |
+| 390 聚焦 | 英雄 `[88,128,318,228]`、sheetTop 380、`aboveSheet: true`、`strips: 0` | 英雄在 sheet 上方 |
+| 键盘焦点 | Tab 连续 6 次：6/6 张卡都在视口内（焦点卡触发最小平移） | 不再出现盲焦点 |
+| 回归 gate | `wall_shots` 新增聚焦断言：`moved>0`、`strips=0`、`sameNode`、点邻卡 `|anchorDelta.x|≤16`、`|centerDelta|≥40`；failures 空 | 可防回退 |
+| 详情返回 | 按 `spotlightAnchor` 把锚点位置放回视野一次 | 相机重置后不丢聚焦卡 |
+| 详情/放映/复制/单色/留白 | 既有断言全部保持 | 无回归 |
+
+**口径**：`photo-wall-focus-mode.md` §4/§9/§11 的“相机居中 / 零重叠”作废；“挤压重排”保留。验收看“点哪张哪张原地放大 + 邻卡被挤动 + 无细条 + 不居中”。
 
 ## 5. 仍未解决
 
@@ -309,15 +380,18 @@ Lead 统筹，编码分给三个 teammate（写域隔离，只有 verifier 能 b
 # 类型检查
 cd web; npx tsc --noEmit
 
-# 生产构建（本机沙箱可用）
-# 直接 npm run build 会在 vite prepare-out-dir 被 safe-delete 拦下（dist/data 上万文件超本轮阈值）
-cd web; node --input-type=module -e "import { build } from 'vite'; import react from '@vitejs/plugin-react'; await build({ root: process.cwd(), base: './', publicDir: false, plugins: [react()], build: { outDir: 'dist-check', target: 'es2022', sourcemap: false, assetsInlineLimit: 0 } });"
+# 生产构建（2026-11-10 复测：npm run build 直接可用，含 public/data 拷贝）
+cd web; npm run build
 
-# 开发/预览服务（含数据）
-cd web; npx vite --port 4318 --strictPort
+# 生产预览（测真实产物，不用 dev server：dev 长时间跑会偶发图片 pending）
+cd web; npx vite preview --port 4273
+
 
 # 四页 + 概要 + 5 条交互 + 390 窄屏 + 双指缩放，一次跑完
-node scripts/wall_shots.mjs --base http://127.0.0.1:4318/ --out web/screenshots
+node scripts/wall_shots.mjs --base http://127.0.0.1:4273/ --out web/screenshots/final
+
+# v5 视觉探针：等图加载完再截图；聚焦/详情/滑动/pane 状态/放映/复制深链/390 指标
+node scripts/wall_visual_probe.mjs http://127.0.0.1:4273/
 
 # 30 秒长时拖拽（堆/DOM/帧/长任务）+ 侧栏真实像素对比度 + backdrop-filter 开关对比
 node scripts/wall_perf.mjs --base http://127.0.0.1:4318/ --out web/screenshots --seconds 30
@@ -338,6 +412,30 @@ python scripts/wall_manifest_check.py web/public/data
 - **local 请求必须绕过 env 代理**：本机 `HTTP_PROXY` 指向 127.0.0.1:58614，`curl http://127.0.0.1:4318/` 不加 `--noproxy '*'` 会拿到 502 假故障。
 - **headless 的帧率不代表真机**：没有 vsync，rAF 基准约 143–145Hz；`p95 ≤33.3ms` 是"两个 60Hz 帧周期"的卡顿红线，不是刷新率。backdrop-filter 由合成器执行，headless 走 SwiftShader，**GPU 侧成本量不出来**。
 - **性能测量必须在无人改代码时跑**：HMR 重载会让探针失效，`wall_perf.mjs` 用 session 令牌判废并自动重试 3 次，报告里出现"重试 N 次"说明当时有人在改文件，数据要重跑。
+
+### 8.1 动效参考（v5 查过并采用的部分）
+
+| 来源 | 采用的点 | 未采用/边界 |
+|---|---|---|
+| [Wix Pro Gallery — Designing Your Gallery](https://support.wix.com/en/article/wix-pro-gallery-designing-your-gallery) | 加载期模糊占位、hover 缩放/压暗、滚动入场 | 其“悬停模糊/反色”等强效果不符合本墙“一个状态一种通道”的克制基调 |
+| [大厂级 APP UI 交互动效指令（素材集市）](https://www.sucaijishi.com/articles-51-2397-1.html) | 骨架扫光 1500ms、模糊揭示 `cubic-bezier(.25,1,.5,1)`、200ms 淡出 | 未引入骨架屏的高度/布局占位（画布本身已锁定卡片矩形，不会 CLS） |
+| [Google — 开始使用 CSS 滚动驱动动画](https://codelabs.developers.google.cn/scroll-driven-animations?hl=zh-cn) | 评估了 `view()` 做入场/视差 | 画布是 transform 平移而非滚动容器，`scroll()`/`view()` 不适用；仍用“进入窗口 + 定时收口”的显式控制 |
+| [GSAP Vault — 2026 animation examples](https://gsapvault.com/blog/gsap-animation-examples) | 环境色块/视差氛围、ease-out 收尾的节奏参考 | 不引第三方动画库：产物保持只依赖 React，动效用 CSS/rAF |
+
+### 8.2 recent.design 参考（2026-11-10 采集，v5.1）
+
+从 [recent.design/websites](https://recent.design/websites) 的 20 个最新条目里挑出与图片浏览/作品集最相关的 8 个，逐个读落地页与描述；实际采用两项，其余作为方向校准。
+
+| 条目 | 视觉/交互 | 对本墙的取舍 |
+|---|---|---|
+| [Harry Atkins — harryjatkins.com](https://harryjatkins.com/)（[Recent 条目](https://recent.design/i/9b18jw0-harry-atkins)） | 超大单字母、极小的项目索引、`Text mode / Dark mode / Monochrome (N)` 三态 | **采用 Monochrome（N）**：图片去色、UI 与强调色保留；不引入 Light/Text 全站换肤（会推翻黑白“缝”的既定标准） |
+| [Meech213 — meech213.com](https://www.meech213.com/)（[Recent 条目](https://recent.design/i/i1mq7nk-meech213)） | 编辑影像以“漂浮印刷卡”呈现，卡片有留白与投影 | **采用留白视图（M）**：详情图收进画框 + drop-shadow；不做漂浮旋转卡片（破坏画布的精确排布） |
+| [Cathy Dolle — cathydolle.com](https://www.cathydolle.com/)（[Recent 条目](https://recent.design/i/sayzd67-cathy-dolle)） | 极度克制的小字导航、超大留白、画廊主体 | **采用**图注的小字/大留白语言；不把主墙改成白底静态网格（失去无限画布） |
+| [Gregor Collienne — gregorcollienne.com](https://gregorcollienne.com/)（[Recent 条目](https://recent.design/i/fjoqfqm-gregor-collienne)） | 米白底、大小不一的漂浮照片、居中的超大无衬线名字 | 验证“漂浮拼贴”方向；我们的无限格位已经是拼贴，不额外加居中字标（会遮挡卡片） |
+| [Podium — podium.global](https://podium.global/)（[Recent 条目](https://recent.design/i/gxi9ddp-podium)） | 黑白骨架 + 彩色摄影 + 强节奏项目展示 | 校准“黑白 UI + 彩色内容是成立的”；单色模式因此保留彩色强调色 |
+| [Nothing to Watch — nothing-to-watch.port80.ch](https://nothing-to-watch.port80.ch/)（[Recent 条目](https://recent.design/i/6wmr7uw-nothing-to-watch)） | 3D 海报球，空间化随机浏览 | 作为“空间化浏览”的旁证；不引入 WebGL/3D 球（与 2D 无限画布的坐标/性能模型冲突） |
+| [Belen Jones — belenjones.com](https://www.belenjones.com/)（[Recent 条目](https://recent.design/i/si1eikw-belen-jones)） | 超大字体 + 3D 编辑项目 + 流动的柔和色场 | 动态强调色已有同源效果；不加 3D 变换 |
+| [Avara — avara.xyz](https://avara.xyz/)（[Recent 条目](https://recent.design/i/bimlbnk-avara)） | 暗色交互展厅、角色化插画、顺滑动效 | 校准暗色展厅的动效分寸；不引入插画/品牌 IP |
 
 ## 9. 本轮改动清单（v4，已提交 `5699cb5`…`4f5c369`）
 
