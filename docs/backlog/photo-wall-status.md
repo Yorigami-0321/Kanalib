@@ -1,20 +1,20 @@
-# 图片墙开发状态（2026-11-09 22:00）
+# 图片墙开发状态（2026-11-10 09:30）
 
 > 分支 `feature/cloud-photo-wall` · 上级计划 [cloud-photo-wall.md](cloud-photo-wall.md) · v3 标准 [photo-wall-v3.md](photo-wall-v3.md)
 >
-> 一句话：**v3 十一条硬规则全过；本轮补完剩余 P1/P2——缩放比例提示、有限世界边界回弹、筛选收窄不再重播波次、详情相似条窄屏密度、标签封面去重、灯箱→详情→返回的焦点归位；并首次量化了 30 秒拖拽的内存/帧率、侧栏真实像素对比度、backdrop-filter 的帧率代价；随后按用户反馈重做点击语义（单击选中/双击展开全屏）、修掉详情大图裁切、详情改 niri 式水平滑动、右键概要改为卡片叠层，PhotoSwipe 退役。**
+> 一句话：**v3 十一条硬规则全过；2026-11-09 收尾了交互与性能尾巴；2026-11-10 补上 W3 质量档位——发布器从原图生成 t1024/t2048（sRGB、EXIF 方向、q90、绝不放大），网格按显示宽度给 srcset，详情按 原图→t2048→t1024→t512 逐级回退。**
 
 ## 1. 当前状态速览
 
 | 项 | 值 |
 |---|---|
-| 分支 / HEAD | `feature/cloud-photo-wall` |
-| 提交情况 | v3 及之前已提交（`f691dc4` 为止）；**本轮四个文件 + 一个新脚本未提交**（清单见 §9） |
+| 分支 / HEAD | `feature/cloud-photo-wall`；轮次起点 `9c3564e`（功能键收进侧栏） |
+| 提交情况 | 本轮锐利档改动未提交（清单见 §9） |
 | 类型检查 | `cd web && npx tsc --noEmit` → exit 0 |
-| 生产构建 | exit 0：CSS 32.8KB（gzip 7.4KB）/ JS 293.2KB（gzip 94.5KB）/ photoswipe chunk 60.3KB（本机 build 命令见 §8，`npm run build` 会被沙箱批量删除拦截） |
-| 数据 | `web/public/data/` 9899 条 / 2 分片（m/0000 5000 + m/0001 4899），gitignore |
-| 验证产物 | `web/screenshots/` 下 `report.json`（四页 + 交互）、`perf-report.json`（长时拖拽/对比度/帧率），两个脚本均可复跑 |
-| 改动前备份 | `.kanalib/backups/src-20261109-130014`（25 个文件），整体回退用 |
+| 生产构建 | exit 0：CSS 25.33KB（gzip 5.84KB）/ JS 278.83KB（gzip 89.88KB） |
+| 数据 | `web/public/data/` 9899 条 / 2 分片；**t1024/t2048 覆盖 0/9899**（这批数据全部来自已删除的 stress_10k，原图不在） |
+| 验证产物 | `.kanalib/wall-shots-tiers/report.json`（四页+交互回归，failures 空）；锐利档夹具端到端与浏览器探针见 §4.7（临时夹具已清理） |
+| 改动前备份 | `.kanalib/backups/src-20261109-130014`（2026-11-09 那轮；本轮未改 UI 组件结构） |
 
 ## 2. 本轮怎么做的
 
@@ -153,6 +153,19 @@ Lead 统筹，编码分给三个 teammate（写域隔离，只有 verifier 能 b
 | 坑 | 竖排一列 4 钮会把底部计数挤出 900 高视口（实测 foot 被推出界）→ 压成 2×2 网格；顺带清掉 styles.css 重复定义的 `.view__bar` 旧块 |
 | 实测 | 缩放 1→1.25→1.563→复位 1；拖远 e=-1117 → ⌖ 回原点；详情翻页 seq 2311→2312、返回 hash #/；`.view__bar` 已不存在；390 缝 64px、4 钮、无溢出；wall_shots failures 空；构建 exit 0 |
 
+### 4.7 锐利档 t1024/t2048（2026-11-10，W3 落地）
+
+| 项 | 实现 | 实测 |
+|---|---|---|
+| 发布器生成 | 一次解码同时产出两档：EXIF 方向套用 → ICC/EXIF 广色域转 sRGB → Lanczos3 按长边缩放 → JPEG q90；源图长边不足档位不放大；视频/ffmpeg-only/源缺失只降级 | 隔离根 5 张真实图（含中文文件名）：t1024 新写 3、t2048 新写 1、无需生成 6、失败 0；ui_screenshot 产出 2048×1339，克拉拉 576×1024（原图 1120×1992） |
+| 增量与 dry-run | 锐利档走同一账本指纹；`--no-tiers` 可关；`--dry-run` 只计数 | 重导 9899 条 11.3s：缩略图全命中账本（跳过 19798），锐利档源缺失 9899（原图已删）、0 失败 |
+| 网格 srcset | `256w/512w` + `sizes = 卡片宽 × 相机缩放`；降级到 t512 后不再带 srcset | 1440×900、DPR1：显示宽 154–218px 的卡选 t256，262–1029px 的卡选 t512 |
+| 详情回退链 | 原图 → t2048 → t1024 → t512（`onError` 逐级） | 同一张 ui_screenshot：t2048（naturalWidth 2048）→ 删 t2048 后 t1024（1024）→ 删 t1024 后 t512（512） |
+| 契约/校验 | `paths` 增 `t2048/`；契约 §1/§6.2/§7 回写；`wall_manifest_check.py` 增两档覆盖统计 | `python scripts/wall_manifest_check.py web/public/data` → exit 0（8 条既有 rating 类别警告），t1024/t2048 覆盖 0/9899 |
+| 回归 | 类型检查 + 生产构建 + 四页脚本 | tsc exit 0；build CSS 25.33KB / JS 278.83KB（gzip 5.84/89.88）；`wall_shots` 74 卡、135 标签、390 窄屏、failures 空 |
+
+**开发数据的限制**：现有 9899 条全部来自已删除的 `stress_10k`，`assets.path` 指向的原图不存在；样例库 14 条的缩略图缓存也已不在（t512 源缺失），所以这批数据既不能补原图也不能补锐利档。t1024/t2048 的清晰度收益要等接入真实图库后复验，**不能拿当前墙的观感当基线**。
+
 ## 5. 仍未解决
 
 ### 5.1 重复副本的标签曾丢失（2026-11-09 已修，数据已重导）
@@ -170,9 +183,11 @@ Lead 统筹，编码分给三个 teammate（写域隔离，只有 verifier 能 b
 - 注意：样例库只有 5 张真实图片，135 个标签里有大量"只挂 1 张"的标签属数据结构（不是 bug）；
   真实库的观感要等接入实际图库后再看一次。
 
-### 5.2 质量档位（依赖 F-080）
+### 5.2 质量档位（依赖 F-080）——**2026-11-10 已实现**
 
-导出目前没有 `t1024` 与 `o/`，详情页只能放大 t512，2K 屏必然软。补档在 F-080（W3）。
+- 导出已产出 `t1024/t2048`（q90、sRGB、EXIF 方向、Lanczos3、不放大），前端详情逐档回退（§4.7）。
+- 当前开发数据覆盖 0/9899：源图库已删除，只剩缩略图缓存。真实图库接入后需要重跑一次发布，并用 `wall_manifest_check.py` 看两档覆盖率。
+- 原图仍由 `--with-originals` 控制；不发布原图时详情最高用 t2048，发布时优先原图。
 
 ### 5.3 L0 全向无界（v3 §1.1 / 规则 11）——**2026-11-09 已实现**
 
@@ -255,7 +270,7 @@ node scripts/wall_shots.mjs --base http://127.0.0.1:4318/ --out web/screenshots
 # 30 秒长时拖拽（堆/DOM/帧/长任务）+ 侧栏真实像素对比度 + backdrop-filter 开关对比
 node scripts/wall_perf.mjs --base http://127.0.0.1:4318/ --out web/screenshots --seconds 30
 
-# 重新导出数据（修完 task-5 之后）
+# 重新导出数据（默认生成 t1024/t2048；只要清单与 t512 时加 --no-tiers）
 cargo run -p kanalib-publish -- --db .kanalib/kanalib.db --out web/public/data
 
 # 契约校验
@@ -272,18 +287,23 @@ python scripts/wall_manifest_check.py web/public/data
 - **headless 的帧率不代表真机**：没有 vsync，rAF 基准约 143–145Hz；`p95 ≤33.3ms` 是"两个 60Hz 帧周期"的卡顿红线，不是刷新率。backdrop-filter 由合成器执行，headless 走 SwiftShader，**GPU 侧成本量不出来**。
 - **性能测量必须在无人改代码时跑**：HMR 重载会让探针失效，`wall_perf.mjs` 用 session 令牌判废并自动重试 3 次，报告里出现"重试 N 次"说明当时有人在改文件，数据要重跑。
 
-## 9. 未提交文件清单（本轮）
+## 9. 未提交文件清单（本轮，2026-11-10）
 
 ```text
- M web/src/App.tsx               （标签封面段内去重 + 焦点归位）
- M web/src/components/Wall.tsx   （缩放提示 / 边界回弹 / 波次收窄判据）
- M web/src/components/detail.css （窄屏相似条密度）
- M web/src/styles.css            （.canvas__zoom）
-?? scripts/wall_perf.mjs         （长时性能 + 对比度 + blur 代价测量）
-?? docs/backlog/photo-wall-status.md（本文件，状态回写）
+ M crates/kanalib-publish/Cargo.toml、Cargo.lock   （image 依赖）
+ M crates/kanalib-publish/src/publish.rs           （t1024/t2048 生成、账本增量、统计）
+ M crates/kanalib-publish/src/manifest.rs          （paths.t2048）
+ M crates/kanalib-publish/src/main.rs              （--no-tiers）
+ M crates/kanalib-publish/tests/publish_contract.rs（5 条锐利档测试；夹具改真实图片）
+ M crates/kanalib-publish/README.md
+ M web/src/source/types.ts、web/src/lib/assetUrl.ts（t2048 + srcset/回退链）
+ M web/src/components/WallCard.tsx、Wall.tsx       （displayScale → srcset sizes）
+ M scripts/wall_manifest_check.py                  （t1024/t2048 覆盖统计）
+ M docs/backlog/{photo-wall-contract,cloud-photo-wall,photo-wall-status,registry}.md
+ M web/README.md                                   （按 v3 现状重写）
 ```
 
-> v3 那批 11 改 + 11 增已在前四笔提交里落地，清单见 §10（历史记录，勿再按它判断当前工作区）。
+> v3 及之前的清单见 §10（历史记录，勿再按它判断当前工作区）。
 
 ## 10. 提交切分（历史记录）
 
@@ -317,6 +337,8 @@ feat(wall): 首页改为 360° 全向无限画布 + 侧栏常驻半透明
 
 - **不要在生产库上跑导出**：白名单/隐私边界见契约 §7。
 - 画布性能命门是虚拟化：30s 连续拖拽实测 DOM 45–81 张、堆 +15.5%、掉帧 0%（§4.4）。1 万条的数据规模已覆盖；十万条需重新评估（无限首页要求全量分片到齐才生成格子）。
+- **锐利档单线程解码**：大库首次发布会把时间花在 t1024/t2048 上，增量发布只重编源指纹变化或目标缺失的条目；十万级真实照片库若嫌慢，下一步再上小线程池（本轮未做）。
+- **开发数据 t1024/t2048 覆盖 0/9899**：源图库已删，当前墙的详情仍走 t512 回退。真实库接入后必须重跑发布再评价清晰度。
 - 动态强调色对纯灰/纯白图会退化成中性灰，属预期行为。
 - **标签封面的"5 种封面"是样例库的限制**：9899 条里只有 5 条真实带标签的图，107/135 个标签是单图标签。真实库接入后要复跑一次相邻重复统计，不能把当前数字当基线。
 - `.kanalib/folia-ui-spec.md`（36KB）是 Folia 的实测规格，需要细节时继续照抄。
