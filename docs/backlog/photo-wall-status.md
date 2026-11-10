@@ -1,8 +1,10 @@
-# 图片墙开发状态（2026-11-10 09:30）
+# 图片墙开发状态（2026-11-10 18:00）
 
 > 分支 `feature/cloud-photo-wall` · 上级计划 [cloud-photo-wall.md](cloud-photo-wall.md) · v3 标准 [photo-wall-v3.md](photo-wall-v3.md)
 >
-> 一句话：**v3 十一条硬规则全过；2026-11-09 收尾了交互与性能尾巴；2026-11-10 补上 W3 质量档位——发布器从原图生成 t1024/t2048（sRGB、EXIF 方向、q90、绝不放大），网格按显示宽度给 srcset，详情按 原图→t2048→t1024→t512 逐级回退。**
+> 一句话：**在 W3 锐利档之后，按 v3 拍板口径把网页层重新对照代码与浏览器补齐：收藏/分级/分组做成与标签同构的两级入口；详情支持触摸横滑、Ctrl/双指缩放、放大后拖拽、双击复位，标签按类别分组并默认折叠；强调色按“首页聚合 / 入口用封面 / 详情用本图”分层；无限首页排序改为有限有序墙；搜索在整库分片上执行；去掉与 W4 相反的 noindex；顺手清掉 styles.css 里 8 份重复区块。**
+>
+> 之前的“详情水平滑动/排序已实现”只在动画和有限墙层面成立，触摸手势、入口结构、标签分组等并未落地；本轮以代码 + 浏览器实测为准重新核过。
 
 ## 1. 当前状态速览
 
@@ -11,9 +13,9 @@
 | 分支 / HEAD | `feature/cloud-photo-wall`；轮次起点 `9c3564e`（功能键收进侧栏） |
 | 提交情况 | 本轮锐利档改动未提交（清单见 §9） |
 | 类型检查 | `cd web && npx tsc --noEmit` → exit 0 |
-| 生产构建 | exit 0：CSS 25.33KB（gzip 5.84KB）/ JS 279.23KB（gzip 90.05KB） |
+| 生产构建 | exit 0：CSS 26.78KB（gzip 6.06KB）/ JS 286.49KB（gzip 92.13KB）；体积上升来自新入口与手势，不是 CSS 重复 |
 | 数据 | `web/public/data/` 9899 条 / 2 分片；**t1024/t2048 覆盖 0/9899**（这批数据全部来自已删除的 stress_10k，原图不在）；新发布器对 9899 条都写了 `sharp: 0` |
-| 验证产物 | `.kanalib/wall-shots-sharp/report.json`（四页+交互回归，failures 空）；锐利档夹具端到端与浏览器探针见 §4.7/§4.8（临时夹具已清理） |
+| 验证产物 | `.kanalib/audit-final/report.json`（四页+交互回归，failures 空）、`verify2.json`（入口/强调色/详情手势）、`new-*.png` 与 `mobile-detail-tagged.png`；临时夹具与探针已清理 |
 | 改动前备份 | `.kanalib/backups/src-20261109-130014`（2026-11-09 那轮；本轮未改 UI 组件结构） |
 
 ## 2. 本轮怎么做的
@@ -179,6 +181,28 @@ Lead 统筹，编码分给三个 teammate（写域隔离，只有 verifier 能 b
 
 **口径**：`sharp` 缺失 ≠ 无档位，而是“旧发布器没声明”；新发布器**总是**写（含 0）。这样前端既能对旧数据保持兼容，也不再为无档条目制造 404。
 
+### 4.9 按拍板口径复查并补齐网页层（2026-11-10）
+
+复查方法：逐项对照 v3 的 Q1–Q23/§3 硬规则读代码，再用 headless 浏览器真实点击、触摸、滚轮与截图验证；不再只看旧状态文档。
+
+| 项 | 原状（代码/浏览器） | 本轮实现 | 实测 |
+|---|---|---|---|
+| Q8 四个入口两级结构 | 只有标签是「封面总览 → 二级墙」；收藏/分级/分组只是侧栏里的筛选面板 | 新增 `#/favs → #/fav`、`#/ratings → #/r/<G\|S\|Q\|E>`、`#/groups → #/g/<group>`；侧栏三个页签改为入口，搜索/排序仍是面板 | 分组总览 2 卡（原创 1 张、截图/文本 1 张）→ 二级墙 1 张；分级总览 4 卡（G 9,899、S/Q/E 0）→ `#/r/G` 墙；收藏总览 1 卡（0 张）→ 空墙提示「还没有收藏的图片」 |
+| 详情触摸换图 | 只有键盘/侧栏按钮能触发滑动，触摸横滑无效 | Pane 增加单指横滑（阈值 70px、横向占优）；滑动中不接新指令 | 1440 触摸左滑 → 下一张；右滑 → 回到上一张；390 窄屏左滑同样生效 |
+| 详情缩放/平移 | 无 wheel/pinch/pan，图片固定 contain | Ctrl/⌘+滚轮以光标为锚缩放；双指缩放；放大后拖拽平移并夹在边界内；双击复位 | Ctrl+滚轮 1→1.616；双指 1→2.8；双击后 `transform: none`；放大状态横滑改为平移、不换图 |
+| 详情标签 | 44 个 chip 平铺，遮住半屏，无类别 | 按类别分组（通用/角色/作品/画师/手动/元信息/分级）；默认只露 18 个、每组最多 6 个，其余 `+N`；「全部 N 个标签」展开后列表自己滚，按钮留在滚动区外 | `anime_chibi.png`：4 组（通用/作品/元信息/分级）、折叠 11 chip、按钮「全部 44 个标签」；展开 44 chip + 「收起标签」 |
+| Q7a 强调色分层 | 标签页/总览不取封面，详情色会残留到下一页 | 首页聚合视野；标签/收藏/分级/分组（总览与二级墙）用该入口封面；详情用本图；无封面回中性灰 | 标签总览 `rgb(186,163,87)` = 首个通用封面的黄；`1girl` 同色；`outdoors` `rgb(167,144,210)`；详情用本图色 |
+| 排序 | 无限首页的排序只改变随机池，画面仍随机；排序控件等于无效 | `sort !== random` 时首页切为有限有序墙（`infiniteHome` 只在随机且无搜索时成立） | 切「文件名」后可见卡 `data-index` 0–14，名称严格升序；回到随机恢复无限 |
+| 搜索范围 | 仅在已加载分片上过滤；筛选后停止拉全库 | 所有列表/总览页 `needAll=true`，分片拉全后再过滤；搜索面板只筛文件名 | 搜 `synthetic_00001`（第二分片）命中 1 张；`#/r/G` 计数 9,899 与库一致 |
+| W4 noindex | index.html 写死 `noindex, nofollow`，与「公开只读、默认可收录」相反 | 去掉静态 noindex；需要私密部署时在托管层加 `X-Robots-Tag` 或重新加 meta | 浏览器 `meta[name=robots]` 为 null |
+| Q4 切页 | 总览/二级墙无淡入 | `.tags` 与 `.wallhead` 加 350ms `page-in` 淡入 | 总览首屏截图正常；无位移 |
+| 代码 | `styles.css` 3009 行，二级墙/标签/详情区块重复 8 次 | 删除 6 份完全相同的副本与 1 份重复的二级墙/标签段；保留概要层与最终生效的详情基底 | 3009 → 1288 行；tsc/构建/wall_shots 全过，截图无回归 |
+
+**已知口径**：
+- 390 下 `wall_shots.mjs` 的规则 11 行程、拖拽与 Ctrl+滚轮断言是按桌面标定的；用 `--width 390` 跑会报这四项。移动端实际用触摸左滑/长按/横拖单独验过，截图见 `mobile-detail-tagged.png`，不把桌面脚本的 390 结果当功能失败。
+- 详情相似条数量由 pHash 距离决定；`anime_chibi.png` 本轮为 0，邻图有 6，属数据分布，不是布局缺失。
+- 收藏/分级/分组的第一层计数与封面取原始 mtime 顺序，刷新稳定；收藏当前为 0 张，所以收藏总览是空白封面卡。
+
 ## 5. 仍未解决
 
 ### 5.1 重复副本的标签曾丢失（2026-11-09 已修，数据已重导）
@@ -300,21 +324,23 @@ python scripts/wall_manifest_check.py web/public/data
 - **headless 的帧率不代表真机**：没有 vsync，rAF 基准约 143–145Hz；`p95 ≤33.3ms` 是"两个 60Hz 帧周期"的卡顿红线，不是刷新率。backdrop-filter 由合成器执行，headless 走 SwiftShader，**GPU 侧成本量不出来**。
 - **性能测量必须在无人改代码时跑**：HMR 重载会让探针失效，`wall_perf.mjs` 用 session 令牌判废并自动重试 3 次，报告里出现"重试 N 次"说明当时有人在改文件，数据要重跑。
 
-## 9. 未提交文件清单（本轮续作，2026-11-10）
+## 9. 未提交文件清单（本轮：网页复查补齐，2026-11-10）
 
 ```text
- M crates/kanalib-publish/src/manifest.rs          （item.sharp）
- M crates/kanalib-publish/src/publish.rs           （sync_sharp_tiers 返回最高可用档）
- M crates/kanalib-publish/tests/publish_contract.rs（sharp 断言）
- M crates/kanalib-publish/README.md
- M web/src/source/types.ts、StaticSource.ts        （sharp 字段与归一化）
- M web/src/lib/assetUrl.ts                         （srcset/详情按 sharp 选档）
- M scripts/wall_manifest_check.py                  （sharp 值域与文件一致性）
- M docs/backlog/{photo-wall-contract,cloud-photo-wall,photo-wall-status}.md
- M web/README.md
+ M web/index.html                          （去掉与 W4 相反的静态 noindex）
+ M web/src/App.tsx                         （四入口路由、强调色分层、排序/搜索、整库加载）
+ M web/src/components/Sidebar.tsx          （收藏/分级/分组改入口；搜索/排序仍是面板）
+ M web/src/components/Detail.tsx           （触摸横滑、缩放平移、标签分组折叠）
+ M web/src/components/Wall.tsx             （emptyText/emptyHint）
+ M web/src/components/detail.css           （手势层指针、缩放、标签组）
+ M web/src/lib/router.ts                   （fav/rating/group 路由）
+ M web/src/state/filters.ts                （只保留文件名搜索）
+ M web/src/styles.css                      （去重 3009→1288 行；切页淡入）
+?? web/src/components/BucketGallery.tsx    （收藏/分级/分组第一层封面墙）
+ M web/README.md、docs/backlog/{photo-wall-v3,photo-wall-status,cloud-photo-wall,registry}.md
 ```
 
-> 上一轮（发布器锐利档 + 前端接入）已按 feat/test/docs 四笔提交（`77e00b8`…`4f61545`）。
+> 发布器锐利档、`item.sharp` 与网格/详情选档已在此前提交（`77e00b8`…`a491b85`）。
 
 ## 10. 提交切分（历史记录）
 
