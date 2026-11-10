@@ -1,6 +1,7 @@
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { originalUrl, tierUrl } from '../lib/assetUrl';
 import { categoryLabel, formatCount, formatDateTime, formatSize, formatStars, ratingLabel } from '../lib/format';
+import { detailHref } from '../lib/router';
 import { groupTags, similarOf } from '../lib/itemDetail';
 import type { TierPaths, WallItem } from '../source/types';
 import './inspector.css';
@@ -36,6 +37,31 @@ export function Inspector({
   onSimilar,
 }: InspectorProps) {
   const [expanded, setExpanded] = useState(false);
+  const [copied, setCopied] = useState(false);
+  const copyTimer = useRef(0);
+  useEffect(() => () => window.clearTimeout(copyTimer.current), []);
+
+  const copyLink = async () => {
+    try {
+      const link = new URL(detailHref(item.id), window.location.href).href;
+      await navigator.clipboard.writeText(link);
+      setCopied(true);
+      window.clearTimeout(copyTimer.current);
+      copyTimer.current = window.setTimeout(() => setCopied(false), 1800);
+    } catch {
+      setCopied(false);
+    }
+  };
+
+  const toggleFullscreen = async () => {
+    try {
+      if (document.fullscreenElement) await document.exitFullscreen();
+      else await document.documentElement.requestFullscreen();
+    } catch {
+      /* 浏览器拒绝（非用户手势/权限）时保持原状 */
+    }
+  };
+
   const groups = groupTags(item);
   const similar = similarOf(item, items);
   const original = originalUrl(paths, item);
@@ -157,11 +183,24 @@ export function Inspector({
               返回列表
             </button>
           ) : null}
-          {original ? (
-            <a className="inspector__link" href={original} target="_blank" rel="noreferrer">
-              打开原图
-            </a>
-          ) : null}
+          <div className="inspector__secondary">
+            <button
+              type="button"
+              className={'inspector__link inspector__link--button' + (copied ? ' is-done' : '')}
+              onClick={copyLink}
+              aria-live="polite"
+            >
+              {copied ? '✓ 已复制链接' : '复制链接'}
+            </button>
+            <button type="button" className="inspector__link inspector__link--button" onClick={toggleFullscreen}>
+              全屏（F）
+            </button>
+            {original ? (
+              <a className="inspector__link" href={original} target="_blank" rel="noreferrer">
+                原图
+              </a>
+            ) : null}
+          </div>
         </div>
       </div>
     </aside>

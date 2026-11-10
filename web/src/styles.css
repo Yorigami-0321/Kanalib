@@ -18,7 +18,7 @@
   --panel: 300px;
   --gap: 8px;
   --ease: cubic-bezier(0.2, 0.7, 0.25, 1);
-  --ease-out: cubic-bezier(0.4, 0, 1, 1);
+  --ease-out: cubic-bezier(0.22, 1, 0.36, 1);
   --cjk: 'Noto Sans CJK SC', 'Source Han Sans SC', 'PingFang SC', 'Hiragino Sans GB',
     'Microsoft YaHei', sans-serif;
   color-scheme: dark;
@@ -299,6 +299,11 @@ a {
   border-top: 1px solid var(--hairline);
 }
 
+.seam__foot-actions {
+  display: flex;
+  gap: 6px;
+}
+
 .seam__count {
   color: rgba(247, 244, 238, 0.38);
   font-size: 10px;
@@ -353,6 +358,27 @@ a {
   margin: 12px 0 0;
   color: var(--ink-soft);
   font-size: 11px;
+}
+
+.panel__keys {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 5px 14px;
+  margin: 12px 0 4px;
+  padding-top: 10px;
+  border-top: 1px solid var(--hairline);
+  font-size: 11px;
+}
+
+.panel__keys dt {
+  color: rgba(247, 244, 238, 0.72);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.panel__keys dd {
+  margin: 0;
+  color: rgba(247, 244, 238, 0.42);
 }
 
 .panel__actions {
@@ -505,20 +531,27 @@ a {
   background: #101012;
   contain: layout paint;
   cursor: pointer;
+  box-shadow: inset 0 0 0 1px rgba(247, 244, 238, 0.055);
   /* 聚焦时卡片在布局里换到更大的 rect：位置/尺寸走 320ms，周围图被平滑挤开。 */
   transition:
     left 320ms var(--ease),
     top 320ms var(--ease),
     width 320ms var(--ease),
     height 320ms var(--ease),
-    filter 160ms var(--ease),
-    box-shadow 180ms var(--ease);
+    filter 240ms var(--ease),
+    opacity 320ms var(--ease),
+    box-shadow 240ms var(--ease),
+    transform 360ms var(--ease);
 }
 
-/* 硬规则 3：hover 只用一个通道（滤镜），不再叠加描边/位移/字号。
-   也不抬 z-index：所有卡片始终在同一层，聚焦靠布局重排而不是叠层。 */
+/* hover 在滤镜之外补一层很轻的抬升 + 图片放大；通道仍收敛，不做描边/字号变化。
+   不抬 z-index：所有卡片始终在同一层，聚焦靠布局重排而不是叠层。 */
 .tile:hover {
   filter: saturate(1.08) brightness(1.05);
+  transform: translateY(-2px);
+  box-shadow:
+    inset 0 0 0 1px rgba(247, 244, 238, 0.12),
+    inset 0 -44px 60px rgba(0, 0, 0, 0.24);
 }
 
 /* ===== 单击聚焦（v4）：格子/有限墙局部重排，英雄卡占更大的 rect；所有图仍在同一层 ===== */
@@ -527,6 +560,47 @@ a {
 .tile--spotlight .tile__chip,
 .tile--spotlight .tile__copy {
   opacity: 0;
+}
+
+/* 聚焦时把画面其余部分压暗，让英雄卡成为唯一的视觉重心；离开聚焦自动淡回。 */
+.canvas.is-spotlight .tile:not(.tile--spotlight) {
+  opacity: 0.52;
+  filter: saturate(0.55) brightness(0.7);
+}
+
+.canvas.is-spotlight .tile:not(.tile--spotlight):hover {
+  opacity: 0.76;
+  filter: saturate(0.85) brightness(0.9);
+}
+
+.canvas.is-spotlight .canvas__hint {
+  opacity: 0;
+}
+
+/* 英雄卡：只加内描边和一点内阴影，不引入外发光（规则 6）。 */
+/* 原位放大：英雄卡叠在未重排的邻卡之上，靠 z-index + 投影建立层次；
+   contain 从 paint 降为 layout，否则外层投影会被裁掉。 */
+.tile--spotlight {
+  z-index: 3;
+  contain: layout;
+  border-radius: 18px;
+  /* 放大用稍长、先加速再收住的曲线；收回走基础 320ms，展开从容、收起利落。 */
+  transition:
+    left 420ms cubic-bezier(0.4, 0, 0.2, 1),
+    top 420ms cubic-bezier(0.4, 0, 0.2, 1),
+    width 420ms cubic-bezier(0.4, 0, 0.2, 1),
+    height 420ms cubic-bezier(0.4, 0, 0.2, 1),
+    opacity 320ms var(--ease),
+    filter 240ms var(--ease),
+    box-shadow 240ms var(--ease);
+  box-shadow:
+    0 36px 90px rgba(0, 0, 0, 0.58),
+    inset 0 0 0 1px rgba(247, 244, 238, 0.2),
+    inset 0 -80px 100px rgba(0, 0, 0, 0.18);
+}
+
+.tile--spotlight:hover {
+  transform: none;
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -562,17 +636,75 @@ a {
   }
 }
 
+/* 渐进揭示：只对合成层属性动效（opacity / transform / filter）。
+   图片未就绪时 1.035 微缩放 + 14px 模糊，加载完成后 700ms 内回到 1x 清晰。 */
 .tile__img {
   display: block;
   width: 100%;
   height: 100%;
   object-fit: cover;
   opacity: 0;
-  transition: opacity 320ms var(--ease);
+  filter: blur(14px) saturate(0.85);
+  transform: scale(1.035);
+  transition:
+    opacity 420ms var(--ease),
+    transform 900ms var(--ease),
+    filter 700ms var(--ease);
 }
 
 .tile__img.is-loaded {
   opacity: 1;
+  filter: none;
+  transform: scale(1.001);
+}
+
+.tile:hover .tile__img.is-loaded {
+  transform: scale(1.045);
+}
+
+.tile--spotlight .tile__img.is-loaded,
+.tile--spotlight:hover .tile__img.is-loaded {
+  transform: scale(1.001);
+}
+
+/* 加载骨架：真实图未到之前扫一条低对比高光，避免整面墙先黑一片。
+   1.5s 一个循环，只动 background-position，不触发布局。 */
+.tile::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  border-radius: inherit;
+  background: linear-gradient(
+    105deg,
+    transparent 28%,
+    rgba(247, 244, 238, 0.085) 44%,
+    transparent 60%
+  );
+  background-size: 220% 100%;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 240ms var(--ease);
+}
+
+.tile:has(> img:not(.is-loaded))::before {
+  opacity: 1;
+  animation: tile-shimmer 1.5s ease-in-out infinite;
+}
+
+@keyframes tile-shimmer {
+  from {
+    background-position: 120% 0;
+  }
+  to {
+    background-position: -120% 0;
+  }
+}
+
+.tile__shade,
+.tile__chip,
+.tile__copy {
+  z-index: 2;
 }
 
 .tile__shade {
@@ -1307,6 +1439,44 @@ a {
     bottom: 10px;
   }
 
+  /* 窄屏卡片往往只有 100–160px 宽：角标和标题必须同步收小，
+     否则一行标题会吃掉三分之一卡宽。 */
+  .tile__chip {
+    top: 8px;
+    left: 8px;
+    max-width: calc(100% - 16px);
+    padding: 2px 5px;
+    font-size: 9px;
+    letter-spacing: 0.06em;
+  }
+
+  .tile__copy {
+    right: 11px;
+    bottom: 10px;
+    left: 11px;
+    gap: 2px;
+  }
+
+  .tile__copy strong {
+    letter-spacing: -0.025em;
+    line-height: 1.04;
+    -webkit-line-clamp: 2;
+  }
+
+  .tile__copy small {
+    display: none;
+  }
+}
+
+/* 手机竖屏的卡片只有 150–180px 宽，角标会被截成「240×…」这种无信息量的碎片；
+   尺寸/标签都进检查器，画面只留标题。 */
+@media (max-width: 560px) {
+  .tile__chip {
+    display: none;
+  }
+}
+
+@media (max-width: 760px) {
   .view__info {
     flex-direction: column;
     align-items: flex-start;
@@ -1317,6 +1487,35 @@ a {
     max-width: 100%;
     overflow-x: auto;
   }
+}
+
+/* ===== 单色预览（N）=====
+   只给图片去色，UI 与动态强调色保留。图片自身的 filter 过渡会把这层
+   grayscale 一起淡入淡出，所以切换时不会硬跳。 */
+.app.is-mono .tile__img,
+.app.is-mono .tagcard__img,
+.app.is-mono .inspector__similar-item img,
+.app.is-mono .view__img {
+  filter: grayscale(1) contrast(1.04);
+}
+
+.app.is-mono .view__ambient {
+  filter: blur(52px) grayscale(1) brightness(0.4);
+}
+
+/* 单色 + 留白：保留画框投影，否则会被上面的 grayscale 规则覆盖掉。 */
+.app.is-mono .view--detail.view--matte .view__img {
+  filter: grayscale(1) contrast(1.04) drop-shadow(0 30px 52px rgba(0, 0, 0, 0.56));
+}
+
+.app.is-mono .tile:hover .tile__img.is-loaded {
+  filter: grayscale(1) contrast(1.04);
+}
+
+.app .tagcard__img {
+  transition:
+    transform 700ms var(--ease),
+    filter 300ms var(--ease);
 }
 
 @media (prefers-reduced-motion: reduce) {

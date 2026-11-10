@@ -12,9 +12,11 @@
   flex-direction: column;
   overflow: hidden;
   border-right: 1px solid var(--hairline);
-  background: color-mix(in srgb, var(--surface) 95%, transparent);
+  /* 实色纸面：95% 半透明会让墙上的标题透过检查器形成重影（聚焦截图里能看到）。 */
+  background:
+    linear-gradient(180deg, #101013 0%, var(--surface) 32%, var(--surface) 100%);
   box-shadow: 24px 0 64px rgba(0, 0, 0, 0.42);
-  animation: inspector-in 180ms var(--ease);
+  animation: inspector-in 220ms var(--ease-out);
 }
 
 @keyframes inspector-in {
@@ -218,9 +220,18 @@
   aspect-ratio: 1;
   padding: 0;
   border: 0;
-  border-radius: 4px;
+  border-radius: 5px;
   background: #101012;
+  box-shadow: inset 0 0 0 1px rgba(247, 244, 238, 0.06);
   cursor: pointer;
+  transition:
+    transform 220ms var(--ease),
+    box-shadow 220ms var(--ease);
+}
+
+.inspector__similar-item:hover {
+  transform: translateY(-2px) scale(1.02);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 45%, transparent);
 }
 
 .inspector__similar-item img {
@@ -268,6 +279,13 @@
   filter: brightness(0.92);
 }
 
+.inspector__secondary {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 14px;
+}
+
 .inspector__link {
   color: color-mix(in srgb, var(--accent) 62%, #fff);
   font-size: 12px;
@@ -276,6 +294,20 @@
 
 .inspector__link:hover {
   text-decoration: underline;
+}
+
+.inspector__link--button {
+  padding: 0;
+  border: 0;
+  background: none;
+  cursor: pointer;
+  text-align: left;
+  transition: color 160ms var(--ease);
+}
+
+.inspector__link--button.is-done {
+  color: #9fe0b4;
+  text-decoration: none;
 }
 
 @media (max-width: 900px) {

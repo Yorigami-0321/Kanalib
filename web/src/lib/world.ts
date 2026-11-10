@@ -99,12 +99,16 @@ export function layoutWorld(
  * 四档，够用且不会出现"同一行两种字号跳来跳去"以外的惊喜。
  */
 export function titleSizeForWidth(width: number): number {
-  if (!Number.isFinite(width) || width <= 0) return 13;
-  if (width < 220) return 13;
+  if (!Number.isFinite(width) || width <= 0) return 12;
+  // 窄卡（390 屏三列约 100px）上 13px 会占掉三分之一卡宽并挤成四行；
+  // 分级同时向上延伸，让大卡/聚焦卡有更明显的视觉重量。
+  if (width < 120) return 10;
+  if (width < 170) return 11;
+  if (width < 240) return 12.5;
   if (width < 340) return 15;
   if (width < 520) return 18;
-  if (width < 760) return 22;
-  return 26;
+  if (width < 760) return 23;
+  return 27;
 }
 
 /** 按 y 二分出可见区间（含 overscan），避免每帧线性扫 1 万条。 */
@@ -392,17 +396,50 @@ export function cellTilesInView(
   return tiles;
 }
 
-/* ===== v4 单击聚焦：原位重排（不是浮层缩放） =====
+/* ===== v5.2：聚焦挤压（保留 v4 的重排语义，修正细条） =====
  *
- * 用户要的是"点开一张，周围的图被挤开，所有图仍在同一层"。
- * - 无限画布：重排被点中的那个格子（格子边界不变，邻格不动），英雄卡占左上大块，
- *   右边一列 + 底部一片网格装下该格其余条目；
- * - 有限墙：英雄卡放在世界顶部的大块，前几张其余图放右侧列，剩下的顺延到下方行。
+ * 英雄卡放大后，同格其余图仍被挤到右侧列/底部带；区别是列数不再写死 1，
+ * 而是按“剩余区域宽高比 × 条目平均图片比例”选列，让每张卡接近原图比例，
+ * 不再出现 300×90 那种横向细条。
  */
 
 interface GridEntry {
   item: WallItem;
   index: number;
+}
+
+function entryRatio(entry: GridEntry): number {
+  return entry.item.w > 0 && entry.item.h > 0 ? entry.item.w / entry.item.h : 1;
+}
+
+/**
+ * 在 box 里为 entries 选列数：让单元格宽高比接近平均图片比例，并惩罚过小的短边。
+ * 这是“挤压但不切条”的关键——单纯一行/一列都会在某个数量下退化为细条。
+ */
+function gridColumns(
+  entries: readonly GridEntry[],
+  box: { w: number; h: number },
+  gap: number,
+): number {
+  const count = entries.length;
+  if (count <= 1 || box.w <= 0 || box.h <= 0) return 1;
+  const average = entries.reduce((sum, entry) => sum + entryRatio(entry), 0) / count;
+  let best = 1;
+  let bestScore = Infinity;
+  for (let cols = 1; cols <= count; cols += 1) {
+    const rows = Math.ceil(count / cols);
+    const cellW = (box.w - gap * (cols - 1)) / cols;
+    const cellH = (box.h - gap * (rows - 1)) / rows;
+    if (cellW <= 0 || cellH <= 0) continue;
+    const aspectDelta = Math.abs(Math.log(cellW / cellH / Math.max(0.2, average)));
+    const shortSide = Math.min(cellW, cellH);
+    const score = aspectDelta + (shortSide < 88 ? 1.6 : 0);
+    if (score < bestScore) {
+      bestScore = score;
+      best = cols;
+    }
+  }
+  return best;
 }
 
 function gridRects(
@@ -434,7 +471,13 @@ function gridRects(
 }
 
 /** 重排一个格子：hero 占左上大块，右侧列 + 底部网格装下同格其余条目。 */
-export function layoutSpotlightCell(spec: CellSpec, b: number, c: number, heroId: string): PlacedTile[] {
+export function layoutSpotlightCell(
+  spec: CellSpec,
+  b: number,
+  c: number,
+  heroId: string,
+  anchorRect?: TileRect,
+): PlacedTile[] {
   const normal = layoutCell(spec, b, c);
   const hero = normal.find((tile) => tile.item.id === heroId);
   if (!hero || normal.length <= 1) return normal;
@@ -451,58 +494,98 @@ export function layoutSpotlightCell(spec: CellSpec, b: number, c: number, heroId
   let heroW: number;
   let heroH: number;
   if (narrow) {
-    // 窄格子：英雄整行，底下用 2–3 列网格装其余图。
     heroW = innerW;
     heroH = Math.min(innerH * 0.62, Math.max(innerH * 0.42, innerW / ratio));
   } else {
-    const maxW = innerW * 0.62;
-    const maxH = innerH * 0.7;
+    // 英雄卡约 60% 宽 / 62% 高；比 v4 稍收，给挤压区更多面积。
+    const maxW = innerW * 0.6;
+    const maxH = innerH * 0.62;
     heroW = maxW;
     heroH = maxW / ratio;
     if (heroH > maxH) {
       heroH = maxH;
       heroW = maxH * ratio;
     }
-    // 至少给右侧列/底部留出 140/110px，不然周围图会缩成细条。
     heroW = Math.min(heroW, innerW - gap - 140);
     heroH = Math.min(heroH, innerH - gap - 110);
     heroW = Math.max(innerW * 0.46, heroW);
     heroH = Math.max(innerH * 0.46, heroH);
   }
 
+  // 锚定被点图片的当前位置：点哪张，哪张就在原地放大；邻图围到它周围，
+  // 不再把新英雄搬到格子左上角、旧英雄挪到新位置（那会像“交换图片”）。
+  const anchorX = anchorRect ? anchorRect.x + anchorRect.w / 2 : hero.rect.x + hero.rect.w / 2;
+  const anchorY = anchorRect ? anchorRect.y + anchorRect.h / 2 : hero.rect.y + hero.rect.h / 2;
+  const heroX = Math.min(
+    Math.max(originX, anchorX - heroW / 2),
+    originX + innerW - heroW,
+  );
+  const heroY = Math.min(
+    Math.max(originY, anchorY - heroH / 2),
+    originY + innerH - heroH,
+  );
   const out: PlacedTile[] = [
-    { item: hero.item, index: hero.index, rect: { x: originX, y: originY, w: heroW, h: heroH }, cell },
+    { item: hero.item, index: hero.index, rect: { x: heroX, y: heroY, w: heroW, h: heroH }, cell },
   ];
   const rest = normal
     .filter((tile) => tile.item.id !== heroId)
     .map((tile) => ({ item: tile.item, index: tile.index }));
 
-  if (narrow) {
-    const bottom = { x: originX, y: originY + heroH + gap, w: innerW, h: Math.max(1, innerH - heroH - gap) };
-    const cols = Math.max(2, Math.min(4, Math.ceil(rest.length / 2)));
-    for (const entry of gridRects(rest, bottom, cols, gap)) {
+  // 英雄四周的剩余区域：横向选更宽的一侧作列，纵向选更高的一侧作带；
+  // 两块互不重叠，各自用 gridColumns 保持比例。
+  const rightW = Math.max(0, originX + innerW - (heroX + heroW) - gap);
+  const leftW = Math.max(0, heroX - originX - gap);
+  const bottomH = Math.max(0, originY + innerH - (heroY + heroH) - gap);
+  const topH = Math.max(0, heroY - originY - gap);
+  const sideRight = rightW >= leftW;
+  const sideW = sideRight ? rightW : leftW;
+  const verticalBottom = bottomH >= topH;
+  const bandH = verticalBottom ? bottomH : topH;
+
+  const sideBox =
+    sideW > 4
+      ? {
+          x: sideRight ? heroX + heroW + gap : originX,
+          y: originY,
+          w: sideW,
+          h: innerH,
+        }
+      : null;
+  const bandBox =
+    bandH > 4
+      ? {
+          x: sideRight ? originX : heroX,
+          y: verticalBottom ? heroY + heroH + gap : originY,
+          w: sideRight ? heroX + heroW - originX : originX + innerW - heroX,
+          h: bandH,
+        }
+      : null;
+
+  const pack = (
+    entries: { item: WallItem; index: number }[],
+    box: { x: number; y: number; w: number; h: number } | null,
+  ) => {
+    if (!box || entries.length === 0 || box.w < 2 || box.h < 2) return;
+    const cols = Math.max(1, Math.min(entries.length, gridColumns(entries, box, gap)));
+    for (const entry of gridRects(entries, box, cols, gap)) {
       out.push({ ...entry, cell });
     }
-    return out;
-  }
-
-  const rightCount = Math.min(rest.length, Math.max(2, Math.round(rest.length * 0.35)));
-  const right = rest.slice(0, rightCount);
-  const bottom = rest.slice(rightCount);
-  const rightW = Math.max(1, innerW - heroW - gap);
-  const rightBox = { x: originX + heroW + gap, y: originY, w: rightW, h: heroH };
-  for (const entry of gridRects(right, rightBox, 1, gap)) {
-    out.push({ ...entry, cell });
-  }
-  const bottomBox = {
-    x: originX,
-    y: originY + heroH + gap,
-    w: innerW,
-    h: Math.max(1, innerH - heroH - gap),
   };
-  const cols = Math.max(2, Math.min(6, Math.ceil(Math.sqrt(Math.max(1, bottom.length) * (bottomBox.w / bottomBox.h)))));
-  for (const entry of gridRects(bottom, bottomBox, cols, gap)) {
-    out.push({ ...entry, cell });
+
+  if (sideBox && bandBox) {
+    const sideArea = sideBox.w * sideBox.h;
+    const bandArea = bandBox.w * bandBox.h;
+    let split = Math.round((rest.length * sideArea) / Math.max(1, sideArea + bandArea));
+    split = Math.max(1, Math.min(rest.length - 1, split));
+    pack(rest.slice(0, split), sideBox);
+    pack(rest.slice(split), bandBox);
+  } else if (sideBox) {
+    pack(rest, sideBox);
+  } else if (bandBox) {
+    pack(rest, bandBox);
+  } else {
+    // 极端比例下两侧都放不下：退回格子左上角重排，至少不重叠。
+    pack(rest, { x: originX, y: originY + heroH + gap, w: innerW, h: Math.max(2, innerH - heroH - gap) });
   }
   return out;
 }
@@ -513,6 +596,7 @@ export function layoutFeaturedWorld(
   options: WorldOptions,
   heroId: string,
   focus: { centerX: number; viewHeight: number; bottomInset: number },
+  anchorRect?: TileRect,
 ): { tiles: LaidTile[]; height: number } {
   const heroIndex = items.findIndex((item) => item.id === heroId);
   if (heroIndex < 0) return layoutWorld(items, options);
@@ -531,33 +615,42 @@ export function layoutFeaturedWorld(
     heroH = maxH;
     heroW = maxH * ratio;
   }
-  // 相机会把英雄移到内容区中心；世界从 x=0 起，英雄必须至少居中到 centerX。
-  let heroX = Math.max(0, Math.round(focus.centerX - heroW / 2));
+  // 有锚点时英雄留在被点图片的位置；没有锚点（兼容旧调用）才回到内容区中心。
+  let heroX: number;
+  let heroY: number;
+  if (anchorRect) {
+    const centerX = anchorRect.x + anchorRect.w / 2;
+    const centerY = anchorRect.y + anchorRect.h / 2;
+    heroX = Math.max(0, Math.min(width - heroW, Math.round(centerX - heroW / 2)));
+    heroY = Math.max(0, Math.round(centerY - heroH / 2));
+  } else {
+    heroX = Math.max(0, Math.round(focus.centerX - heroW / 2));
+    const visibleHeight = Math.max(200, focus.viewHeight - focus.bottomInset);
+    heroY = Math.max(0, Math.round(visibleHeight / 2 - heroH / 2));
+  }
   heroW = Math.min(heroW, width - heroX);
   const rightW = width - heroX - heroW - gap;
   const useRightColumn = rightW >= 180;
 
   const rightItems = useRightColumn ? rest.slice(0, Math.min(rest.length, 4)) : [];
   const belowItems = rest.slice(rightItems.length);
-  // 顶部留白让英雄在无 bottom pad 的有限相机(>=0)里也能落在可见区中心。
-  const visibleHeight = Math.max(200, focus.viewHeight - focus.bottomInset);
-  const topPad = Math.max(0, Math.round(visibleHeight / 2 - heroH / 2));
 
   const tiles: LaidTile[] = [
     {
       item: hero,
       index: heroIndex,
-      rect: { x: heroX, y: topPad, w: heroW, h: heroH },
+      rect: { x: heroX, y: heroY, w: heroW, h: heroH },
     },
   ];
   if (useRightColumn) {
-    const rightBox = { x: heroX + heroW + gap, y: topPad, w: Math.max(1, rightW), h: heroH };
-    for (const entry of gridRects(rightItems, rightBox, 1, gap)) {
+    const rightBox = { x: heroX + heroW + gap, y: heroY, w: Math.max(1, rightW), h: heroH };
+    const rightCols = Math.max(1, Math.min(rightItems.length, gridColumns(rightItems, rightBox, gap)));
+    for (const entry of gridRects(rightItems, rightBox, rightCols, gap)) {
       tiles.push({ ...entry });
     }
   }
 
-  const belowOffset = topPad + heroH + gap;
+  const belowOffset = heroY + heroH + gap;
   if (belowItems.length > 0) {
     const below = layoutWorld(
       belowItems.map((entry) => entry.item),
@@ -579,5 +672,5 @@ export function layoutFeaturedWorld(
     }
     return { tiles, height: belowOffset + below.height };
   }
-  return { tiles, height: topPad + heroH };
+  return { tiles, height: heroY + heroH };
 }

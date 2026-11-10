@@ -83,6 +83,14 @@ const ICON_INFO = (
   </Icon>
 );
 
+/** 单色预览：左半实心的圆。 */
+const ICON_MONO = (
+  <Icon>
+    <circle cx="12" cy="12" r="8.5" />
+    <path d="M12 3.5a8.5 8.5 0 0 1 0 17z" fill="currentColor" stroke="none" />
+  </Icon>
+);
+
 const ICON_MINUS = (
   <Icon>
     <path d="M5 12h14" />
@@ -137,6 +145,27 @@ const ICON_NEXT = (
   </Icon>
 );
 
+const ICON_PLAY = (
+  <Icon>
+    <path d="M8 5.5v13l11-6.5z" fill="currentColor" stroke="none" />
+  </Icon>
+);
+
+const ICON_PAUSE = (
+  <Icon>
+    <path d="M9 5v14" />
+    <path d="M15 5v14" />
+  </Icon>
+);
+
+/** 留白视图：一张画框。 */
+const ICON_MATTE = (
+  <Icon>
+    <rect x="3.5" y="3.5" width="17" height="17" rx="1.5" />
+    <rect x="7" y="7" width="10" height="10" rx="0.8" />
+  </Icon>
+);
+
 export type RailView =
   | 'home'
   | 'tags'
@@ -164,9 +193,13 @@ export interface DetailOps {
   total: number;
   hasPrev: boolean;
   hasNext: boolean;
+  playing: boolean;
+  matte: boolean;
   onBack: () => void;
   onPrev: () => void;
   onNext: () => void;
+  onTogglePlay: () => void;
+  onToggleMatte: () => void;
 }
 
 export interface SidebarProps {
@@ -192,6 +225,9 @@ export interface SidebarProps {
   /** 详情页信息栏是否收起（undefined = 不显示信息开关）。 */
   detailInfoHidden?: boolean;
   onToggleInfo?: () => void;
+  /** 单色预览：只给图片去色，强调色与 UI 保持原样。 */
+  mono: boolean;
+  onToggleMono: () => void;
 }
 
 /**
@@ -220,6 +256,8 @@ export function Sidebar({
   inspector,
   detailInfoHidden,
   onToggleInfo,
+  mono,
+  onToggleMono,
 }: SidebarProps) {
   const [panel, setPanel] = useState<PanelId | null>(null);
   const panelRef = useRef<HTMLDivElement | null>(null);
@@ -414,6 +452,24 @@ export function Sidebar({
                 {ICON_INFO}
               </button>
             ) : null}
+            <button
+              type="button"
+              className={'seam__tab seam__tab--icon' + (detail.playing ? ' is-on' : '')}
+              onClick={detail.onTogglePlay}
+              title={detail.playing ? '暂停放映（P）' : '自动放映（P）'}
+              aria-pressed={detail.playing}
+            >
+              {detail.playing ? ICON_PAUSE : ICON_PLAY}
+            </button>
+            <button
+              type="button"
+              className={'seam__tab seam__tab--icon' + (detail.matte ? ' is-on' : '')}
+              onClick={detail.onToggleMatte}
+              title={detail.matte ? '沉浸视图（M）' : '留白视图（M）'}
+              aria-pressed={detail.matte}
+            >
+              {ICON_MATTE}
+            </button>
             <span className="seam__count">
               {String(detail.index + 1).padStart(2, '0')} / {formatCount(detail.total)}
             </span>
@@ -424,17 +480,28 @@ export function Sidebar({
           <span className="seam__count">
             {formatCount(loaded)} / {formatCount(total)}
           </span>
-          <button
-            type="button"
-            className={'seam__tab seam__tab--icon' + (panel === 'about' ? ' is-on' : '')}
-            id="seam-panel-trigger-about"
-            aria-expanded={panel === 'about'}
-            aria-controls={panel === 'about' ? 'seam-panel' : undefined}
-            onClick={(event) => openPanel('about', event.currentTarget)}
-            title="关于"
-          >
-            {ICON_INFO}
-          </button>
+          <div className="seam__foot-actions">
+            <button
+              type="button"
+              className={'seam__tab seam__tab--icon' + (mono ? ' is-on' : '')}
+              onClick={onToggleMono}
+              aria-pressed={mono}
+              title={mono ? '恢复彩色（N）' : '单色预览（N）'}
+            >
+              {ICON_MONO}
+            </button>
+            <button
+              type="button"
+              className={'seam__tab seam__tab--icon' + (panel === 'about' ? ' is-on' : '')}
+              id="seam-panel-trigger-about"
+              aria-expanded={panel === 'about'}
+              aria-controls={panel === 'about' ? 'seam-panel' : undefined}
+              onClick={(event) => openPanel('about', event.currentTarget)}
+              title="关于"
+            >
+              {ICON_INFO}
+            </button>
+          </div>
         </div>
       </nav>
 
@@ -511,6 +578,22 @@ export function Sidebar({
                   最近看的一张：{focusItem.n}（{Math.round(focusItem.w)} × {Math.round(focusItem.h)}）
                 </p>
               ) : null}
+              <dl className="panel__keys">
+                <dt>单击 / 双击</dt>
+                <dd>聚焦卡片 / 打开详情</dd>
+                <dt>拖拽 · 滚轮</dt>
+                <dd>平移画布</dd>
+                <dt>Ctrl + 滚轮</dt>
+                <dd>以光标为中心缩放</dd>
+                <dt>← → · Esc</dt>
+                <dd>详情中换图 / 返回</dd>
+                <dt>I · F · P</dt>
+                <dd>收起信息 · 全屏 · 放映</dd>
+                <dt>N · M</dt>
+                <dd>单色预览 · 留白视图</dd>
+                <dt>Home · + −</dt>
+                <dd>回到起点 · 缩放</dd>
+              </dl>
               <div className="panel__actions">
                 <button type="button" className="ghost" onClick={() => onFilters({ ...EMPTY_FILTERS })}>
                   清除全部筛选

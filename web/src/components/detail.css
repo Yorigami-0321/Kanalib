@@ -1,10 +1,33 @@
 /* v4 详情：画面只留图，信息在左侧检查器。
    stage 在检查器展开时让出 seam + 300px；≤900px 检查器是底部 sheet，图仍全宽。 */
 
+/* 环境层：同一张图的 512 档，重度模糊后压暗，填住 contain 留下的黑边。
+   静态层，不做漂移动画：模糊滤镜每帧重算在集显上代价太高。 */
+.view__ambient {
+  position: absolute;
+  inset: -6%;
+  z-index: 0;
+  background-position: center;
+  background-size: cover;
+  filter: blur(52px) saturate(1.12) brightness(0.44);
+  opacity: 0.66;
+  transform: scale(1.06);
+  pointer-events: none;
+}
+
+.view__ambient::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background:
+    radial-gradient(ellipse at center, transparent 34%, rgba(5, 5, 5, 0.55) 100%),
+    linear-gradient(180deg, rgba(5, 5, 5, 0.35), rgba(5, 5, 5, 0.15));
+}
+
 .view--detail .view__stage {
   position: absolute;
   inset: 0;
-  z-index: 0;
+  z-index: 1;
   overflow: hidden;
 }
 
@@ -23,11 +46,11 @@
 }
 
 .view--detail .view__track--next {
-  animation: pane-next 420ms var(--ease) both;
+  animation: pane-next 520ms var(--ease-out) both;
 }
 
 .view--detail .view__track--prev {
-  animation: pane-prev 420ms var(--ease) both;
+  animation: pane-prev 520ms var(--ease-out) both;
 }
 
 @keyframes pane-next {
@@ -80,6 +103,30 @@
   width: 100%;
   height: 100%;
   object-fit: contain;
+  opacity: 0;
+  /* 只做很短的淡入：520ms 滑动里新图必须马上可见，420ms 会让半屏先空一截。 */
+  transition:
+    opacity 160ms var(--ease),
+    top 420ms var(--ease-out),
+    right 420ms var(--ease-out),
+    bottom 420ms var(--ease-out),
+    left 420ms var(--ease-out),
+    width 420ms var(--ease-out),
+    height 420ms var(--ease-out),
+    filter 420ms var(--ease-out);
+}
+
+.view--detail .view__img.is-loaded {
+  opacity: 1;
+}
+
+/* 滑动中的目标屏跳过淡入：预取已把它放进缓存，
+   再等 onLoad + 160ms 会让中途出现一段空画面。
+   下一张的目标是 pane2（第 3 格），上一张的目标是 pane0（第 1 格）。 */
+.view--detail .view__track--next .view__pane:nth-child(3) .view__img,
+.view--detail .view__track--prev .view__pane:nth-child(1) .view__img {
+  opacity: 1;
+  transition: none;
 }
 
 /* 双击展开（lib/expand.ts）：克隆图飞行期间把真实内容蒙住，落位后露出。 */
@@ -98,6 +145,104 @@
 
 .view--detail .view__scrim {
   z-index: 1;
+}
+
+/* 放映模式：4.2s 一条进度线，换图时由 key 重新挂载、从头开始。 */
+.view__playbar {
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  left: 0;
+  z-index: 4;
+  height: 2px;
+  background: linear-gradient(90deg, color-mix(in srgb, var(--accent) 70%, #fff), var(--accent));
+  box-shadow: 0 0 12px color-mix(in srgb, var(--accent) 55%, transparent);
+  transform-origin: 0 50%;
+  animation: play-progress 4200ms linear forwards;
+}
+
+@keyframes play-progress {
+  from {
+    transform: scaleX(0);
+  }
+  to {
+    transform: scaleX(1);
+  }
+}
+
+/* ===== 留白视图（M）：把图收进画框，环境层退到很暗 =====
+   参考 Meech213 的 print-style 卡片与 Cathy Dolle 的极简画廊：
+   大留白 + 很轻的投影 + 一行小字图注，信息栏收起时才出现。 */
+.view--detail.view--matte {
+  --matte-x: clamp(34px, 9vw, 168px);
+  --matte-y: clamp(30px, 8vh, 96px);
+  --matte-b: clamp(72px, 11vh, 132px);
+}
+
+.view--detail.view--matte .view__img {
+  top: var(--matte-y);
+  right: auto;
+  bottom: auto;
+  left: var(--matte-x);
+  width: calc(100% - 2 * var(--matte-x));
+  height: calc(100% - var(--matte-y) - var(--matte-b));
+  /* drop-shadow 跟随实际像素，不会把 contain 的透明留边一起框进投影。 */
+  filter: drop-shadow(0 30px 52px rgba(0, 0, 0, 0.56));
+}
+
+.view--detail.view--matte .view__ambient {
+  opacity: 0.22;
+  filter: blur(64px) grayscale(0.35) brightness(0.26);
+}
+
+.view__caption {
+  position: absolute;
+  right: var(--matte-x);
+  bottom: clamp(26px, 4vh, 46px);
+  left: var(--matte-x);
+  z-index: 3;
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 18px;
+  color: rgba(247, 244, 238, 0.42);
+  font-size: 11px;
+  letter-spacing: 0.06em;
+  font-variant-numeric: tabular-nums;
+  animation: caption-in 380ms var(--ease-out);
+  pointer-events: none;
+}
+
+.view--detail.view--detail-info .view__caption {
+  left: clamp(34px, 9vw, 168px);
+}
+
+.view__caption-name {
+  min-width: 0;
+  overflow: hidden;
+  color: rgba(247, 244, 238, 0.72);
+  letter-spacing: 0.01em;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+@keyframes caption-in {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+}
+
+@media (max-width: 900px) {
+  .view--detail.view--matte {
+    --matte-x: 16px;
+    --matte-y: 18px;
+    --matte-b: 18px;
+  }
+
+  .view__caption {
+    display: none;
+  }
 }
 
 @media (max-width: 900px) {

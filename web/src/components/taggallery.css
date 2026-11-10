@@ -97,6 +97,19 @@
     filter 260ms var(--ease);
 }
 
+/* 封面墙入场：按阅读顺序 24ms 递进，延迟封顶 320ms；backwards 保证
+   动画结束后 hover 的 translateY 仍然生效（both 会把最终 transform 锁死）。 */
+.app .tagcard--enter {
+  animation: tagcard-in 480ms var(--ease-out) backwards;
+}
+
+@keyframes tagcard-in {
+  from {
+    opacity: 0;
+    transform: translateY(14px) scale(0.985);
+  }
+}
+
 .app .tagcard:hover {
   transform: translateY(-2px);
   filter: saturate(1.06) brightness(1.06);

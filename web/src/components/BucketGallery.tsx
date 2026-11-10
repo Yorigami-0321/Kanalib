@@ -45,11 +45,12 @@ export function BucketGallery({
 
       {entries.length > 0 ? (
         <div className="tags__grid">
-          {entries.map((entry) => (
+          {entries.map((entry, index) => (
             <button
               key={entry.key}
               type="button"
-              className="tagcard"
+              className="tagcard tagcard--enter"
+              style={{ animationDelay: Math.min(320, index * 24) + 'ms' }}
               onClick={() => onOpen(entry.href)}
               title={entry.label + ' · ' + formatCount(entry.count) + ' 张'}
             >

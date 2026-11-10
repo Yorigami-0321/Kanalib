@@ -68,7 +68,12 @@ export function App() {
   const [summaryId, setSummaryId] = useState<string | null>(null);
   const [spotlightItem, setSpotlightItem] = useState<WallItem | null>(null);
   const [spotlightAnchor, setSpotlightAnchor] = useState<{ x: number; y: number } | null>(null);
+  /** 被点卡片在点击瞬间的世界矩形：聚焦重排以它为锚，图片不会被搬到固定英雄位。 */
+  const [spotlightRect, setSpotlightRect] = useState<Rect | null>(null);
   const [detailInfoHidden, setDetailInfoHidden] = useState(false);
+  const [playing, setPlaying] = useState(false);
+  const [mono, setMono] = useState(false);
+  const [matte, setMatte] = useState(false);
   const [layout, setLayout] = useState(readLayoutMetrics);
   const [orderSeed] = useState(() => Math.floor(Math.random() * 0x7fffffff));
   const gestureDebug = useMemo(
@@ -90,13 +95,39 @@ export function App() {
   wallRef.current = wall;
 
   useEffect(() => {
-    if (!spotlightItem) setSpotlightAnchor(null);
+    if (!spotlightItem) {
+      setSpotlightAnchor(null);
+      setSpotlightRect(null);
+    }
   }, [spotlightItem]);
+
+  // 总览页（标签/收藏/分级/分组）不是画布：从详情/墙直接改 hash 过来时，
+  // 残留的聚焦检查器会盖住封面墙，这里统一收掉。二级墙（tag/fav/rating/group）保留聚焦。
+  useEffect(() => {
+    if (route.view === 'tags' || route.view === 'favs' || route.view === 'ratings' || route.view === 'groups') {
+      setSpotlightItem(null);
+      setSummaryId(null);
+    }
+  }, [route.view]);
 
   useEffect(() => {
     const onResize = () => setLayout(readLayoutMetrics());
     window.addEventListener('resize', onResize);
     return () => window.removeEventListener('resize', onResize);
+  }, []);
+
+  // N：单色预览（参考 Harry Atkins 的 Monochrome 模式）。输入框内让行。
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.metaKey || event.ctrlKey || event.altKey) return;
+      if (event.key !== 'n' && event.key !== 'N') return;
+      const target = event.target as Element | null;
+      if (target?.closest('input, textarea, select, [contenteditable="true"]')) return;
+      event.preventDefault();
+      setMono((value) => !value);
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
   }, []);
 
   const detailId = route.view === 'detail' ? route.id : null;
@@ -526,10 +557,38 @@ export function App() {
     navigate(detailHref(id));
   }, []);
 
-  const handleSpotlight = useCallback((item: WallItem | null, anchor?: { x: number; y: number }) => {
-    setSpotlightItem(item);
-    setSpotlightAnchor(anchor ?? null);
-  }, []);
+  // 自动放映：每张停留 4.2s，到最后一张回到第一张；离开详情自动停。
+  const PLAY_INTERVAL = 4200;
+  useEffect(() => {
+    if (!playing || route.view !== 'detail' || !detailItem || detailBrowseItems.length < 2) return;
+    const index = detailBrowseItems.findIndex((entry) => entry.id === detailItem.id);
+    if (index < 0) return;
+    const timer = window.setTimeout(() => {
+      const next = detailBrowseItems[(index + 1) % detailBrowseItems.length];
+      if (next) handleDetail(next.id);
+    }, PLAY_INTERVAL);
+    return () => window.clearTimeout(timer);
+  }, [detailBrowseItems, detailItem, handleDetail, playing, route.view]);
+
+  useEffect(() => {
+    if (route.view !== 'detail' && playing) setPlaying(false);
+  }, [playing, route.view]);
+
+  const handleTogglePlay = useCallback(() => {
+    if (!detailItem) return;
+    setPlaying((value) => !value);
+  }, [detailItem]);
+
+  const handleToggleMatte = useCallback(() => setMatte((value) => !value), []);
+
+  const handleSpotlight = useCallback(
+    (item: WallItem | null, anchor?: { x: number; y: number }, rect?: Rect) => {
+      setSpotlightItem(item);
+      setSpotlightAnchor(anchor ?? null);
+      setSpotlightRect(rect ?? null);
+    },
+    [],
+  );
 
   const handleCloseInspector = useCallback(() => {
     if (detailItem) setDetailInfoHidden(true);
@@ -627,6 +686,10 @@ export function App() {
             total: detailBrowseItems.length,
             hasPrev: detailIndex > 0,
             hasNext: detailIndex + 1 < detailBrowseItems.length,
+            playing,
+            matte,
+            onTogglePlay: handleTogglePlay,
+            onToggleMatte: handleToggleMatte,
             onBack: handleBack,
             onPrev: () => {
               const prev = detailBrowseItems[detailIndex - 1];
@@ -638,7 +701,17 @@ export function App() {
             },
           }
         : null,
-    [detailBrowseItems, detailIndex, detailItem, handleBack, handleDetail],
+    [
+      detailBrowseItems,
+      detailIndex,
+      detailItem,
+      handleBack,
+      handleDetail,
+      handleToggleMatte,
+      handleTogglePlay,
+      matte,
+      playing,
+    ],
   );
 
   const wallHead = useMemo(() => {
@@ -694,7 +767,7 @@ export function App() {
     : null;
 
   return (
-    <div className={'app' + (inspectorOpen ? ' has-inspector' : '')}>
+    <div className={'app' + (inspectorOpen ? ' has-inspector' : '') + (mono ? ' is-mono' : '')}>
       <Sidebar
         view={railView}
         onHome={handleHome}
@@ -716,6 +789,8 @@ export function App() {
         inspector={inspector}
         detailInfoHidden={detailItem ? detailInfoHidden : undefined}
         onToggleInfo={detailItem ? handleToggleInfo : undefined}
+        mono={mono}
+        onToggleMono={() => setMono((value) => !value)}
       />
 
       <main className="stage">
@@ -726,9 +801,13 @@ export function App() {
               items={detailBrowseItems}
               paths={wall.paths}
               infoOpen={!detailInfoHidden}
+              playing={playing}
+              matte={matte}
               onBack={handleBack}
               onOpenDetail={handleDetail}
               onToggleInfo={handleToggleInfo}
+              onTogglePlay={handleTogglePlay}
+              onToggleMatte={handleToggleMatte}
             />
           ) : (
             <p className="stage__hint">
@@ -797,6 +876,7 @@ export function App() {
               emptyHint={emptyHint}
               spotlightId={spotlightItem?.id ?? null}
               spotlightAnchor={spotlightAnchor}
+              spotlightAnchorRect={spotlightRect}
               onSpotlightChange={handleSpotlight}
               infoInset={wallInfoInset}
               infoInsetBottom={wallInfoBottom}

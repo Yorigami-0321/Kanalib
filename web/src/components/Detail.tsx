@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { detailSources } from '../lib/assetUrl';
+import { detailSources, tierUrl } from '../lib/assetUrl';
 import { expanding } from '../lib/expand';
 import type { TierPaths, WallItem } from '../source/types';
 import './detail.css';
@@ -39,9 +39,15 @@ export interface DetailProps {
   paths: TierPaths;
   /** 信息检查器是否展开（桌面会让出 300px，窄屏是底部 sheet）。 */
   infoOpen: boolean;
+  /** 自动放映中：每张停留 4.2s，侧栏 ▶ 切成 ❚❚。 */
+  playing: boolean;
+  /** 留白视图：图片收进画框，环境层压暗；收起信息时底部出现极简图注。 */
+  matte: boolean;
   onBack: () => void;
   onOpenDetail: (id: string) => void;
   onToggleInfo: () => void;
+  onTogglePlay: () => void;
+  onToggleMatte: () => void;
 }
 
 interface PaneProps {
@@ -63,6 +69,11 @@ function Pane({ item, paths, active, onNavigate }: PaneProps) {
   const [loadStage, setLoadStage] = useState<{ id: string; index: number }>({ id: item.id, index: 0 });
   const srcIndex = loadStage.id === item.id ? Math.min(loadStage.index, sources.length - 1) : 0;
 
+  // 加载完成状态与「id + 档位」绑定：缓存图可能在 effect 之前就触发 onLoad，
+  // 用 effect 重置会把 is-loaded 永久清掉（v4 实测过一次）。
+  const loadKey = item.id + ':' + srcIndex;
+  const [loadedKey, setLoadedKey] = useState('');
+  const loaded = loadedKey === loadKey;
   const [zoom, setZoom] = useState<ZoomState>(NO_ZOOM);
   const zoomRef = useRef(zoom);
   zoomRef.current = zoom;
@@ -232,10 +243,12 @@ function Pane({ item, paths, active, onNavigate }: PaneProps) {
         role="presentation"
       >
         <img
-          className="view__img"
+          className={'view__img' + (loaded ? ' is-loaded' : '')}
           src={sources[srcIndex]}
           alt={item.n}
           decoding="async"
+          fetchPriority="high"
+          onLoad={() => setLoadedKey(loadKey)}
           style={
             zoom.scale > 1
               ? {
@@ -260,7 +273,19 @@ function Pane({ item, paths, active, onNavigate }: PaneProps) {
  * 全屏作品页：整页就是那张图（contain、不裁切），信息全部在左侧检查器。
  * 左右切换走水平滑动（niri 式）：当前屏滑出去、下一屏从旁边滑进来。
  */
-export function Detail({ item, items, paths, infoOpen, onBack, onOpenDetail, onToggleInfo }: DetailProps) {
+export function Detail({
+  item,
+  items,
+  paths,
+  infoOpen,
+  playing,
+  matte,
+  onBack,
+  onOpenDetail,
+  onToggleInfo,
+  onTogglePlay,
+  onToggleMatte,
+}: DetailProps) {
   // 屏幕正中正在展示的那张：滑动动画结束后才提交，连按时以上一次的目标为基准。
   const [center, setCenter] = useState<WallItem>(() => items.find((e) => e.id === item.id) ?? item);
   const [slide, setSlide] = useState<{ dir: 1 | -1; from: WallItem; to: WallItem } | null>(null);
@@ -269,6 +294,21 @@ export function Detail({ item, items, paths, infoOpen, onBack, onOpenDetail, onT
   const slideRef = useRef(slide);
   slideRef.current = slide;
   const trackRef = useRef<HTMLDivElement | null>(null);
+
+  // 邻图预取：滑动动画开始时下一张往往已经解码完成，拖/滑过去不会先黑一屏。
+  useEffect(() => {
+    const index = items.findIndex((entry) => entry.id === item.id);
+    if (index < 0) return;
+    for (const offset of [-1, 1]) {
+      const next = items[index + offset];
+      if (!next) continue;
+      const image = new Image();
+      image.decoding = 'async';
+      image.src = tierUrl(paths, 't512', next.id);
+      // 提前解码，滑动开始那一帧就不会是空白的。
+      void image.decode?.().catch(() => undefined);
+    }
+  }, [item.id, items, paths]);
 
   // 路由换了图：与"正中那张"比索引定方向。不相邻（相似条跳转 / 深链）就直接落位。
   useEffect(() => {
@@ -309,6 +349,22 @@ export function Detail({ item, items, paths, infoOpen, onBack, onOpenDetail, onT
         onToggleInfo();
         return;
       }
+      if (event.key === 'f' || event.key === 'F') {
+        event.preventDefault();
+        if (document.fullscreenElement) void document.exitFullscreen();
+        else void document.documentElement.requestFullscreen().catch(() => undefined);
+        return;
+      }
+      if (event.key === 'p' || event.key === 'P') {
+        event.preventDefault();
+        onTogglePlay();
+        return;
+      }
+      if (event.key === 'm' || event.key === 'M') {
+        event.preventDefault();
+        onToggleMatte();
+        return;
+      }
       if (slideRef.current) return;
       const index = items.findIndex((entry) => entry.id === centerRef.current.id);
       if (event.key === 'ArrowLeft' && index > 0) {
@@ -321,7 +377,7 @@ export function Detail({ item, items, paths, infoOpen, onBack, onOpenDetail, onT
     };
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
-  }, [items, onBack, onOpenDetail, onToggleInfo]);
+  }, [items, onBack, onOpenDetail, onToggleInfo, onToggleMatte, onTogglePlay]);
 
   // 双击展开的窗口期内先把真实内容蒙住，等克隆图飞到位再露出。
   const [veiled, setVeiled] = useState(() => expanding());
@@ -343,10 +399,12 @@ export function Detail({ item, items, paths, infoOpen, onBack, onOpenDetail, onT
     [items, onOpenDetail],
   );
 
+  // 轨道常驻 -100%：pane1 是当前屏。往下一张（dir=1）动画到 -200%，
+  // 新图必须放在 pane2；往上一张（dir=-1）动画到 0，新图放在 pane0。
   const panes: (WallItem | undefined)[] = slide
     ? slide.dir === 1
-      ? [slide.from, slide.to, undefined]
-      : [undefined, slide.to, slide.from]
+      ? [undefined, slide.from, slide.to]
+      : [slide.to, slide.from, undefined]
     : [
         routeIndex > 0 ? items[routeIndex - 1] : undefined,
         item,
@@ -359,9 +417,18 @@ export function Detail({ item, items, paths, infoOpen, onBack, onOpenDetail, onT
   return (
     <article
       className={
-        'view view--detail' + (infoOpen ? ' view--detail-info' : '') + (veiled ? ' view--expanding' : '')
+        'view view--detail' +
+        (infoOpen ? ' view--detail-info' : '') +
+        (veiled ? ' view--expanding' : '') +
+        (matte ? ' view--matte' : '')
       }
     >
+      {/* 环境层：同一张图的低分辨率副本，模糊 + 缓漂移，给 contain 留下的黑边一点空气。 */}
+      <div
+        className="view__ambient"
+        style={{ backgroundImage: `url("${tierUrl(paths, 't512', item.id)}")` }}
+        aria-hidden="true"
+      />
       <div className="view__stage">
         <div className={trackClass} ref={trackRef} onAnimationEnd={commitSlide}>
           {panes.map((pane, paneIndex) =>
@@ -380,6 +447,13 @@ export function Detail({ item, items, paths, infoOpen, onBack, onOpenDetail, onT
         </div>
       </div>
       <div className="view__scrim" aria-hidden="true" />
+      {playing ? <div className="view__playbar" key={item.id} aria-hidden="true" /> : null}
+      {matte && !infoOpen ? (
+        <div className="view__caption" key={item.id} aria-hidden="true">
+          <span className="view__caption-name">{item.n}</span>
+          <span>{Math.round(item.w)} × {Math.round(item.h)}</span>
+        </div>
+      ) : null}
     </article>
   );
 }

@@ -81,11 +81,12 @@ export function TagGallery({ entries, paths, loading, onOpenTag }: TagGalleryPro
               <span className="tags__group-count">{formatCount(section.entries.length)} 个</span>
             </div>
             <div className="tags__grid">
-              {section.entries.map((entry) => (
+              {section.entries.map((entry, index) => (
                 <button
                   key={entry.name}
                   type="button"
-                  className="tagcard"
+                  className="tagcard tagcard--enter"
+                  style={{ animationDelay: Math.min(320, index * 24) + 'ms' }}
                   onClick={() => onOpenTag(entry.name)}
                   title={entry.name + ' · ' + formatCount(entry.count) + ' 张'}
                 >
