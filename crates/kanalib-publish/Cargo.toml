@@ -11,6 +11,8 @@ description = "Kanalib 云端图片墙发布器：把本地库导出成静态站
 anyhow = { workspace = true }
 # id 兜底需要 blake3(path_key::encode(path))：core 已在用同一大版本，不引入新下载。
 blake3 = "1"
+# 锐利档（t1024/t2048）解码原图并重新编码 JPEG；编解码特性与 core 的缩略图链路保持一致。
+image = { workspace = true, features = ["jpeg", "png", "webp", "gif", "bmp", "tiff", "ico", "qoi", "exr"] }
 kanalib-core = { path = "../kanalib-core" }
 serde = { workspace = true }
 serde_json = { workspace = true }

@@ -4202,6 +4202,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "blake3",
+ "image",
  "kanalib-core",
  "serde",
  "serde_json",

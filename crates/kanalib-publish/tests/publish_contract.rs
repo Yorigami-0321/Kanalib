@@ -93,17 +93,36 @@ impl Fixture {
     }
 
     fn tile_path(&self, name: &str) -> PathBuf {
-        self.thumbs.join(format!("{}-512-t256.jpg", Self::stem(name)))
+        self.thumbs
+            .join(format!("{}-512-t256.jpg", Self::stem(name)))
     }
 
     /// 写入一条资产（原图 + t512 缩略图 + 可选 t256），返回原图路径。
     fn add(&self, db: &Db, name: &str, mtime: u64, sha1: &str, tile: bool) -> PathBuf {
+        self.add_sized(db, name, 1200, 900, mtime, sha1, tile)
+    }
+
+    /// 同上，但可以指定原图尺寸（锐利档需要真实可解码的图片）。
+    fn add_sized(
+        &self,
+        db: &Db,
+        name: &str,
+        width: u32,
+        height: u32,
+        mtime: u64,
+        sha1: &str,
+        tile: bool,
+    ) -> PathBuf {
         let original = self.root.join(name);
         if let Some(parent) = original.parent() {
             fs::create_dir_all(parent).unwrap();
         }
-        let payload = format!("{name}-{mtime}").into_bytes();
-        fs::write(&original, &payload).unwrap();
+        image::RgbImage::from_fn(width, height, |x, y| {
+            image::Rgb([(x % 256) as u8, (y % 256) as u8, 80])
+        })
+        .save(&original)
+        .unwrap();
+        let bytes = fs::metadata(&original).unwrap().len();
         let thumb = self.thumb_path(name);
         fs::write(&thumb, b"thumb512").unwrap();
         if tile {
@@ -125,9 +144,9 @@ impl Fixture {
             &root,
             &original,
             Some(&thumb),
-            1200,
-            900,
-            payload.len() as u64,
+            width,
+            height,
+            bytes,
             mtime,
             &hashes,
             false,
@@ -161,6 +180,43 @@ fn read_items(out: &Path) -> Vec<serde_json::Value> {
     items
 }
 
+fn id_of(out: &Path, name: &str) -> String {
+    let item = read_items(out)
+        .into_iter()
+        .find(|item| item["n"] == name)
+        .unwrap_or_else(|| panic!("items 里没有 {name}"));
+    item["id"].as_str().unwrap().to_string()
+}
+
+fn jpeg_size(path: &Path) -> (u32, u32) {
+    let image = image::open(path).unwrap();
+    (image.width(), image.height())
+}
+
+/// 在已有 JPEG 前插入最小的 EXIF APP1（只含 Orientation），模拟手机照片。
+fn inject_exif_orientation(path: &Path, orientation: u8) {
+    let jpeg = fs::read(path).unwrap();
+    let mut tiff = Vec::new();
+    tiff.extend(b"II*\0");
+    tiff.extend(8u32.to_le_bytes());
+    tiff.extend(1u16.to_le_bytes());
+    tiff.extend(0x0112u16.to_le_bytes());
+    tiff.extend(3u16.to_le_bytes());
+    tiff.extend(1u32.to_le_bytes());
+    tiff.extend((orientation as u16).to_le_bytes());
+    tiff.extend([0u8, 0u8]);
+    tiff.extend(0u32.to_le_bytes());
+    let payload = [b"Exif\0\0".as_slice(), tiff.as_slice()].concat();
+    let mut app1 = vec![0xFF, 0xE1];
+    app1.extend(((payload.len() + 2) as u16).to_be_bytes());
+    app1.extend(payload);
+    let mut output = Vec::with_capacity(jpeg.len() + app1.len());
+    output.extend(&jpeg[..2]);
+    output.extend(app1);
+    output.extend(&jpeg[2..]);
+    fs::write(path, output).unwrap();
+}
+
 fn is_valid_id(value: &str) -> bool {
     (value.len() == 40 || value.len() == 64)
         && value
@@ -188,6 +244,18 @@ fn assert_no_absolute_paths(out: &Path, needles: &[String]) {
     walk(out, &mut files);
     assert!(!files.is_empty(), "导出目录为空：{}", out.display());
     for file in &files {
+        let dir_name = file
+            .parent()
+            .and_then(|parent| parent.file_name())
+            .map(|name| name.to_string_lossy().to_string())
+            .unwrap_or_default();
+        let in_media_dir = matches!(dir_name.as_str(), "t256" | "t512" | "t1024" | "t2048" | "o");
+        if in_media_dir {
+            let stem = file.file_stem().unwrap().to_string_lossy().to_string();
+            assert!(is_valid_id(&stem), "产物文件名不是合法 id：{stem}");
+            continue;
+        }
+        // 只有文本产物需要做泄漏扫描；JPEG 是二进制，随机字节里出现 `:/` 不代表路径。
         let text = String::from_utf8_lossy(&fs::read(file).unwrap()).to_string();
         assert!(
             !text.contains(":\\") && !text.contains(":/"),
@@ -201,15 +269,6 @@ fn assert_no_absolute_paths(out: &Path, needles: &[String]) {
                 "{} 泄漏本地路径片段 {needle}",
                 file.display()
             );
-        }
-        let in_thumb_dir = file
-            .parent()
-            .and_then(|parent| parent.file_name())
-            .map(|name| name == "t256" || name == "t512" || name == "o")
-            .unwrap_or(false);
-        if in_thumb_dir {
-            let stem = file.file_stem().unwrap().to_string_lossy().to_string();
-            assert!(is_valid_id(&stem), "产物文件名不是合法 id：{stem}");
         }
     }
 }
@@ -246,7 +305,8 @@ fn exports_contract_layout_order_and_item_fields() {
     // favorite / star 不走 update_tags，各有独立入口。
     let b_path = fixture.root.join("b.png");
     assert_eq!(
-        db.set_favorite(std::slice::from_ref(&b_path), true).unwrap(),
+        db.set_favorite(std::slice::from_ref(&b_path), true)
+            .unwrap(),
         1
     );
     assert_eq!(db.set_star(std::slice::from_ref(&b_path), 3).unwrap(), 1);
@@ -270,6 +330,7 @@ fn exports_contract_layout_order_and_item_fields() {
     assert_eq!(index["paths"]["t256"], "t256/");
     assert_eq!(index["paths"]["t512"], "t512/");
     assert_eq!(index["paths"]["t1024"], "t1024/");
+    assert_eq!(index["paths"]["t2048"], "t2048/");
     assert_eq!(index["paths"]["original"], "o/");
     assert!(index["generated_at"].as_str().unwrap().ends_with('Z'));
 
@@ -284,8 +345,20 @@ fn exports_contract_layout_order_and_item_fields() {
     for item in &items {
         let id = item["id"].as_str().unwrap();
         assert!(is_valid_id(id), "id 不合法：{id}");
-        assert!(fixture.out().join("t512").join(format!("{id}.jpg")).is_file());
-        assert!(fixture.out().join("t256").join(format!("{id}.jpg")).is_file());
+        assert!(
+            fixture
+                .out()
+                .join("t512")
+                .join(format!("{id}.jpg"))
+                .is_file()
+        );
+        assert!(
+            fixture
+                .out()
+                .join("t256")
+                .join(format!("{id}.jpg"))
+                .is_file()
+        );
         assert!(item["w"].as_u64().unwrap() > 0);
         assert!(item["h"].as_u64().unwrap() > 0);
         assert!(!item["n"].as_str().unwrap().contains('/'));
@@ -361,10 +434,7 @@ fn shard_split_boundaries() {
         assert_eq!(counts, expected, "count={count}");
         for (position, shard) in shards.iter().enumerate() {
             assert_eq!(shard["i"], position as u64);
-            assert_eq!(
-                shard["path"],
-                format!("m/{position:04}.json").as_str()
-            );
+            assert_eq!(shard["path"], format!("m/{position:04}.json").as_str());
         }
         let items = read_items(&fixture.out());
         assert_eq!(items.len(), count);
@@ -478,7 +548,13 @@ fn originals_are_local_only_and_missing_sources_are_skipped() {
         .expect("应包含 a.png");
     assert_eq!(a["orig"], "png");
     let id = a["id"].as_str().unwrap();
-    assert!(options.out_dir.join("o").join(format!("{id}.png")).is_file());
+    assert!(
+        options
+            .out_dir
+            .join("o")
+            .join(format!("{id}.png"))
+            .is_file()
+    );
     let b = items
         .iter()
         .find(|item| item["n"] == "b.jpg")
@@ -565,4 +641,118 @@ fn duplicate_copy_supplies_tags_when_kept_copy_is_untagged() {
     let tags = items[0]["tags"].as_array().unwrap();
     assert_eq!(tags.len(), 1);
     assert_eq!(tags[0][0], "1girl");
+}
+
+/// 锐利档从原图按长边缩小，小图绝不放大；档位文件是真实可解码的 JPEG。
+#[test]
+fn sharp_tiers_downscale_and_never_upscale() {
+    let fixture = Fixture::new("tiers-scale");
+    let db = fixture.open();
+    fixture.add_sized(&db, "big.png", 3000, 2000, 100, &sha1_of(1), true);
+    fixture.add_sized(&db, "small.png", 800, 600, 200, &sha1_of(2), true);
+    drop(db);
+
+    let stats = run(&fixture.options()).unwrap();
+    assert_eq!(stats.exported, 2);
+    assert_eq!(stats.tiers.written_t1024, 1);
+    assert_eq!(stats.tiers.written_t2048, 1);
+    assert_eq!(stats.tiers.not_needed, 2, "800×600 两个档都不该放大");
+    assert_eq!(stats.tiers.failed, 0);
+
+    let out = fixture.out();
+    let big = id_of(&out, "big.png");
+    let small = id_of(&out, "small.png");
+    for (tier, edge) in [("t1024", 1024), ("t2048", 2048)] {
+        let path = out.join(tier).join(format!("{big}.jpg"));
+        let (w, h) = jpeg_size(&path);
+        assert_eq!(w.max(h), edge, "{tier} 长边应为 {edge}");
+        assert!(
+            (w as f64 / h as f64 - 1.5).abs() < 0.01,
+            "{tier} 宽高比走样"
+        );
+    }
+    assert!(!out.join("t1024").join(format!("{small}.jpg")).exists());
+    assert!(!out.join("t2048").join(format!("{small}.jpg")).exists());
+    assert_no_absolute_paths(&out, &needles(&fixture));
+}
+
+/// 账本命中时锐利档不重写；源 mtime 变化后只重编这一条。
+#[test]
+fn sharp_tiers_are_incremental() {
+    let fixture = Fixture::new("tiers-ledger");
+    let db = fixture.open();
+    fixture.add_sized(&db, "big.png", 3000, 2000, 100, &sha1_of(1), true);
+    drop(db);
+
+    let first = run(&fixture.options()).unwrap();
+    assert_eq!(first.tiers.written(), 2);
+    let out = fixture.out();
+    let id = id_of(&out, "big.png");
+    let t1024 = out.join("t1024").join(format!("{id}.jpg"));
+    let before = fs::metadata(&t1024).unwrap().modified().unwrap();
+
+    let second = run(&fixture.options()).unwrap();
+    assert_eq!(second.tiers.written(), 0);
+    assert_eq!(second.tiers.skipped, 2);
+    assert_eq!(fs::metadata(&t1024).unwrap().modified().unwrap(), before);
+
+    let db = fixture.open();
+    fixture.add_sized(&db, "big.png", 3000, 2000, 900, &sha1_of(1), true);
+    drop(db);
+    let third = run(&fixture.options()).unwrap();
+    assert_eq!(third.tiers.written(), 2);
+    assert_eq!(third.tiers.skipped, 0);
+}
+
+/// EXIF 方向必须在生成锐利档时套用，否则手机竖拍的照片在详情页会躺倒。
+#[test]
+fn sharp_tiers_follow_exif_orientation() {
+    let fixture = Fixture::new("tiers-orientation");
+    let db = fixture.open();
+    let original = fixture.add_sized(&db, "rotated.jpg", 3000, 2000, 100, &sha1_of(1), true);
+    drop(db);
+    inject_exif_orientation(&original, 6);
+
+    let stats = run(&fixture.options()).unwrap();
+    assert_eq!(stats.tiers.written(), 2);
+
+    let out = fixture.out();
+    let id = id_of(&out, "rotated.jpg");
+    let (w, h) = jpeg_size(&out.join("t1024").join(format!("{id}.jpg")));
+    assert_eq!((w, h), (683, 1024), "orientation=6 应顺时针转成 683×1024");
+}
+
+/// 原图损坏时仍导出该资产（t512 可用），只是缺锐利档。
+#[test]
+fn undecodable_source_keeps_asset_and_skips_tiers() {
+    let fixture = Fixture::new("tiers-broken");
+    let db = fixture.open();
+    let original = fixture.add_sized(&db, "broken.png", 3000, 2000, 100, &sha1_of(1), true);
+    drop(db);
+    fs::write(&original, b"not a real png").unwrap();
+
+    let stats = run(&fixture.options()).unwrap();
+    assert_eq!(stats.exported, 1);
+    assert_eq!(stats.tiers.failed, 1);
+    assert_eq!(stats.tiers.written(), 0);
+    let out = fixture.out();
+    let id = id_of(&out, "broken.png");
+    assert!(out.join("t512").join(format!("{id}.jpg")).is_file());
+}
+
+/// --no-tiers：只写清单与 t512/t256，不创建锐利档目录。
+#[test]
+fn tiers_can_be_disabled() {
+    let fixture = Fixture::new("tiers-off");
+    let db = fixture.open();
+    fixture.add_sized(&db, "big.png", 3000, 2000, 100, &sha1_of(1), true);
+    drop(db);
+
+    let mut options = fixture.options();
+    options.tiers = false;
+    let stats = run(&options).unwrap();
+    assert_eq!(stats.tiers.written(), 0);
+    assert!(!options.out_dir.join("t1024").exists());
+    assert!(!options.out_dir.join("t2048").exists());
+    assert_eq!(read_index(&options.out_dir)["paths"]["t2048"], "t2048/");
 }

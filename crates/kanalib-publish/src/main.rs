@@ -21,6 +21,7 @@ kanalib-publish —— 把 Kanalib 本地库导出成静态站点数据目录（
 选项:
   --limit <N>           最多导出 N 条（调试用；缺省全量）
   --with-originals      额外导出原图到 o/<id>.<ext>（仅本地来源）
+  --no-tiers            不生成 t1024/t2048 锐利档（只要清单与 t512 时用）
   --dry-run             只打印统计，不写任何文件
   --shard-size <N>      每片条数（默认 5000）
   --max-tags <N>        facets.tags 上限（默认 2000）
@@ -80,9 +81,11 @@ fn parse_args(args: &[String]) -> Result<Option<Options>, String> {
         match arg {
             "-h" | "--help" => return Ok(None),
             "--with-originals" => options.with_originals = true,
+            "--no-tiers" => options.tiers = false,
             "--dry-run" => options.dry_run = true,
             "--prune-stale" => options.prune_stale = true,
-            "--db" | "--out" | "--limit" | "--shard-size" | "--max-tags" | "--max-groups" | "--root" => {
+            "--db" | "--out" | "--limit" | "--shard-size" | "--max-tags" | "--max-groups"
+            | "--root" => {
                 let Some(value) = args.get(index) else {
                     return Err(format!("{arg} 缺少参数值"));
                 };

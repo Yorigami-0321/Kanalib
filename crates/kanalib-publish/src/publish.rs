@@ -1,8 +1,10 @@
-//! 导出主流程：扫描本地库 -> 写分片/缩略图/原图 -> 写 index.json 与账本。
+//! 导出主流程：扫描本地库 -> 写分片/缩略图/锐利档/原图 -> 写 index.json 与账本。
 //!
 //! 语义要点（对照 docs/backlog/photo-wall-contract.md）：
 //! - 排序完全交给 core 的 Db::search_page（Modified 降序 + path 兜底），这里只按游标顺序消费；
 //! - 每个 item 的 t512 必定存在（缩略图源缺失就跳过该资产并 warn），t256 只是锦上添花；
+//! - t1024/t2048 从原图解码一次、按 ICC/EXIF 转 sRGB 与方向、Lanczos 缩放后以 q90 重编码，
+//!   源缺失/不可解码/视频宁可缺档也不放大，前端逐档回退；
 //! - 只读：除账本与产物外不改库；打开库时的补列/建索引由 core 负责（stderr 已提示）；
 //! - --dry-run 不写任何文件；日志一律走 stderr。
 
@@ -12,6 +14,9 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
+use image::codecs::jpeg::JpegEncoder;
+use image::imageops::FilterType;
+use kanalib_core::color;
 use kanalib_core::db::{Db, SearchCursor, SearchPageRequest, SearchSort};
 use kanalib_core::model::{Asset, Filter, SearchQuery, TagHit};
 use kanalib_core::sources;
@@ -24,6 +29,11 @@ use crate::timefmt;
 /// 分页抓取步长（core 允许到 10000，1000 足够减少查询次数又不过度占用内存）。
 const PAGE_LIMIT: usize = 1000;
 
+/// 锐利档：长边像素与目录名。只从原图生成，绝不把小图放大。
+const TIERS: [(&str, u32); 2] = [("t1024", 1024), ("t2048", 2048)];
+/// 锐利档 JPEG 质量（photo-wall W3：高质量、正确 sRGB）。
+const TIER_JPEG_QUALITY: u8 = 90;
+
 /// 发布参数，由 CLI 或库调用方构造。
 #[derive(Clone, Debug)]
 pub struct Options {
@@ -33,6 +43,8 @@ pub struct Options {
     pub limit: Option<usize>,
     /// 是否导出原图到 o/<id>.<ext>。
     pub with_originals: bool,
+    /// 是否从原图生成 t1024/t2048 锐利档。
+    pub tiers: bool,
     /// 只打印统计，不写盘。
     pub dry_run: bool,
     pub shard_size: usize,
@@ -51,6 +63,7 @@ impl Default for Options {
             out_dir: PathBuf::new(),
             limit: None,
             with_originals: false,
+            tiers: true,
             dry_run: false,
             shard_size: manifest::DEFAULT_SHARD_SIZE,
             max_facet_tags: manifest::MAX_FACET_TAGS,
@@ -69,6 +82,23 @@ pub struct FileStats {
     pub failed: usize,
 }
 
+/// 锐利档统计。written_* 按文件计；missing/failed 按资产计（一个资产解码失败不会重复计数）。
+#[derive(Clone, Debug, Default)]
+pub struct TierStats {
+    pub written_t1024: usize,
+    pub written_t2048: usize,
+    pub skipped: usize,
+    pub not_needed: usize,
+    pub missing: usize,
+    pub failed: usize,
+}
+
+impl TierStats {
+    pub fn written(&self) -> usize {
+        self.written_t1024 + self.written_t2048
+    }
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct Stats {
     pub scanned: usize,
@@ -83,6 +113,7 @@ pub struct Stats {
     pub tags: usize,
     pub groups: usize,
     pub thumbs: FileStats,
+    pub tiers: TierStats,
     pub originals: FileStats,
     pub stale_shards: usize,
     pub pruned_shards: usize,
@@ -93,7 +124,11 @@ impl fmt::Display for Stats {
         writeln!(
             f,
             "扫描 {} 条；导出 {} 条（重复 id {}、缺可用缩略图 {}、字段不合法 {}）",
-            self.scanned, self.exported, self.duplicates, self.skipped_no_thumb, self.skipped_invalid
+            self.scanned,
+            self.exported,
+            self.duplicates,
+            self.skipped_no_thumb,
+            self.skipped_invalid
         )?;
         if self.tags_from_duplicates > 0 {
             writeln!(
@@ -111,6 +146,16 @@ impl fmt::Display for Stats {
             f,
             "缩略图 t512/t256：新写 {}、跳过（账本命中）{}、源缺失 {}、失败 {}",
             self.thumbs.written, self.thumbs.skipped, self.thumbs.missing, self.thumbs.failed
+        )?;
+        writeln!(
+            f,
+            "锐利档 t1024/t2048：新写 {}/{}、跳过（账本命中）{}、无需生成 {}、源缺失 {}、失败 {}",
+            self.tiers.written_t1024,
+            self.tiers.written_t2048,
+            self.tiers.skipped,
+            self.tiers.not_needed,
+            self.tiers.missing,
+            self.tiers.failed
         )?;
         write!(
             f,
@@ -148,14 +193,14 @@ pub fn run(options: &Options) -> Result<Stats> {
     if !options.db_path.is_file() {
         bail!("数据库不存在：{}", options.db_path.display());
     }
-    eprintln!(
-        "[kanalib-publish] 注意：打开库时会执行 core 迁移（补列/建索引），与桌面行为一致"
-    );
+    eprintln!("[kanalib-publish] 注意：打开库时会执行 core 迁移（补列/建索引），与桌面行为一致");
     let db = Db::open(&options.db_path)
         .with_context(|| format!("打开数据库失败：{}", options.db_path.display()))?;
     let folders = resolve_folders(&db, &options.roots)?;
     if folders.is_empty() {
-        bail!("没有可扫描的本地根目录：settings.library.local_roots 与 sources 表均为空，请用 --root 指定");
+        bail!(
+            "没有可扫描的本地根目录：settings.library.local_roots 与 sources 表均为空，请用 --root 指定"
+        );
     }
     eprintln!(
         "[kanalib-publish] 本地根目录 {} 个：{}",
@@ -353,14 +398,17 @@ impl<'a> Publisher<'a> {
     /// 保留的那份没有任何标签时，用同内容副本的标签补位。
     /// 只补"空"的情况：两份都有标签时以被保留那条为准，避免把不同批次的打标结果混在一起。
     fn fill_tags_from_duplicates(&mut self, asset: &mut Asset) {
-        if !asset.tags.is_empty() || !asset.manual_tags.is_empty() || self.duplicate_tags.is_empty() {
+        if !asset.tags.is_empty() || !asset.manual_tags.is_empty() || self.duplicate_tags.is_empty()
+        {
             return;
         }
         let lookup = |hash: Option<&str>| {
             hash.map(|value| value.to_ascii_lowercase())
                 .and_then(|value| self.duplicate_tags.get(&value).cloned())
         };
-        if let Some(tags) = lookup(asset.sha1.as_deref()).or_else(|| lookup(asset.blake3.as_deref())) {
+        if let Some(tags) =
+            lookup(asset.sha1.as_deref()).or_else(|| lookup(asset.blake3.as_deref()))
+        {
             asset.tags = tags;
             self.stats.tags_from_duplicates += 1;
         }
@@ -403,7 +451,12 @@ impl<'a> Publisher<'a> {
                 .sha1
                 .as_deref()
                 .map(|value| value.to_ascii_lowercase())
-                .or_else(|| asset.blake3.as_deref().map(|value| value.to_ascii_lowercase())),
+                .or_else(|| {
+                    asset
+                        .blake3
+                        .as_deref()
+                        .map(|value| value.to_ascii_lowercase())
+                }),
             mtime: asset.mtime,
             bytes: asset.bytes,
         };
@@ -433,6 +486,8 @@ impl<'a> Publisher<'a> {
         } else {
             self.stats.thumbs.missing += 1;
         }
+
+        self.sync_sharp_tiers(&id, asset, &meta)?;
 
         let mut orig = None;
         if self.options.with_originals {
@@ -470,6 +525,111 @@ impl<'a> Publisher<'a> {
         Ok(())
     }
 
+    /// 生成/跳过 t1024/t2048：解码原图一次，转 sRGB、套 EXIF 方向，再按档缩放重编码。
+    /// 源缺失、视频、不可解码都只降级（前端逐档回退），不中止发布。
+    fn sync_sharp_tiers(&mut self, id: &str, asset: &Asset, meta: &FileMeta) -> Result<()> {
+        if !self.options.tiers {
+            return Ok(());
+        }
+        // 视频的缩略图是首帧；原图是视频容器，不能当静图解码，也不该把首帧放大成"锐利档"。
+        if kanalib_core::model::is_video(&asset.path) {
+            self.stats.tiers.not_needed += TIERS.len();
+            return Ok(());
+        }
+        if !asset.path.is_file() {
+            // 源库目录可能已被移除而缩略图缓存还在；这里按缺失计数，不逐条刷警告。
+            self.stats.tiers.missing += 1;
+            return Ok(());
+        }
+
+        let long_edge = asset.width.max(asset.height);
+        let mut jobs = Vec::new();
+        for (tier, edge) in TIERS {
+            if long_edge <= edge {
+                self.stats.tiers.not_needed += 1;
+                continue;
+            }
+            let rel = format!("{tier}/{id}.jpg");
+            if self.file_is_current(id, &rel, meta) {
+                self.stats.tiers.skipped += 1;
+                self.record_file(id, &rel);
+                continue;
+            }
+            if self.options.dry_run {
+                self.tier_written(tier);
+                continue;
+            }
+            jobs.push((tier, edge, rel));
+        }
+        if jobs.is_empty() {
+            return Ok(());
+        }
+
+        let decoded = match color::decode(&asset.path) {
+            Ok(value) => value,
+            Err(error) => {
+                self.stats.tiers.failed += 1;
+                eprintln!("[kanalib-publish] 警告：锐利档解码失败，跳过 {id}（{error}）");
+                return Ok(());
+            }
+        };
+        let mut image = color::convert_to_srgb(decoded.image, &decoded.profile);
+        image.apply_orientation(decoded.orientation);
+
+        let mut failed = false;
+        for (tier, edge, rel) in jobs {
+            let scaled = if image.width().max(image.height()) > edge {
+                image.resize(edge, edge, FilterType::Lanczos3)
+            } else {
+                image.clone()
+            };
+            let rgb = scaled.to_rgb8();
+            let mut bytes = Vec::new();
+            match JpegEncoder::new_with_quality(&mut bytes, TIER_JPEG_QUALITY).encode_image(&rgb) {
+                Ok(()) => {
+                    let target = self.options.out_dir.join(&rel);
+                    if let Some(parent) = target.parent() {
+                        fsutil::ensure_dir(parent)?;
+                    }
+                    match fsutil::write_atomic(&target, &bytes) {
+                        Ok(()) => {
+                            self.tier_written(tier);
+                            self.record_file(id, &rel);
+                        }
+                        Err(error) => {
+                            failed = true;
+                            eprintln!("[kanalib-publish] 警告：写锐利档 {rel} 失败（{error:#}）");
+                        }
+                    }
+                }
+                Err(error) => {
+                    failed = true;
+                    eprintln!("[kanalib-publish] 警告：编码锐利档 {rel} 失败（{error}）");
+                }
+            }
+        }
+        if failed {
+            self.stats.tiers.failed += 1;
+        }
+        Ok(())
+    }
+
+    fn tier_written(&mut self, tier: &str) {
+        if tier == "t1024" {
+            self.stats.tiers.written_t1024 += 1;
+        } else {
+            self.stats.tiers.written_t2048 += 1;
+        }
+    }
+
+    /// 账本命中且源指纹未变、目标仍在。
+    fn file_is_current(&self, id: &str, rel: &str, meta: &FileMeta) -> bool {
+        self.previous.get(id).is_some_and(|entry| {
+            entry.is_current(meta.sha1.as_deref(), meta.mtime, meta.bytes)
+                && entry.files.iter().any(|file| file == rel)
+        }) && self.options.out_dir.join(rel).is_file()
+    }
+
     /// 增量复制：账本命中且源指纹未变、目标仍在 -> 跳过；返回目标是否可用。
     fn sync_file(
         &mut self,
@@ -488,14 +648,7 @@ impl<'a> Publisher<'a> {
             return Ok(false);
         }
         let target = self.options.out_dir.join(rel);
-        let unchanged = self
-            .previous
-            .get(id)
-            .is_some_and(|entry| {
-                entry.is_current(meta.sha1.as_deref(), meta.mtime, meta.bytes)
-                    && entry.files.iter().any(|file| file == rel)
-            })
-            && target.is_file();
+        let unchanged = self.file_is_current(id, rel, meta);
         if unchanged {
             self.bucket_mut(slot).skipped += 1;
             self.record_file(id, rel);
@@ -554,14 +707,19 @@ impl<'a> Publisher<'a> {
             let bytes = serde_json::to_vec(&shard).context("序列化分片失败")?;
             fsutil::write_atomic(&self.options.out_dir.join(&path), &bytes)?;
         }
-        self.shards.push(ShardRef { i: index, path, count });
+        self.shards.push(ShardRef {
+            i: index,
+            path,
+            count,
+        });
         Ok(())
     }
 
     fn finish(mut self) -> Result<Stats> {
         self.flush_shard()?;
         let tags = manifest::build_tag_facets(&self.tag_counts, self.options.max_facet_tags);
-        let groups = manifest::build_group_facets(&self.group_counts, self.options.max_facet_groups);
+        let groups =
+            manifest::build_group_facets(&self.group_counts, self.options.max_facet_groups);
         self.stats.shards = self.shards.len();
         self.stats.tags = tags.len();
         self.stats.groups = groups.len();
@@ -573,6 +731,10 @@ impl<'a> Publisher<'a> {
         fsutil::ensure_dir(&self.options.out_dir.join("m"))?;
         fsutil::ensure_dir(&self.options.out_dir.join("t256"))?;
         fsutil::ensure_dir(&self.options.out_dir.join("t512"))?;
+        if self.options.tiers {
+            fsutil::ensure_dir(&self.options.out_dir.join("t1024"))?;
+            fsutil::ensure_dir(&self.options.out_dir.join("t2048"))?;
+        }
         if self.options.with_originals {
             fsutil::ensure_dir(&self.options.out_dir.join("o"))?;
         }

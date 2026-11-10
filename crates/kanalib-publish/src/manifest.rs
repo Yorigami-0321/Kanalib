@@ -23,12 +23,13 @@ pub struct ShardRef {
     pub count: usize,
 }
 
-/// 档位前缀；契约要求 t1024 未产出时也照常写出该键。
+/// 档位前缀；契约要求 t1024/t2048 未产出时也照常写出该键。
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Paths {
     pub t256: String,
     pub t512: String,
     pub t1024: String,
+    pub t2048: String,
     pub original: String,
 }
 
@@ -38,6 +39,7 @@ impl Default for Paths {
             t256: "t256/".to_string(),
             t512: "t512/".to_string(),
             t1024: "t1024/".to_string(),
+            t2048: "t2048/".to_string(),
             original: "o/".to_string(),
         }
     }
@@ -419,6 +421,7 @@ mod tests {
         assert_eq!(paths.t256, "t256/");
         assert_eq!(paths.t512, "t512/");
         assert_eq!(paths.t1024, "t1024/");
+        assert_eq!(paths.t2048, "t2048/");
         assert_eq!(paths.original, "o/");
     }
 }
