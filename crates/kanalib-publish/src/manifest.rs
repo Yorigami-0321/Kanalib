@@ -102,6 +102,9 @@ pub struct Item {
     /// 原图小写扩展名（无点）；缺省表示无原图。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub orig: Option<String>,
+    /// 本条目可用的最高锐利档长边：0 = 无锐利档，1024/2048 = 有；缺省表示旧数据未声明（前端按未知处理）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sharp: Option<u16>,
 }
 
 /// 计算资产 id（契约 §5）。只接受合法的小写 hex，非法值降级到下一个来源。
@@ -169,6 +172,7 @@ pub fn build_item(asset: &Asset) -> Item {
         ph: asset.phash.map(|value| format!("{value:016x}")),
         mtime: asset.mtime,
         orig: None,
+        sharp: None,
     }
 }
 

@@ -487,7 +487,7 @@ impl<'a> Publisher<'a> {
             self.stats.thumbs.missing += 1;
         }
 
-        self.sync_sharp_tiers(&id, asset, &meta)?;
+        let sharp = self.sync_sharp_tiers(&id, asset, &meta)?;
 
         let mut orig = None;
         if self.options.with_originals {
@@ -515,6 +515,7 @@ impl<'a> Publisher<'a> {
 
         let mut item = manifest::build_item(asset);
         item.orig = orig;
+        item.sharp = Some(sharp);
         manifest::count_tags(&mut self.tag_counts, &item);
         manifest::count_group(&mut self.group_counts, &item);
         self.pending.push(item);
@@ -527,22 +528,24 @@ impl<'a> Publisher<'a> {
 
     /// 生成/跳过 t1024/t2048：解码原图一次，转 sRGB、套 EXIF 方向，再按档缩放重编码。
     /// 源缺失、视频、不可解码都只降级（前端逐档回退），不中止发布。
-    fn sync_sharp_tiers(&mut self, id: &str, asset: &Asset, meta: &FileMeta) -> Result<()> {
+    /// 返回本条目可用的最高档长边（0 = 无锐利档），写进 item.sharp 让前端不必 404 试探。
+    fn sync_sharp_tiers(&mut self, id: &str, asset: &Asset, meta: &FileMeta) -> Result<u16> {
         if !self.options.tiers {
-            return Ok(());
+            return Ok(0);
         }
         // 视频的缩略图是首帧；原图是视频容器，不能当静图解码，也不该把首帧放大成"锐利档"。
         if kanalib_core::model::is_video(&asset.path) {
             self.stats.tiers.not_needed += TIERS.len();
-            return Ok(());
+            return Ok(0);
         }
         if !asset.path.is_file() {
             // 源库目录可能已被移除而缩略图缓存还在；这里按缺失计数，不逐条刷警告。
             self.stats.tiers.missing += 1;
-            return Ok(());
+            return Ok(0);
         }
 
         let long_edge = asset.width.max(asset.height);
+        let mut available = 0u16;
         let mut jobs = Vec::new();
         for (tier, edge) in TIERS {
             if long_edge <= edge {
@@ -553,16 +556,18 @@ impl<'a> Publisher<'a> {
             if self.file_is_current(id, &rel, meta) {
                 self.stats.tiers.skipped += 1;
                 self.record_file(id, &rel);
+                available = available.max(edge as u16);
                 continue;
             }
             if self.options.dry_run {
                 self.tier_written(tier);
+                available = available.max(edge as u16);
                 continue;
             }
             jobs.push((tier, edge, rel));
         }
         if jobs.is_empty() {
-            return Ok(());
+            return Ok(available);
         }
 
         let decoded = match color::decode(&asset.path) {
@@ -570,7 +575,7 @@ impl<'a> Publisher<'a> {
             Err(error) => {
                 self.stats.tiers.failed += 1;
                 eprintln!("[kanalib-publish] 警告：锐利档解码失败，跳过 {id}（{error}）");
-                return Ok(());
+                return Ok(available);
             }
         };
         let mut image = color::convert_to_srgb(decoded.image, &decoded.profile);
@@ -595,6 +600,7 @@ impl<'a> Publisher<'a> {
                         Ok(()) => {
                             self.tier_written(tier);
                             self.record_file(id, &rel);
+                            available = available.max(edge as u16);
                         }
                         Err(error) => {
                             failed = true;
@@ -611,7 +617,7 @@ impl<'a> Publisher<'a> {
         if failed {
             self.stats.tiers.failed += 1;
         }
-        Ok(())
+        Ok(available)
     }
 
     fn tier_written(&mut self, tier: &str) {

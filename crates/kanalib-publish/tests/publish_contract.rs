@@ -364,6 +364,7 @@ fn exports_contract_layout_order_and_item_fields() {
         assert!(!item["n"].as_str().unwrap().contains('/'));
         assert_eq!(item["ph"], "0000000000000007");
         assert!(item.get("orig").is_none());
+        assert_eq!(item["sharp"], 1024, "1200×900 应产出 t1024 并声明");
         if item["n"] != "b.png" {
             // 未设置分级/分组/星级的资产走默认值：G、不写 g 键。
             assert_eq!(item["rt"], "G");
@@ -673,6 +674,15 @@ fn sharp_tiers_downscale_and_never_upscale() {
     }
     assert!(!out.join("t1024").join(format!("{small}.jpg")).exists());
     assert!(!out.join("t2048").join(format!("{small}.jpg")).exists());
+
+    let items = read_items(&out);
+    let sharp_of = |name: &str| {
+        items.iter().find(|item| item["n"] == name).unwrap()["sharp"]
+            .as_u64()
+            .unwrap()
+    };
+    assert_eq!(sharp_of("big.png"), 2048);
+    assert_eq!(sharp_of("small.png"), 0, "小图必须显式声明无锐利档");
     assert_no_absolute_paths(&out, &needles(&fixture));
 }
 
@@ -720,6 +730,7 @@ fn sharp_tiers_follow_exif_orientation() {
     let id = id_of(&out, "rotated.jpg");
     let (w, h) = jpeg_size(&out.join("t1024").join(format!("{id}.jpg")));
     assert_eq!((w, h), (683, 1024), "orientation=6 应顺时针转成 683×1024");
+    assert_eq!(read_items(&out)[0]["sharp"], 2048);
 }
 
 /// 原图损坏时仍导出该资产（t512 可用），只是缺锐利档。
@@ -738,6 +749,7 @@ fn undecodable_source_keeps_asset_and_skips_tiers() {
     let out = fixture.out();
     let id = id_of(&out, "broken.png");
     assert!(out.join("t512").join(format!("{id}.jpg")).is_file());
+    assert_eq!(read_items(&out)[0]["sharp"], 0, "解码失败必须声明无锐利档");
 }
 
 /// --no-tiers：只写清单与 t512/t256，不创建锐利档目录。
@@ -755,4 +767,5 @@ fn tiers_can_be_disabled() {
     assert!(!options.out_dir.join("t1024").exists());
     assert!(!options.out_dir.join("t2048").exists());
     assert_eq!(read_index(&options.out_dir)["paths"]["t2048"], "t2048/");
+    assert_eq!(read_items(&options.out_dir)[0]["sharp"], 0);
 }

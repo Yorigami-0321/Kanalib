@@ -58,7 +58,7 @@ cargo run -p kanalib-publish -- --db .kanalib/kanalib.db --out .kanalib/wall_exp
 
 - §2 index.json：schema=1、generated_at（RFC3339 UTC）、count、shard_size、shards[{i, path, count}]（i 从 0 连续递增，path 形如 m/0000.json）、facets.tags（按 count 降序、最多 2000、category 沿用库内值）、facets.groups（最多 200）、paths 五个档位前缀（t1024/t2048 即使未产出也照写）。
 - §3 分片：m/{i:04}.json = {schema, index, items}；每片条数 <= shard_size；分片顺序即展示顺序，等于 Db::search_page 的 SearchSort::Modified 降序，同 mtime 由 core 的 name / path 兜底。
-- §4 item：id、w、h、n（basename）、rt（G/S/Q/E，库内小写归一化为大写，缺失记 G）、g（可选，assets.group 原值，空则不写键）、st（0-5）、fav、tags（[[name, category, score]]，score 0-1 保留 3 位小数，自动标签在前、人工标签在后并按名去重）、ph（16 位小写 hex，缺失不出现）、mtime（UTC 秒）、orig（原图小写扩展名，缺失不出现）。
+- §4 item：id、w、h、n（basename）、rt（G/S/Q/E，库内小写归一化为大写，缺失记 G）、g（可选，assets.group 原值，空则不写键）、st（0-5）、fav、tags（[[name, category, score]]，score 0-1 保留 3 位小数，自动标签在前、人工标签在后并按名去重）、ph（16 位小写 hex，缺失不出现）、mtime（UTC 秒）、orig（原图小写扩展名，缺失不出现）、sharp（本条目最高锐利档 0/1024/2048，前端据此选档，不必 404 试探）。
 - §5 id：sha1（40 位小写 hex）-> blake3（64 位）-> blake3(path_key::encode(path))；不合法值降级到下一个来源；只允许 [0-9a-z]，长度 40 或 64；跨次发布稳定。
 - §6 增量：publish-ledger.json 记录每个 id 的源指纹（sha1、mtime、bytes）与上次写出的文件列表；三者未变且目标文件仍在就跳过复制；--dry-run 不写盘。
 
@@ -69,6 +69,7 @@ cargo run -p kanalib-publish -- --db .kanalib/kanalib.db --out .kanalib/wall_exp
 - t256 从缩略图同目录的 {stem}-t256.jpg 派生（DB 不存该路径），缺失只计 missing，不报错。
 - t1024/t2048 从原图生成：一次解码同时产出两档，套 EXIF 方向、ICC/EXIF 广色域转 sRGB、Lanczos3 缩放、JPEG q=90；源图长边不足档位时**不放大**（计 not_needed），视频、ffmpeg-only 格式与源缺失只降级（计 missing/failed），不中止发布。
 - 锐利档也走账本增量：源指纹未变且目标文件仍在就跳过，不重新解码。
+- 每条 item 写 `sharp`（0/1024/2048）：前端网格据此把 t1024/t2048 放进 srcset，详情按声明选档，不再用 404 试探；`--no-tiers` 时全部写 0。
 - 同一 id（重复 sha1）只发布第一条，其余计入 duplicates。
 - 被保留的那条**没有**任何标签、而同内容副本打过标签时，用副本的标签补位（stats.tags_from_duplicates 计数）；两份都有标签时仍以被保留那条为准，不混批次。
 - 陈旧分片（m/ 下比本次分片数多的文件）默认只警告并提示；清理必须显式 --prune-stale，遵循「绝不自动删除」。
