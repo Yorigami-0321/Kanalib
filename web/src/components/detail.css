@@ -64,6 +64,16 @@
   /* styles.css 的基础值给了 28px padding，会把 contain 图从四边缩进来，
      顶部就出现一条"黑条遮挡"。详情图要贴到视口边缘，letterbox 交给 contain。 */
   padding: 0;
+  /* 触摸手势全部交给图片自己：单指横滑换图、双指缩放、放大后拖拽。 */
+  touch-action: none;
+}
+
+.view--detail .view__media.is-zoomed {
+  cursor: grab;
+}
+
+.view--detail .view__media.is-zoomed:active {
+  cursor: grabbing;
 }
 
 .view--detail .view__img {
@@ -104,6 +114,9 @@
   overflow-x: hidden;
   overflow-y: auto;
   overscroll-behavior: contain;
+  /* 透明区域必须让指针穿到下面的图上，否则整屏都被信息层拦住，
+     双指缩放/横滑永远收不到事件。真正的内容（.view__info）再单独接指针。 */
+  pointer-events: none;
   scrollbar-color: rgba(247, 244, 238, 0.2) transparent;
   scrollbar-width: thin;
 }
@@ -129,6 +142,7 @@
   display: flex;
   flex-direction: column;
   min-height: 100%;
+  pointer-events: none;
 }
 
 /* 内容不满一屏时贴底；超长时随内容长高并从头滚动（不用 justify-content:center，
@@ -156,6 +170,7 @@
     #050505 100%
   );
   pointer-events: auto;
+  touch-action: pan-y;
 }
 
 .view--detail .view__text {
@@ -200,6 +215,83 @@
 .view--detail .view__tags {
   gap: 6px;
   margin-top: 14px;
+}
+
+/* ===== 标签：按类别分组，默认只露前 18 个，展开后容器自己滚 ===== */
+
+.view--detail .view__taggroups {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-top: 14px;
+}
+
+.view--detail .view__taggroup-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.view--detail .view__taggroups.is-expanded .view__taggroup-list {
+  max-height: 34vh;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding-right: 6px;
+  scrollbar-color: rgba(247, 244, 238, 0.2) transparent;
+  scrollbar-width: thin;
+}
+
+.view--detail .view__taggroup {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.view--detail .view__taggroup-label {
+  color: rgba(247, 244, 238, 0.42);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.14em;
+}
+
+.view--detail .view__taggroup-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.view--detail .chip--more {
+  cursor: default;
+  opacity: 0.55;
+}
+
+.view--detail .view__tags-toggle {
+  align-self: flex-start;
+  margin-top: 2px;
+  padding: 5px 10px;
+  border: 0;
+  border-radius: 2px;
+  color: rgba(247, 244, 238, 0.62);
+  background: rgba(8, 8, 9, 0.42);
+  box-shadow: inset 0 0 0 1px rgba(247, 244, 238, 0.1);
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.view--detail .view__tags-toggle:hover {
+  color: var(--ink);
+  background: rgba(247, 244, 238, 0.1);
+}
+
+/* 原图入口放在元信息行，不再混在标签 chip 里。 */
+.view--detail .view__original {
+  color: color-mix(in srgb, var(--accent) 62%, #fff);
+  text-decoration: none;
+  white-space: nowrap;
+}
+
+.view--detail .view__original:hover {
+  text-decoration: underline;
 }
 
 /* 详情里的标签 chip：压在图上，需要自己的底与描边 */
