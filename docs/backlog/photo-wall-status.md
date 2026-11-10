@@ -19,7 +19,7 @@
 | 类型检查 | `cd web && npx tsc --noEmit` → exit 0 |
 | 生产构建 | exit 0：CSS 33.89KB（gzip 7.51KB）/ JS 303.55KB（gzip 98.04KB）；v5 增量来自渐进加载、环境层、放映与新交互，v5.1 单色/留白，v5.2 锚定挤压 + 键盘焦点平移 |
 | 数据 | **默认数据 `web/public/data/` 已是真实库**：937 条、t1024 785（83.8%）、t2048 346（36.9%）、2,000 facets 标签 / 73 分组；源 `D:\Pictures\bili` 只读。合成 9899 条与测试图片已按用户要求删除（清单见 `.kanalib/cleanup-manifest-2026-11-10*.json`） |
-| 验证产物 | `web/screenshots/probe/probe.json` + home/mono/spotlight/detail/detail-slide/detail-next/matte/playing/tags/tag/tag-focus/home-390.png（v5/v5.1 视觉 + 单色/留白 + 放映 + 复制深链）、`web/screenshots/final3/report.json`（四页+交互+390+双指，failures 空）、`web/screenshots/perf-report.json`（30s 拖拽/对比度） |
+| 验证产物 | 本轮截图/探针产物已按 2026-11-10 清理指令删除；数值留在 §4.11/§4.12/§5.2.1，`wall_shots`/`wall_visual_probe` 可随时重跑，实库默认数据为 `web/public/data` |
 | 改动前备份 | 本轮改动前状态由 `a491b85` 保存，可直接 git 回退；未另建目录备份 |
 
 ## 2. 本轮怎么做的
