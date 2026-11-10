@@ -528,7 +528,18 @@ async function main() {
     //    先 reload——交互那几步把相机缩放过，直接改视口会把那张放大的画面带进截图。
     await cdp.send('Emulation.setDeviceMetricsOverride', { width: 390, height: 844, deviceScaleFactor: 2, mobile: true });
     await cdp.send('Page.reload');
-    for (let attempt = 0; attempt < 40; attempt += 1) {
+    // 窄屏 reload 在 dev server 冷启动/HMR 后偶发空白首帧；等 .app，必要时再 reload 一次。
+    let appReady = false;
+    for (let attempt = 0; attempt < 60; attempt += 1) {
+      appReady = await evaluate(`!!document.querySelector('.app')`).catch(() => false);
+      if (appReady) break;
+      await sleep(200);
+    }
+    if (!appReady) {
+      await cdp.send('Page.reload');
+      await sleep(1200);
+    }
+    for (let attempt = 0; attempt < 60; attempt += 1) {
       const count = await evaluate(`document.querySelectorAll('.tile').length`).catch(() => 0);
       if (count > 0) break;
       await sleep(200);
