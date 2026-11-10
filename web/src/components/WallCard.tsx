@@ -1,5 +1,5 @@
 import { useCallback, useMemo, useState } from 'react';
-import { gridSources } from '../lib/assetUrl';
+import { gridImageAttrs, gridSources } from '../lib/assetUrl';
 import type { Rect } from '../lib/expand';
 import { formatCount, formatDateTime, formatSize, ratingLabel } from '../lib/format';
 import { titleSizeForWidth } from '../lib/world';
@@ -11,6 +11,8 @@ export interface WallCardProps {
   index: number;
   paths: TierPaths;
   rect: TileRect;
+  /** 画布相机缩放；用于按屏幕实际宽度选缩略档（srcset）。 */
+  displayScale?: number;
   /** 这张卡是不是"当前项"（刚点开 / 刚右键看概要的那一张）。 */
   current?: boolean;
   /**
@@ -57,6 +59,7 @@ export function WallCard({
   index,
   paths,
   rect,
+  displayScale = 1,
   current,
   enter = false,
   enterDelay = 0,
@@ -87,6 +90,11 @@ export function WallCard({
   );
 
   const chip = useMemo(() => chipTextOf(item, tagCounts), [item, tagCounts]);
+  // 没有回退到 t512 时才让浏览器按显示宽度选档；一旦降级就固定用 src，避免再次 404。
+  const gridAttrs = useMemo(
+    () => (tierIndex === 0 ? gridImageAttrs(paths, item, rect.w * displayScale) : null),
+    [tierIndex, paths, item, rect.w, displayScale],
+  );
   const titleSize = titleSizeForWidth(rect.w);
 
   return (
@@ -122,6 +130,8 @@ export function WallCard({
         <img
           className={'tile__img' + (loaded ? ' is-loaded' : '')}
           src={sources[tierIndex]}
+          srcSet={gridAttrs?.srcSet}
+          sizes={gridAttrs?.sizes}
           alt={item.n}
           loading="lazy"
           decoding="async"

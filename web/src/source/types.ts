@@ -5,7 +5,7 @@
  */
 
 /** 缩略图/原图档位。契约 §1 的目录名固定，不可配置化。 */
-export type TileTier = 't256' | 't512' | 't1024' | 'original';
+export type TileTier = 't256' | 't512' | 't1024' | 't2048' | 'original';
 
 export type TierPaths = Record<TileTier, string>;
 
@@ -14,6 +14,7 @@ export const DEFAULT_TIER_PATHS: TierPaths = {
   t256: 't256/',
   t512: 't512/',
   t1024: 't1024/',
+  t2048: 't2048/',
   original: 'o/',
 };
 

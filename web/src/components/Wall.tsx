@@ -992,6 +992,7 @@ export function WallView({
               index={tile.index}
               paths={paths}
               rect={tile.rect}
+              displayScale={camera.zoom}
               current={tile.item.id === activeId}
               enter={enter.on}
               enterDelay={enterDelayOf(tile.rect)}

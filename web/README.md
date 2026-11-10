@@ -3,12 +3,15 @@
 Kanalib 的**只读静态图片墙**前端：纯静态 SPA（Vite + React 19 + TypeScript），
 数据全部来自发布器导出的静态文件（`index.json` + 分片 + 缩略图），不连后端、不带写入能力。
 
-- 墙页 `#/`：Masonry 混排拼贴（1x1 / 1x2 / 2x1 / 2x2 尺寸档），滚动贴近底部顺序加载下一片
-- 详情页 `#/a/<id>`：大图、标签 chips、元数据、相似推荐（pHash 汉明距离）
-- 交互：单击 220ms 去抖后开 PhotoSwipe lightbox，双击直接进详情；lightbox 工具栏常驻「详情」（移动端兜底）
-- 整墙缩放：可选的「缩放模式」（工具栏按钮 / `W` 键），默认关闭，滚轮仍然用来滚动加载
+- 墙页 `#/`：360° 全向无限画布，格子按 `(种子, 格号)` 按需生成；横/竖排混搭与跨行主图
+- 详情页 `#/d/<id>`：整屏大图（contain）、标签 chips、元数据、相似推荐（pHash 汉明距离），左右切换走水平滑动
+- 标签页 `#/tags`、单标签墙 `#/t/<tag>`
+- 交互：拖拽平移、滚轮平移、`Ctrl+滚轮`/双指缩放；单击选中、双击（或触屏单击）展开全屏；
+  右键/长按在卡片上叠出概要；左侧 120px（窄屏 64px）竖排「缝」收页签、筛选与功能键
 
 契约以 [`docs/backlog/photo-wall-contract.md`](../docs/backlog/photo-wall-contract.md) v1 为准（字段、目录、不变量）。
+交互标准与验收口径见 [`docs/backlog/photo-wall-v3.md`](../docs/backlog/photo-wall-v3.md)、
+[`docs/backlog/photo-wall-status.md`](../docs/backlog/photo-wall-status.md)。
 
 ## 快速开始
 
@@ -24,10 +27,11 @@ npm run dev        # http://127.0.0.1:5273
 web/public/data/
 ├─ index.json            # schema / count / shards / facets / paths
 ├─ m/0000.json           # 分片，items 数组
-├─ t256/<id>.jpg         # 256 长边缩略图（网格用，可缺）
-├─ t512/<id>.jpg         # 512 主档（必存在）
-├─ t1024/<id>.jpg        # 可选，lightbox 优先
-└─ o/<id>.<ext>          # 可选原图（详情页用）
+├─ t256/<id>.jpg         # 256 长边缩略图（网格 1x）
+├─ t512/<id>.jpg         # 512 主档（必存在；网格 2x 与详情兜底）
+├─ t1024/<id>.jpg        # 可选锐利档（详情回退链）
+├─ t2048/<id>.jpg        # 可选锐利档（详情回退链）
+└─ o/<id>.<ext>          # 可选原图（详情优先，--with-originals 时产出）
 ```
 
 然后：
@@ -60,16 +64,17 @@ VITE_WALL_DATA=./wall_export/
 
 ## 数据层
 
-`src/source/` 里是一个很小的抽象，上层（墙、详情、lightbox）只认接口：
+`src/source/` 是一个很小的抽象，页面层只认接口（`WallSource`）：
 
 ```ts
 interface WallSource {
   init(): Promise<WallIndex>;              // 拉 index.json
   loadMore(): Promise<WallItem[]>;         // 顺序追加下一片（不并发拉全部）
-  items(): readonly WallItem[];            // 已加载条目
+  items(): readonly WallItem[];
   getItem(id: string): WallItem | undefined;
-  readonly paths: TierPaths;               // t256/t512/t1024/original 目录
-  readonly hasMore: boolean;
+  paths(): TierPaths;                      // t256/t512/t1024/t2048/original 目录
+  hasMore(): boolean;
+  index(): WallIndex | null;
 }
 ```
 
@@ -82,31 +87,32 @@ interface WallSource {
 
 | 操作 | 行为 |
 | --- | --- |
-| 单击卡片 | 约 220ms 去抖后打开 lightbox |
-| 双击卡片 | 取消待触发的单击，直接路由到 `#/a/<id>` |
-| lightbox 内 | `Esc` 关闭、`←`/`→` 切图、滚轮缩放、右上「详情」按钮进详情页 |
-| `W` | 切换整墙缩放模式（缩放中滚轮=缩放、拖拽=平移，页面滚动被锁住） |
-| `Esc`（无 lightbox） | 先退出缩放模式 |
-| 「适应屏幕」 | 复位缩放并退回普通滚动 |
-| 标签 chip（详情页） | 带上 `#/?tag=<name>` 回到墙并作为筛选条件 |
+| 左键拖拽画布 | 平移（无限模式四向无边界；有限列表撞边回弹） |
+| 滚轮 | 平移；`Ctrl+滚轮` 以光标为锚缩放，右上角出现瞬态比例提示 |
+| 双指 | 缩放（锚点固定双指中点） |
+| 单击卡片 | 选中高亮（竖线 + 提亮）；同一张 360ms 内再次抬起 = 展开 |
+| 双击/触屏单击 | 展开全屏详情（共享元素动画） |
+| 右键 / 长按 500ms | 在卡片上叠出概要（scrim + 文件名/meta/标签 + 详情/关闭） |
+| 详情页 | `←`/`→` 水平滑动切图，`Esc` 返回；焦点归位到触发卡 |
+| 画布焦点 | 方向键/PageUp/PageDown 平移，`+`/`-` 缩放，`Home` 回起点（全局快捷键） |
+| 左侧缝 | 页签（墙/标签）、搜索与筛选、缩放/复位/回起点、详情页返回/上一张/下一张、底部计数 |
 
 ## 筛选
 
-工具栏的标签、收藏、分级、星级、分组、文件名子串**全部在浏览器侧对已加载数据做子集过滤**（不重新请求数据），
-统计区同时显示「已加载 X / 共 Y · 命中 Z」。因为只过滤已加载的部分，脚本会在命中 0 时提示继续向下滚动加载。
-分组筛选依赖契约 §4 的可选字段 `g`；数据里没有 `g` 时该下拉只有「全部」，详情页显示「未分组」。
-标签 facet 为空（例如合成图库）时，标签面板显示「这份数据没有标签 facet」。
+左侧「缝」里的标签、收藏、分级、分组、文件名子串**全部在浏览器侧对已加载数据做子集过滤**（不重新请求数据）。
+筛选收窄时只淡入、不重播入场波次；换页签/换标签/扩宽仍播波次。
+标签 facet 为空（例如合成图库）时，标签面板显示空态说明。
 
 ## 图片档位与降级
 
-- 网格：`t256` → 404 自动回退 `t512`；两者都缺时显示「图片不可用」占位，不阻断排版
-- lightbox：`t1024`（首次探测存在才用）→ `t512` → `t256`，单张 404 自动降档重试
-- 详情页：有 `orig` 用 `o/<id>.<ext>`，否则 `t512`；每个 `img` 都带 `onError` 降级
+- 网格：`img` 带 `srcset`（`t256 256w` / `t512 512w`），`sizes = 卡片宽 × 相机缩放`；`t256` 404 回退 `t512`，两者都缺显示「缩略图缺失」占位
+- 详情：`o/<id>.<ext>`（有 `orig` 时）→ `t2048` → `t1024` → `t512`，单张 404 自动降档重试
+- 锐利档是可选产物；源图长边不够、视频、ffmpeg-only 格式（AVIF/PSD）都会缺档，靠上面的回退链兜底
 
 ## 相似推荐
 
-详情页对**当前已加载集合**里带 `ph`（pHash，16 位小写 hex）的条目算汉明距离，升序取前 12 条；
-条目没有 `ph` 或集合里没有其它带 `ph` 的条目时显示空态说明。
+详情页对**当前已加载集合**里带 `ph`（pHash，16 位小写 hex）的条目算汉明距离，升序取最近 6 条（距离 ≤12）；
+条目没有 `ph` 或集合里没有相似项时隐藏相似条。
 
 ## 目录结构
 
@@ -118,24 +124,21 @@ web/
 ├─ public/                 # 静态资源（data/ 为本地数据，不入库）
 └─ src/
    ├─ main.tsx
-   ├─ App.tsx              # 路由、筛选状态、缩放模式、滚动记忆
-   ├─ styles.css           # 暗色主题
+   ├─ App.tsx              # 路由、筛选、概要、详情展开
+   ├─ styles.css           # 主题变量、画布、缝
    ├─ source/              # StaticSource + 契约类型 + 数据根配置
-   ├─ lib/                 # 路由、pHash 汉明距离、探测、格式化、档位 URL
+   ├─ lib/                 # 路由、pHash、世界布局、强调色、共享元素展开、档位 URL
    ├─ state/               # useWall（顺序装片）、筛选
-   └─ components/          # Wall / WallCard / ZoomStage / Toolbar / Lightbox / Detail
+   └─ components/          # Wall / WallCard / Sidebar / TagGallery / Detail + 各自 CSS
 ```
 
 ## 依赖许可
 
-只使用 MIT / Apache-2.0 / BSD 许可的库，且都锁在 `package-lock.json` 里：
+运行时只依赖 React；其余是构建工具。全部 MIT / Apache-2.0，锁在 `package-lock.json` 里：
 
 | 包 | 用途 | 许可 |
 | --- | --- | --- |
 | react / react-dom | UI | MIT |
-| @egjs/react-infinitegrid | 混排无限网格 | MIT |
-| photoswipe | lightbox | MIT |
-| react-zoom-pan-pinch | 整墙缩放 | MIT |
 | vite / @vitejs/plugin-react / typescript | 构建与类型检查 | MIT / MIT / Apache-2.0 |
 
-不引入遥测、外链字体或 CDN 资源，页面自带 `noindex`（公开墙默认不挡搜索引擎，若需要私密部署可在托管层加鉴权/robots）。
+不引入遥测、外链字体或 CDN 资源；公开墙默认不挡搜索引擎（需要私密部署时在托管层加鉴权/robots）。
