@@ -200,22 +200,25 @@ function pickStrip(
   const start = Math.floor(rng() * total);
   const picked: { index: number; ratio: number }[] = [];
   let ratioSum = 0;
-  // 太窄的卡放不下标题（390 屏上一张竖图可能只有 60px 宽），宁可跳过换下一张；
-  // 一张都没挑到时再退回"不限宽度"的兜底，保证行不会空着。
+  // 太窄的卡放不下标题（真实库里 390 屏上一张竖图可能只有 60px 宽）。
+  // 第一张也必须是宽卡；只有整条行都找不到时才退回“不限宽度”的兜底。
   const minWidth = Math.min(box.w * 0.45, 96);
-  for (let step = 0; step < total && picked.length < 8; step += 1) {
-    const index = (start + step) % total;
-    if (used.has(index)) continue;
-    const entry = items[index];
-    const ratio = entry.w > 0 && entry.h > 0 ? entry.w / entry.h : 1;
-    if (picked.length > 0 && ratio * box.h < minWidth) continue;
-    picked.push({ index, ratio });
-    ratioSum += ratio;
-    const natural = ratioSum * box.h;
-    const gaps = gap * (picked.length - 1);
-    if (natural + gaps >= box.w) break;
-    // 剩下的宽度要拉伸 35% 以上才填得满？再补一张更划算。
-    if ((box.w - gaps) / natural <= 1.35) break;
+  for (const enforceWidth of [true, false]) {
+    if (picked.length > 0) break;
+    for (let step = 0; step < total && picked.length < 8; step += 1) {
+      const index = (start + step) % total;
+      if (used.has(index)) continue;
+      const entry = items[index];
+      const ratio = entry.w > 0 && entry.h > 0 ? entry.w / entry.h : 1;
+      if (enforceWidth && ratio * box.h < minWidth) continue;
+      picked.push({ index, ratio });
+      ratioSum += ratio;
+      const natural = ratioSum * box.h;
+      const gaps = gap * (picked.length - 1);
+      if (natural + gaps >= box.w) break;
+      // 剩下的宽度要拉伸 35% 以上才填得满？再补一张更划算。
+      if ((box.w - gaps) / natural <= 1.35) break;
+    }
   }
   if (picked.length === 0) return;
   const gaps = gap * (picked.length - 1);
