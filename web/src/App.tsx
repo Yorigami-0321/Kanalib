@@ -16,18 +16,30 @@ import {
   groupHref,
   groupsHref,
   navigate,
+  parseUiParams,
   ratingHref,
   ratingsHref,
+  replaceNavigate,
   tagHref,
   tagsHref,
   useRoute,
+  useUiParamsSync,
   wallHref,
+  writeUiParams,
+  type UiParams,
 } from './lib/router';
 import { INSPECTOR_WIDTH, readLayoutMetrics } from './lib/layout';
 import { appendShuffled, hashString } from './lib/shuffle';
 import { DATA_ROOT } from './source/config';
-import { StaticSource } from './source/StaticSource';
-import { EMPTY_FILTERS, filterItems, filterSignature, isFilterActive, type FilterState } from './state/filters';
+import { StaticSource, type SearchRecord } from './source/StaticSource';
+import {
+  EMPTY_FILTERS,
+  filterItems,
+  filterSignature,
+  isFilterActive,
+  type FilterState,
+  type SearchIndexPhase,
+} from './state/filters';
 import { useWall } from './state/useWall';
 import type { TagFacet, WallItem } from './source/types';
 
@@ -59,8 +71,10 @@ export function App() {
   const wall = useWall(source);
   const route = useRoute();
 
-  const [filters, setFilters] = useState<FilterState>(EMPTY_FILTERS);
-  const [sort, setSort] = useState<SortMode>('random');
+  const [filters, setFilters] = useState<FilterState>(() => ({
+    query: parseUiParams(window.location.hash).q,
+  }));
+  const [sort, setSort] = useState<SortMode>(() => parseUiParams(window.location.hash).sort);
   const [detailItem, setDetailItem] = useState<WallItem | null>(null);
   const [detailMissing, setDetailMissing] = useState(false);
   const [allLoaded, setAllLoaded] = useState(false);
@@ -72,8 +86,12 @@ export function App() {
   const [spotlightRect, setSpotlightRect] = useState<Rect | null>(null);
   const [detailInfoHidden, setDetailInfoHidden] = useState(false);
   const [playing, setPlaying] = useState(false);
-  const [mono, setMono] = useState(false);
-  const [matte, setMatte] = useState(false);
+  const [mono, setMono] = useState(() => parseUiParams(window.location.hash).mono);
+  const [matte, setMatte] = useState(() => parseUiParams(window.location.hash).matte);
+  /** 搜索索引：首屏不拉；第一次需要搜索时才取，404/未就绪静默退回文件名搜索。 */
+  const [searchPhase, setSearchPhase] = useState<SearchIndexPhase>('idle');
+  const [searchRecords, setSearchRecords] = useState<ReadonlyMap<string, SearchRecord> | null>(null);
+  const searchRequested = useRef(false);
   const [layout, setLayout] = useState(readLayoutMetrics);
   const [orderSeed] = useState(() => Math.floor(Math.random() * 0x7fffffff));
   const gestureDebug = useMemo(
@@ -89,6 +107,8 @@ export function App() {
   // 焦点要还给谁：记录最近一次从墙上 / 详情里进入详情的条目 id。
   const returnFocusId = useRef<string | null>(null);
   const routeViewRef = useRef(route.view);
+  /** 深链定位：记录「这个 id 探测到第几个分片」，纯 sync 不再触发新一轮 findItem。 */
+  const detailProbe = useRef<{ id: string; loaded: number } | null>(null);
   const orderCache = useRef<{ source: readonly WallItem[]; list: WallItem[] }>({ source: [], list: [] });
   const wallRef = useRef(wall);
   const wallControls = useRef<WallControls | null>(null);
@@ -130,6 +150,40 @@ export function App() {
     return () => window.removeEventListener('keydown', onKeyDown);
   }, []);
 
+  // 搜索索引按需加载：打开搜索框或开始输入时才取，首屏不阻塞；
+  // 失败（404/离线/结构不合约）只降级，不写 console。
+  const requestSearchIndex = useCallback(() => {
+    if (searchRequested.current) return;
+    searchRequested.current = true;
+    setSearchPhase('loading');
+    void source.loadSearchIndex().then((data) => {
+      if (!data) {
+        setSearchPhase('unavailable');
+        return;
+      }
+      setSearchRecords(data.records);
+      setSearchPhase('ready');
+    });
+  }, [source]);
+
+  useEffect(() => {
+    if (filters.query.trim().length > 0) requestSearchIndex();
+  }, [filters.query, requestSearchIndex]);
+
+  // 浏览状态写进 hash query：replace 不产生历史条目，刷新/分享即可恢复。
+  useEffect(() => {
+    writeUiParams({ q: filters.query, sort, mono, matte });
+  }, [filters.query, sort, mono, matte]);
+
+  // 前进/后退或手改地址：把 URL 上的 q/sort/mono/matte 喂回状态。
+  const applyUiParams = useCallback((ui: UiParams) => {
+    setFilters({ query: ui.q });
+    setSort(ui.sort);
+    setMono(ui.mono);
+    setMatte(ui.matte);
+  }, []);
+  useUiParamsSync(applyUiParams);
+
   const detailId = route.view === 'detail' ? route.id : null;
   const queryActive = isFilterActive(filters);
   const routeFiltered = WALL_VIEWS.has(route.view);
@@ -167,7 +221,10 @@ export function App() {
     }
   }, [orderedItems, route]);
 
-  const shown = useMemo(() => sortItems(filterItems(baseItems, filters), sort), [baseItems, filters, sort]);
+  const shown = useMemo(
+    () => sortItems(filterItems(baseItems, filters, searchRecords), sort),
+    [baseItems, filters, searchRecords, sort],
+  );
 
   // 详情页的浏览序列跟用户当前看到的墙（筛后+排序后）一致。
   const detailBrowseItems = useMemo(() => {
@@ -336,27 +393,42 @@ export function App() {
   }, [wall.loadedShards]);
 
   useEffect(() => {
-    setDetailMissing(false);
     if (!detailId) {
+      detailProbe.current = null;
       setDetailItem(null);
+      setDetailMissing(false);
       return;
     }
-    const local = wallRef.current.items.find((item) => item.id === detailId);
+    const local = wall.items.find((item) => item.id === detailId);
     if (local) {
       setDetailItem(local);
+      setDetailMissing(false);
       return;
     }
     setDetailItem(null);
+    // 同一深链、分片数没变：停在当前缺失页，不再发起 findItem。
+    // 否则「找不到 → sync 换 items 引用 → effect 重跑 → 再找不到」会无限循环。
+    const probe = detailProbe.current;
+    if (probe && probe.id === detailId && probe.loaded === wall.loadedShards) {
+      if (!wall.hasMore && wall.phase !== 'error') setDetailMissing(true);
+      return;
+    }
+    detailProbe.current = { id: detailId, loaded: wall.loadedShards };
+    setDetailMissing(false);
     let alive = true;
     void wallRef.current.findItem(detailId).then((found) => {
       if (!alive) return;
-      if (found) setDetailItem(found);
-      else setDetailMissing(true);
+      if (found) {
+        setDetailItem(found);
+        setDetailMissing(false);
+      } else {
+        setDetailMissing(true);
+      }
     });
     return () => {
       alive = false;
     };
-  }, [detailId, wall.items]);
+  }, [detailId, wall.items, wall.loadedShards, wall.hasMore, wall.phase]);
 
   useEffect(() => {
     if (route.view !== 'detail') setRailView(route.view === 'wall' ? 'home' : route.view);
@@ -556,7 +628,16 @@ export function App() {
     returnFocusId.current = id;
     setSummaryId(null);
     setDetailInfoHidden(false);
-    navigate(detailHref(id));
+    // 详情内翻页/放映：replace 当前历史条目，一次后退直接回列表。
+    replaceNavigate(detailHref(id));
+  }, []);
+
+  /** 深链缺失页的「用此 ID 搜索」：把 id 写进 q，回到墙上继续找。 */
+  const handleSearchId = useCallback((id: string) => {
+    setFilters({ query: id });
+    setSpotlightItem(null);
+    navigate(wallHref());
+    window.scrollTo(0, 0);
   }, []);
 
   // 自动放映：每张停留 4.2s，到最后一张回到第一张；离开详情自动停。
@@ -658,9 +739,9 @@ export function App() {
     wall.loadMore();
   }, [wall.loadMore]);
 
-  // 首页与标签墙共用无界空间：随机序下画布没有边界，缩放/平移不会露出空白底。
-  const infiniteWall =
-    (route.view === 'wall' || route.view === 'tag') && !queryActive && sort === 'random';
+  // 无界空间只属于首页随机墙：标签/收藏/分级/分组墙一律有限墙，
+  // 小集合（1 张、11 张）不会在格子世界里被循环复制。
+  const infiniteWall = route.view === 'wall' && !queryActive && sort === 'random';
 
   // 侧栏功能键：墙页给缩放/回到起点，详情页给返回/翻页，两组互斥。
   const canvasOps = useMemo(
@@ -778,6 +859,8 @@ export function App() {
         onGroups={handleGroups}
         filters={filters}
         onFilters={setFilters}
+        searchPhase={searchPhase}
+        onSearchIntent={requestSearchIndex}
         loaded={wall.items.length}
         total={total}
         shown={shown.length}
@@ -810,10 +893,20 @@ export function App() {
               onTogglePlay={handleTogglePlay}
               onToggleMatte={handleToggleMatte}
             />
+          ) : detailMissing ? (
+            <div className="stage__missing">
+              <p className="stage__hint">找不到这张图片（可能不在已导出的范围里）</p>
+              <div className="stage__missing-actions" role="group" aria-label="缺失图片的处理">
+                <button type="button" className="ghost" onClick={handleHome}>
+                  回首页
+                </button>
+                <button type="button" className="ghost" onClick={() => handleSearchId(detailId)}>
+                  用此 ID 搜索
+                </button>
+              </div>
+            </div>
           ) : (
-            <p className="stage__hint">
-              {detailMissing ? '找不到这张图片（可能不在已导出的范围里）' : '正在定位…'}
-            </p>
+            <p className="stage__hint">正在定位…</p>
           )
         ) : route.view === 'tags' ? (
           <TagGallery
@@ -826,7 +919,7 @@ export function App() {
           <BucketGallery
             title="收藏"
             subtitle={formatCount(favEntries[0]?.count ?? 0) + ' 张'}
-            entries={favEntries}
+            entries={favEntries[0]?.count ? favEntries : []}
             paths={wall.paths}
             loading={loadingBuckets}
             emptyText="还没有收藏（收藏状态来自工作台）"

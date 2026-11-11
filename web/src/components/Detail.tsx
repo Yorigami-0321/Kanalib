@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { detailSources, tierUrl } from '../lib/assetUrl';
+import { detailSharpSources, originalUrl, tierUrl } from '../lib/assetUrl';
 import { expanding, expandRevealDelay } from '../lib/expand';
 import type { TierPaths, WallItem } from '../source/types';
 import './detail.css';
@@ -33,6 +33,19 @@ function wheelUnit(event: WheelEvent, viewportHeight: number): number {
   return 1;
 }
 
+/** 省流/弱网下不做后台 2048 升级：第一屏的 1024 已经够看，别用带宽换边缘细节。 */
+function slowNetwork(): boolean {
+  const connection = (
+    navigator as Navigator & {
+      connection?: { saveData?: boolean; effectiveType?: string };
+    }
+  ).connection;
+  if (!connection) return false;
+  if (connection.saveData) return true;
+  const type = connection.effectiveType;
+  return type === 'slow-2g' || type === '2g' || type === '3g';
+}
+
 export interface DetailProps {
   item: WallItem;
   items: readonly WallItem[];
@@ -63,17 +76,67 @@ interface PaneProps {
  * 图片自己支持：双指/Ctrl+滚轮缩放、放大后拖拽平移、双击复位；未放大时左右拖拽换图。
  */
 function Pane({ item, paths, active, onNavigate }: PaneProps) {
-  const sources = detailSources(paths, item);
-  // 失败档位跟 item.id 绑在一起存，不在 effect 里重置 —— 换 item 的那一帧
-  // effect 还没跑，旧 srcIndex 会去索引新的 sources（可能越界成 undefined）。
-  const [loadStage, setLoadStage] = useState<{ id: string; index: number }>({ id: item.id, index: 0 });
-  const srcIndex = loadStage.id === item.id ? Math.min(loadStage.index, sources.length - 1) : 0;
+  // 底色永远是 t512：邻屏只拉这一档做占位，居中后才沿锐利档升档。
+  // 环境层用的也是同一个 t512 URL，缓存里只有一份。
+  const preview = tierUrl(paths, 't512', item.id);
+  const sharpLadder = detailSharpSources(paths, item);
 
-  // 加载完成状态与「id + 档位」绑定：缓存图可能在 effect 之前就触发 onLoad，
+  // 重试计数跟 item.id 绑定：换图后旧 nonce 立即失效，
+  // 新图的首个请求不会被无意义地加上 ?r=N。
+  const [reload, setReload] = useState<{ id: string; nonce: number }>({ id: '', nonce: 0 });
+  const reloadNonce = reload.id === item.id ? reload.nonce : 0;
+  // 浏览器可能把上一轮的加载失败留在内存缓存里，只换 <img> 节点、不改 URL
+  // 会立刻再次失败（实测），重试时给 URL 加一次性参数。
+  const retrySuffix = reloadNonce > 0 ? '?r=' + reloadNonce : '';
+
+  // 底色加载态与 id 绑定：缓存图可能在 effect 之前就触发 onLoad，
   // 用 effect 重置会把 is-loaded 永久清掉（v4 实测过一次）。
-  const loadKey = item.id + ':' + srcIndex;
-  const [loadedKey, setLoadedKey] = useState('');
-  const loaded = loadedKey === loadKey;
+  const [baseState, setBaseState] = useState<{ id: string; loaded: boolean; failed: boolean }>({
+    id: '',
+    loaded: false,
+    failed: false,
+  });
+  const base = baseState.id === item.id ? baseState : { id: item.id, loaded: false, failed: false };
+
+  // 锐利档逐级升：index 前进到下一档；全部失败就保持 t512，不再盖错误卡片。
+  const [sharpState, setSharpState] = useState<{ id: string; index: number; loaded: boolean; failed: boolean }>({
+    id: '',
+    index: 0,
+    loaded: false,
+    failed: false,
+  });
+  const sharp = sharpState.id === item.id ? sharpState : { id: item.id, index: 0, loaded: false, failed: false };
+  const sharpIndex = sharpLadder.length === 0 ? 0 : Math.min(sharp.index, sharpLadder.length - 1);
+  // 邻屏不拉锐利档：只有居中这一屏升档。
+  const sharpSrc = active && sharpLadder.length > 0 ? sharpLadder[sharpIndex] : '';
+  const sharpLoaded = sharp.loaded && sharp.index === sharpIndex;
+  // 升档时旧锐利层继续兜底，等新档加载完成再交接，避免中间闪回 t512。
+  const [lastSharp, setLastSharp] = useState<{ id: string; src: string }>({ id: '', src: '' });
+  const keepSharp =
+    active && lastSharp.id === item.id && lastSharp.src !== '' && lastSharp.src !== sharpSrc
+      ? lastSharp.src
+      : '';
+
+  // 首屏先给 1024，加载完成后再等一拍升 2048：不和首屏、也不和相邻图抢带宽。
+  useEffect(() => {
+    if (!active || !sharp.loaded || sharpIndex + 1 >= sharpLadder.length) return;
+    if (slowNetwork()) return;
+    const timer = window.setTimeout(() => {
+      setSharpState({ id: item.id, index: sharpIndex + 1, loaded: false, failed: false });
+    }, 700);
+    return () => window.clearTimeout(timer);
+  }, [active, item.id, sharpIndex, sharp.loaded, sharpLadder.length]);
+
+  // 只有底色和锐利档都失败才是真的看不到图；锐利档失败还有 t512 兜底。
+  const failed = active && base.failed && (sharpLadder.length === 0 || sharp.failed);
+  const original = originalUrl(paths, item);
+
+  const retry = () => {
+    setBaseState({ id: item.id, loaded: false, failed: false });
+    setSharpState({ id: item.id, index: 0, loaded: false, failed: false });
+    setReload((prev) => ({ id: item.id, nonce: (prev.id === item.id ? prev.nonce : 0) + 1 }));
+  };
+
   const [zoom, setZoom] = useState<ZoomState>(NO_ZOOM);
   const zoomRef = useRef(zoom);
   zoomRef.current = zoom;
@@ -231,6 +294,15 @@ function Pane({ item, paths, active, onNavigate }: PaneProps) {
     [active],
   );
 
+  // 底色与锐利层同步缩放：两层用同一个变换，升级时不会有一层留在原位。
+  const zoomStyle =
+    zoom.scale > 1
+      ? {
+          transform: `translate3d(${zoom.x}px, ${zoom.y}px, 0) scale(${zoom.scale})`,
+          transformOrigin: 'center center',
+        }
+      : undefined;
+
   return (
     <div className="view__pane" ref={paneRef}>
       <div
@@ -242,28 +314,74 @@ function Pane({ item, paths, active, onNavigate }: PaneProps) {
         onDoubleClick={onDoubleClick}
         role="presentation"
       >
-        <img
-          className={'view__img' + (loaded ? ' is-loaded' : '')}
-          src={sources[srcIndex]}
-          alt={item.n}
-          decoding="async"
-          fetchPriority="high"
-          onLoad={() => setLoadedKey(loadKey)}
-          style={
-            zoom.scale > 1
-              ? {
-                  transform: `translate3d(${zoom.x}px, ${zoom.y}px, 0) scale(${zoom.scale})`,
-                  transformOrigin: 'center center',
+        <div className="view__layers">
+          <img
+            key={'base:' + item.id + ':' + reloadNonce}
+            className={'view__img' + (base.loaded ? ' is-loaded' : '')}
+            src={preview + retrySuffix}
+            alt={item.n}
+            decoding="async"
+            fetchPriority="high"
+            onLoad={() => setBaseState({ id: item.id, loaded: true, failed: false })}
+            onError={() => setBaseState({ id: item.id, loaded: false, failed: true })}
+            style={zoomStyle}
+          />
+          {keepSharp ? (
+            <img
+              className="view__img view__img--sharp is-loaded"
+              src={keepSharp + retrySuffix}
+              alt=""
+              aria-hidden="true"
+              decoding="async"
+              style={zoomStyle}
+            />
+          ) : null}
+          {sharpSrc ? (
+            <img
+              key={'sharp:' + item.id + ':' + sharpIndex + ':' + reloadNonce}
+              className={'view__img view__img--sharp' + (sharpLoaded ? ' is-loaded' : '')}
+              src={sharpSrc + retrySuffix}
+              alt=""
+              aria-hidden="true"
+              decoding="async"
+              onLoad={() => {
+                setSharpState({ id: item.id, index: sharpIndex, loaded: true, failed: false });
+                setLastSharp({ id: item.id, src: sharpSrc });
+              }}
+              onError={() => {
+                if (sharpIndex + 1 >= sharpLadder.length) {
+                  setSharpState({ id: item.id, index: sharpIndex, loaded: false, failed: true });
+                  return;
                 }
-              : undefined
-          }
-          onError={() =>
-            setLoadStage((current) => {
-              const base = current.id === item.id ? current.index : 0;
-              return { id: item.id, index: Math.min(base + 1, sources.length - 1) };
-            })
-          }
-        />
+                setSharpState({ id: item.id, index: sharpIndex + 1, loaded: false, failed: false });
+              }}
+              style={zoomStyle}
+            />
+          ) : null}
+        </div>
+        {failed ? (
+          <div
+            className="view__error"
+            role={active ? 'alert' : undefined}
+            // 左右邻屏只是滑动时的视觉副本：别让它们的按钮进入 Tab 序列，
+            // 也别让三块错误态同时被读屏播报。
+            inert={!active}
+            onPointerDown={(event) => event.stopPropagation()}
+          >
+            <p className="view__error-title">这张图暂时加载不出来</p>
+            <p className="view__error-hint">网络或图片档位可能有问题。可以重试。</p>
+            <div className="view__error-actions">
+              <button type="button" className="view__error-retry" onClick={retry}>
+                重试
+              </button>
+              {original ? (
+                <a className="view__error-link" href={original} target="_blank" rel="noreferrer">
+                  打开原图 ↗
+                </a>
+              ) : null}
+            </div>
+          </div>
+        ) : null}
       </div>
     </div>
   );
@@ -294,21 +412,20 @@ export function Detail({
   const slideRef = useRef(slide);
   slideRef.current = slide;
   const trackRef = useRef<HTMLDivElement | null>(null);
+  const shellRef = useRef<HTMLElement | null>(null);
 
-  // 邻图预取：滑动动画开始时下一张往往已经解码完成，拖/滑过去不会先黑一屏。
+  // 打开详情时把焦点从 BODY 接进这张"全屏作品页"：
+  // 路由切换会卸载原来的卡片，若不做这一步，键盘与读屏用户会丢掉位置。
+  // 只接管仍停在 BODY 的情况，不抢用户已经主动建立的焦点。
   useEffect(() => {
-    const index = items.findIndex((entry) => entry.id === item.id);
-    if (index < 0) return;
-    for (const offset of [-1, 1]) {
-      const next = items[index + offset];
-      if (!next) continue;
-      const image = new Image();
-      image.decoding = 'async';
-      image.src = tierUrl(paths, 't512', next.id);
-      // 提前解码，滑动开始那一帧就不会是空白的。
-      void image.decode?.().catch(() => undefined);
-    }
-  }, [item.id, items, paths]);
+    const node = shellRef.current;
+    if (!node) return;
+    const active = document.activeElement;
+    if (!active || active === document.body) node.focus({ preventScroll: true });
+  }, []);
+
+  // 邻图预取已并入邻屏本身：邻屏 Pane 挂载时就只拉 t512 占位，
+  // 这里再 new Image() 拉同一张只会制造重复请求。
 
   // 路由换了图：与"正中那张"比索引定方向。不相邻（相似条跳转 / 深链）就直接落位。
   useEffect(() => {
@@ -437,6 +554,10 @@ export function Detail({
         (veiled ? ' view--expanding' : '') +
         (matte ? ' view--matte' : '')
       }
+      ref={shellRef}
+      tabIndex={-1}
+      role="dialog"
+      aria-label={`图片详情：${item.n}`}
     >
       {/* 环境层：同一张图的低分辨率副本，模糊 + 缓漂移，给 contain 留下的黑边一点空气。 */}
       <div

@@ -45,6 +45,9 @@ const ZOOM_PIP_FADE = 300;
 /** 这些元素自己处理手势，画布不接管。 */
 const INTERACTIVE = 'button, a, input, select, textarea, [role="button"]';
 
+/** 首屏骨架的图位比例：只在 boot/首片未到时出现，不参与真实布局。 */
+const SKELETON_SLOTS = [0.78, 1.32, 0.92, 1.18, 0.72, 1.44, 0.86, 1.1, 1.36, 0.68, 1.02, 0.84];
+
 /** 卡片在 DOM 里的稳定身份/顺序：不含 rect，聚焦重排时节点不会被移动或重挂。 */
 function tileRenderKey(tile: { item: WallItem; index: number }): string {
   const cell = (tile as { cell?: { b: number; c: number } }).cell;
@@ -334,7 +337,9 @@ export function WallView({
   }, [spotlightId, spotlightAnchorRect, infinite, spotlightCell, cellSpec, layout.tiles]);
 
   const cellTiles = useMemo(() => {
-    if (!infinite || !ready) return [];
+    if (!infinite) return [];
+    // 不再等全量到齐才生成格子：分片失败/补拉时已有条目仍然出图，
+    // 画面不会整块清空；新分片到达后 cellSpec 变化，格子自然重排并入。
     // 缓冲区按格子尺度取（约 1/3 格）：固定 420px 在窄屏上等于多预取两屏，
     // DOM 卡片数会翻倍，违反"数量恒定"。
     const base = cellTilesInView(
@@ -359,7 +364,6 @@ export function WallView({
     ];
   }, [
     infinite,
-    ready,
     cellSpec,
     cellCache,
     cellHeight,
@@ -1337,8 +1341,9 @@ export function WallView({
   };
   const isEmpty = items.length === 0;
   const showEmpty = isEmpty && phase !== 'boot' && phase !== 'loading';
-  // 无限空间要等全量到齐再生成格子：分片陆续到达会让每个格子的选图整体换一遍。
-  const awaitingWorld = infinite && !ready && phase !== 'error';
+  // 首次 boot（一张都没有）才让加载态占位；已有条目就渲染当前格子，
+  // 失败/补拉窗口不再把画面清空。全量到齐后 ready 只影响格子重排。
+  const awaitingWorld = infinite && !ready && isEmpty && phase !== 'error';
   // 传给 memo 卡片的回调必须引用稳定，否则纯平移时卡片仍会整批重渲染。
   const handleCardOpen = useCallback(
     (openedItem: WallItem, openedIndex: number, originRect?: Rect) => {
@@ -1378,6 +1383,22 @@ export function WallView({
         endPointer(null, -1);
       }}
     >
+      {/* 弱网首屏：boot/首片未到时先铺图位骨架，避免白屏或纯黑；真实卡片到达后整层卸载。 */}
+      {isEmpty && (phase === 'boot' || phase === 'loading') ? (
+        <div className="wall-skeleton" role="status" aria-live="polite">
+          <span className="sr-only">正在加载图片</span>
+          <div className="wall-skeleton__grid" aria-hidden="true">
+            {SKELETON_SLOTS.map((ratio, index) => (
+              <span
+                key={index}
+                className="wall-skeleton__tile"
+                style={{ aspectRatio: String(ratio) }}
+              />
+            ))}
+          </div>
+        </div>
+      ) : null}
+
       {showEmpty ? (
         <div className="wall__note">
           {phase === 'error' ? (
@@ -1427,12 +1448,21 @@ export function WallView({
       )}
 
       {/* 硬规则 1：首页不出现脚手架文案。计数只留在边栏底部（.seam__count）；
-          加载态只有一条 1px 进度线，错误才给一句提示。 */}
+          加载态只有一条 1px 进度线，错误时给一句提示 + 重试入口。 */}
       <div className="canvas__hint">拖拽平移 · 滚轮滚动 · Ctrl+滚轮缩放 · 右键看概要</div>
 
       <div className="canvas__progress" data-active={phase === 'loading' ? 'true' : undefined} aria-hidden="true" />
 
-      {phase === 'error' ? <div className="canvas__error">数据加载中断</div> : null}
+      {/* 已有卡片时错误条挂重试按钮：从失败分片续拉，不清空已加载内容。
+          空态（0 张）由上面的 .wall__note 承担同一语义，避免两个入口。 */}
+      {phase === 'error' && !isEmpty ? (
+        <div className="canvas__error" role="status">
+          <span>数据加载中断</span>
+          <button type="button" className="canvas__error-retry" onClick={onRetry} title="从失败分片继续加载">
+            重试
+          </button>
+        </div>
+      ) : null}
 
       {/* 缩放比例提示（P2-9）：只在最后一次缩放后的 1.1s 内存在，
           aria-hidden + pointer-events:none，既不进 Tab 序列也不拦卡片点击。 */}

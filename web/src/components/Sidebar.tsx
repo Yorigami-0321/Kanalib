@@ -2,7 +2,7 @@ import { useEffect, useRef, useState, type ReactNode } from 'react';
 import { formatCount } from '../lib/format';
 import './sidebar.css';
 import { Inspector, type InspectorProps } from './Inspector';
-import { EMPTY_FILTERS, type FilterState } from '../state/filters';
+import { EMPTY_FILTERS, type FilterState, type SearchIndexPhase } from '../state/filters';
 import type { WallItem } from '../source/types';
 
 export type SortMode = 'random' | 'time' | 'name' | 'stars';
@@ -211,6 +211,10 @@ export interface SidebarProps {
   onGroups: () => void;
   filters: FilterState;
   onFilters: (next: FilterState) => void;
+  /** 搜索索引阶段：决定提示文案（未加载时退回文件名搜索）。 */
+  searchPhase?: SearchIndexPhase;
+  /** 打开搜索框即预取索引，别等第一个字符。 */
+  onSearchIntent?: () => void;
   loaded: number;
   total: number;
   shown: number;
@@ -244,6 +248,8 @@ export function Sidebar({
   onGroups,
   filters,
   onFilters,
+  searchPhase,
+  onSearchIntent,
   loaded,
   total,
   shown,
@@ -542,13 +548,23 @@ export function Sidebar({
                 {ICON_SEARCH}
                 <input
                   value={filters.query}
-                  placeholder="按文件名搜索"
+                  placeholder="搜索名称、标签、分组、分级"
+                  aria-label="搜索图片：名称、标签、分组、分级"
                   autoFocus
+                  onFocus={onSearchIntent}
                   onChange={(event) => onFilters({ ...filters, query: event.target.value })}
                 />
               </label>
               <p className="panel__hint">
-                {filters.query.trim() ? '已按文件名过滤' : '输入文件名的一部分即可过滤'}
+                {filters.query.trim()
+                  ? searchPhase === 'ready'
+                    ? '名称 / 标签 / 分组 / 分级均参与；空格 AND，-词 排除，tag: 限定'
+                    : searchPhase === 'loading'
+                      ? '先按文件名过滤，搜索索引加载中…'
+                      : searchPhase === 'unavailable'
+                        ? '已按文件名过滤（搜索索引不可用）'
+                        : '已按文件名过滤'
+                  : '空格分隔多个词，-词 排除，tag:标签 限定'}
               </p>
               <div className="panel__actions">
                 <button type="button" className="ghost" onClick={() => onFilters({ ...filters, query: '' })}>

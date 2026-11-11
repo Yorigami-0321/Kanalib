@@ -8,9 +8,57 @@
     <meta name="robots" content="noindex, nofollow" />
     <link rel="icon" type="image/svg+xml" href="./favicon.svg" />
     <title>Kanalib 图片墙</title>
+    <style>
+      /* 冷启动外壳：JS 下载完成前就给出深色底与图位，避免 Fast 3G 下白屏。 */
+      html,
+      body {
+        margin: 0;
+        height: 100%;
+        background: #070707;
+      }
+      #root:not(:empty) + .boot {
+        display: none;
+      }
+      .boot {
+        position: fixed;
+        inset: 0;
+        display: grid;
+        place-items: center;
+        padding: 40px 8vw;
+        pointer-events: none;
+      }
+      .boot__grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+        gap: 12px;
+        width: min(1080px, 100%);
+      }
+      .boot__grid i {
+        display: block;
+        min-height: 96px;
+        border-radius: 10px;
+        background: rgba(247, 244, 238, 0.055);
+      }
+      @media (prefers-reduced-motion: no-preference) {
+        .boot__grid i {
+          animation: boot-pulse 1.6s ease-in-out infinite;
+        }
+        @keyframes boot-pulse {
+          50% {
+            background: rgba(247, 244, 238, 0.09);
+          }
+        }
+      }
+    </style>
   </head>
   <body>
     <div id="root"></div>
+    <div class="boot" aria-hidden="true">
+      <div class="boot__grid">
+        <i></i><i></i><i></i><i></i><i></i><i></i>
+        <i></i><i></i><i></i><i></i><i></i><i></i>
+      </div>
+    </div>
     <noscript>这个图片墙需要启用 JavaScript 才能浏览。</noscript>
     <script type="module" src="/src/main.tsx"></script>
   </body>

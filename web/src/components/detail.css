@@ -99,6 +99,12 @@
   cursor: grabbing;
 }
 
+/* 底色与锐利层共用一块叠放容器：升级只改上层，底色始终在下面兜着。 */
+.view--detail .view__layers {
+  position: absolute;
+  inset: 0;
+}
+
 .view--detail .view__img {
   position: absolute;
   inset: 0;
@@ -121,6 +127,11 @@
 
 .view--detail .view__img.is-loaded {
   opacity: 1;
+}
+
+/* 锐利层叠在 t512 底色之上：占位图先出，升级完成再淡入覆盖，切换过程不空屏。 */
+.view--detail .view__img--sharp {
+  z-index: 1;
 }
 
 /* 滑动中的目标屏跳过淡入：预取已把它放进缓存，
@@ -179,6 +190,10 @@
   left: var(--matte-x);
   width: calc(100% - 2 * var(--matte-x));
   height: calc(100% - var(--matte-y) - var(--matte-b));
+}
+
+/* 投影只挂在叠放容器上：两层各自投影会叠出双份暗边。 */
+.view--detail.view--matte .view__layers {
   /* drop-shadow 跟随实际像素，不会把 contain 的透明留边一起框进投影。 */
   filter: drop-shadow(0 30px 52px rgba(0, 0, 0, 0.56));
 }
@@ -217,6 +232,97 @@
   letter-spacing: 0.01em;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+/* 所有档位都失败时的可见错误态：画面不能只留一块黑。
+   卡片居中、可聚焦按钮可被 Tab 到，重试会重新走一遍档位链。 */
+.view__error {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  z-index: 2;
+  display: grid;
+  gap: 10px;
+  width: min(360px, calc(100% - 48px));
+  padding: 20px 22px;
+  border: 1px solid var(--hairline);
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--surface) 86%, transparent);
+  box-shadow: 0 18px 48px rgba(0, 0, 0, 0.4);
+  text-align: center;
+  transform: translate(-50%, -50%);
+  backdrop-filter: blur(14px);
+  animation: view-error-in 240ms var(--ease-out);
+}
+
+@keyframes view-error-in {
+  from {
+    opacity: 0;
+    transform: translate(-50%, calc(-50% + 8px));
+  }
+}
+
+.view__error-title {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+
+.view__error-hint {
+  margin: 0;
+  color: var(--ink-soft);
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+.view__error-actions {
+  display: flex;
+  justify-content: center;
+  gap: 12px;
+  margin-top: 4px;
+}
+
+.view__error-retry {
+  padding: 7px 16px;
+  border: 0;
+  border-radius: 999px;
+  background: var(--ink);
+  color: #131313;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: filter 160ms var(--ease);
+}
+
+.view__error-retry:hover {
+  filter: brightness(0.94);
+}
+
+.view__error-retry:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 3px;
+}
+
+.view__error-link {
+  align-self: center;
+  color: rgba(247, 244, 238, 0.72);
+  font-size: 12px;
+  text-decoration: none;
+  border-bottom: 1px solid var(--hairline);
+  transition: color 160ms var(--ease), border-color 160ms var(--ease);
+}
+
+.view__error-link:hover {
+  color: var(--ink);
+  border-color: rgba(247, 244, 238, 0.4);
+}
+
+/* 焦点接进整个作品页：容器本身不是交互控件，不要画一圈全局 focus 环。 */
+.view--detail:focus,
+.view--detail:focus-visible {
+  outline: none;
 }
 
 @keyframes caption-in {

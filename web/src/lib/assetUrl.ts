@@ -10,9 +10,9 @@ export function tierUrl(
   return dataUrl(`${paths[tier]}${id}.jpg`);
 }
 
-/** 原图 URL；`orig` 缺失时返回 null（契约 §4：缺省表示该条无原图）。 */
+/** 原图 URL；`orig` 或原图目录缺失时返回 null（契约 §4：缺省表示该条无原图）。 */
 export function originalUrl(paths: TierPaths, item: WallItem): string | null {
-  if (!item.orig) return null;
+  if (!item.orig || !paths.original) return null;
   return dataUrl(`${paths.original}${item.id}.${item.orig}`);
 }
 
@@ -21,16 +21,16 @@ export function gridSources(paths: TierPaths, item: WallItem): string[] {
   return [tierUrl(paths, 't256', item.id), tierUrl(paths, 't512', item.id)];
 }
 
-/** 锐利档从高到低；`sharp` 缺省（旧数据）时两档都要试探。 */
-const SHARP_TIERS = [
-  { edge: 2048, tier: 't2048' },
-  { edge: 1024, tier: 't1024' },
-] as const;
-
-function availableSharpTiers(item: WallItem): ('t2048' | 't1024')[] {
+/** 详情页锐利档（低→高）。旧数据缺 `sharp` 时按 t1024 → t2048 逐档试探。 */
+export function detailSharpSources(paths: TierPaths, item: WallItem): string[] {
   const sharp = item.sharp;
-  if (sharp === undefined) return SHARP_TIERS.map(({ tier }) => tier);
-  return SHARP_TIERS.filter(({ edge }) => sharp >= edge).map(({ tier }) => tier);
+  if (sharp === undefined) {
+    return [tierUrl(paths, 't1024', item.id), tierUrl(paths, 't2048', item.id)];
+  }
+  const sources: string[] = [];
+  if (sharp >= 1024) sources.push(tierUrl(paths, 't1024', item.id));
+  if (sharp >= 2048) sources.push(tierUrl(paths, 't2048', item.id));
+  return sources;
 }
 
 /**
@@ -64,16 +64,6 @@ export function spotlightSources(paths: TierPaths, item: WallItem): string[] {
   const sharp = item.sharp;
   if (sharp !== undefined && sharp >= 2048) sources.push(tierUrl(paths, 't2048', item.id));
   if (sharp !== undefined && sharp >= 1024) sources.push(tierUrl(paths, 't1024', item.id));
-  sources.push(tierUrl(paths, 't512', item.id));
-  return sources;
-}
-
-/** 详情页大图：原图 → 声明的锐利档（高→低）→ t512；旧数据缺 sharp 时逐档试探。 */
-export function detailSources(paths: TierPaths, item: WallItem): string[] {
-  const sources: string[] = [];
-  const original = originalUrl(paths, item);
-  if (original) sources.push(original);
-  for (const tier of availableSharpTiers(item)) sources.push(tierUrl(paths, tier, item.id));
   sources.push(tierUrl(paths, 't512', item.id));
   return sources;
 }

@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { originalUrl, tierUrl } from '../lib/assetUrl';
 import {
   categoryLabel,
@@ -11,7 +11,7 @@ import {
   ratingLabel,
 } from '../lib/format';
 import { detailHref } from '../lib/router';
-import { groupTags, similarOf } from '../lib/itemDetail';
+import { groupTags, relatedOf } from '../lib/itemDetail';
 import type { TierPaths, WallItem } from '../source/types';
 import './inspector.css';
 
@@ -72,7 +72,15 @@ export function Inspector({
 
   // 分级已经在元信息行展示，`rating:g` chip 不再重复；其余分组按类别展示。
   const groups = groupTags(item).filter((group) => group.category !== 'rating');
-  const similar = similarOf(item, items);
+  // 先 pHash，没有 ≤12 的邻居时回退同标签/同分组；null 时整块不渲染。
+  const related = useMemo(() => relatedOf(item, items), [item, items]);
+  const relatedLabel = !related
+    ? ''
+    : related.kind === 'tag'
+      ? '同标签'
+      : related.kind === 'group'
+        ? '同分组'
+        : '相似';
   const original = originalUrl(paths, item);
   const totalTags = groups.reduce((sum, group) => sum + group.tags.length, 0);
 
@@ -160,11 +168,14 @@ export function Inspector({
           )}
         </section>
 
-        <section className="inspector__section" aria-labelledby="inspector-similar">
-          <h3 id="inspector-similar">相似</h3>
-          {similar.length > 0 ? (
+        {related ? (
+          <section className="inspector__section" aria-labelledby="inspector-similar">
+            <h3 id="inspector-similar">{relatedLabel}</h3>
+            {related.kind !== 'phash' ? (
+              <p className="inspector__hint">没有足够相近的图片，以下为{relatedLabel}。</p>
+            ) : null}
             <div className="inspector__similar">
-              {similar.map((entry) => (
+              {related.items.map((entry) => (
                 <button
                   key={entry.id}
                   type="button"
@@ -173,14 +184,18 @@ export function Inspector({
                   aria-label={entry.n}
                   onClick={() => onSimilar(entry.id)}
                 >
-                  <img src={tierUrl(paths, 't256', entry.id)} alt="" decoding="async" />
+                  <img
+                    src={tierUrl(paths, 't256', entry.id)}
+                    alt=""
+                    decoding="async"
+                    loading="lazy"
+                    fetchPriority="low"
+                  />
                 </button>
               ))}
             </div>
-          ) : (
-            <p className="inspector__hint">暂无相似图片</p>
-          )}
-        </section>
+          </section>
+        ) : null}
       </div>
 
       <div className="inspector__actions">
