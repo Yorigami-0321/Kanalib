@@ -129,19 +129,9 @@
   transition: none;
 }
 
-/* 双击展开（lib/expand.ts）：克隆图飞行期间把真实内容蒙住，落位后露出。 */
-.view--detail.view--expanding .view__track {
-  animation: track-reveal 1ms 440ms both;
-}
-
-@keyframes track-reveal {
-  from {
-    opacity: 0;
-  }
-  to {
-    opacity: 1;
-  }
-}
+/* 双击展开（lib/expand.ts）：克隆图飞行期间把真实内容蒙住；揭示由 Detail
+   用 WAAPI 按飞行时钟驱动（expandRevealDelay），CSS 不再排延迟动画——
+   挂载抖动曾让揭示晚于克隆落位，留下空窗（反馈问题 6）。 */
 
 .view--detail .view__scrim {
   z-index: 1;

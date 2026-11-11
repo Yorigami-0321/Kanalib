@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { gridImageAttrs, gridSources, spotlightSources } from '../lib/assetUrl';
 import type { Rect } from '../lib/expand';
 import { formatCount, formatDateTime, formatSize, ratingLabel } from '../lib/format';
@@ -73,17 +73,56 @@ export function WallCard({
   onSummary,
 }: WallCardProps) {
   // 网格用 t256/t512；聚焦时按 sharp 声明换锐利档（t2048/t1024 → t512）。
-  const sources = spotlight ? spotlightSources(paths, item) : gridSources(paths, item);
+  const sources = useMemo(
+    () => (spotlight ? spotlightSources(paths, item) : gridSources(paths, item)),
+    [spotlight, paths, item],
+  );
   const [tierIndex, setTierIndex] = useState(0);
   const [failed, setFailed] = useState(false);
   const [loaded, setLoaded] = useState(false);
+  const imgRef = useRef<HTMLImageElement | null>(null);
+  /** 聚焦换图窗口：锐利档解码完成前继续显示旧画面（holdSrc），避免基线 JPEG 半解码白带。 */
+  const [spotReady, setSpotReady] = useState(false);
+  const [holdSrc, setHoldSrc] = useState<string | null>(null);
 
-  // 聚焦切换时换一套 sources，失败档归零；加载态不重置——已经显示的图继续可见，
-  // 等新档 onLoad 再换帧（否则缓存图先 load、effect 后跑会把 is-loaded 永久清掉）。
+  // 聚焦切换时换一套 sources，失败档归零；加载态不重置——已经显示的图继续可见。
+  // 锐利档先离屏 decode()，整帧解码完才替换 src：data/t1024 是基线 JPEG，
+  // 直接换 src 会把未解码的行渲染成白色（聚焦下半白带，反馈文档 §5）。
   useEffect(() => {
     setTierIndex(0);
     setFailed(false);
-  }, [spotlight, item.id]);
+    if (!spotlight) {
+      setSpotReady(false);
+      setHoldSrc(null);
+      return;
+    }
+    setHoldSrc(imgRef.current?.currentSrc || null);
+    setSpotReady(false);
+    let alive = true;
+    const tryTier = (index: number) => {
+      if (index >= sources.length) {
+        if (alive) setFailed(true);
+        return;
+      }
+      const probe = new Image();
+      probe.setAttribute('fetchpriority', 'high');
+      probe.src = sources[index];
+      probe.decode().then(
+        () => {
+          if (!alive) return;
+          setTierIndex(index);
+          setSpotReady(true);
+        },
+        () => {
+          if (alive) tryTier(index + 1);
+        },
+      );
+    };
+    tryTier(0);
+    return () => {
+      alive = false;
+    };
+  }, [spotlight, item.id, sources]);
 
   // updater 必须是纯函数（StrictMode 下会跑两次），降级判定放在外面。
   const handleError = useCallback(() => {
@@ -95,10 +134,31 @@ export function WallCard({
     (event: React.MouseEvent<HTMLDivElement>) => {
       event.preventDefault();
       event.stopPropagation();
-      onSummary(item);
+      // 概要已开时再次右键 = 退出（反馈问题 4b）；App 的 pointerdown 关法
+      // 对卡片上的右键让行，由这里统一判定开/关。
+      if (summary) onCloseSummary?.();
+      else onSummary(item);
     },
-    [item, onSummary],
+    [item, summary, onSummary, onCloseSummary],
   );
+
+  // 概要退出：summary 变 false 后停留 160ms 播淡出再卸载（动画衔接，问题 6）。
+  // wasSummary 防止没开过概要的卡在挂载时空跑一轮停留。
+  const wasSummary = useRef(summary);
+  const [infoLingering, setInfoLingering] = useState(false);
+  useEffect(() => {
+    if (summary) {
+      wasSummary.current = true;
+      setInfoLingering(false);
+      return;
+    }
+    if (!wasSummary.current) return;
+    wasSummary.current = false;
+    setInfoLingering(true);
+    const timer = window.setTimeout(() => setInfoLingering(false), 160);
+    return () => window.clearTimeout(timer);
+  }, [summary]);
+  const infoMounted = summary || infoLingering;
 
   const chip = useMemo(() => chipTextOf(item, tagCounts), [item, tagCounts]);
   // 没有回退到 t512 时才让浏览器按显示宽度选档；一旦降级就固定用 src，避免再次 404。
@@ -141,8 +201,9 @@ export function WallCard({
         <span className="tile__fallback">缩略图缺失</span>
       ) : (
         <img
+          ref={imgRef}
           className={'tile__img' + (loaded ? ' is-loaded' : '')}
-          src={sources[tierIndex]}
+          src={spotlight && !spotReady && holdSrc ? holdSrc : sources[tierIndex]}
           srcSet={gridAttrs?.srcSet}
           sizes={gridAttrs?.sizes}
           alt={item.n}
@@ -172,8 +233,11 @@ export function WallCard({
         </small>
       </span>
 
-      {summary ? (
-        <div className="tile__info" onPointerDown={(event) => event.stopPropagation()}>
+      {infoMounted ? (
+        <div
+          className={'tile__info' + (summary ? '' : ' tile__info--leave')}
+          onPointerDown={(event) => event.stopPropagation()}
+        >
           <div className="tile__info-bar">
             <button
               type="button"

@@ -555,22 +555,12 @@ a {
 }
 
 /* ===== 单击聚焦（v4）：格子/有限墙局部重排，英雄卡占更大的 rect；所有图仍在同一层 ===== */
-/* 信息已经进了检查器；聚焦卡只留图。 */
+/* 聚焦卡只留图；邻图不压暗（反馈问题 2：非聚焦图不要遮罩），
+   视觉重心靠英雄卡自身的放大 + 内描边 + 投影建立。 */
 .tile--spotlight .tile__shade,
 .tile--spotlight .tile__chip,
 .tile--spotlight .tile__copy {
   opacity: 0;
-}
-
-/* 聚焦时把画面其余部分压暗，让英雄卡成为唯一的视觉重心；离开聚焦自动淡回。 */
-.canvas.is-spotlight .tile:not(.tile--spotlight) {
-  opacity: 0.52;
-  filter: saturate(0.55) brightness(0.7);
-}
-
-.canvas.is-spotlight .tile:not(.tile--spotlight):hover {
-  opacity: 0.76;
-  filter: saturate(0.85) brightness(0.9);
 }
 
 .canvas.is-spotlight .canvas__hint {
@@ -643,6 +633,8 @@ a {
   width: 100%;
   height: 100%;
   object-fit: cover;
+  /* 深色兜底：任何解码/加载瞬态露出的都是暗底而不是白底（反馈 §5 方案 C）。 */
+  background: #101012;
   opacity: 0;
   filter: blur(14px) saturate(0.85);
   transform: scale(1.035);
@@ -812,6 +804,8 @@ a {
   letter-spacing: 0.04em;
   text-align: right;
   backdrop-filter: blur(10px);
+  /* 纯提示层：不拦指针，否则头几秒会挡住它下面卡片的点击/拖拽。 */
+  pointer-events: none;
   animation: hint-out 700ms var(--ease) 2.6s forwards;
   pointer-events: none;
 }
@@ -903,17 +897,31 @@ a {
   flex-direction: column;
   justify-content: space-between;
   padding: 12px;
+  /* 遮罩边缘要压得住亮图：旧版中段 40% / 顶部 72% 不透明度，
+     亮图从边缘透出来像一条边界缝（反馈问题 4a）。 */
   background: linear-gradient(
     180deg,
-    rgba(5, 5, 6, 0.72) 0%,
-    rgba(5, 5, 6, 0.4) 38%,
-    rgba(5, 5, 6, 0.9) 100%
+    rgba(5, 5, 6, 0.88) 0%,
+    rgba(5, 5, 6, 0.7) 38%,
+    rgba(5, 5, 6, 0.94) 100%
   );
   animation: tile-info-in 160ms var(--ease);
 }
 
 @keyframes tile-info-in {
   from {
+    opacity: 0;
+  }
+}
+
+/* 退出：再次右键/Esc/点别处关闭时先淡出，WallCard 160ms 后才卸载。 */
+.tile__info.tile__info--leave {
+  animation: tile-info-out 160ms var(--ease) forwards;
+  pointer-events: none;
+}
+
+@keyframes tile-info-out {
+  to {
     opacity: 0;
   }
 }

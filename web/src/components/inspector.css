@@ -26,6 +26,19 @@
   }
 }
 
+/* 退出：收起时先播离场动画，Sidebar 200ms 后才卸载（动画衔接，反馈问题 6）。 */
+.inspector.inspector--leave {
+  animation: inspector-out 200ms var(--ease) forwards;
+  pointer-events: none;
+}
+
+@keyframes inspector-out {
+  to {
+    opacity: 0;
+    transform: translateX(-12px);
+  }
+}
+
 .inspector__handle {
   display: none;
 }
@@ -327,6 +340,17 @@
 
   @keyframes inspector-sheet-in {
     from {
+      opacity: 0;
+      transform: translateY(18px);
+    }
+  }
+
+  .inspector.inspector--leave {
+    animation-name: inspector-sheet-out;
+  }
+
+  @keyframes inspector-sheet-out {
+    to {
       opacity: 0;
       transform: translateY(18px);
     }

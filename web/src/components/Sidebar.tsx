@@ -220,7 +220,7 @@ export interface SidebarProps {
   focusItem?: WallItem | null;
   canvas?: CanvasOps | null;
   detail?: DetailOps | null;
-  /** 当前聚焦/详情图的信息检查器；null 时不渲染。 */
+  /** 详情页的信息检查器；null 时播退出动画后卸载。 */
   inspector?: InspectorProps | null;
   /** 详情页信息栏是否收起（undefined = 不显示信息开关）。 */
   detailInfoHidden?: boolean;
@@ -263,6 +263,27 @@ export function Sidebar({
   const panelRef = useRef<HTMLDivElement | null>(null);
   /** 打开面板的按钮：关闭后把焦点还回去（P2-2）。 */
   const panelTriggerRef = useRef<HTMLElement | null>(null);
+
+  // 检查器退出动画：prop 变 null 后保留最后一份内容 200ms 播离场，
+  // 而不是直接卸载（动画衔接，反馈问题 6）。
+  const lastInspector = useRef<InspectorProps | null>(null);
+  if (inspector) lastInspector.current = inspector;
+  const [inspectorLeaving, setInspectorLeaving] = useState(false);
+  const inspectorPresent = Boolean(inspector);
+  useEffect(() => {
+    if (inspectorPresent) {
+      setInspectorLeaving(false);
+      return;
+    }
+    if (!lastInspector.current) return;
+    setInspectorLeaving(true);
+    const timer = window.setTimeout(() => {
+      lastInspector.current = null;
+      setInspectorLeaving(false);
+    }, 200);
+    return () => window.clearTimeout(timer);
+  }, [inspectorPresent]);
+  const inspectorShown = inspector ?? (inspectorLeaving ? lastInspector.current : null);
 
   useEffect(() => {
     if (!panel) return;
@@ -604,7 +625,13 @@ export function Sidebar({
         </div>
       ) : null}
 
-      {inspector ? <Inspector key={inspector.item.id} {...inspector} /> : null}
+      {inspectorShown ? (
+        <Inspector
+          key={inspectorShown.item.id}
+          {...inspectorShown}
+          leaving={inspectorLeaving && !inspector}
+        />
+      ) : null}
     </>
   );
 }

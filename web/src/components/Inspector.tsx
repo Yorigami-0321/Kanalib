@@ -13,28 +13,27 @@ export interface InspectorProps {
   item: WallItem;
   items: readonly WallItem[];
   paths: TierPaths;
-  mode: 'spotlight' | 'detail';
   onClose: () => void;
-  onOpenDetail: (id: string) => void;
   onBack?: () => void;
   onTagClick: (tag: string) => void;
   onSimilar: (id: string) => void;
+  /** 退出窗口：收起时先播 200ms 离场动画再卸载（Sidebar 驱动）。 */
+  leaving?: boolean;
 }
 
 /**
- * 左侧信息检查器（v4）：聚焦卡和详情页共用。
- * 详情页的标题/元数据/标签/相似条全部在这里，画面本身不再挂底部信息层。
+ * 左侧信息检查器（v4）：详情页的标题/元数据/标签/相似条全部在这里，
+ * 画面本身不再挂底部信息层。单击聚焦不带检查器（反馈问题 2）。
  */
 export function Inspector({
   item,
   items,
   paths,
-  mode,
   onClose,
-  onOpenDetail,
   onBack,
   onTagClick,
   onSimilar,
+  leaving = false,
 }: InspectorProps) {
   const [expanded, setExpanded] = useState(false);
   const [copied, setCopied] = useState(false);
@@ -82,12 +81,12 @@ export function Inspector({
   const visibleGroups: (typeof groups[number] & { hidden?: number })[] = expanded ? groups : collapsedGroups;
 
   return (
-    <aside className={'inspector inspector--' + mode} aria-label="图片信息">
+    <aside className={'inspector' + (leaving ? ' inspector--leave' : '')} aria-label="图片信息">
       <span className="inspector__handle" aria-hidden="true" />
       <div className="inspector__scroll">
         <header className="inspector__head">
           <div>
-            <p className="inspector__eyebrow">{mode === 'detail' ? '详情' : '聚焦'}</p>
+            <p className="inspector__eyebrow">详情</p>
             <h2 className="inspector__title">{item.n}</h2>
           </div>
           <button type="button" className="inspector__close" onClick={onClose} title="收起信息" aria-label="收起信息">
@@ -174,11 +173,7 @@ export function Inspector({
         </section>
 
         <div className="inspector__actions">
-          {mode === 'spotlight' ? (
-            <button type="button" className="inspector__primary" onClick={() => onOpenDetail(item.id)}>
-              打开详情
-            </button>
-          ) : onBack ? (
+          {onBack ? (
             <button type="button" className="inspector__primary" onClick={onBack}>
               返回列表
             </button>

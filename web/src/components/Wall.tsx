@@ -90,10 +90,6 @@ export interface WallViewProps {
     anchor?: { x: number; y: number },
     rect?: Rect,
   ) => void;
-  /** 聚焦/信息栏占用的右侧宽度；相机在它之外的内容区居中。 */
-  infoInset?: number;
-  /** 窄屏底部 sheet 占用的高度；聚焦卡在它上方的可见区居中。 */
-  infoInsetBottom?: number;
   onLoadMore: () => void;
   /**
    * 展开全屏（双击 / Enter / 触屏单击）。origin 是卡片矩形，详情页用它把图片
@@ -172,8 +168,6 @@ export function WallView({
   spotlightAnchor,
   spotlightAnchorRect,
   onSpotlightChange,
-  infoInset = 0,
-  infoInsetBottom = 0,
   onLoadMore,
   onOpen,
   onSummary,
@@ -253,9 +247,9 @@ export function WallView({
         options,
         spotlightId,
         {
-          centerX: worldInset + infoInset + Math.max(200, viewWidth - infoInset) / 2,
+          centerX: worldInset + Math.max(200, viewWidth) / 2,
           viewHeight: size.h,
-          bottomInset: infoInsetBottom,
+          bottomInset: 0,
         },
         spotlightAnchorRect ?? undefined,
       );
@@ -271,8 +265,6 @@ export function WallView({
     spotlightId,
     spotlightAnchorRect,
     worldInset,
-    infoInset,
-    infoInsetBottom,
     viewWidth,
     size.h,
   ]);
@@ -497,10 +489,10 @@ export function WallView({
     const cam = cameraRef.current;
     const box = tile.getBoundingClientRect();
     const seam = narrow ? 64 : 120;
-    const safeLeft = (infoInset > 0 ? infoInset : seam) + 24;
+    const safeLeft = seam + 24;
     const safeRight = size.w - 24;
     const safeTop = 24;
-    const safeBottom = size.h - infoInsetBottom - 24;
+    const safeBottom = size.h - 24;
     let x = cam.x;
     let y = cam.y;
     if (box.left < safeLeft) x -= safeLeft - box.left;
@@ -1206,14 +1198,12 @@ export function WallView({
     );
   }, [cellTiles, infinite, layout.tiles, origin.x, origin.y, slice.start, slice.end]);
 
-  // 重排后的英雄卡不强制居中；只在它被缝/检查器/底部 sheet 遮住时补最小平移。
+  // 重排后的英雄卡不强制居中；只在它被导航缝遮住时补最小平移。
   const spotlightKey =
     spotlightId && spotlightHeroRect
       ? [
           spotlightId,
           spotlightAnchor ? spotlightAnchor.x + ',' + spotlightAnchor.y : 'n',
-          infoInset,
-          infoInsetBottom,
           size.w + 'x' + size.h,
           [spotlightHeroRect.x, spotlightHeroRect.y, spotlightHeroRect.w, spotlightHeroRect.h]
             .map((value) => Math.round(value))
@@ -1231,10 +1221,10 @@ export function WallView({
     const cam = cameraRef.current;
     const zoom = cam.zoom;
     const seam = narrow ? 64 : 120;
-    const safeLeft = (infoInset > 0 ? infoInset : seam) + 24;
+    const safeLeft = seam + 24;
     const safeRight = size.w - 24;
     const safeTop = 24;
-    const safeBottom = size.h - infoInsetBottom - 24;
+    const safeBottom = size.h - 24;
     const sx = worldInset + spotlightHeroRect.x * zoom - cam.x;
     const sy = verticalSlack + spotlightHeroRect.y * zoom - cam.y;
     const sw = spotlightHeroRect.w * zoom;
@@ -1253,8 +1243,6 @@ export function WallView({
   }, [
     spotlightKey,
     spotlightHeroRect,
-    infoInset,
-    infoInsetBottom,
     narrow,
     size.h,
     size.w,

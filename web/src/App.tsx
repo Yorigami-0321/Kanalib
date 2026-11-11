@@ -175,13 +175,10 @@ export function App() {
     return shown.some((entry) => entry.id === detailItem.id) ? shown : orderedItems;
   }, [detailItem, shown, orderedItems]);
 
-  const inspectorItem = detailItem && !detailInfoHidden ? detailItem : route.view !== 'detail' ? spotlightItem : null;
+  // 检查器只在详情页出现（双击放大后）：单击聚焦不再带信息面板，
+  // 墙面上也没有右侧/底部让位（反馈问题 2）。
+  const inspectorItem = detailItem && !detailInfoHidden ? detailItem : null;
   const inspectorOpen = Boolean(inspectorItem);
-  const inspectorMode: 'spotlight' | 'detail' = detailItem ? 'detail' : 'spotlight';
-  const wallInfoInset =
-    inspectorOpen && route.view !== 'detail' && layout.wide ? layout.seam + INSPECTOR_WIDTH : 0;
-  const wallInfoBottom =
-    inspectorOpen && route.view !== 'detail' && !layout.wide ? Math.round(window.innerHeight * 0.55) : 0;
 
   const signature =
     route.view +
@@ -502,11 +499,14 @@ export function App() {
     if (route.view !== 'wall') setAccent(FALLBACK_ACCENT);
   }, [detailItem, spotlightItem, accentCoverId, route.view, wall.paths]);
 
-  // 概要层关法：Esc、点卡片以外任何地方。
+  // 概要层关法：Esc、点卡片以外任何地方。卡片上的右键让行给 WallCard
+  // 的开/关判定（再次右键退出，反馈问题 4b），不然这里会抢先关掉再被打开。
   useEffect(() => {
     if (!summaryId) return;
     const close = (event: PointerEvent) => {
-      if (event.target instanceof Element && event.target.closest('.tile__info')) return;
+      if (!(event.target instanceof Element)) return;
+      if (event.target.closest('.tile__info')) return;
+      if (event.button === 2 && event.target.closest('.tile')) return;
       setSummaryId(null);
     };
     const onKeyDown = (event: KeyboardEvent) => {
@@ -591,9 +591,8 @@ export function App() {
   );
 
   const handleCloseInspector = useCallback(() => {
-    if (detailItem) setDetailInfoHidden(true);
-    else setSpotlightItem(null);
-  }, [detailItem]);
+    setDetailInfoHidden(true);
+  }, []);
 
   const handleToggleInfo = useCallback(() => {
     setDetailInfoHidden((value) => !value);
@@ -755,12 +754,10 @@ export function App() {
   const inspector = inspectorItem
     ? {
         item: inspectorItem,
-        items: detailItem ? detailBrowseItems : shown,
+        items: detailBrowseItems,
         paths: wall.paths,
-        mode: inspectorMode,
         onClose: handleCloseInspector,
-        onOpenDetail: handleDetail,
-        onBack: detailItem ? handleBack : undefined,
+        onBack: handleBack,
         onTagClick: handleOpenTag,
         onSimilar: handleDetail,
       }
@@ -878,8 +875,6 @@ export function App() {
               spotlightAnchor={spotlightAnchor}
               spotlightAnchorRect={spotlightRect}
               onSpotlightChange={handleSpotlight}
-              infoInset={wallInfoInset}
-              infoInsetBottom={wallInfoBottom}
               onLoadMore={handleLoadMore}
               onOpen={handleOpen}
               onSummary={handleSummary}

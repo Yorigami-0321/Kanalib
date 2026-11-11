@@ -26,6 +26,14 @@ export function expanding(): boolean {
   return performance.now() < windowUntil;
 }
 
+/**
+ * 真实内容揭示的延迟：对齐飞行时钟的 380ms（克隆 420ms 落位）。
+ * 用挂载时刻反推延迟，挂载抖动不会把揭示推到晚于克隆落位（空窗来源）。
+ */
+export function expandRevealDelay(): number {
+  return Math.max(0, windowUntil - 120 - performance.now());
+}
+
 /** contain 模式下图片实际占用的矩形；(offsetX, offsetY) 用于详情让开侧栏检查器后的内容区。 */
 export function containRect(
   nw: number,
@@ -74,7 +82,7 @@ export function flyImage(src: string, from: Rect, to: Rect): void {
         borderRadius: '0px',
       },
     ],
-    { duration: SLIDE_MS, easing: 'cubic-bezier(.22, .61, .36, 1)', fill: 'forwards' },
+    { duration: SLIDE_MS, easing: 'cubic-bezier(0.4, 0, 0.2, 1)', fill: 'forwards' },
   );
   let done = false;
   const finish = () => {

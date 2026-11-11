@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { detailSources, tierUrl } from '../lib/assetUrl';
-import { expanding } from '../lib/expand';
+import { expanding, expandRevealDelay } from '../lib/expand';
 import type { TierPaths, WallItem } from '../source/types';
 import './detail.css';
 
@@ -385,6 +385,21 @@ export function Detail({
     if (!veiled) return;
     const timer = window.setTimeout(() => setVeiled(false), 520);
     return () => window.clearTimeout(timer);
+  }, [veiled]);
+
+  // 揭示与克隆飞行共用 expand.ts 的时钟：飞行 380ms 起淡入 160ms，
+  // 克隆 420ms 落位时真实内容已有可见透明度，交接不留空窗。
+  useEffect(() => {
+    if (!veiled) return;
+    const track = trackRef.current;
+    if (!track) return;
+    const animation = track.animate([{ opacity: 0 }, { opacity: 1 }], {
+      duration: 160,
+      delay: expandRevealDelay(),
+      easing: 'cubic-bezier(0.2, 0.7, 0.25, 1)',
+      fill: 'both',
+    });
+    return () => animation.cancel();
   }, [veiled]);
 
   const routeIndex = items.findIndex((entry) => entry.id === item.id);
