@@ -11,23 +11,24 @@
 | 地址 | 页面 |
 |---|---|
 | `#/` | 无限随机墙（默认） |
-| `#/tags` · `#/t/<tag>` | 标签总览 · 单标签墙 |
+| `#/tags` · `#/t/<tag>` | 标签总览 · 单标签墙（图片数 ≥8 且随机、无搜索时无界，否则有限） |
 | `#/favs` · `#/fav` | 收藏总览 · 收藏墙 |
 | `#/ratings` · `#/r/<G\|S\|Q\|E>` | 分级总览 · 分级墙 |
 | `#/groups` · `#/g/<group>` | 分组总览 · 分组墙 |
 | `#/d/<id>` | 详情（`#/a/<id>` 为兼容别名） |
+| 其他非空路径 | 缺失页：说明 + 「回首页」「去搜索」，不再静默回落首页 |
 
-未知 hash 回落到首页，没有 404 提示（见 §4）。
+> 世界形态：首页随机墙恒为无界；单标签墙在「随机排序 + 无搜索 + 图片数 ≥ 8」时无界（`INFINITE_MIN_TAG_ITEMS = 8`，计数优先取 `index.facets.tags`），其余组合——显式排序、搜索、收藏/分级/分组墙——均为有限有序墙。
 
 ### 1.2 交互
 
 | 面 | 已实现 |
 |---|---|
-| 画布 | 左键拖拽、滚轮/Ctrl+滚轮/双指缩放、方向键/PageUp/PageDown/Home/缩放键、360° 无限格位、有限墙边界回弹、缩放比例瞬态提示 |
+| 画布 | 左键拖拽、滚轮/Ctrl+滚轮/双指缩放、方向键/PageUp/PageDown/Home/缩放键、360° 无限格位、有限墙边界回弹、缩放比例瞬态提示；画布全幅铺满（图垫在左侧 76% 半透明缝下，玻璃可见），缝区在画布 pointer/wheel 层硬拦截（不拖动、不缩放、不选中）；标签墙点顶部卡片时四周自动补图 |
 | 卡片 | 单击原位聚焦（邻图挤压、不居中）、双击/Enter 进详情、长按概要、hover 微缩放、渐进模糊加载、入场波次 |
-| 详情 | 键盘/侧栏翻页、触摸横滑、Ctrl/双指缩放与放大后平移、双击复位、自动放映（P）、单色（N）、留白视图（M）、复制深链、全屏 |
+| 详情 | 键盘/侧栏翻页、触摸横滑、Ctrl/双指缩放与放大后平移、双击复位、自动放映（P）、单色（N）、留白视图（M）、复制深链、全屏；停留 800ms 后预取前后 ±2/±3 的 t512（弱网跳过，同 URL 只取一次） |
 | 信息 | 侧栏 300px 检查器：元数据、按类别折叠标签、相似条、原图；窄屏为底部 sheet |
-| 列表 | 文件名搜索、排序（随机/文件名/时间等）、标签/分级/分组筛选、四个入口两级结构 |
+| 列表 | 文件名 + 全库搜索、排序（随机/文件名/时间等）、标签/分级/分组筛选、四个入口两级结构；各类空态带可执行动作（清空搜索 / 回对应总览 / 回首页） |
 
 ### 1.3 数据与发布管线
 
@@ -54,6 +55,11 @@ node scripts/wall_probe_recover.mjs --base http://127.0.0.1:4273/   # 断片注�
 node scripts/wall_probe_state.mjs --base http://127.0.0.1:4273/     # 无效深链 / 搜索 / URL / 小集合
 node scripts/wall_probe_cold_search.mjs --base http://127.0.0.1:4273/ # 冷开带 q / 刷新 / 新标签 / 索引 404
 node scripts/wall_probe_detail_nav.mjs --base http://127.0.0.1:4273/  # 详情 ←/→/侧栏/放映/相似与路由同步
+node scripts/wall_probe_tag360.mjs --base http://127.0.0.1:4273/     # 标签墙 360° 补图 / 缝不穿透 / 移动端
+node scripts/wall_probe_tag_threshold.mjs --base http://127.0.0.1:4273/  # 1/7/8/9/大标签的世界形态边界
+node scripts/wall_probe_edge.mjs --base http://127.0.0.1:4273/      # 未知 hash 缺失页 / 空态动作 / 历史
+node scripts/wall_probe_mask_edge.mjs --base http://127.0.0.1:4273/ --out web/screenshots/mask-edge  # 概要遮罩边缘像素 + 反馈环形态
+node scripts/wall_probe_detail_preload.mjs --serve-dist web/dist    # 详情预取窗口与网络计数（自带缓存静态服务）
 cargo test -p kanalib-publish         # 25 单元 + 23 集成契约测试
 ```
 
@@ -81,70 +87,72 @@ cargo test -p kanalib-publish         # 25 单元 + 23 集成契约测试
 | 远走 | 横 4.3 万 px / 竖 1 万 px 仍满屏，DOM 恒定 |
 | 侧栏对比度 | 次级文字最差 5.68:1、主文字 12.16:1（达标）；`seam__count` 计数 0.62 后 7.14:1 |
 | 实库探针 | 首屏 72 卡、pending 0、详情 t1024、聚焦细条 0、Tab 6/6 可见、console 0 错误 |
+| 标签墙 360°（1440×900） | 画布 left=0 / w=1440 并盖住 120px 缝；DOM 46–67 张；点最顶卡片后四周无空缺、上方仍可拖 21–23 行；缝内拖拽/真实+合成滚轮均不动 transform、不换 hash |
+| 移动端（390×844） | 画布 left=0 / w=390，横向溢出 0，缝宽 64，canvasCoversSeam=true |
+| 详情预取（4g / 弱网） | 4g 打开 7 张 t512（3 邻屏 + ±2/±3 共 4 张预取，276 KB）；弱网预取 0、t2048 0，首屏体积 +0% |
+| 概要遮罩边缘（1440×900） | zoom 1 / 1.2635 / 1.6 / DPR 2.5：四边最外 2px 与内缩 4–6px 亮度差 −2.2…+1.4（≤3/255），遮罩四边外扩 2.00px，内容内缩 12.00px；`wall_probe_mask_edge` passed |
 
 ## 4. 已知问题（代码审计，按影响排序）
 
 | # | 问题 | 代码位置 | 影响 | 计划 |
 |---|---|---|---|---|
-| 1 | 搜索只匹配文件名 `n`，不含标签/分组/路径 | `state/filters.ts` | 实库 2000 标签无法用搜索定位 | P0：发布 `search-index.json`，前端全库检索 |
+| 1 | ~~搜索只匹配文件名~~ **已完成**：`search-index.json` 全库检索（名称/标签/分组/分级；空格 AND、`-词` 排除、`tag:` 限定；索引缺失时退回文件名） | `state/filters.ts`、`source/StaticSource.ts` | — | 回归：`wall_probe_state`、`wall_probe_cold_search` |
 | 2 | 所有列表路由都串行拉全部分片；无限首页要等全量到齐才生成格位 | `App.tsx` `needAll` / `infinite && !ready` | 分片一多首屏即被拖住，单分片失败全网卡死 | P0：首页按需渲染 + 全量改为后台渐进；搜索索引独立 |
 | 3 | ~~分片失败后没有就地重试~~ **已修复（2026-11-11）**：游标改为请求成功后才推进 + generation 作废旧请求；失败自动补拉 800/2000ms；空态与“已有卡片”错误条均可重试/续拉，不清空已加载 | `StaticSource.ts`、`useWall.ts`、`Wall.tsx` | — | 回归：`wall_probe_recover.mjs` 连续 3 次失败 → 真实坐标点击 → 84 张恢复 |
 | 4 | 标签总览一次渲染全部 2,000 张卡 | `TagGallery.tsx` | 大库首屏 DOM 与封面请求过重 | P1：分类目录 + 分组展开/窗口化 + 搜索置顶 |
-| 5 | 筛选/排序/单色/留白只存在内存，刷新即丢；无法分享当前视图 | `App.tsx` `useState` | 返回/刷新后回到默认状态 | P1：写入 URL query（hash 内）并支持深链恢复 |
+| 5 | ~~筛选/排序/单色/留白只在内存~~ **已完成**：`q/sort/mono/matte` 写入 hash query，刷新/深链可恢复 | `App.tsx`、`lib/router.ts` | — | 遗留：跨入口静默延续 query 无可视 chip（见 §5 第二批 B） |
 | 6 | 详情深链最多补拉 8 个分片（约 4 万条），更靠后的 id 找不到 | `useWall.ts` `MAX_PROBE_SHARDS` | 大库深链可能“图片不存在” | P1：按 id 前缀定位分片，或提供 id→分片索引 |
-| 7 | 未知 hash 静默回落首页 | `lib/router.ts` | 失效链接无提示 | P2：轻量 404 态（提示 + 回首页） |
-| 8 | 标签/分组墙为空时动作不足 | `TagGallery.tsx`、`App.tsx` | 空态只显示一句话 | P2：补“看全部/清空搜索/换入口”动作 |
+| 7 | ~~未知 hash 静默回落首页~~ **已完成**：未知非空路径解析为 `notfound`，渲染缺失页（说明 + 回首页 / 去搜索），不进全量拉取；有效路由与历史前进后退正常 | `lib/router.ts`、`App.tsx` | — | 回归：`wall_probe_edge` |
+| 8 | ~~标签/分组墙为空时动作不足~~ **已完成**：五类空态各带动作（清空搜索 / 回标签·分级·分组总览 / 回首页） | `App.tsx`、`Wall.tsx`、`BucketGallery.tsx` | — | 回归：`wall_probe_edge` |
 | 9 | 移动端检查器为底部 sheet，遮挡较多画面 | `inspector.css` | 390 宽下内容区被压 | P2：改底部 tab 或可折叠把手（待产品决策） |
 | 10 | 发布非原子：中断可能留下半套产物 | `crates/kanalib-publish` | 部署时可能出现版本不一致 | P2：写临时目录后原子替换，或产物带版本号目录 |
 | 11 | 语义搜索缺失 | — | 只能按文件名/标签找图 | 候选：CLIP（F-016），先不做 |
 
-### 4.1 2026-11-11 已闭环（失败路径与兜底）
+### 4.1 2026-11-11 已闭环（明细归档）
 
-| 项 | 实现 | 证据 |
-|---|---|---|
-| 详情四档全失败白屏 | 可见错误卡（标题/说明/重试/打开原图）；重试带 `?r=<nonce>` 且按 `item.id` 重置，换图不带旧 nonce | 探针：全档失败 → 错误卡 → 点击恢复；切图后 src 无 `?r=` |
-| 打开详情焦点掉到 BODY | 详情容器 `role="dialog"`、`tabIndex=-1`；仅在焦点仍在 body 时接管 | 探针 `activeElement` 落在详情容器 |
-| 组件崩溃整站白屏 | `ErrorBoundary` + 刷新入口，保留原始错误日志 | 临时崩溃桩：`.crash` 出现、`.app` 卸载 |
-| 计数文字对比度 2.5:1 | `.seam__count` 透明度 0.38→0.62 | 实测 7.14:1 |
-| 两条错误提示同占右下 | 全局诊断条 `.app__error` 移到顶部居中、`pointer-events:none`；右下只留可重试的画布错误条 | 结构上不再相交 |
+失败路径与兜底、第二批 A 复验、功能与旅程审计的完整证据已归档：[photo-wall-audit-2026-11-11.md](../archive/2026-11/photo-wall-audit-2026-11-11.md)。当前结论：
 
-**残余风险**：部分分片先到时会先渲染一轮、后续分片到达再整体换一批选图（无限首页）。当前接受；若实机观感闪烁，再改成“只追加不重排”。
-
-### 4.3 第二批 A 复验（2026-11-11，主工作区）
-
-| 项 | 实测 |
+| 批次 | 结论 |
 |---|---|
-| 无效深链 `#/d/<40 个 0>` | 8s 内 console error 0；缺失页同屏「回首页 / 用此 ID 搜索」；无 `Maximum update depth` |
-| 全库搜索 | `pink_hair` → 筛选后 142 张（文件名 0 命中）；`cat_ears` 36、`cat_ears pink_hair` 8、`cat_ears -pink_hair` 28、`tag:cat_ears` 36；输入 p95 12.4ms（前端一号 40 次采样） |
-| URL 状态 | `#/?q=cat_ears&sort=name&mono=1&matte=1` 刷新后 hash、单色、输入框全部保持；详情翻页 replace，一次后退回列表 |
-| 小集合墙 | `#/t/rating:e` 1 卡 1 id；`#/t/rating:q` 11 卡 11 id；无界墙只保留首页随机无搜索 |
-| 弱网骨架 | Fast 3G：boot 骨架 177ms 可见、FCP 704ms；`index.html` 内联关键 CSS + `#root:not(:empty)+.boot` 自动隐藏；reduced-motion 下静止 |
-| 索引体积口径 | 937 条 / 3180 标签 / 73 分组：**310,823 B raw、122,211 B gzip**。门限从 ≤300KB/≤80KB 调整为 **≤350KB raw / ≤140KB gzip**（索引按需加载，不阻塞首屏）；10k 规模需评估压缩或拆分 |
-| 回归 | tsc 0、build 通过、`wall_shots` failures 空、`wall_probe_state` 全过 |
+| 失败路径与兜底 | 详情全档失败错误卡与重试、打开详情焦点接管、ErrorBoundary、计数对比度、双错误条分离，全部闭环 |
+| 第二批 A | 无效深链、全库搜索、URL 状态、小集合墙、弱网骨架、索引体积门限，全部闭环 |
+| 功能与旅程审计 | 19 项中 12 项闭环；剩余为分片渐进、标签目录、移动端布局、排序面板不收起、分级双真源、长图/GIF、内容闸门 |
 
-### 4.2 2026-11-11 功能与旅程审计（前端二号，9 轮 CDP 实测）
+**残余风险**：部分分片先到会先渲染一轮、后续分片到达再整体换一批选图（无限首页）。当前接受；若实机观感闪烁，再改成“只追加不重排”。
 
-| 审计项 | 关键证据 | 处置 |
+### 4.2 画布与边界态收口（2026-11-11 夜）
+
+| 项 | 实现 | 复验 |
 |---|---|---|
-| 无效/过期详情深链触发 React 无限更新、页面无出口 | `useWall.ts` 的 `sync` 每次 `items.slice()` 造新数组，找不到 id 时仍 sync；`App.tsx` 定位 effect 依赖 `wall.items` → 循环；`#/d/<坏 id>` 8–12s 内 16–24 条 `Maximum update depth exceeded` | **已修复并复验**：未加载新分片不 sync；缺失页两动作；8s console error 0 |
-| 弱网/冷缓存首页约 20s 全白 | Fast 3G：首卡 DOM 20.7s、首图 21.1s；index 112KB + 单分片 1.4MB；期间无骨架/进度 | **骨架已修**（177ms 可见）；按需分片与切小片进 2B |
-| 详情丢列表上下文 | 从 `#/t/pink_hair`（142 张）进详情变全库 19/937，←/→ 走出标签；深链不带列表 | 2B（与 URL 状态一起定义上下文携带） |
-| 搜索只匹配文件名 | `#/t/pink_hair` 实有 142 张，搜索 0 命中 | **已完成**：`pink_hair` 筛选后 142 张 |
-| 状态刷新即失、跨入口残留不可见 | `q/sort/mono/matte` 仅内存；带残留 query 进标签墙只剩 1 张且无 chip/清除 | **URL 部分已完成**；跨入口可见 chip/清除进 2B |
-| 详情邻屏按最高档加载且重复预取 | 三屏各走 detailSources；另有一次 t512 预取；弱网详情首屏 738KB/4.04s | **已完成**：邻屏固定 t512，居中才升档；首屏最大 196KB（正常网）/ 368KB（Fast 3G）；邻屏锐利请求 0、重复 URL 0 |
-| 相似图 95% 详情为空 | 阈值 12/上限 6，仅 4.9% 有邻居（最近邻 14–20 为主） | **已完成**：无 pHASH 邻居时回退同标签/同分组（≤6，标题标来源，排除 rating）；抽样 10 页空区块 0 |
-| 原图承诺全库落空 | `o/` 不存在、orig 0/937；错误态仍写“打开原图” | **已完成**：`originalUrl` 对 `paths.original` 判空，全链路无「原图」入口；错误态只承诺重试 |
-| 详情翻页只改 URL 不改画面 | `replaceNavigate` 用 `history.replaceState`（不触发 hashchange），`useRoute` 只订阅 hashchange；→ 后 1.8s 标题/计数不变，手动补发 hashchange 立即恢复 | **已修复并复核**：`router.ts` 新增 `kanalib:routechange`，`useRoute` 同时订阅；`wall_probe_detail_nav` 通过（→ 13ms 换图、← 2ms、侧栏 1–3ms、放映 4.2s、相似 4ms、一次后退回列表、刷新恢复、分片请求 1→1） |
-| 冷启动带 q 深链丢搜索索引 | `loadSearchIndex` 在请求前捕获 generation=0，`init()` 自增后结果被丢弃；`#/?q=pink_hair` 冷开 0 张并提示「搜索索引不可用」，先浏览再搜则 142 张 | **已修复并复核**：索引请求等 init 落定后再发（等待器 + 有界重试）；冷开/刷新/新标签均 142 张、请求 1 次、console 0；404/损坏仍静默降级 |
-| 详情导航探针自身抖动 | `prevSlide:false` 但 `restored:true`；标签在 React 提交时已变，轨道动画类晚一拍才挂上，探针首帧就返回 | **已加固**：命中换图后继续采样 160ms 再判动画；连跑 5 次全过（`ms` 仍记首次换图时间） |
-| 分级双入口计数矛盾 | `#/r/S` 504 vs `#/t/rating:s` 547；真源 `rt` 与 `rating:*` 标签并存 | 2B：单一真源，或在标签总览隐藏 `rating:/style:/meta:` 内部键 |
-| 小集合标签墙重复铺同一张 | `#/t/rating:e` 1 张 → 6 卡同 id；`#/t/rating:q` 11 张 → 51 卡 | **已完成**：集合墙一律有限墙，无界只留首页随机 |
-| 排序切档换掉整个墙面范式、面板不收起 | 随机无界 46 卡 → 时间序有限 32 卡、相机重置；选完面板不关 | 2B |
-| 收藏空态不可达 | `favEntries` 恒返回 1 项，`#/favs` 渲染“0 张”空白卡 | **已完成**：0 收藏直接空态 |
-| 长图/低清不可读、GIF 静帧 | 710×10800 → 135×2048；152 条 sharp=0；28 条 GIF 无动画 | 2B / 候选（阅读模式、低清标注、动图导出） |
-| 空态无动作、未知 hash 静默回首页、翻页污染历史 | 四类空态 0 动作；`router.ts` 回退；详情翻页 push | 2B；**翻页 replace 随 2A** |
-| 键盘与移动端入口成本 | Tab 约 13 站才到图、无 skip link；移动端 360ms 双击窗口且提示隐藏 | 与移动端/卡片交互决策一起 |
-| 内容分级闸门缺失 | 首屏 72 卡含 S/Q；全库 S 504/937 | **待用户决策**（默认仅 G / 记住选择 / 前置确认） |
+| 画布全幅 + 缝区拦截（回退让位方案） | `.canvas` 恢复 `inset:0`，图垫到缝下让 76% + `blur(10px)` 玻璃重新可见；`Wall.tsx` 在 `pointerdown` / `wheel` 首行按 `clientX < 缝宽` 提前 return（在 `preventDefault`、`setPointerCapture` 之前），缝区不拖拽/不缩放/不选中 | `wall_probe_tag360`：canvas `left 0 / w 1440`、`canvasCoversSeam:true`；缝内拖 220px 与真实/合成滚轮均不动 transform/hash/spotlight，右侧滚轮平移、Ctrl+滚轮缩放正常；`Sidebar.tsx` / `sidebar.css` git diff 为空 |
+| 标签墙 360° 无界 | 单标签「随机 + 无搜索」进入无界格子世界，点顶卡四周自动补图；坐标换算以画布左上角为原点（画布全幅，含缝下） | `wall_probe_tag360`：桌面画布 left=0/w=1440、移动端 left=0/w=390，上方可拖 21–23 行，rows/cols 无缺 |
+| 小标签阈值 | `INFINITE_MIN_TAG_ITEMS = 8`；计数优先 `index.facets.tags`，缺失时等分片全量到位再兜底；世界模式并入 `resetKey` | `wall_probe_tag_threshold`：1/7 张有限、8/9/735 张无界，0 console error |
+| 无界标签页标题可读 | `.wallhead::before` 纸面衬底（顶部压暗 + blur 14px + 径向遮罩淡出），不参与命中测试；无界世界没有固定边缘，故不做顶部安全区 | `wall_probe_detail_preload`：标题可见，`wallheadBlocksClick:false` |
+| 详情预加载窗口 | 停留 800ms 后预取前后 ±2/±3 的 t512（`PRELOAD_RADIUS=3`，URL 去重、上限 120、弱网跳过）；邻屏固定 t512、居中才升档不变 | `wall_probe_detail_preload`：4g 打开 7 张 t512 / 276 KB，窗口外 0；弱网预取 0、首屏体积 +0% |
+| 未知 hash 缺失页 | 未知非空路径 → `notfound`，渲染「回首页 / 去搜索」，不进全量拉取 | `wall_probe_edge`：两动作齐全、tiles 0、console 0 |
+| 空态动作 | 无匹配 → 清空搜索；空标签/分级/分组 → 回对应总览；空收藏 → 回首页；`#/favs` 桶空态 → 回首页 | `wall_probe_edge`：五类空态点击后到达目标路由 |
+
+**残余风险**：① 8 张标签按 8 张循环，属阈值语义的预期观感；② 未进 facets 前 2000 的小标签依赖全量分片兜底，加载极慢时会先无界占位再切有限（当前单分片无感）；③ 详情预取在快网会多约 4 张 t512（~160 KB，low priority），弱网跳过；④ 缺失页初始焦点仍在 body，无障碍收口时再处理。
+
+### 4.3 功能与旅程审计（明细归档）
+
+前端二号 9 轮 CDP 审计的逐条证据已归档：[photo-wall-audit-2026-11-11.md](../archive/2026-11/photo-wall-audit-2026-11-11.md) §3。仍未闭环的条目已并入 §4 已知问题表与 §5 第二批 B。
+
+### 4.4 概要遮罩边缘亮边（2026-11-11 深夜，已闭环）
+
+用户口径：右键/hover 时图上的遮罩没有铺满整张图，卡片边缘留一条很细的亮边。复现（1440×900、zoom 1.2635 / 1.6）：概要卡 rect 为分数坐标，`.tile__info` / `.tile__shade` 的 rect 与卡片一致，但隐藏卡内 `<img>` 后四边仍见紫色细线（右缘 x=913/914/915/916 亮度 6.8/20.3/29.1/38.9，内部约 6.8）；zoom 1.6 最底行 (55,48,46) vs 上一行 (5,5,6)。
+
+根因：`.tile` 自身 `overflow:hidden + contain:paint` 在分数坐标下裁切边界只有部分像素覆盖，`inset:0` 遮罩填不满最外设备像素；下层 `data-current` 的 2px accent 内描边与 hover 的 1px 高光从边界透出。只把遮罩外扩不够（外扩部分仍被父级裁掉；-3px 仅消底边、右缘仍 63.9）。
+
+修法（`styles.css`、`WallCard.tsx`）：
+- `.tile` 取消裁切（移除 `overflow:hidden`，`contain: layout paint` → `layout`）；新增 `.tile__media` 承载图片 / 底部压暗 / 骨架的圆角裁切。
+- 概要挂载期间（`.tile:has(.tile__info)`）`.tile__media` 外扩 1px；`.tile__info` 外扩 2px + `border-radius:inherit`，在图片抗锯齿之外收边；内边距 14px，内容距卡边仍 12px。
+- 概要态压掉卡片自身 `box-shadow`，并隐藏 current / hover / spotlight 装饰环；键盘 `:focus-visible` 环保留。
+- 新增 `.tile__ring`（z6 > 遮罩 z5、`pointer-events:none`、圆角继承）：hover 2px 白环、当前项 2px accent 环、聚焦卡 2px 环，均为遮罩之上的整圈。
+
+复验：`wall_probe_mask_edge` passed（zoom 1 / 1.2635 / 1.6 / DPR 2.5 四边 Δ ≤3/255；遮罩外扩 2.00px；内容内缩 12.00px；概要态 ring=none）；`tag360` / `tag_threshold` / `edge` / `detail_nav` / `detail_preload` 全 passed；tsc/build 通过。独立抽查 zoom 0.5 概要边缘：隐藏 img 后四边亮度 5.5–6.7，无透光亮线。
+
+**残余风险**：① 卡片外 1px 仍可见图片自身抗锯齿透过半透明遮罩，亮度低于内部（采样在卡片内，不参与判定），要压平只能把遮罩边缘做成不透明；② 概要挂载瞬间图片裁切层外扩 1px（被 160ms 淡入盖住）；③ 概要态不显示 current/hover 装饰环（键盘焦点环保留），属有意的识别性取舍；④ `.tile:has(.tile__info)` 依赖 `:has`（Chrome 105+）。
 
 ## 5. 下一批任务（不与上线绑定）
 
@@ -165,17 +173,19 @@ cargo test -p kanalib-publish         # 25 单元 + 23 集成契约测试
 5. 详情翻页路由同步（前端一号）：A4 引入的 `replaceState` 无事件回归，**已完成并复核**；`wall_probe_detail_nav` 固化“→ 后 500ms 画面必须变”。
 6. 冷启动带 q 深链（前端一号）：搜索索引请求与 `init()` 的 generation 竞态，**已完成并复核**；`wall_probe_cold_search` 固化冷开/刷新/新标签/404 四种场景。
 
-### 第二批 B（待三项决策 + 功能与旅程报告）
+### 第二批 B（部分已完成，其余待决策）
 
-3. 首页按需分片与无限格位渐进生成；后台补全其余分片。
-4. 标签页目录化：默认分类目录、每组限量、搜索置顶。
-5. 移动端布局调整（底部 tab 或可折叠 sheet）。
-6. 卡面信息与打开方式（聚焦保留名称+主标签+“打开”按钮 / 双击窗口）。
-7. 空态动作与 404 提示。
+3. 首页按需分片与无限格位渐进生成；后台补全其余分片。（待决策）
+4. 标签页目录化：默认分类目录、每组限量、搜索置顶。（待决策）
+5. 移动端布局调整（底部 tab 或可折叠 sheet）。（待决策）
+6. 卡面信息与打开方式（聚焦保留名称+主标签+“打开”按钮 / 双击窗口）。（待决策）
+7. ~~空态动作与 404 提示~~ **已完成并复验**：未知非空 hash → 缺失页（回首页 / 去搜索）；无匹配 / 空标签 / 空分级 / 空分组 / 空收藏 / `#/favs` 桶空态均带可执行动作。回归：`wall_probe_edge`（1440，console 0，历史前进后退正常）。
 
 ### 第三批（体验打磨）
 
-- 详情左右切换的预加载窗口扩大（前后各 2–3 张）。
+- ~~详情左右切换的预加载窗口扩大~~ **已完成并复核**：停留 800ms 后预取前后 ±2/±3 的 t512（`PRELOAD_RADIUS=3`，URL 去重、上限 120、弱网跳过）；4g 打开 7 张 t512 / 276 KB，窗口外 0；弱网预取 0、首屏体积 +0%。回归：`wall_probe_detail_preload`。
+- ~~无界标签页标题被首行卡片压住~~ **已完成并复核**：`.wallhead::before` 纸面衬底（顶部压暗 + blur 14px + 径向遮罩淡出），不拦指针，相机与 360° 补图不受影响。回归：`wall_probe_tag360`。
+- ~~概要遮罩边缘 1px 亮边~~ **已完成并复核**：遮罩外扩 2px 越出卡片裁切边界，`.tile__media` 承担圆角裁切，装饰环改为遮罩之上的 `.tile__ring`（概要态关闭/键盘焦点保留）。回归：`wall_probe_mask_edge`（zoom 1 / 1.2635 / 1.6 / DPR 2.5 四边 Δ ≤3/255）、`wall_probe_tag360`、`wall_probe_tag_threshold`、`wall_probe_edge`、`wall_probe_detail_nav`、`wall_probe_detail_preload`。明细见 §4.4。
 - 检查器信息密度与标签分组交互（默认组、展开记忆）。
 - 发布器线程池（大库首编耗时）与原子发布。
 - 真实设备手感复验（触控板/触屏/高分屏 DPR）。
@@ -193,6 +203,7 @@ cargo test -p kanalib-publish         # 25 单元 + 23 集成契约测试
 
 | 内容 | 位置 |
 |---|---|
+| 2026-11-11 功能与旅程审计、失败路径、第二批 A 明细 | [archive/2026-11/photo-wall-audit-2026-11-11.md](../archive/2026-11/photo-wall-audit-2026-11-11.md) |
 | 2026-11-10 21:00 前的完整开发日志（v3/v4/v5 逐轮实测） | [archive/2026-11/photo-wall-status-2026-11-10.md](../archive/2026-11/photo-wall-status-2026-11-10.md) |
 | 两轮实机反馈根因与修复明细 | [archive/2026-11/photo-wall-feedback-2026-11-10.md](../archive/2026-11/photo-wall-feedback-2026-11-10.md) |
 | v4 聚焦与手势调研推演 | [archive/2026-11/photo-wall-focus-mode.md](../archive/2026-11/photo-wall-focus-mode.md) |
