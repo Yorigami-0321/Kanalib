@@ -108,6 +108,8 @@ pub struct Stats {
     pub duplicates: usize,
     /// 从同内容重复副本补回标签的条目数。
     pub tags_from_duplicates: usize,
+    /// 裁掉源图纯白底带的条目数（反馈 §5.6）。
+    pub trimmed: usize,
     pub shards: usize,
     pub shard_size: usize,
     pub tags: usize,
@@ -136,6 +138,9 @@ impl fmt::Display for Stats {
                 "其中 {} 条的标签来自同内容副本（被保留的那份没打标签）",
                 self.tags_from_duplicates
             )?;
+        }
+        if self.trimmed > 0 {
+            writeln!(f, "其中 {} 条裁掉了源图纯白底带（全档重编码）", self.trimmed)?;
         }
         writeln!(
             f,
@@ -288,6 +293,28 @@ fn tile_thumb_path(thumb: &Path) -> PathBuf {
         .map(|value| value.to_string_lossy().to_string())
         .unwrap_or_default();
     thumb.with_file_name(format!("{stem}-t256.jpg"))
+}
+
+/// 底部连续纯白 (255,255,255) 行带：源图上传侧垫白/损坏的痕迹（反馈 §5.6）。
+/// 源图确认用 4%/8 行；t256 候选检测用 3%/3 行——带边界的 JPEG ringing
+/// 会让小档上的候选带高略低于真值，阈值放宽以免漏检。
+fn white_bottom_band(rgb: &image::RgbImage, min_frac: f64, min_rows: u32) -> Option<u32> {
+    let (width, height) = rgb.dimensions();
+    if width == 0 || height == 0 {
+        return None;
+    }
+    let mut band = 0u32;
+    for y in (0..height).rev() {
+        if !(0..width).all(|x| rgb.get_pixel(x, y).0 == [255, 255, 255]) {
+            break;
+        }
+        band += 1;
+    }
+    if band >= min_rows && band < height && f64::from(band) >= f64::from(height) * min_frac {
+        Some(band)
+    } else {
+        None
+    }
 }
 
 /// 原图扩展名：小写、无点、只允许字母数字，最长 10。
@@ -467,27 +494,105 @@ impl<'a> Publisher<'a> {
                 mtime: meta.mtime,
                 bytes: meta.bytes,
                 files: Vec::new(),
+                trim_band: None,
             },
         );
 
-        // t512 是硬不变量：源缩略图不可用就整条跳过。
-        let t512 = format!("t512/{id}.jpg");
-        if !self.sync_file(&id, &t512, &thumb, &meta, Slot::Thumb)? {
-            self.stats.skipped_no_thumb += 1;
-            self.next.remove(&id);
-            return Ok(());
-        }
-
-        // t256 网格档：源缺失不报错，只写 t512 并让前端回退。
         let tile = tile_thumb_path(&thumb);
-        if tile.is_file() {
-            let t256 = format!("t256/{id}.jpg");
-            let _ = self.sync_file(&id, &t256, &tile, &meta, Slot::Thumb)?;
+        // 纯白底带裁剪（反馈 §5.6）：源图上传侧垫白/损坏留下全宽纯白底带，
+        // 各档缩略图都会继承，与解码瞬态无关。在导出 t256 上候选检测（源指纹
+        // 变化时用缓存 t256），精确边界以源图为准；裁掉后全档重编码。账本记
+        // trim_band，增量跑据此保持 manifest 高度不回退。
+        let prior = self.previous.get(&id);
+        let source_current =
+            prior.is_some_and(|entry| entry.is_current(meta.sha1.as_deref(), meta.mtime, meta.bytes));
+        let mut band = if source_current {
+            prior.and_then(|entry| entry.trim_band)
         } else {
-            self.stats.thumbs.missing += 1;
+            None
+        };
+        if band.is_none() {
+            let out_tile = self.options.out_dir.join(format!("t256/{id}.jpg"));
+            let probe_path = if source_current || !tile.is_file() {
+                out_tile
+            } else {
+                tile.clone()
+            };
+            if let Ok(probe) = image::open(&probe_path).map(|value| value.to_rgb8()) {
+                if white_bottom_band(&probe, 0.03, 3).is_some() {
+                    // t256 带边界的 JPEG ringing 会低估带高，精确边界以源图为准。
+                    if let Ok(decoded) = color::decode(&asset.path) {
+                        let mut source = color::convert_to_srgb(decoded.image, &decoded.profile);
+                        source.apply_orientation(decoded.orientation);
+                        // 裁剪行数以方向套用后的源图为准；与库记高度不一致
+                        // （旋转图）时不裁，避免 manifest 高度错配。
+                        band = white_bottom_band(&source.to_rgb8(), 0.04, 8)
+                            .filter(|_| source.height() == asset.height);
+                    }
+                }
+            }
         }
 
-        let sharp = self.sync_sharp_tiers(&id, asset, &meta)?;
+        let mut item_asset = asset.clone();
+        let sharp = match band.filter(|value| *value < asset.height) {
+            Some(band) => {
+                let height = asset.height - band;
+                let long_edge = asset.width.max(height);
+                let mut rels = vec![format!("t256/{id}.jpg"), format!("t512/{id}.jpg")];
+                rels.extend(
+                    TIERS
+                        .iter()
+                        .filter(|(_, edge)| long_edge > *edge)
+                        .map(|(tier, _)| format!("{tier}/{id}.jpg")),
+                );
+                // 账本命中且裁剪产物都在：跳过重编码，只登记（契约 §6 增量语义）。
+                // 必须确认账本记过 trim_band：升级首跑时旧产物还带白底带，
+                // 不能当作已裁剪缓存跳过。
+                let cached = source_current
+                    && prior.is_some_and(|entry| {
+                        entry.trim_band.is_some()
+                            && rels.iter().all(|rel| {
+                                entry.files.iter().any(|file| file == rel)
+                                    && self.options.out_dir.join(rel).is_file()
+                            })
+                    });
+                if cached {
+                    for rel in &rels {
+                        self.record_file(&id, rel);
+                    }
+                    self.stats.thumbs.skipped += 2;
+                    self.stats.tiers.skipped += rels.len() - 2;
+                    item_asset.height = height;
+                    if let Some(entry) = self.next.assets.get_mut(&id) {
+                        entry.trim_band = Some(band);
+                    }
+                    Some(
+                        TIERS
+                            .iter()
+                            .filter(|(_, edge)| long_edge > *edge)
+                            .map(|(_, edge)| *edge as u16)
+                            .max()
+                            .unwrap_or(0),
+                    )
+                } else {
+                    match self.write_trimmed_tiers(&id, asset, band)? {
+                        Some(sharp) => {
+                            item_asset.height = height;
+                            if let Some(entry) = self.next.assets.get_mut(&id) {
+                                entry.trim_band = Some(band);
+                            }
+                            self.stats.trimmed += 1;
+                            Some(sharp)
+                        }
+                        None => self.normal_tiers(&id, asset, &thumb, &tile, &meta)?,
+                    }
+                }
+            }
+            None => self.normal_tiers(&id, asset, &thumb, &tile, &meta)?,
+        };
+        let Some(sharp) = sharp else {
+            return Ok(());
+        };
 
         let mut orig = None;
         if self.options.with_originals {
@@ -513,7 +618,7 @@ impl<'a> Publisher<'a> {
             }
         }
 
-        let mut item = manifest::build_item(asset);
+        let mut item = manifest::build_item(&item_asset);
         item.orig = orig;
         item.sharp = Some(sharp);
         manifest::count_tags(&mut self.tag_counts, &item);
@@ -524,6 +629,115 @@ impl<'a> Publisher<'a> {
             self.flush_shard()?;
         }
         Ok(())
+    }
+
+    /// 常规路径：t512/t256 增量复制缩略图缓存，锐利档从源解码。
+    /// Ok(None) = t512 硬不变量不满足，整条跳过。
+    fn normal_tiers(
+        &mut self,
+        id: &str,
+        asset: &Asset,
+        thumb: &Path,
+        tile: &Path,
+        meta: &FileMeta,
+    ) -> Result<Option<u16>> {
+        // t512 是硬不变量：源缩略图不可用就整条跳过。
+        let t512 = format!("t512/{id}.jpg");
+        if !self.sync_file(id, &t512, thumb, meta, Slot::Thumb)? {
+            self.stats.skipped_no_thumb += 1;
+            self.next.remove(id);
+            return Ok(None);
+        }
+        // t256 网格档：源缺失不报错，只写 t512 并让前端回退。
+        if tile.is_file() {
+            let t256 = format!("t256/{id}.jpg");
+            let _ = self.sync_file(id, &t256, tile, meta, Slot::Thumb)?;
+        } else {
+            self.stats.thumbs.missing += 1;
+        }
+        Ok(Some(self.sync_sharp_tiers(id, asset, meta)?))
+    }
+
+    /// 白底带裁剪路径：源解码一次、裁掉底带，从裁剪图写 t256/t512/t1024/t2048。
+    /// Ok(None) = 源不可解码或裁完为空，调用方回退常规路径。
+    fn write_trimmed_tiers(
+        &mut self,
+        id: &str,
+        asset: &Asset,
+        band: u32,
+    ) -> Result<Option<u16>> {
+        let decoded = match color::decode(&asset.path) {
+            Ok(value) => value,
+            Err(error) => {
+                eprintln!("[kanalib-publish] 警告：白底带裁剪解码失败，回退常规路径 {id}（{error}）");
+                return Ok(None);
+            }
+        };
+        let mut source = color::convert_to_srgb(decoded.image, &decoded.profile);
+        source.apply_orientation(decoded.orientation);
+        if source.height() != asset.height {
+            return Ok(None);
+        }
+        let height = source.height().saturating_sub(band);
+        if height == 0 {
+            return Ok(None);
+        }
+        let cropped = source.crop_imm(0, 0, source.width(), height);
+        let long_edge = cropped.width().max(cropped.height());
+        let mut available = 0u16;
+        for (tier, edge) in [("t256", 256u32), ("t512", 512), ("t1024", 1024), ("t2048", 2048)] {
+            let sharp = edge >= 1024;
+            if sharp && long_edge <= edge {
+                self.stats.tiers.not_needed += 1;
+                continue;
+            }
+            let rel = format!("{tier}/{id}.jpg");
+            if self.options.dry_run {
+                if sharp {
+                    self.tier_written(tier);
+                    available = available.max(edge as u16);
+                } else {
+                    self.stats.thumbs.written += 1;
+                }
+                continue;
+            }
+            let scaled = if long_edge > edge {
+                cropped.resize(edge, edge, FilterType::Lanczos3)
+            } else {
+                cropped.clone()
+            };
+            let rgb = scaled.to_rgb8();
+            let mut bytes = Vec::new();
+            let encoded =
+                JpegEncoder::new_with_quality(&mut bytes, TIER_JPEG_QUALITY).encode_image(&rgb);
+            let written = match encoded {
+                Ok(()) => {
+                    let target = self.options.out_dir.join(&rel);
+                    if let Some(parent) = target.parent() {
+                        fsutil::ensure_dir(parent)?;
+                    }
+                    fsutil::write_atomic(&target, &bytes).is_ok()
+                }
+                Err(error) => {
+                    eprintln!("[kanalib-publish] 警告：白底带裁剪编码 {rel} 失败（{error}）");
+                    false
+                }
+            };
+            if written {
+                self.record_file(id, &rel);
+                if sharp {
+                    self.tier_written(tier);
+                    available = available.max(edge as u16);
+                } else {
+                    self.stats.thumbs.written += 1;
+                }
+            } else if sharp {
+                self.stats.tiers.failed += 1;
+            } else {
+                self.stats.thumbs.failed += 1;
+            }
+        }
+        Ok(Some(available))
     }
 
     /// 生成/跳过 t1024/t2048：解码原图一次，转 sRGB、套 EXIF 方向，再按档缩放重编码。
@@ -832,5 +1046,64 @@ impl<'a> Publisher<'a> {
         }
         self.stats.pruned_shards = removed;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::white_bottom_band;
+    use image::RgbImage;
+
+    fn image_with_band(width: u32, height: u32, band: u32) -> RgbImage {
+        let mut img = RgbImage::new(width, height);
+        for y in 0..height {
+            for x in 0..width {
+                let pixel = if y >= height - band {
+                    [255, 255, 255]
+                } else {
+                    [10, 120, 200]
+                };
+                img.put_pixel(x, y, image::Rgb(pixel));
+            }
+        }
+        img
+    }
+
+    #[test]
+    fn detects_trailing_white_band() {
+        assert_eq!(white_bottom_band(&image_with_band(40, 200, 40), 0.04, 8), Some(40));
+    }
+
+    #[test]
+    fn ignores_clean_image() {
+        assert_eq!(white_bottom_band(&image_with_band(40, 200, 0), 0.04, 8), None);
+    }
+
+    #[test]
+    fn ignores_band_below_threshold() {
+        assert_eq!(white_bottom_band(&image_with_band(40, 200, 4), 0.04, 8), None);
+    }
+
+    #[test]
+    fn ignores_all_white_image() {
+        assert_eq!(white_bottom_band(&image_with_band(40, 200, 200), 0.04, 8), None);
+    }
+
+    #[test]
+    fn candidate_threshold_is_looser() {
+        assert_eq!(white_bottom_band(&image_with_band(40, 200, 7), 0.03, 3), Some(7));
+        assert_eq!(white_bottom_band(&image_with_band(40, 200, 7), 0.04, 8), None);
+    }
+
+    #[test]
+    fn band_must_reach_bottom_row() {
+        // 白在中间、底行有色：不算底带。
+        let mut img = image_with_band(40, 200, 0);
+        for y in 100..140 {
+            for x in 0..40 {
+                img.put_pixel(x, y, image::Rgb([255, 255, 255]));
+            }
+        }
+        assert_eq!(white_bottom_band(&img, 0.04, 8), None);
     }
 }

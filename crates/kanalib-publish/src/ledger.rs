@@ -25,6 +25,9 @@ pub struct LedgerEntry {
     /// 该资产上次写出的相对路径（t512/t256/o）。
     #[serde(default)]
     pub files: Vec<String>,
+    /// 源图纯白底带裁剪行数（反馈 §5.6）：增量跑据此保持 manifest 高度不回退。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trim_band: Option<u32>,
 }
 
 impl LedgerEntry {
@@ -154,6 +157,7 @@ mod tests {
                 mtime: 7,
                 bytes: 99,
                 files: vec!["t512/abc.jpg".to_string()],
+                trim_band: None,
             },
         );
         ledger.save(&dir.path).unwrap();
@@ -178,6 +182,7 @@ mod tests {
             mtime: 5,
             bytes: 6,
             files: Vec::new(),
+            trim_band: None,
         };
         assert!(entry.is_current(Some("aa"), 5, 6));
         assert!(!entry.is_current(Some("bb"), 5, 6));
