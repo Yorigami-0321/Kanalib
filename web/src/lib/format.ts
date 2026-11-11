@@ -28,7 +28,7 @@ export const RATING_LABELS: Record<string, string> = {
 };
 
 export function ratingLabel(rating: string): string {
-  return RATING_LABELS[rating] ?? rating;
+  return RATING_LABELS[rating] ?? (rating || '未分级');
 }
 
 /**
@@ -42,8 +42,10 @@ export const CATEGORY_LABELS: Record<string, string> = {
   copyright: '作品',
   artist: '画师',
   manual: '手动',
+  style: '风格',
   meta: '元信息',
   rating: '分级',
+  other: '其他',
 };
 
 export function categoryLabel(category: string): string {
@@ -53,6 +55,42 @@ export function categoryLabel(category: string): string {
 export function truncateMiddle(value: string, head = 8, tail = 6): string {
   if (value.length <= head + tail + 1) return value;
   return `${value.slice(0, head)}…${value.slice(-tail)}`;
+}
+
+/** 图片扩展名（只认常见图片后缀，避免把 `v1.2` 这类名字误裁）。 */
+const IMAGE_EXTENSION = /\.(?:avif|gif|heic|heif|jpe?g|png|tiff?|webp|bmp)$/i;
+
+/** 长且无分隔的 token 中间省略：哈希、编号、导出串在卡面上只留头尾。 */
+function compactToken(token: string): string {
+  if (token.length > 24 && /^[0-9a-f]+$/i.test(token)) return truncateMiddle(token);
+  if (token.length > 28) return truncateMiddle(token);
+  return token;
+}
+
+/**
+ * 卡面展示名：去图片扩展名、下划线转空格、压缩空白；长哈希/长串中间省略。
+ * 完整文件名仍保留在 title/aria-label 与检查器标题里。
+ */
+export function displayTitle(name: string): string {
+  if (!name) return '';
+  const base = name.replace(IMAGE_EXTENSION, '').replace(/_+/g, ' ').replace(/\s+/g, ' ').trim();
+  if (!base) return name;
+  return base.split(' ').map(compactToken).join(' ');
+}
+
+/** 标签展示名：把 danbooru 风格的下划线换成空格，点击仍用原始 tag。 */
+export function displayTag(name: string): string {
+  if (!name) return '';
+  return name.replace(/_+/g, ' ').replace(/\s+/g, ' ').trim() || name;
+}
+
+/** 分组展示名：`作品: honkai_impact_3rd` → `作品 · honkai impact 3rd`。 */
+export function displayGroup(group: string): string {
+  if (!group) return '未分组';
+  const spaced = group.replace(/_+/g, ' ').replace(/\s+/g, ' ').trim();
+  const match = /^([^:：]+)[:：]\s*(.+)$/.exec(spaced);
+  if (!match) return spaced || group;
+  return `${match[1].trim()} · ${match[2].trim()}`;
 }
 
 export function formatCount(value: number): string {

@@ -9,6 +9,7 @@ import {
   layoutWorld,
   visibleSlice,
   type CellSpec,
+  type PlacedTile,
   type TileRect,
 } from '../lib/world';
 import { WallCard } from './WallCard';
@@ -292,6 +293,9 @@ export function WallView({
     () => ({ items, seed: worldSeed, cellWidth, cellHeight, gap: GAP }),
     [items, worldSeed, cellWidth, cellHeight],
   );
+  // 同一次 cellSpec 生命周期内缓存格子排布：平移时卡片对象与 rect 引用保持稳定，
+  // 配合 WallCard memo，视野内卡片无需逐帧重渲染。
+  const cellCache = useMemo(() => new Map<string, PlacedTile[]>(), [cellSpec]);
   // DOM 坐标不随相机无限增长：origin 是一段世界偏移，rebase 时整体平移。
   const [origin, setOrigin] = useState({ x: 0, y: 0 });
   // 相机换算成"世界坐标里的可见矩形"（未乘缩放）。
@@ -337,6 +341,7 @@ export function WallView({
       cellSpec,
       viewRect,
       Math.round(Math.min(cellWidth, cellHeight) * 0.35),
+      cellCache,
     );
     if (!spotlightCell) return base;
     const others = base.filter(
@@ -356,6 +361,7 @@ export function WallView({
     infinite,
     ready,
     cellSpec,
+    cellCache,
     cellHeight,
     cellWidth,
     viewRect.x,
@@ -486,6 +492,7 @@ export function WallView({
     const target = event.target as HTMLElement | null;
     const tile = target?.closest<HTMLElement>('.tile');
     if (!tile || !tile.matches(':focus-visible')) return;
+    stopGlide();
     const cam = cameraRef.current;
     const box = tile.getBoundingClientRect();
     const seam = narrow ? 64 : 120;
@@ -565,45 +572,75 @@ export function WallView({
     inertia.current = 0;
   }, []);
 
-  // 鼠标滚轮是离散的（一格 100px），直接改相机像瞬移；用 170ms ease-out
-  // 把目标位移补成一段可控的滑动。触控板事件很密，效果上是"更跟手"，不是延迟。
+  // 滚轮/触控板积分：单一持久 rAF 循环 + 帧率无关指数平滑。
+  // 旧版每个 wheel 事件重启一段 170ms ease-out：rAF 时间戳可能早于事件时刻
+  // （t<0 → k<0）导致相机向后外推＝用户看到的"回滚"；重启还带来速度尖峰
+  // 与零速空窗（失速）。持久循环只朝累加目标单调收敛（k∈[0,1)），对角双轴
+  // 同积分；tau 由输入分类决定（见 classifyWheel）。
   const wheelGlide = useRef(0);
   const wheelTarget = useRef<Camera | null>(null);
+  const wheelLast = useRef(0);
+  /** 输入分类结果：0＝连续流 1:1 直跟，80＝离散滚轮 glide。 */
+  const wheelTau = useRef(80);
   const stopGlide = useCallback(() => {
     if (wheelGlide.current) cancelAnimationFrame(wheelGlide.current);
     wheelGlide.current = 0;
     wheelTarget.current = null;
   }, []);
-  const glideTo = useCallback(
-    (target: Camera) => {
-      const from = cameraRef.current;
-      const to = clampCamera(target);
-      wheelTarget.current = to;
-      if (Math.abs(to.x - from.x) < 0.5 && Math.abs(to.y - from.y) < 0.5 && Math.abs(to.zoom - from.zoom) < 0.0005) {
-        wheelTarget.current = null;
-        moveCameraRef.current(to);
+  const pumpWheel = useCallback(() => {
+    if (wheelGlide.current) return;
+    wheelLast.current = performance.now();
+    const step = (now: number) => {
+      const target = wheelTarget.current;
+      if (!target) {
+        wheelGlide.current = 0;
         return;
       }
-      if (wheelGlide.current) cancelAnimationFrame(wheelGlide.current);
-      const started = performance.now();
-      const step = (now: number) => {
-        const t = Math.min(1, (now - started) / 170);
-        const k = 1 - Math.pow(1 - t, 3);
-        moveCameraRef.current({
-          zoom: from.zoom + (to.zoom - from.zoom) * k,
-          x: from.x + (to.x - from.x) * k,
-          y: from.y + (to.y - from.y) * k,
-        });
-        if (t < 1) wheelGlide.current = requestAnimationFrame(step);
-        else {
-          wheelGlide.current = 0;
-          wheelTarget.current = null;
-        }
+      // dt 夹在 [0, 64]：负时间戳不外推，切标签回来的大间隔不瞬移。
+      const dt = Math.min(64, Math.max(0, now - wheelLast.current));
+      wheelLast.current = now;
+      // tau=0（连续流）k=1：相机逐事件 1:1 跟上手指，无收敛滞后。
+      const k = wheelTau.current === 0 ? 1 : 1 - Math.exp(-dt / wheelTau.current);
+      const cam = cameraRef.current;
+      const next = {
+        zoom: cam.zoom + (target.zoom - cam.zoom) * k,
+        x: cam.x + (target.x - cam.x) * k,
+        y: cam.y + (target.y - cam.y) * k,
       };
-      wheelGlide.current = requestAnimationFrame(step);
+      const settled =
+        Math.abs(target.x - next.x) < 0.25 &&
+        Math.abs(target.y - next.y) < 0.25 &&
+        Math.abs(target.zoom - next.zoom) < 0.0005;
+      moveCameraRef.current(settled ? target : next);
+      if (settled) {
+        wheelGlide.current = 0;
+        wheelTarget.current = null;
+      } else {
+        wheelGlide.current = requestAnimationFrame(step);
+      }
+    };
+    wheelGlide.current = requestAnimationFrame(step);
+  }, []);
+  const glideTo = useCallback(
+    (target: Camera) => {
+      wheelTarget.current = clampCamera(target);
+      pumpWheel();
     },
-    [clampCamera],
+    [clampCamera, pumpWheel],
   );
+  // 触控板连续流也走 tau=80 会留下"速度×80ms"的稳态滞后（实测跟随误差
+  // 13px、松手后还要 ~200ms 收敛），手感是迟滞不跟手；连续流改 tau=0
+  // 逐帧 1:1，离散滚轮保留 glide（一格 100px 直跟会像瞬移）。
+  const classifyWheel = useCallback((event: WheelEvent) => {
+    const mag = Math.max(Math.abs(event.deltaX), Math.abs(event.deltaY));
+    const fractional = !Number.isInteger(event.deltaX) || !Number.isInteger(event.deltaY);
+    // 行/页模式只有鼠标会给；像素模式下一格是 100/120 的整数倍。其余
+    // （小数增量、小步长）来自触控板或高分辨率滚轮，都按连续流直跟。
+    const notch =
+      !fractional &&
+      (event.deltaMode !== 0 || (mag >= 40 && (mag % 100 === 0 || mag % 120 === 0)));
+    wheelTau.current = notch ? 80 : 0;
+  }, []);
 
   // P1-1：切 #/tags、开详情都会卸载 WallView，惯性 rAF 必须在这里停掉，
   // 否则它会在已卸载的组件上继续 moveCamera → setState（真泄漏）。
@@ -1021,14 +1058,18 @@ export function WallView({
     const onWheelNative = (event: WheelEvent) => {
       event.preventDefault();
       stopInertia();
+      classifyWheel(event);
       // 连续 wheel 要叠加到"上一段滑动的目标"而不是当前帧位置，否则缓动会被不断重置、越滑越肉。
       const cam = wheelTarget.current ?? cameraRef.current;
       if (event.ctrlKey || event.metaKey) {
         const rect = host.getBoundingClientRect();
         const mx = event.clientX - rect.left;
         const my = event.clientY - rect.top;
-        const worldX = (cam.x + mx) / cam.zoom;
-        const worldY = (cam.y + my) / cam.zoom;
+        // 锚点用当前相机而非平滑目标：连续捏合时平滑滞后不会让光标下的
+        // 世界点漂移；缩放倍率仍累加在目标上。
+        const cur = cameraRef.current;
+        const worldX = (cur.x + mx) / cur.zoom;
+        const worldY = (cur.y + my) / cur.zoom;
         const nextZoom = Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, cam.zoom * (1 - event.deltaY * 0.0022)));
         setCameraTween(false);
         glideTo({ zoom: nextZoom, x: worldX * nextZoom - mx, y: worldY * nextZoom - my });
@@ -1048,7 +1089,7 @@ export function WallView({
     };
     host.addEventListener('wheel', onWheelNative, { passive: false });
     return () => host.removeEventListener('wheel', onWheelNative);
-  }, [flashZoom, glideTo]);
+  }, [classifyWheel, flashZoom, glideTo, stopInertia]);
 
   // 相机停下 320ms 后告诉上层"现在该用什么颜色"（滚动中不换色，避免抽搐）。
   useEffect(() => {
@@ -1174,28 +1215,38 @@ export function WallView({
       default:
         return;
     }
+    // 键盘直操与滚轮收敛循环互斥：不然残留目标会把按键位移拉回去。
+    stopGlide();
     event.preventDefault();
   };
 
   // 无限空间的卡片按 (rect - origin) 落到 DOM，坐标量级不随相机增长；
   // 有限世界 origin 恒为 0，等同于原来的世界坐标。
+  // 平移时卡片集合通常不变：用引用缓存跳过重复的 rect 复制/排序，
+  // 让 memo 的 WallCard 在纯平移时完全跳过重渲染（只有 .world transform 变化）。
+  const visibleCache = useRef<{ key: string; tiles: PlacedTile[] } | null>(null);
   const visible = useMemo(() => {
-    const tiles = infinite
-      ? cellTiles.map((tile) => ({
-          ...tile,
-          rect: {
-            x: tile.rect.x - origin.x,
-            y: tile.rect.y - origin.y,
-            w: tile.rect.w,
-            h: tile.rect.h,
-          },
-        }))
-      : layout.tiles.slice(slice.start, slice.end);
+    if (!infinite) {
+      return layout.tiles.slice(slice.start, slice.end);
+    }
+    const key = origin.x + ',' + origin.y + '|' + cellTiles.map(tileRenderKey).join('|');
+    if (visibleCache.current?.key === key) return visibleCache.current.tiles;
+    const tiles = cellTiles.map((tile) => ({
+      ...tile,
+      rect: {
+        x: tile.rect.x - origin.x,
+        y: tile.rect.y - origin.y,
+        w: tile.rect.w,
+        h: tile.rect.h,
+      },
+    }));
     // 固定 DOM 顺序（不含坐标/布局顺序）：重排只改 rect，不移动节点，
     // 这样 left/top/width/height 的过渡才不会被 DOM 移动打断。
-    return [...tiles].sort((left, right) =>
+    const sorted = [...tiles].sort((left, right) =>
       tileRenderKey(left).localeCompare(tileRenderKey(right)),
     );
+    visibleCache.current = { key, tiles: sorted };
+    return sorted;
   }, [cellTiles, infinite, layout.tiles, origin.x, origin.y, slice.start, slice.end]);
 
   // 重排后的英雄卡不强制居中；只在它被导航缝遮住时补最小平移。
@@ -1236,6 +1287,7 @@ export function WallView({
     if (sy < safeTop) y -= safeTop - sy;
     else if (sy + sh > safeBottom) y += sy + sh - safeBottom;
     if (Math.abs(x - cam.x) < 0.5 && Math.abs(y - cam.y) < 0.5) return;
+    stopGlide();
     setCameraTween(true);
     moveCamera({ ...cam, x, y });
     const timer = window.setTimeout(() => setCameraTween(false), 430);
@@ -1249,6 +1301,7 @@ export function WallView({
     verticalSlack,
     worldInset,
     moveCamera,
+    stopGlide,
   ]);
 
   // 检查器关闭（spotlightId 变 null）时，选中内描边也跟着收掉。
@@ -1286,6 +1339,21 @@ export function WallView({
   const showEmpty = isEmpty && phase !== 'boot' && phase !== 'loading';
   // 无限空间要等全量到齐再生成格子：分片陆续到达会让每个格子的选图整体换一遍。
   const awaitingWorld = infinite && !ready && phase !== 'error';
+  // 传给 memo 卡片的回调必须引用稳定，否则纯平移时卡片仍会整批重渲染。
+  const handleCardOpen = useCallback(
+    (openedItem: WallItem, openedIndex: number, originRect?: Rect) => {
+      setActiveId(openedItem.id);
+      onOpen(openedItem, openedIndex, originRect);
+    },
+    [onOpen],
+  );
+  const handleCardSummary = useCallback(
+    (item: WallItem) => {
+      setActiveId(item.id);
+      onSummary(item);
+    },
+    [onSummary],
+  );
   // 「回到起点」不再是画布上的浮出按钮：功能键统一收进左侧缝（2026-11-09 用户指令），
   // 画布上只留提示与进度，不再放任何操作钮。
 
@@ -1349,14 +1417,8 @@ export function WallView({
               enter={enter.on}
               enterDelay={enterDelayOf(tile.rect)}
               tagCounts={tagCounts}
-              onOpen={(openedItem, openedIndex, origin) => {
-                setActiveId(openedItem.id);
-                onOpen(openedItem, openedIndex, origin);
-              }}
-              onSummary={(item) => {
-                setActiveId(item.id);
-                onSummary(item);
-              }}
+              onOpen={handleCardOpen}
+              onSummary={handleCardSummary}
               summary={tile.item.id === summaryId}
               onCloseSummary={onCloseSummary}
             />

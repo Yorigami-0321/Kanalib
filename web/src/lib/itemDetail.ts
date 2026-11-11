@@ -4,7 +4,7 @@ import { hammingHex } from './hash';
 
 export const SIMILAR_DISTANCE = 12;
 export const SIMILAR_LIMIT = 6;
-export const TAG_CATEGORY_ORDER = ['general', 'character', 'copyright', 'artist', 'manual', 'meta', 'rating'];
+export const TAG_CATEGORY_ORDER = ['general', 'character', 'copyright', 'artist', 'manual', 'style', 'meta', 'rating'];
 
 export interface TagGroup {
   category: string;

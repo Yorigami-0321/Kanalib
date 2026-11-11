@@ -193,23 +193,27 @@
   gap: 6px;
 }
 
-/* 标签名就是主角：§2.2 第四档字号，.92 行高、负字距、两行起收、三行封顶 */
+/* 标签名就是主角：§2.2 第四档字号，.94 行高、负字距、两行封顶。
+   数据侧已把 `_` 换成空格；这里用 break-word + hyphens 兜底，
+   不再用 anywhere 把 looking_at_viewer 拆成 viewwe / r（P0-3）。 */
 .app .tagcard__name {
   display: -webkit-box;
   overflow: hidden;
   /* 压在照片上的标题用 --ink（近白），不写死 #fff */
   color: var(--ink);
-  font-size: clamp(20px, 2vw, 34px);
+  font-size: clamp(18px, 1.9vw, 32px);
   font-weight: 600;
   letter-spacing: -0.035em;
-  line-height: 0.92;
+  line-height: 0.94;
   text-overflow: clip;
   text-shadow: 0 1px 10px rgba(0, 0, 0, 0.45);
   text-wrap: balance;
-  overflow-wrap: anywhere;
+  overflow-wrap: break-word;
+  word-break: normal;
+  hyphens: auto;
   white-space: normal;
   -webkit-box-orient: vertical;
-  -webkit-line-clamp: 3;
+  -webkit-line-clamp: 2;
 }
 
 .app .tagcard__meta {

@@ -2,15 +2,17 @@
    stage 在检查器展开时让出 seam + 300px；≤900px 检查器是底部 sheet，图仍全宽。 */
 
 /* 环境层：同一张图的 512 档，重度模糊后压暗，填住 contain 留下的黑边。
-   静态层，不做漂移动画：模糊滤镜每帧重算在集显上代价太高。 */
+   静态层，不做漂移动画：模糊滤镜每帧重算在集显上代价太高。
+   亮度/透明度提高一档：旧值 brightness(.44)×opacity(.66) 再叠 scrim，
+   侧边只剩 ~11% 亮度，看起来像纯黑（P1-2）。 */
 .view__ambient {
   position: absolute;
   inset: -6%;
   z-index: 0;
   background-position: center;
   background-size: cover;
-  filter: blur(52px) saturate(1.12) brightness(0.44);
-  opacity: 0.66;
+  filter: blur(48px) saturate(1.25) brightness(0.7);
+  opacity: 0.82;
   transform: scale(1.06);
   pointer-events: none;
 }
@@ -20,8 +22,8 @@
   position: absolute;
   inset: 0;
   background:
-    radial-gradient(ellipse at center, transparent 34%, rgba(5, 5, 5, 0.55) 100%),
-    linear-gradient(180deg, rgba(5, 5, 5, 0.35), rgba(5, 5, 5, 0.15));
+    radial-gradient(ellipse at center, transparent 42%, rgba(5, 5, 5, 0.38) 100%),
+    linear-gradient(180deg, rgba(5, 5, 5, 0.26), rgba(5, 5, 5, 0.1));
 }
 
 .view--detail .view__stage {
@@ -45,12 +47,13 @@
   will-change: transform;
 }
 
+/* 滑动时长与图片位置/尺寸过渡统一到 420ms（P2-1），commitSlide 仍由 animationend 驱动。 */
 .view--detail .view__track--next {
-  animation: pane-next 520ms var(--ease-out) both;
+  animation: pane-next 420ms var(--ease-out) both;
 }
 
 .view--detail .view__track--prev {
-  animation: pane-prev 520ms var(--ease-out) both;
+  animation: pane-prev 420ms var(--ease-out) both;
 }
 
 @keyframes pane-next {
@@ -104,7 +107,7 @@
   height: 100%;
   object-fit: contain;
   opacity: 0;
-  /* 只做很短的淡入：520ms 滑动里新图必须马上可见，420ms 会让半屏先空一截。 */
+  /* 只做很短的淡入：420ms 滑动里新图必须马上可见，更长会让半屏先空一截。 */
   transition:
     opacity 160ms var(--ease),
     top 420ms var(--ease-out),

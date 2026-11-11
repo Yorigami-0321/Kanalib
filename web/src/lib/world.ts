@@ -419,11 +419,14 @@ export function layoutCell(spec: CellSpec, b: number, c: number): PlacedTile[] {
   return tiles;
 }
 
-/** 视野 + 缓冲里所有格子的卡（按世界坐标过滤），格子本身在 DOM 里不落地。 */
+/** 视野 + 缓冲里所有格子的卡（按世界坐标过滤），格子本身在 DOM 里不落地。
+ *  传入 cache（同一 spec 生命周期内复用）可让平移时卡片对象保持引用稳定，
+ *  只重算当前视野覆盖的格子，避免每帧重新随机排布。 */
 export function cellTilesInView(
   spec: CellSpec,
   view: { x: number; y: number; w: number; h: number },
   padding = 420,
+  cache?: Map<string, PlacedTile[]>,
 ): PlacedTile[] {
   const left = view.x - padding;
   const right = view.x + view.w + padding;
@@ -434,9 +437,20 @@ export function cellTilesInView(
   const b0 = Math.floor(top / spec.cellHeight);
   const b1 = Math.floor(bottom / spec.cellHeight);
   const tiles: PlacedTile[] = [];
+  if (cache) {
+    for (const key of cache.keys()) {
+      const [keyB, keyC] = key.split(',').map(Number);
+      if (keyB < b0 || keyB > b1 || keyC < c0 || keyC > c1) cache.delete(key);
+    }
+  }
   for (let b = b0; b <= b1; b += 1) {
     for (let c = c0; c <= c1; c += 1) {
-      for (const tile of layoutCell(spec, b, c)) {
+      let cell = cache?.get(b + ',' + c);
+      if (!cell) {
+        cell = layoutCell(spec, b, c);
+        cache?.set(b + ',' + c, cell);
+      }
+      for (const tile of cell) {
         if (tile.rect.x + tile.rect.w < left || tile.rect.x > right) continue;
         if (tile.rect.y + tile.rect.h < top || tile.rect.y > bottom) continue;
         tiles.push(tile);
@@ -474,9 +488,14 @@ function gridColumns(
   const count = entries.length;
   if (count <= 1 || box.w <= 0 || box.h <= 0) return 1;
   const average = entries.reduce((sum, entry) => sum + entryRatio(entry), 0) / count;
-  let best = 1;
+  // 行高/列宽硬下限 70：矮横带里图多时旧评分会选两行，产出 <70px 的
+  // 细条卡（回归闸门抓到的 flake）。先算行数上限再反推列数下限。
+  const maxRows = Math.max(1, Math.floor((box.h + gap) / (70 + gap)));
+  const minCols = Math.ceil(count / maxRows);
+  const maxCols = Math.max(minCols, Math.min(count, Math.floor((box.w + gap) / (70 + gap))));
+  let best = minCols;
   let bestScore = Infinity;
-  for (let cols = 1; cols <= count; cols += 1) {
+  for (let cols = minCols; cols <= maxCols; cols += 1) {
     const rows = Math.ceil(count / cols);
     const cellW = (box.w - gap * (cols - 1)) / cols;
     const cellH = (box.h - gap * (rows - 1)) / rows;

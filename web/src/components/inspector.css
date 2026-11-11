@@ -182,6 +182,7 @@
 }
 
 .inspector__chip {
+  max-width: 100%;
   padding: 4px 9px;
   border: 0;
   border-radius: 2px;
@@ -190,7 +191,8 @@
   box-shadow: inset 0 0 0 1px rgba(247, 244, 238, 0.08);
   font-size: 12px;
   line-height: 1.25;
-  overflow-wrap: anywhere;
+  overflow-wrap: break-word;
+  word-break: normal;
   cursor: pointer;
   transition:
     color 160ms var(--ease),
@@ -273,6 +275,22 @@
   margin-top: 20px;
   padding-top: 14px;
   border-top: 1px solid var(--hairline);
+}
+
+/* 新结构：aside.inspector > (handle + scroll + actions)。
+   actions 移出滚动区后作为常驻 footer：只占自身高度，标签再多也不把
+   主操作推到首屏之外；scroll 仍是 flex:1 / min-height:0 / overflow-y:auto（P0-4）。 */
+.inspector > .inspector__actions {
+  flex: none;
+  margin: 0;
+  padding: 12px 18px calc(14px + env(safe-area-inset-bottom, 0px));
+  border-top: 1px solid var(--hairline);
+  background: var(--surface);
+  box-shadow: 0 -14px 28px rgba(0, 0, 0, 0.28);
+}
+
+.inspector > .inspector__actions .inspector__primary {
+  min-height: 38px;
 }
 
 .inspector__primary {
@@ -367,7 +385,13 @@
   }
 
   .inspector__scroll {
-    padding: 10px 16px 22px;
+    padding: 10px 16px 18px;
+  }
+
+  /* 底部 sheet：footer 用安全区内边距，390 首屏就能点到返回/复制/全屏/原图。 */
+  .inspector > .inspector__actions {
+    gap: 6px;
+    padding: 10px 16px calc(12px + env(safe-area-inset-bottom, 0px));
   }
 
   .inspector__head {

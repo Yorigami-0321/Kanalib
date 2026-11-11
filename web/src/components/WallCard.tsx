@@ -1,7 +1,14 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { gridImageAttrs, gridSources, spotlightSources } from '../lib/assetUrl';
 import type { Rect } from '../lib/expand';
-import { formatCount, formatDateTime, formatSize, ratingLabel } from '../lib/format';
+import {
+  displayTag,
+  displayTitle,
+  formatCount,
+  formatDateTime,
+  formatSize,
+  ratingLabel,
+} from '../lib/format';
 import { titleSizeForWidth } from '../lib/world';
 import type { TagTriple, TierPaths, WallItem } from '../source/types';
 import type { TileRect } from '../lib/world';
@@ -37,15 +44,27 @@ export interface WallCardProps {
   onSummary: (item: WallItem) => void;
 }
 
-/** 角标文案：主标签 · 张数；没有标签就退回 宽×高（B1：以前这里是占位的像素宽度）。 */
+/** 角标主标签的分类优先级：内容类优先，尺寸兜底；rating/meta/style 内部键不上卡面。 */
+const CHIP_CATEGORY_ORDER = ['general', 'character', 'copyright', 'artist', 'manual'];
+/** 概要标签只展示内容类，避免 rating:/style 之类内部键直接上屏。 */
+const SUMMARY_EXCLUDED_CATEGORIES = new Set(['rating', 'style', 'meta']);
+
+/** 角标文案：优先级最高的内容标签 · 张数；没有内容标签就退回 宽×高。 */
 function chipTextOf(item: WallItem, tagCounts?: ReadonlyMap<string, number>): string {
   let primary: TagTriple | null = null;
+  let primaryRank = CHIP_CATEGORY_ORDER.length;
   for (const tag of item.tags) {
-    if (!primary || tag[2] > primary[2]) primary = tag;
+    const rank = CHIP_CATEGORY_ORDER.indexOf(tag[1]);
+    if (rank < 0) continue;
+    if (!primary || rank < primaryRank || (rank === primaryRank && tag[2] > primary[2])) {
+      primary = tag;
+      primaryRank = rank;
+    }
   }
   if (primary) {
     const count = tagCounts?.get(primary[0]);
-    return count ? primary[0] + ' · ' + formatCount(count) : primary[0];
+    const label = displayTag(primary[0]);
+    return count ? label + ' · ' + formatCount(count) : label;
   }
   if (item.w > 0 && item.h > 0) return Math.round(item.w) + '×' + Math.round(item.h);
   return '—';
@@ -55,8 +74,9 @@ function chipTextOf(item: WallItem, tagCounts?: ReadonlyMap<string, number>): st
  * 画布上的一张卡片：绝对定位，标题常驻在左下角（不是 hover 才出现）。
  * 单击选中（内描边高亮）、双击展开全屏由画布统一判定；这里处理右键概要叠层与键盘激活。
  * 标题字号按卡宽分级（world.titleSizeForWidth），最多三行收尾（photo-wall-v3.md:72）。
+ * memo：相机平移只改 .world transform，卡片 props 不变时必须跳过重渲染。
  */
-export function WallCard({
+export const WallCard = memo(function WallCard({
   item,
   index,
   paths,
@@ -161,6 +181,13 @@ export function WallCard({
   const infoMounted = summary || infoLingering;
 
   const chip = useMemo(() => chipTextOf(item, tagCounts), [item, tagCounts]);
+  const summaryTags = useMemo(
+    () =>
+      item.tags
+        .filter((tag) => !SUMMARY_EXCLUDED_CATEGORIES.has(tag[1]))
+        .map((tag) => displayTag(tag[0])),
+    [item],
+  );
   // 没有回退到 t512 时才让浏览器按显示宽度选档；一旦降级就固定用 src，避免再次 404。
   const gridAttrs = useMemo(
     () => (!spotlight && tierIndex === 0 ? gridImageAttrs(paths, item, rect.w * displayScale) : null),
@@ -226,9 +253,9 @@ export function WallCard({
       </span>
 
       <span className="tile__copy">
-        <strong style={{ fontSize: titleSize }}>{item.n}</strong>
+        <strong style={{ fontSize: titleSize }}>{displayTitle(item.n)}</strong>
         <small>
-          {item.rt}
+          {ratingLabel(item.rt)}
           {item.st > 0 ? ' · ' + '★'.repeat(Math.min(5, Math.round(item.st))) : ''}
         </small>
       </span>
@@ -268,16 +295,16 @@ export function WallCard({
             </button>
           </div>
           <div className="tile__info-body">
-            <strong className="tile__info-name">{item.n}</strong>
+            <strong className="tile__info-name">{displayTitle(item.n)}</strong>
             <span className="tile__info-meta">
               {formatSize(item.w, item.h)}
               {item.mtime ? ' · ' + formatDateTime(item.mtime).slice(0, 10) : ''}
-              {item.rt ? ' · ' + ratingLabel(item.rt) : ''}
+              {' · ' + ratingLabel(item.rt)}
             </span>
-            {item.tags.length > 0 ? (
+            {summaryTags.length > 0 ? (
               <span className="tile__info-tags">
-                {item.tags.slice(0, 4).map((tag) => tag[0]).join(' · ')}
-                {item.tags.length > 4 ? ' …' : ''}
+                {summaryTags.slice(0, 4).join(' · ')}
+                {summaryTags.length > 4 ? ' …' : ''}
               </span>
             ) : null}
           </div>
@@ -285,4 +312,4 @@ export function WallCard({
       ) : null}
     </div>
   );
-}
+});

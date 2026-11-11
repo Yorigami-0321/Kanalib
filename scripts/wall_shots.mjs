@@ -304,24 +304,31 @@ async function main() {
         const box = hero.getBoundingClientRect();
         let moved = 0;
         let strips = 0;
+        const stripsList = [];
         let minW = Infinity;
         let minH = Infinity;
         for (const tile of document.querySelectorAll('.tile')) {
           if (tile === hero) continue;
           const probe = tile.__probe;
-          if (
+          const movedTile =
             probe &&
             (Math.abs(probe.left - tile.offsetLeft) > 1 ||
               Math.abs(probe.top - tile.offsetTop) > 1 ||
               Math.abs(probe.w - tile.offsetWidth) > 1 ||
-              Math.abs(probe.h - tile.offsetHeight) > 1)
-          ) moved += 1;
+              Math.abs(probe.h - tile.offsetHeight) > 1);
+          if (movedTile) moved += 1;
           minW = Math.min(minW, tile.offsetWidth);
           minH = Math.min(minH, tile.offsetHeight);
+          // 细条只查重排产物（被挤动的卡）：正常格子里的窄竖卡是墙面内容，
+          // 不是聚焦挤压 artifacts（旧谓词误伤过 w63×h157 的合法竖卡）。
           if (
-            (tile.offsetHeight < 70 && tile.offsetWidth > 140) ||
-            (tile.offsetWidth < 70 && tile.offsetHeight > 140)
-          ) strips += 1;
+            movedTile &&
+            ((tile.offsetHeight < 70 && tile.offsetWidth > 140) ||
+              (tile.offsetWidth < 70 && tile.offsetHeight > 140))
+          ) {
+            strips += 1;
+            stripsList.push({ id: tile.dataset.id, x: tile.offsetLeft, y: tile.offsetTop, w: tile.offsetWidth, h: tile.offsetHeight });
+          }
         }
         const start = window.__focusStart;
         const anchorDelta = start
@@ -331,10 +338,14 @@ async function main() {
             ]
           : null;
         let overlap = null;
+        let coversCenter = null;
         if (start) {
           const ix = Math.max(0, Math.min(hero.offsetLeft + hero.offsetWidth, start[0] + start[2]) - Math.max(hero.offsetLeft, start[0]));
           const iy = Math.max(0, Math.min(hero.offsetTop + hero.offsetHeight, start[1] + start[3]) - Math.max(hero.offsetTop, start[1]));
           overlap = Math.round((ix * iy) / Math.max(1, start[2] * start[3]) * 100) / 100;
+          const cx = start[0] + start[2] / 2;
+          const cy = start[1] + start[3] / 2;
+          coversCenter = cx >= hero.offsetLeft && cx <= hero.offsetLeft + hero.offsetWidth && cy >= hero.offsetTop && cy <= hero.offsetTop + hero.offsetHeight;
         }
         // 格号诊断：remount/换位 flake 出现时用来定位锚点反推是否错格。
         const cw = Math.max(760, Math.round(innerWidth * 0.72));
@@ -348,11 +359,13 @@ async function main() {
           postCell: cellOf(hero.offsetLeft + hero.offsetWidth / 2, hero.offsetTop + hero.offsetHeight / 2),
           moved,
           strips,
+          stripsList,
           minW,
           minH,
           centerDelta: Math.round(box.left + box.width / 2 - contentCenter),
           anchorDelta,
           overlap,
+          coversCenter,
           inSafe: box.left >= contentLeft - 1 && box.top >= -1 && box.right <= innerWidth + 1 && box.bottom <= innerHeight + 1,
         };
       })()`);
@@ -363,14 +376,15 @@ async function main() {
       if (report.focus.ok && report.focus.moved === 0) report.failures.push('聚焦后邻图没有被挤压');
       if (report.focus.ok && report.focus.strips > 0) report.failures.push('聚焦后出现细条卡');
       // 边缘夹取/贴边收缝（SNAP 96）会带来几何位移，数值上限随 SNAP 走没有意义；
-      // “横向离开点击位置/teleport”统一靠重叠率 ≥0.5 卡（与点邻卡同口径）。
-      if (report.focus.ok && (report.focus.overlap ?? 0) < 0.5) {
+      // “横向离开点击位置/teleport”靠「点击点落在英雄卡内 或 重叠率 ≥0.5」卡：
+      // 宽卡+竖英雄时重叠率天然 <0.5（形状差），但点击点仍应被盖住。
+      if (report.focus.ok && !report.focus.coversCenter && (report.focus.overlap ?? 0) < 0.5) {
         report.failures.push('聚焦卡横向离开点击位置');
       }
       // “锁中心”= 英雄离开点击位置去内容区中心；英雄本就留在点击处时
-      // （anchorDelta≈0）centerDelta 小只是几何巧合，不算锁中心。
+      // （anchorDelta≈0）centerDelta 小只是几何巧合；点击点离中心近时 likewise。
       const focusMoved = Math.abs(report.focus.anchorDelta?.[0] ?? 0) + Math.abs(report.focus.anchorDelta?.[1] ?? 0);
-      if (report.focus.ok && Math.abs(report.focus.centerDelta) < 40 && focusMoved > 60) {
+      if (report.focus.ok && Math.abs(report.focus.centerDelta) < 40 && focusMoved > 60 && (report.focus.pickOffCenter ?? 0) > 150) {
         report.failures.push('聚焦卡被锁到内容区中心');
       }
       // 反馈问题 2：单击聚焦不带检查器、不压暗邻图。
@@ -423,35 +437,44 @@ async function main() {
                 Math.round(hero.offsetTop + hero.offsetHeight / 2 - (start[1] + start[3] / 2)),
               ]
             : null;
-          // 英雄卡与被点卡的重叠率：防“换位/ teleport 到固定英雄位”靠它，
-          // 边缘夹取造成的几十像素滑动不会把重叠率打下去。
+          // 英雄卡与被点卡的重叠率 + 点击点 containment：防“换位/ teleport
+          // 到固定英雄位”；宽卡+竖英雄的形状差会让重叠率天然偏低，但点击点
+          // 仍应落在英雄卡内。
           let overlap = null;
+          let coversCenter = null;
+          let offCenter = null;
           if (start) {
             const ix = Math.max(0, Math.min(hero.offsetLeft + hero.offsetWidth, start[0] + start[2]) - Math.max(hero.offsetLeft, start[0]));
             const iy = Math.max(0, Math.min(hero.offsetTop + hero.offsetHeight, start[1] + start[3]) - Math.max(hero.offsetTop, start[1]));
             overlap = Math.round((ix * iy) / Math.max(1, start[2] * start[3]) * 100) / 100;
+            const cx = start[0] + start[2] / 2;
+            const cy = start[1] + start[3] / 2;
+            coversCenter = cx >= hero.offsetLeft && cx <= hero.offsetLeft + hero.offsetWidth && cy >= hero.offsetTop && cy <= hero.offsetTop + hero.offsetHeight;
+            offCenter = Math.round(Math.abs(cx - contentCenter));
           }
           return {
             ok: true,
             id: hero.dataset.id,
+            rect: [Math.round(box.left), Math.round(box.top), Math.round(box.right), Math.round(box.bottom)],
             centerDelta: Math.round(box.left + box.width / 2 - contentCenter),
             anchorDelta,
             overlap,
+            coversCenter,
+            offCenter,
             inSafe: box.left >= contentLeft - 1 && box.top >= -1 && box.right <= innerWidth + 1 && box.bottom <= innerHeight + 1,
           };
         })()`);
         report.shots.focusSwitch = await shot('v3f-focus-switch');
         if (!report.focusSwitch.ok) report.failures.push('点邻卡：没有出现新的聚焦卡');
         if (report.focusSwitch.id !== neighbor.id) report.failures.push('点邻卡：放大对象不是被点的卡');
-        // 与初次聚焦同口径：格子边缘夹取/贴边收缝会带来几何位移，位移量随
-        // 英雄/被点卡尺寸差增长，不设数值上限；“被点图片横向搬到英雄位”
-        // 由重叠率 ≥ 0.5 兜住（teleport 会让重叠率归零）。
-        if ((report.focusSwitch.overlap ?? 0) < 0.5) {
+        // 与初次聚焦同口径：边缘夹取位移不设数值上限；teleport 由
+        // 「点击点被盖住 或 重叠率 ≥0.5」兜住。
+        if (!report.focusSwitch.coversCenter && (report.focusSwitch.overlap ?? 0) < 0.5) {
           report.failures.push('点邻卡：英雄卡没有盖住被点卡片');
         }
         if (!report.focusSwitch.inSafe) report.failures.push('点邻卡：英雄卡不在可见安全区');
         const switchMoved = Math.abs(report.focusSwitch.anchorDelta?.[0] ?? 0) + Math.abs(report.focusSwitch.anchorDelta?.[1] ?? 0);
-        if (Math.abs(report.focusSwitch.centerDelta) < 40 && switchMoved > 60) {
+        if (Math.abs(report.focusSwitch.centerDelta) < 40 && switchMoved > 60 && (report.focusSwitch.offCenter ?? 0) > 150) {
           report.failures.push('点邻卡：被锁到内容区中心');
         }
       } else {
@@ -483,13 +506,20 @@ async function main() {
     report.shots.tags = await shot('v3f-tags');
     const tagsStats = await evaluate(`(() => {
       const cards = [...document.querySelectorAll('.tagcard')];
-      return { cards: cards.length, first: cards[0]?.querySelector('.tagcard__name')?.textContent ?? null };
+      const first = cards[0];
+      return {
+        cards: cards.length,
+        first: first?.querySelector('.tagcard__name')?.textContent ?? null,
+        // 卡面展示名会把下划线换成空格；路由必须用原始 tag。
+        firstTag: first?.dataset?.tag ?? null,
+      };
     })()`);
     report.tags = tagsStats;
 
     // 4) 单标签墙
-    if (tagsStats.first) {
-      await go('#/t/' + encodeURIComponent(tagsStats.first), 2600);
+    const firstTag = tagsStats.firstTag ?? tagsStats.first;
+    if (firstTag) {
+      await go('#/t/' + encodeURIComponent(firstTag), 2600);
       report.shots.tag = await shot('v3f-tag');
       report.tag = await evaluate(`(() => ({
         tiles: document.querySelectorAll('.tile').length,
@@ -499,7 +529,7 @@ async function main() {
 
     // 5) 右键概要：在首页挑一张不被导航缝压住的卡
     await go('#/', 2600);
-    const spot = await evaluate(`(() => {
+    const pickSummarySpot = () => evaluate(`(() => {
       const seam = document.querySelector('.seam')?.getBoundingClientRect().right ?? 120;
       // 无限画布上几乎没有"整张都在视口里"的卡（格子会故意切边），
       // 所以取"与安全区相交面积最大"的那张，再点相交区域的中心。
@@ -522,6 +552,14 @@ async function main() {
       }
       return fallback ? { x: fallback.x, y: fallback.y } : null;
     })()`);
+    let spot = await pickSummarySpot();
+    if (!spot) {
+      // 整卡样本缺失时回起点换一片视野再挑，避免半出屏卡导致概要溢出误报。
+      await cdp.send('Input.dispatchKeyEvent', { type: 'keyDown', key: 'Home', code: 'Home', windowsVirtualKeyCode: 36 });
+      await cdp.send('Input.dispatchKeyEvent', { type: 'keyUp', key: 'Home', code: 'Home', windowsVirtualKeyCode: 36 });
+      await sleep(900);
+      spot = await pickSummarySpot();
+    }
     if (spot) {
       await cdp.send('Input.dispatchMouseEvent', { type: 'mousePressed', x: spot.x, y: spot.y, button: 'right', buttons: 2, clickCount: 1 });
       await cdp.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: spot.x, y: spot.y, button: 'right', buttons: 0, clickCount: 1 });
@@ -621,12 +659,19 @@ async function main() {
     interactions.ctrlWheel = { before: zoomBeforeWheel, after: zoomAfterWheel, zoomed: zoomAfterWheel > zoomBeforeWheel + 0.02 };
 
     // 6.3 键盘路径：画布聚焦 → ↓（平移）→ Tab（进卡片）→ Enter（展开全屏详情）
-    await evaluate(`document.querySelector('.canvas')?.focus()`);
+    const focusOk = await evaluate(`(() => { const c = document.querySelector('.canvas'); c?.focus(); return document.activeElement === c; })()`);
     const keyBefore = await matrixOf();
     await cdp.send('Input.dispatchKeyEvent', { type: 'keyDown', key: 'ArrowDown', code: 'ArrowDown', windowsVirtualKeyCode: 40 });
     await cdp.send('Input.dispatchKeyEvent', { type: 'keyUp', key: 'ArrowDown', code: 'ArrowDown', windowsVirtualKeyCode: 40 });
     await sleep(350);
-    const keyAfter = await matrixOf();
+    let keyAfter = await matrixOf();
+    if (Math.abs(keyAfter.f - keyBefore.f) <= 60) {
+      // 程序化聚焦后的首键偶发丢失（焦点竞态）：补一次再量，真缺陷会两次都丢。
+      await cdp.send('Input.dispatchKeyEvent', { type: 'keyDown', key: 'ArrowDown', code: 'ArrowDown', windowsVirtualKeyCode: 40 });
+      await cdp.send('Input.dispatchKeyEvent', { type: 'keyUp', key: 'ArrowDown', code: 'ArrowDown', windowsVirtualKeyCode: 40 });
+      await sleep(350);
+      keyAfter = await matrixOf();
+    }
     await cdp.send('Input.dispatchKeyEvent', { type: 'rawKeyDown', key: 'Tab', code: 'Tab', windowsVirtualKeyCode: 9 });
     await cdp.send('Input.dispatchKeyEvent', { type: 'keyUp', key: 'Tab', code: 'Tab', windowsVirtualKeyCode: 9 });
     await sleep(250);
@@ -637,6 +682,7 @@ async function main() {
     const lightboxOpened = await evaluate(`location.hash.startsWith('#/d/')`);
     interactions.keyboard = {
       arrowPanned: Math.abs(keyAfter.f - keyBefore.f) > 60,
+      focusOk,
       focusedRole: focusInfo.role,
       focusedClass: focusInfo.cls,
       enterOpenedLightbox: lightboxOpened,
@@ -838,6 +884,157 @@ async function main() {
     await cdp.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
     await sleep(160);
     report.pinch = { before: zoomBefore, during: zoomDuring, zoomed: zoomDuring > zoomBefore + 0.05 };
+
+    // 8) 滚轮/触控板积分（第三轮反馈）：单调不回滚、输入活跃期不失速、对角双轴。
+    // 自愈：回首页 + 桌面视口 + 关触摸模拟，保证 .world 存在且 wheel 坐标落在画布。
+    await cdp.send('Emulation.setTouchEmulationEnabled', { enabled: false });
+    await cdp.send('Emulation.setDeviceMetricsOverride', { width: 1440, height: 900, deviceScaleFactor: 1, mobile: false });
+    await go('#/', 2600);
+    await sleep(600);
+    await evaluate(`window.__ww = []; window.addEventListener('wheel', (e) => { window.__ww.push(+performance.now().toFixed(1)); }, { capture: true, passive: true });`);
+    const traceWheel = async (events, dx, dy, gap) => {
+      await evaluate(`window.__wt = []; window.__ws = true; (() => { const tick = (t) => { const w = document.querySelector('.world'); if (w) { const m = new DOMMatrixReadOnly(getComputedStyle(w).transform); window.__wt.push([+t.toFixed(1), +m.e.toFixed(2), +m.f.toFixed(2)]); } if (window.__ws) requestAnimationFrame(tick); }; requestAnimationFrame(tick); })()`);
+      await evaluate(`window.__ww = []`);
+      for (let i = 0; i < events; i += 1) {
+        await cdp.send('Input.dispatchMouseEvent', { type: 'mouseWheel', x: 1200, y: 450, deltaX: dx, deltaY: dy });
+        await sleep(gap);
+      }
+      await sleep(400);
+      const tr = await evaluate(`window.__ws = false; window.__wt`);
+      const wheels = await evaluate(`window.__ww`);
+      return { tr, wheels };
+    };
+    const wheelStats = (tr, wheels, idx) => {
+      if (!tr || tr.length < 2) return { total: 0, reversals: 0, stall: 0, empty: true };
+      const total = tr[tr.length - 1][idx] - tr[0][idx];
+      const dir = Math.sign(total) || 1;
+      let reversals = 0;
+      let stall = 0;
+      let run = 0;
+      const w0 = wheels[0] ?? tr[0][0];
+      const w1 = (wheels[wheels.length - 1] ?? tr[tr.length - 1][0]) + 150;
+      for (let i = 1; i < tr.length; i += 1) {
+        const d = tr[i][idx] - tr[i - 1][idx];
+        const dt = Math.max(0.1, tr[i][0] - tr[i - 1][0]);
+        if (Math.abs(d) > 1 && Math.sign(d) !== dir) reversals += 1;
+        const active = tr[i][0] >= w0 && tr[i][0] <= w1;
+        if (Math.abs(d) < 0.05) {
+          run += dt;
+          // 探针投递间隙（前后 wheel 间隔 >60ms）不算失速
+          let prev = w0;
+          let next = w1;
+          for (const w of wheels) {
+            if (w <= tr[i][0]) prev = w;
+            else { next = w; break; }
+          }
+          if (active && next - prev <= 60) stall = Math.max(stall, run);
+        } else run = 0;
+      }
+      // 收敛尾巴：末次输入后进入终值 ±2px 的时长（直跟应 ≈ 一帧）。
+      const final = tr[tr.length - 1][idx];
+      const lastW = wheels[wheels.length - 1] ?? tr[0][0];
+      let settle = null;
+      for (let i = 0; i < tr.length; i += 1) {
+        if (tr[i][0] >= lastW && Math.abs(tr[i][idx] - final) < 2) {
+          settle = Math.round(tr[i][0] - lastW);
+          break;
+        }
+      }
+      return { total: Math.round(total), reversals, stall: Math.round(stall), settle };
+    };
+    // 页内等节拍驱动：每帧一个 wheel（真实触控板节拍），避开 CDP 逐事件往返
+    // 造成的"突发+空窗"。跟随误差在下一次投递前读相机：量的是新输入到达时
+    // 上一笔还差多少没跟上，1:1 直跟时应恒等于一笔增量（渲染提交的固有下限）。
+    const traceCadence = async (events, dx, dy, everyFrames) => {
+      await evaluate(`window.__wt = []; window.__ww = []; window.__ws = true; (() => { const tick = (t) => { const w = document.querySelector('.world'); if (w) { const m = new DOMMatrixReadOnly(getComputedStyle(w).transform); window.__wt.push([+t.toFixed(1), +m.e.toFixed(2), +m.f.toFixed(2)]); } if (window.__ws) requestAnimationFrame(tick); }; requestAnimationFrame(tick); })()`);
+      const follow = await evaluate(`(async () => {
+        const host = document.querySelector('.canvas');
+        const read = () => { const m = new DOMMatrixReadOnly(document.querySelector('.world').style.transform || 'none'); return [m.e, m.f]; };
+        const start = read();
+        const rows = [];
+        let sent = 0; let frame = 0; let cumY = 0;
+        await new Promise((res) => {
+          const tick = (t) => {
+            frame += 1;
+            if (frame % ${everyFrames} === 0) {
+              const cur = read();
+              rows.push([+(start[1] - cur[1]).toFixed(2), cumY]);
+              host.dispatchEvent(new WheelEvent('wheel', { deltaX: ${dx}, deltaY: ${dy}, deltaMode: 0, bubbles: true, cancelable: true }));
+              cumY += ${dy}; sent += 1;
+            }
+            if (sent < ${events}) requestAnimationFrame(tick); else res();
+          };
+          requestAnimationFrame(tick);
+        });
+        await new Promise((r) => setTimeout(r, 400));
+        window.__ws = false;
+        return rows;
+      })()`);
+      const tr = await evaluate(`window.__wt`);
+      const wheels = await evaluate(`window.__ww`);
+      const errs = follow.map((r) => Math.abs(r[0] - r[1]));
+      return {
+        tr,
+        wheels,
+        followMax: errs.length ? +Math.max(...errs).toFixed(2) : null,
+        followMean: errs.length ? +(errs.reduce((a, b) => a + b, 0) / errs.length).toFixed(2) : null,
+      };
+    };
+    const mouseTrace = await traceWheel(10, 0, 100, 90);
+    const padTrace = await traceWheel(40, 8, 8, 16);
+    const padCadence = await traceCadence(60, 0, 12, 1);
+    const mouseCadence = await traceCadence(12, 0, 100, 6);
+    report.wheel = {
+      mouse: wheelStats(mouseTrace.tr, mouseTrace.wheels, 2),
+      padDiagonalY: wheelStats(padTrace.tr, padTrace.wheels, 2),
+      padDiagonalX: wheelStats(padTrace.tr, padTrace.wheels, 1),
+      padCadence: { ...wheelStats(padCadence.tr, padCadence.wheels, 2), followMax: padCadence.followMax, followMean: padCadence.followMean },
+      mouseCadence: { ...wheelStats(mouseCadence.tr, mouseCadence.wheels, 2), followMax: mouseCadence.followMax, followMean: mouseCadence.followMean },
+    };
+    report.wheel.diag = await evaluate(`(() => {
+      const before = new DOMMatrixReadOnly(getComputedStyle(document.querySelector('.world')).transform);
+      document.querySelector('.canvas')?.dispatchEvent(new WheelEvent('wheel', { deltaY: 100, bubbles: true, cancelable: true }));
+      const after = new DOMMatrixReadOnly(getComputedStyle(document.querySelector('.world')).transform);
+      const el = document.elementFromPoint(1200, 450);
+      return {
+        url: location.hash,
+        tiles: document.querySelectorAll('.tile').length,
+        atPoint: el ? (el.className || el.tagName).toString().slice(0, 40) : null,
+        syntheticDelta: +(after.f - before.f).toFixed(2),
+        viewport: [innerWidth, innerHeight],
+      };
+    })()`);
+    if (report.wheel.mouse.empty || report.wheel.padDiagonalY.empty || report.wheel.padCadence.empty) {
+      report.failures.push('滚轮闸门：没有采到轨迹');
+    }
+    if (
+      report.wheel.mouse.reversals > 0 ||
+      report.wheel.padDiagonalY.reversals > 0 ||
+      report.wheel.padCadence.reversals > 0
+    ) {
+      report.failures.push('滚轮/触控板：存在回滚');
+    }
+    // 失速只在"输入真的连续"时才有意义：CDP 逐事件往返会把触控板序列投成
+    // 突发+空窗（实测 wheel 间隔 p50 42–49ms），直跟下空窗里相机不动是正确
+    // 行为。连续流的失速改由页内等节拍轨迹卡。
+    if (report.wheel.mouse.stall > 80 || report.wheel.padCadence.stall > 80) {
+      report.failures.push('滚轮/触控板：输入活跃期失速');
+    }
+    if (Math.abs(report.wheel.padDiagonalX.total) < 100 || Math.abs(report.wheel.padDiagonalY.total) < 100) {
+      report.failures.push('触控板：对角双轴未生效');
+    }
+    // 第四轮：连续流 1:1 直跟。跟随误差上限＝两笔增量（一笔是渲染提交的固有
+    // 下限）；tau=80 全量平滑时实测 88.6px，会被这条卡住。
+    if ((report.wheel.padCadence.followMax ?? Infinity) > 24) {
+      report.failures.push('触控板：连续流不跟手（跟随误差 ' + report.wheel.padCadence.followMax + 'px）');
+    }
+    if ((report.wheel.padCadence.settle ?? Infinity) > 80) {
+      report.failures.push('触控板：松手后收敛尾巴过长（' + report.wheel.padCadence.settle + 'ms）');
+    }
+    // 离散滚轮必须保留 glide：一格 100px 直跟会像瞬移。
+    if ((report.wheel.mouseCadence.settle ?? 0) < 60) {
+      report.failures.push('鼠标滚轮：离散 glide 丢失（收敛 ' + report.wheel.mouseCadence.settle + 'ms）');
+    }
 
     if (!report.home?.tiles) report.failures.push('首页没有渲染出任何卡片');
     if (report.detail && !report.detail.ok) report.failures.push('详情页没有大图');

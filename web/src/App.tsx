@@ -8,7 +8,7 @@ import { WallView, type WallControls } from './components/Wall';
 import { accentOf, blendAccents } from './lib/accent';
 import { tierUrl } from './lib/assetUrl';
 import { beginExpand, containRect, flyImage, type Rect } from './lib/expand';
-import { categoryLabel, formatCount, ratingLabel } from './lib/format';
+import { categoryLabel, displayGroup, displayTag, formatCount, ratingLabel } from './lib/format';
 import {
   detailHref,
   favHref,
@@ -297,7 +297,7 @@ export function App() {
         const items = wall.items.filter((item) => item.group === group);
         return {
           key: group,
-          label: group,
+          label: displayGroup(group),
           count: items.length,
           coverId: items[0]?.id,
           href: groupHref(group),
@@ -524,6 +524,8 @@ export function App() {
     setSummaryId(item.id);
   }, []);
 
+  const handleCloseSummary = useCallback(() => setSummaryId(null), []);
+
   // 双击 / Enter / 触屏单击：图片从卡片位置"长"到全屏。
   const handleOpen = useCallback(
     (item: WallItem, _index: number, origin?: Rect) => {
@@ -656,7 +658,9 @@ export function App() {
     wall.loadMore();
   }, [wall.loadMore]);
 
-  const infiniteHome = route.view === 'wall' && !queryActive && sort === 'random';
+  // 首页与标签墙共用无界空间：随机序下画布没有边界，缩放/平移不会露出空白底。
+  const infiniteWall =
+    (route.view === 'wall' || route.view === 'tag') && !queryActive && sort === 'random';
 
   // 侧栏功能键：墙页给缩放/回到起点，详情页给返回/翻页，两组互斥。
   const canvasOps = useMemo(
@@ -671,9 +675,9 @@ export function App() {
               setSpotlightItem(null);
               wallControls.current?.goHome();
             },
-            homeTitle: infiniteHome ? '回到起点（Home）' : '回到顶部（Home）',
+            homeTitle: infiniteWall ? '回到起点（Home）' : '回到顶部（Home）',
           },
-    [infiniteHome, route.view],
+    [infiniteWall, route.view],
   );
 
   const detailIndex = detailItem ? detailBrowseItems.findIndex((e) => e.id === detailItem.id) : -1;
@@ -716,13 +720,13 @@ export function App() {
   const wallHead = useMemo(() => {
     switch (route.view) {
       case 'tag':
-        return { title: route.tag, count: shown.length };
+        return { title: displayTag(route.tag), count: shown.length };
       case 'fav':
         return { title: '收藏', count: shown.length };
       case 'rating':
         return { title: ratingLabel(route.rating), count: shown.length };
       case 'group':
-        return { title: route.group, count: shown.length };
+        return { title: displayGroup(route.group), count: shown.length };
       default:
         return null;
     }
@@ -864,7 +868,7 @@ export function App() {
               hasMore={wall.hasMore}
               resetKey={signature}
               filtered={filtered}
-              infinite={infiniteHome}
+              infinite={infiniteWall}
               ready={allLoaded}
               worldSeed={orderSeed}
               stableAppend={route.view === 'wall' && sort === 'random' && !queryActive}
@@ -879,7 +883,7 @@ export function App() {
               onOpen={handleOpen}
               onSummary={handleSummary}
               summaryId={summaryId}
-              onCloseSummary={() => setSummaryId(null)}
+              onCloseSummary={handleCloseSummary}
               controlsRef={wallControls}
               onFocusItems={handleFocusItems}
               onRetry={wall.retry}

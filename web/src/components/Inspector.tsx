@@ -1,6 +1,15 @@
 import { useEffect, useRef, useState } from 'react';
 import { originalUrl, tierUrl } from '../lib/assetUrl';
-import { categoryLabel, formatCount, formatDateTime, formatSize, formatStars, ratingLabel } from '../lib/format';
+import {
+  categoryLabel,
+  displayGroup,
+  displayTag,
+  formatCount,
+  formatDateTime,
+  formatSize,
+  formatStars,
+  ratingLabel,
+} from '../lib/format';
 import { detailHref } from '../lib/router';
 import { groupTags, similarOf } from '../lib/itemDetail';
 import type { TierPaths, WallItem } from '../source/types';
@@ -61,10 +70,11 @@ export function Inspector({
     }
   };
 
-  const groups = groupTags(item);
+  // 分级已经在元信息行展示，`rating:g` chip 不再重复；其余分组按类别展示。
+  const groups = groupTags(item).filter((group) => group.category !== 'rating');
   const similar = similarOf(item, items);
   const original = originalUrl(paths, item);
-  const totalTags = item.tags.length;
+  const totalTags = groups.reduce((sum, group) => sum + group.tags.length, 0);
 
   let remaining = COLLAPSED_TAGS;
   const collapsedGroups = groups
@@ -107,7 +117,7 @@ export function Inspector({
           <dt>星级</dt>
           <dd>{formatStars(item.st)}</dd>
           <dt>分组</dt>
-          <dd>{item.group || '未分组'}</dd>
+          <dd>{displayGroup(item.group ?? '')}</dd>
           <dt>标签</dt>
           <dd>{formatCount(totalTags)} 个</dd>
         </dl>
@@ -128,7 +138,7 @@ export function Inspector({
                         title={categoryLabel(group.category)}
                         onClick={() => onTagClick(tag.name)}
                       >
-                        {tag.name}
+                        {displayTag(tag.name)}
                       </button>
                     ))}
                     {!expanded && (group.hidden ?? 0) > 0 ? (
@@ -168,34 +178,34 @@ export function Inspector({
               ))}
             </div>
           ) : (
-            <p className="inspector__hint">当前范围里没有 pHash 相近的图。</p>
+            <p className="inspector__hint">暂无相似图片</p>
           )}
         </section>
+      </div>
 
-        <div className="inspector__actions">
-          {onBack ? (
-            <button type="button" className="inspector__primary" onClick={onBack}>
-              返回列表
-            </button>
+      <div className="inspector__actions">
+        {onBack ? (
+          <button type="button" className="inspector__primary" onClick={onBack}>
+            返回列表
+          </button>
+        ) : null}
+        <div className="inspector__secondary">
+          <button
+            type="button"
+            className={'inspector__link inspector__link--button' + (copied ? ' is-done' : '')}
+            onClick={copyLink}
+            aria-live="polite"
+          >
+            {copied ? '✓ 已复制链接' : '复制链接'}
+          </button>
+          <button type="button" className="inspector__link inspector__link--button" onClick={toggleFullscreen}>
+            全屏（F）
+          </button>
+          {original ? (
+            <a className="inspector__link" href={original} target="_blank" rel="noreferrer">
+              原图
+            </a>
           ) : null}
-          <div className="inspector__secondary">
-            <button
-              type="button"
-              className={'inspector__link inspector__link--button' + (copied ? ' is-done' : '')}
-              onClick={copyLink}
-              aria-live="polite"
-            >
-              {copied ? '✓ 已复制链接' : '复制链接'}
-            </button>
-            <button type="button" className="inspector__link inspector__link--button" onClick={toggleFullscreen}>
-              全屏（F）
-            </button>
-            {original ? (
-              <a className="inspector__link" href={original} target="_blank" rel="noreferrer">
-                原图
-              </a>
-            ) : null}
-          </div>
         </div>
       </div>
     </aside>

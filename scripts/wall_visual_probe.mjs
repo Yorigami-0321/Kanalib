@@ -437,7 +437,16 @@ try {
 
   // 二级墙聚焦：英雄卡中心应落在「缝 + 检查器之后的内容区」中心，而不是被垂直余量推偏。
   const tagSpot = await evaluate(`(() => {
-    const tiles = [...document.querySelectorAll('.tile')];
+    // 只挑「中心在视口内、且真能点到」的最大卡：无界墙会把视口外的卡也挂在 DOM 里，
+    // 按宽度盲选会点到视口外（elementFromPoint 为 null），造成假失败。
+    const tiles = [...document.querySelectorAll('.tile')].filter((tile) => {
+      const box = tile.getBoundingClientRect();
+      const x = box.left + box.width / 2;
+      const y = box.top + box.height / 2;
+      if (x < 0 || y < 0 || x >= innerWidth || y >= innerHeight) return false;
+      const hit = document.elementFromPoint(x, y);
+      return !!hit && tile.contains(hit);
+    });
     const tile = tiles.sort((a, b) => b.getBoundingClientRect().width - a.getBoundingClientRect().width)[0];
     if (!tile) return null;
     const box = tile.getBoundingClientRect();

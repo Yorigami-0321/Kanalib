@@ -1,5 +1,5 @@
 import { tierUrl } from '../lib/assetUrl';
-import { formatCount } from '../lib/format';
+import { displayTag, formatCount } from '../lib/format';
 import type { TierPaths } from '../source/types';
 import './taggallery.css';
 
@@ -25,7 +25,7 @@ interface Section {
 }
 
 /** §2.2：类别顺序固定 通用 → 角色 → 作品 → 画师，其余（手动/元信息/分级）殿后。 */
-const CATEGORY_ORDER = ['general', 'character', 'copyright', 'artist', 'manual', 'meta', 'rating'];
+const CATEGORY_ORDER = ['general', 'character', 'copyright', 'artist', 'manual', 'style', 'meta', 'rating'];
 
 function categoryRank(key: string): number {
   const index = CATEGORY_ORDER.indexOf(key);
@@ -87,14 +87,15 @@ export function TagGallery({ entries, paths, loading, onOpenTag }: TagGalleryPro
                   type="button"
                   className="tagcard tagcard--enter"
                   style={{ animationDelay: Math.min(320, index * 24) + 'ms' }}
+                  data-tag={entry.name}
                   onClick={() => onOpenTag(entry.name)}
-                  title={entry.name + ' · ' + formatCount(entry.count) + ' 张'}
+                  title={displayTag(entry.name) + ' · ' + formatCount(entry.count) + ' 张'}
                 >
                   {entry.coverId ? (
                     <img
                       className="tagcard__img"
                       src={tierUrl(paths, 't256', entry.coverId)}
-                      alt={entry.name}
+                      alt={displayTag(entry.name)}
                       loading="lazy"
                       decoding="async"
                       draggable={false}
@@ -104,7 +105,7 @@ export function TagGallery({ entries, paths, loading, onOpenTag }: TagGalleryPro
                   )}
                   <span className="tagcard__shade" aria-hidden="true" />
                   <span className="tagcard__body">
-                    <span className="tagcard__name">{entry.name}</span>
+                    <span className="tagcard__name">{displayTag(entry.name)}</span>
                     <span className="tagcard__meta">{formatCount(entry.count)} 张</span>
                   </span>
                 </button>
