@@ -528,7 +528,8 @@ a {
 
 .canvas {
   position: fixed;
-  inset: 0;
+  /* 画布从缝的右缘开始：缝下方不再有画布内容/命中区，侧栏区域不会被穿透。 */
+  inset: 0 0 0 var(--seam-w);
   z-index: 0;
   overflow: hidden;
   cursor: grab;
@@ -1105,6 +1106,8 @@ a {
   max-width: calc(100vw - var(--seam-w) - 40px);
   align-items: center;
   gap: 10px;
+  /* 纯标题层：不拦指针，否则会挡住下面一行的卡片点击/拖拽。 */
+  pointer-events: none;
   animation: page-in 350ms var(--ease);
 }
 

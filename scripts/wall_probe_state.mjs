@@ -225,7 +225,8 @@ async function main() {
     })`);
     report.cases.urlState = { before, after, errors: report.errors.length };
 
-    // 4) 小集合标签墙
+    // 4) 小集合标签墙：图片数 < 8 的标签回退有限世界（阈值 8），
+    //    1 张图只渲染 1 张卡，不再按格子循环铺满。
     report.errors.length = 0;
     await cdp.send('Page.navigate', { url: base + '#/t/rating:e' });
     await sleep(3000);

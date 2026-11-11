@@ -70,7 +70,7 @@ export interface WallViewProps {
   stableAppend?: boolean;
   /**
    * 无限空间（§1.1 / 规则 11）：上/下/左/右都能一直走，没有边界。
-   * 只有"全库随机墙"才开；标签墙/筛选后的列表条目少，仍然用有限世界（否则三张图会无限重复）。
+   * 首页随机墙与单个标签的随机墙开启；显式排序仍用有限世界，避免排序失效。
    */
   infinite?: boolean;
   /** 无限空间要求条目全量到齐后再生成，否则分片到达会让整屏重排。 */
@@ -217,11 +217,11 @@ export function WallView({
   const sizeRef = useRef(size);
   sizeRef.current = size;
 
-  // 窄屏（<=760）：导航缝收成 64px，世界也从缝的右缘开始 —— 否则第一列会被缝压掉一半，
-  // 390 屏上看着像坏掉。桌面保持"世界铺满、图从缝底下穿过"的空间感。
-  const narrow = size.w <= 760;
-  const worldInset = narrow ? 64 : 0;
-  const viewWidth = Math.max(200, size.w - worldInset);
+  // 画布自身从缝的右缘开始（styles.css `.canvas` 左边距 = --seam-w），
+  // size.w 就是可用画布宽度，不再需要"世界右移让开缝"的 worldInset。
+  // 窄屏阈值按画布宽度取：原视口 760 在 64px 缝下约等于画布 700。
+  const narrow = size.w <= 700;
+  const viewWidth = Math.max(200, size.w);
   const worldWidth = narrow
     ? viewWidth
     : Math.max(WORLD_MIN_WIDTH, Math.round(size.w * WORLD_OVERSCAN));
@@ -251,7 +251,7 @@ export function WallView({
         options,
         spotlightId,
         {
-          centerX: worldInset + Math.max(200, viewWidth) / 2,
+          centerX: Math.max(200, viewWidth) / 2,
           viewHeight: size.h,
           bottomInset: 0,
         },
@@ -268,7 +268,6 @@ export function WallView({
     stretchPartialRow,
     spotlightId,
     spotlightAnchorRect,
-    worldInset,
     viewWidth,
     size.h,
   ]);
@@ -499,17 +498,20 @@ export function WallView({
     stopGlide();
     const cam = cameraRef.current;
     const box = tile.getBoundingClientRect();
-    const seam = narrow ? 64 : 120;
-    const safeLeft = seam + 24;
+    const hostBox = viewportRef.current?.getBoundingClientRect();
+    const left = box.left - (hostBox?.left ?? 0);
+    const top = box.top - (hostBox?.top ?? 0);
+    // 相机坐标就是画布坐标：安全区按画布内 24px 计算，不再假设缝宽。
+    const safeLeft = 24;
     const safeRight = size.w - 24;
     const safeTop = 24;
     const safeBottom = size.h - 24;
     let x = cam.x;
     let y = cam.y;
-    if (box.left < safeLeft) x -= safeLeft - box.left;
-    else if (box.right > safeRight) x += box.right - safeRight;
-    if (box.top < safeTop) y -= safeTop - box.top;
-    else if (box.bottom > safeBottom) y += box.bottom - safeBottom;
+    if (left < safeLeft) x -= safeLeft - left;
+    else if (left + box.width > safeRight) x += left + box.width - safeRight;
+    if (top < safeTop) y -= safeTop - top;
+    else if (top + box.height > safeBottom) y += top + box.height - safeBottom;
     if (Math.abs(x - cam.x) < 0.5 && Math.abs(y - cam.y) < 0.5) return;
     window.clearTimeout(focusPanTimer.current);
     setCameraTween(true);
@@ -656,12 +658,11 @@ export function WallView({
     [stopGlide, stopInertia],
   );
 
-  /** 以"可见区"中心为锚缩放：键盘 +/- 与侧栏按钮共用一条路。窄屏锚点要让开 64px 的缝。 */
+  /** 以"可见区"中心为锚缩放：键盘 +/- 与侧栏按钮共用一条路。画布坐标已不含缝宽度。 */
   const zoomByFactor = useCallback(
     (factor: number) => {
       const cam = cameraRef.current;
-      const inset = sizeRef.current.w <= 760 ? 64 : 0;
-      const cx = inset + (sizeRef.current.w - inset) / 2;
+      const cx = sizeRef.current.w / 2;
       const cy = sizeRef.current.h / 2;
       const worldX = (cam.x + cx) / cam.zoom;
       const worldY = (cam.y + cy) / cam.zoom;
@@ -725,7 +726,9 @@ export function WallView({
   /** 让世界坐标 (wx, wy) 落在内容区中心；rightInset/bottomInset 为聚焦时侧栏/sheet 占用的空间。 */
   const centerOnWorld = useCallback(
     (wx: number, wy: number, zoom = cameraRef.current.zoom, rightInset = 0, bottomInset = 0) => {
-      const availableW = Math.max(200, viewWidth - rightInset);
+      // 用画布的实际宽度：首帧 size 还是默认视口宽，画布让出缝后会偏 ~17px。
+      const hostWidth = viewportRef.current?.clientWidth || viewWidth;
+      const availableW = Math.max(200, hostWidth - rightInset);
       const availableH = Math.max(200, size.h - bottomInset);
       stopGlide();
       moveCameraRef.current({
@@ -1026,16 +1029,19 @@ export function WallView({
     lastClick.current = { id: item.id, t: now };
     setActiveId(item.id);
     const box = tile?.getBoundingClientRect();
+    const hostBox = viewportRef.current?.getBoundingClientRect();
     const cam = cameraRef.current;
     // 把点击瞬间的卡片矩形还原到绝对世界坐标：重排以它为锚，图片不会搬到固定英雄位。
-    const worldRect = box
-      ? {
-          x: (box.left - worldInset + cam.x) / cam.zoom + origin.x,
-          y: (box.top - verticalSlack + cam.y) / cam.zoom + origin.y,
-          w: box.width / cam.zoom,
-          h: box.height / cam.zoom,
-        }
-      : undefined;
+    // 卡片 rect 是视口坐标，先减画布左/上边缘换成画布坐标。
+    const worldRect =
+      box && hostBox
+        ? {
+            x: (box.left - hostBox.left + cam.x) / cam.zoom + origin.x,
+            y: (box.top - hostBox.top + cam.y) / cam.zoom + origin.y - verticalSlack / cam.zoom,
+            w: box.width / cam.zoom,
+            h: box.height / cam.zoom,
+          }
+        : undefined;
     const anchor = worldRect
       ? { x: worldRect.x + worldRect.w / 2, y: worldRect.y + worldRect.h / 2 }
       : undefined;
@@ -1128,12 +1134,12 @@ export function WallView({
       // 无限空间没有世界尺寸：.world 只当坐标系原点用，尺寸交给卡片自己。
       width: infinite ? undefined : worldWidth,
       height: infinite ? undefined : Math.max(layout.height, size.h),
-      // worldInset：窄屏把世界右移，让开 64px 的导航缝（桌面为 0，图照样从缝底下穿过）。
+      // 画布从缝的右缘开始，世界坐标原点就是画布左上角；
       // origin：rebase 后的世界偏移，卡片按 (rect - origin) 渲染，这里把偏移补回屏幕。
       // bounce：撞边界时的纯视觉越界补偿（≤28px），camera 本身始终合法。
       transform:
         'translate3d(' +
-        (worldInset - camera.x + origin.x * camera.zoom + bounce.x) +
+        (-camera.x + origin.x * camera.zoom + bounce.x) +
         'px,' +
         (-camera.y + origin.y * camera.zoom + bounce.y + verticalSlack) +
         'px,0) scale(' +
@@ -1155,7 +1161,6 @@ export function WallView({
       origin.y,
       size.h,
       verticalSlack,
-      worldInset,
       worldWidth,
     ],
   );
@@ -1275,12 +1280,12 @@ export function WallView({
     ensuredSpot.current = spotlightKey;
     const cam = cameraRef.current;
     const zoom = cam.zoom;
-    const seam = narrow ? 64 : 120;
-    const safeLeft = seam + 24;
+    // 画布坐标原点就是缝的右缘，安全区直接按画布内边距算，不再叠加缝宽。
+    const safeLeft = 24;
     const safeRight = size.w - 24;
     const safeTop = 24;
     const safeBottom = size.h - 24;
-    const sx = worldInset + spotlightHeroRect.x * zoom - cam.x;
+    const sx = spotlightHeroRect.x * zoom - cam.x;
     const sy = verticalSlack + spotlightHeroRect.y * zoom - cam.y;
     const sw = spotlightHeroRect.w * zoom;
     const sh = spotlightHeroRect.h * zoom;
@@ -1299,11 +1304,9 @@ export function WallView({
   }, [
     spotlightKey,
     spotlightHeroRect,
-    narrow,
     size.h,
     size.w,
     verticalSlack,
-    worldInset,
     moveCamera,
     stopGlide,
   ]);

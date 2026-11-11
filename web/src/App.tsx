@@ -47,6 +47,12 @@ const EMPTY_TAGS: TagFacet[] = [];
 const RATING_ORDER = ['G', 'S', 'Q', 'E'];
 const FALLBACK_ACCENT = '#8f8f92';
 
+/**
+ * 标签图少于这个数就回退有限世界：无界空间会循环铺同一组图，
+ * 图片太少时视觉上就是「一张图铺满」，比留白更难读。8 张约能撑起一屏三列。
+ */
+const INFINITE_MIN_TAG_ITEMS = 8;
+
 /** 焦点归位的最大重试帧数：从详情返回聚焦时相机要 360ms 居中，卡才进可见集合；30 帧约 500ms。 */
 const FOCUS_RETRY_FRAMES = 30;
 
@@ -237,18 +243,6 @@ export function App() {
   const inspectorItem = detailItem && !detailInfoHidden ? detailItem : null;
   const inspectorOpen = Boolean(inspectorItem);
 
-  const signature =
-    route.view +
-    ':' +
-    ('tag' in route ? route.tag : '') +
-    ':' +
-    ('rating' in route ? route.rating : '') +
-    ':' +
-    ('group' in route ? route.group : '') +
-    '|' +
-    filterSignature(filters) +
-    '|' +
-    sort;
   const filtered = queryActive || routeFiltered;
   const total = wall.index?.count ?? wall.items.length;
   const facetTags = wall.index?.facets?.tags ?? EMPTY_TAGS;
@@ -369,6 +363,45 @@ export function App() {
     for (const facet of facetTags) map.set(facet.name, facet.count);
     return map;
   }, [facetTags]);
+
+  // 分片全部到齐（或已无下一片）：此时已加载集合即全量，可当作计数兜底。
+  // 不用 allLoaded 单指标：它比快照晚一帧，会让标签模式多闪一次。
+  const dataComplete = allLoaded || (!wall.hasMore && wall.phase === 'end');
+
+  // 标签规模决定用不用无界空间：facets 是发布时算好的全量计数，index 到达即可用；
+  // facets 缺这个标签时才退回已加载集合，且等全量到位后再采用，
+  // 避免把加载中途偏小的计数当成结论、让世界模式来回翻转。
+  const tagItemCount =
+    route.view === 'tag'
+      ? tagCounts.get(route.tag) ?? (dataComplete ? baseItems.length : null)
+      : null;
+
+  // 无界空间：首页随机墙 + 图片足够多的单个标签随机墙。标签页四周补图，
+  // 否则点顶部一行时上方留出大片空缺；图片太少的标签回退有限世界，
+  // 避免同一张图循环铺满。显式排序、搜索、收藏/分级/分组墙保持有限世界。
+  const infiniteWall =
+    (route.view === 'wall' ||
+      (route.view === 'tag' &&
+        (tagItemCount === null || tagItemCount >= INFINITE_MIN_TAG_ITEMS))) &&
+    !queryActive &&
+    sort === 'random';
+
+  // 世界模式也算进 resetKey：异常情况下（index 晚到、facets 缺失）模式切换时
+  // 让相机按新世界重新定位，不会带着另一种坐标系的偏移进入画面。
+  const signature =
+    route.view +
+    ':' +
+    ('tag' in route ? route.tag : '') +
+    ':' +
+    ('rating' in route ? route.rating : '') +
+    ':' +
+    ('group' in route ? route.group : '') +
+    '|' +
+    filterSignature(filters) +
+    '|' +
+    sort +
+    '|' +
+    (infiniteWall ? 'infinite' : 'finite');
 
   const indexPath = useMemo(
     () => new URL('index.json', new URL(DATA_ROOT, document.baseURI)).href,
@@ -738,10 +771,6 @@ export function App() {
   const handleLoadMore = useCallback(() => {
     wall.loadMore();
   }, [wall.loadMore]);
-
-  // 无界空间只属于首页随机墙：标签/收藏/分级/分组墙一律有限墙，
-  // 小集合（1 张、11 张）不会在格子世界里被循环复制。
-  const infiniteWall = route.view === 'wall' && !queryActive && sort === 'random';
 
   // 侧栏功能键：墙页给缩放/回到起点，详情页给返回/翻页，两组互斥。
   const canvasOps = useMemo(
