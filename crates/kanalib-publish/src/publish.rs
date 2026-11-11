@@ -22,8 +22,9 @@ use kanalib_core::model::{Asset, Filter, SearchQuery, TagHit};
 use kanalib_core::sources;
 
 use crate::fsutil;
-use crate::ledger::{LEDGER_FILE, Ledger, LedgerEntry};
+use crate::ledger::{LEDGER_FILE, Ledger, LedgerEntry, RENDER_VERSION};
 use crate::manifest::{self, Facets, Index, Item, Paths, SCHEMA_VERSION, Shard, ShardRef};
+use crate::search::{SEARCH_INDEX_FILE, SearchBuilder};
 use crate::timefmt;
 
 /// 分页抓取步长（core 允许到 10000，1000 足够减少查询次数又不过度占用内存）。
@@ -33,6 +34,20 @@ const PAGE_LIMIT: usize = 1000;
 const TIERS: [(&str, u32); 2] = [("t1024", 1024), ("t2048", 2048)];
 /// 锐利档 JPEG 质量（photo-wall W3：高质量、正确 sRGB）。
 const TIER_JPEG_QUALITY: u8 = 90;
+
+/// 源图白带确认阈值：2.5% / 8 行。目标是覆盖 3% 薄白边（4% 老阈值会整条漏掉），
+/// 留 0.5 个百分点吸收 JPEG 边界行的 ringing；2% 及以下仍不裁。
+const SOURCE_BAND_FRAC: f64 = 0.025;
+const SOURCE_BAND_MIN_ROWS: u32 = 8;
+/// 缩略图候选阈值：1.5% / 3 行。候选只负责触发源图确认，真阈值以源图为准；
+/// t256 上 3% 薄带缩放后只剩 3-4 行，还要吸收 JPEG 噪点，所以放得比源图更松。
+const PROBE_BAND_FRAC: f64 = 0.015;
+const PROBE_BAND_MIN_ROWS: u32 = 3;
+/// 候选行允许 2% 的像素被 JPEG 噪点压到阈值以下（源图确认仍是 100%）。
+const PROBE_WHITE_PERCENT: u32 = 98;
+/// 判定「白」的通道下限：纯白带经 JPEG 4:2:2 + q90 往返会掉到 244 左右，
+/// 严格 255 会整条漏检；242 仍能把 240 及以下的浅灰排除在外。
+const WHITE_LEVEL: u8 = 242;
 
 /// 发布参数，由 CLI 或库调用方构造。
 #[derive(Clone, Debug)]
@@ -114,6 +129,9 @@ pub struct Stats {
     pub shard_size: usize,
     pub tags: usize,
     pub groups: usize,
+    /// 搜索索引：去重标签数与序列化后字节数（dry-run 也会算，便于预估首包）。
+    pub search_tags: usize,
+    pub search_bytes: usize,
     pub thumbs: FileStats,
     pub tiers: TierStats,
     pub originals: FileStats,
@@ -146,6 +164,11 @@ impl fmt::Display for Stats {
             f,
             "分片 {} 片（每片上限 {}）；facets 标签 {} 个 / 分组 {} 个",
             self.shards, self.shard_size, self.tags, self.groups
+        )?;
+        writeln!(
+            f,
+            "搜索索引：去重标签 {} 个、{} 字节（{}）",
+            self.search_tags, self.search_bytes, SEARCH_INDEX_FILE
         )?;
         writeln!(
             f,
@@ -295,17 +318,58 @@ fn tile_thumb_path(thumb: &Path) -> PathBuf {
     thumb.with_file_name(format!("{stem}-t256.jpg"))
 }
 
-/// 底部连续纯白 (255,255,255) 行带：源图上传侧垫白/损坏的痕迹（反馈 §5.6）。
-/// 源图确认用 4%/8 行；t256 候选检测用 3%/3 行——带边界的 JPEG ringing
-/// 会让小档上的候选带高略低于真值，阈值放宽以免漏检。
+/// 与 core 缩略图一致的 alpha 合成：透明像素压到白底。
+///
+/// `to_rgb8()` 只是丢掉 alpha，透明区域的 RGB（常见为 0）会变成黑色：
+/// 既让源图检测看不到白带，也会把透明 PNG/GIF 的锐利档导出成黑底。
+/// 不透明图走 `to_rgb8()`，避免大图多分配一份 RGBA。
+fn flatten_white(image: &image::DynamicImage) -> image::RgbImage {
+    if !image.color().has_alpha() {
+        return image.to_rgb8();
+    }
+    let rgba = image.to_rgba8();
+    let (width, height) = rgba.dimensions();
+    let mut rgb = image::RgbImage::new(width, height);
+    for (source, target) in rgba.pixels().zip(rgb.pixels_mut()) {
+        let alpha = u32::from(source[3]);
+        let inverse = 255 - alpha;
+        *target = image::Rgb([
+            ((u32::from(source[0]) * alpha + 255 * inverse) / 255) as u8,
+            ((u32::from(source[1]) * alpha + 255 * inverse) / 255) as u8,
+            ((u32::from(source[2]) * alpha + 255 * inverse) / 255) as u8,
+        ]);
+    }
+    rgb
+}
+
+fn is_white(pixel: &image::Rgb<u8>) -> bool {
+    pixel.0.iter().all(|channel| *channel >= WHITE_LEVEL)
+}
+
+/// 底部连续白行带：源图上传侧垫白/损坏的痕迹（反馈 §5.6）。
+/// 检测表面必须与缩略图/编码表面一致（alpha 已合成白底），阈值见文件头常量。
+/// `min_white_percent` 是单行里至少多少比例的像素算白；源图确认用 100（严格），
+/// 缩略图候选可放宽到 98 吸收 JPEG 噪点。
 fn white_bottom_band(rgb: &image::RgbImage, min_frac: f64, min_rows: u32) -> Option<u32> {
+    white_bottom_band_with(rgb, min_frac, min_rows, 100)
+}
+
+fn white_bottom_band_with(
+    rgb: &image::RgbImage,
+    min_frac: f64,
+    min_rows: u32,
+    min_white_percent: u32,
+) -> Option<u32> {
     let (width, height) = rgb.dimensions();
     if width == 0 || height == 0 {
         return None;
     }
     let mut band = 0u32;
     for y in (0..height).rev() {
-        if !(0..width).all(|x| rgb.get_pixel(x, y).0 == [255, 255, 255]) {
+        let white = (0..width)
+            .filter(|x| is_white(rgb.get_pixel(*x, y)))
+            .count();
+        if (white as u64) * 100 < u64::from(width) * u64::from(min_white_percent) {
             break;
         }
         band += 1;
@@ -337,6 +401,8 @@ struct Publisher<'a> {
     duplicate_tags: HashMap<String, Vec<TagHit>>,
     tag_counts: HashMap<String, manifest::TagCount>,
     group_counts: HashMap<String, usize>,
+    /// 搜索索引构建器：与分片同序收条目，finish 时统一去重 tag 表并编码。
+    search: SearchBuilder,
     pending: Vec<Item>,
     shards: Vec<ShardRef>,
     stats: Stats,
@@ -356,6 +422,7 @@ impl<'a> Publisher<'a> {
             duplicate_tags: HashMap::new(),
             tag_counts: HashMap::new(),
             group_counts: HashMap::new(),
+            search: SearchBuilder::new(),
             pending: Vec::new(),
             shards: Vec::new(),
             stats,
@@ -495,41 +562,58 @@ impl<'a> Publisher<'a> {
                 bytes: meta.bytes,
                 files: Vec::new(),
                 trim_band: None,
+                render: RENDER_VERSION,
             },
         );
 
         let tile = tile_thumb_path(&thumb);
         // 纯白底带裁剪（反馈 §5.6）：源图上传侧垫白/损坏留下全宽纯白底带，
-        // 各档缩略图都会继承，与解码瞬态无关。在导出 t256 上候选检测（源指纹
-        // 变化时用缓存 t256），精确边界以源图为准；裁掉后全档重编码。账本记
-        // trim_band，增量跑据此保持 manifest 高度不回退。
+        // 各档缩略图都会继承，与解码瞬态无关。在缩略图上做候选检测（源指纹 +
+        // 渲染版本都命中时用上次产物），精确边界以源图为准；裁掉后全档重编码。
+        // 账本记 trim_band，增量跑据此保持 manifest 高度不回退。
         let prior = self.previous.get(&id);
-        let source_current =
-            prior.is_some_and(|entry| entry.is_current(meta.sha1.as_deref(), meta.mtime, meta.bytes));
-        let mut band = if source_current {
+        let source_current = prior
+            .is_some_and(|entry| entry.is_current(meta.sha1.as_deref(), meta.mtime, meta.bytes));
+        let cached_current = source_current && prior.is_some_and(LedgerEntry::render_current);
+        let mut band = if cached_current {
             prior.and_then(|entry| entry.trim_band)
         } else {
             None
         };
         if band.is_none() {
+            // 候选读小图即可：上次产物（同源同渲染）→ 新 t256 → t512 → 上次 t256。
             let out_tile = self.options.out_dir.join(format!("t256/{id}.jpg"));
-            let probe_path = if source_current || !tile.is_file() {
-                out_tile
-            } else {
+            let probe_path = if cached_current {
+                out_tile.clone()
+            } else if tile.is_file() {
                 tile.clone()
+            } else if thumb.is_file() {
+                thumb.clone()
+            } else {
+                out_tile
             };
-            if let Ok(probe) = image::open(&probe_path).map(|value| value.to_rgb8()) {
-                if white_bottom_band(&probe, 0.03, 3).is_some() {
-                    // t256 带边界的 JPEG ringing 会低估带高，精确边界以源图为准。
-                    if let Ok(decoded) = color::decode(&asset.path) {
-                        let mut source = color::convert_to_srgb(decoded.image, &decoded.profile);
-                        source.apply_orientation(decoded.orientation);
-                        // 裁剪行数以方向套用后的源图为准；与库记高度不一致
-                        // （旋转图）时不裁，避免 manifest 高度错配。
-                        band = white_bottom_band(&source.to_rgb8(), 0.04, 8)
-                            .filter(|_| source.height() == asset.height);
-                    }
-                }
+            if let Ok(probe) = image::open(&probe_path).map(|value| flatten_white(&value))
+                && white_bottom_band_with(
+                    &probe,
+                    PROBE_BAND_FRAC,
+                    PROBE_BAND_MIN_ROWS,
+                    PROBE_WHITE_PERCENT,
+                )
+                .is_some()
+                && let Ok(decoded) = color::decode(&asset.path)
+            {
+                // 小档 JPEG ringing 会低估带高，精确边界以源图为准；
+                // 源图同样先合成白底，透明 PNG/GIF 才和缩略图看到同一条带。
+                let mut source = color::convert_to_srgb(decoded.image, &decoded.profile);
+                source.apply_orientation(decoded.orientation);
+                // 裁剪行数以方向套用后的源图为准；与库记高度不一致
+                // （旋转图）时不裁，避免 manifest 高度错配。
+                band = white_bottom_band(
+                    &flatten_white(&source),
+                    SOURCE_BAND_FRAC,
+                    SOURCE_BAND_MIN_ROWS,
+                )
+                .filter(|_| source.height() == asset.height);
             }
         }
 
@@ -548,7 +632,7 @@ impl<'a> Publisher<'a> {
                 // 账本命中且裁剪产物都在：跳过重编码，只登记（契约 §6 增量语义）。
                 // 必须确认账本记过 trim_band：升级首跑时旧产物还带白底带，
                 // 不能当作已裁剪缓存跳过。
-                let cached = source_current
+                let cached = cached_current
                     && prior.is_some_and(|entry| {
                         entry.trim_band.is_some()
                             && rels.iter().all(|rel| {
@@ -623,6 +707,7 @@ impl<'a> Publisher<'a> {
         item.sharp = Some(sharp);
         manifest::count_tags(&mut self.tag_counts, &item);
         manifest::count_group(&mut self.group_counts, &item);
+        self.search.push(&item);
         self.pending.push(item);
         self.stats.exported += 1;
         if self.pending.len() >= self.options.shard_size {
@@ -706,7 +791,7 @@ impl<'a> Publisher<'a> {
             } else {
                 cropped.clone()
             };
-            let rgb = scaled.to_rgb8();
+            let rgb = flatten_white(&scaled);
             let mut bytes = Vec::new();
             let encoded =
                 JpegEncoder::new_with_quality(&mut bytes, TIER_JPEG_QUALITY).encode_image(&rgb);
@@ -767,7 +852,7 @@ impl<'a> Publisher<'a> {
                 continue;
             }
             let rel = format!("{tier}/{id}.jpg");
-            if self.file_is_current(id, &rel, meta) {
+            if self.file_is_current(id, &rel, meta, true) {
                 self.stats.tiers.skipped += 1;
                 self.record_file(id, &rel);
                 available = available.max(edge as u16);
@@ -802,7 +887,7 @@ impl<'a> Publisher<'a> {
             } else {
                 image.clone()
             };
-            let rgb = scaled.to_rgb8();
+            let rgb = flatten_white(&scaled);
             let mut bytes = Vec::new();
             match JpegEncoder::new_with_quality(&mut bytes, TIER_JPEG_QUALITY).encode_image(&rgb) {
                 Ok(()) => {
@@ -842,10 +927,11 @@ impl<'a> Publisher<'a> {
         }
     }
 
-    /// 账本命中且源指纹未变、目标仍在。
-    fn file_is_current(&self, id: &str, rel: &str, meta: &FileMeta) -> bool {
+    /// 账本命中且源指纹未变、目标仍在；`require_render` 时还要求渲染版本一致。
+    fn file_is_current(&self, id: &str, rel: &str, meta: &FileMeta, require_render: bool) -> bool {
         self.previous.get(id).is_some_and(|entry| {
             entry.is_current(meta.sha1.as_deref(), meta.mtime, meta.bytes)
+                && (!require_render || entry.render_current())
                 && entry.files.iter().any(|file| file == rel)
         }) && self.options.out_dir.join(rel).is_file()
     }
@@ -868,7 +954,8 @@ impl<'a> Publisher<'a> {
             return Ok(false);
         }
         let target = self.options.out_dir.join(rel);
-        let unchanged = self.file_is_current(id, rel, meta);
+        // 缩略图产物受渲染版本约束；原图只是源文件拷贝，换渲染器不必重抄。
+        let unchanged = self.file_is_current(id, rel, meta, matches!(slot, Slot::Thumb));
         if unchanged {
             self.bucket_mut(slot).skipped += 1;
             self.record_file(id, rel);
@@ -943,6 +1030,11 @@ impl<'a> Publisher<'a> {
         self.stats.shards = self.shards.len();
         self.stats.tags = tags.len();
         self.stats.groups = groups.len();
+        // 搜索索引与分片同源同序：dry-run 也算出来（只统计体积，不写盘）。
+        let search = std::mem::take(&mut self.search).finish();
+        let search_bytes = search.to_bytes()?;
+        self.stats.search_tags = search.tags.len();
+        self.stats.search_bytes = search_bytes.len();
         if self.options.dry_run {
             return Ok(self.stats);
         }
@@ -970,14 +1062,13 @@ impl<'a> Publisher<'a> {
         };
         let bytes = serde_json::to_vec(&index).context("序列化 index.json 失败")?;
         fsutil::write_atomic(&self.options.out_dir.join("index.json"), &bytes)?;
+        search.write(&self.options.out_dir)?;
         self.next.save(&self.options.out_dir)?;
         self.prune_stale()?;
         eprintln!(
-            "[kanalib-publish] 已写出 {}（index.json + {} 分片 + {} / {}）",
+            "[kanalib-publish] 已写出 {}（index.json + {} 分片 + {SEARCH_INDEX_FILE} + 账本 {LEDGER_FILE}）",
             self.options.out_dir.display(),
             self.shards.len(),
-            LEDGER_FILE,
-            "账本条目"
         );
         Ok(self.stats)
     }
@@ -1051,8 +1142,8 @@ impl<'a> Publisher<'a> {
 
 #[cfg(test)]
 mod tests {
-    use super::white_bottom_band;
-    use image::RgbImage;
+    use super::{flatten_white, white_bottom_band, white_bottom_band_with};
+    use image::{DynamicImage, Rgb, RgbImage, Rgba, RgbaImage};
 
     fn image_with_band(width: u32, height: u32, band: u32) -> RgbImage {
         let mut img = RgbImage::new(width, height);
@@ -1082,6 +1173,49 @@ mod tests {
     #[test]
     fn ignores_band_below_threshold() {
         assert_eq!(white_bottom_band(&image_with_band(40, 200, 4), 0.04, 8), None);
+    }
+
+    #[test]
+    fn treats_near_white_as_white() {
+        let mut img = image_with_band(40, 200, 0);
+        for y in 180..200 {
+            for x in 0..40 {
+                img.put_pixel(x, y, Rgb([248, 252, 250]));
+            }
+        }
+        assert_eq!(white_bottom_band(&img, 0.03, 8), Some(20));
+    }
+
+    #[test]
+    fn ignores_light_gray_band() {
+        let mut img = image_with_band(40, 200, 0);
+        for y in 180..200 {
+            for x in 0..40 {
+                img.put_pixel(x, y, Rgb([240, 240, 240]));
+            }
+        }
+        assert_eq!(white_bottom_band(&img, 0.03, 8), None);
+    }
+
+    #[test]
+    fn probe_tolerates_jpeg_noise_per_row() {
+        let mut img = image_with_band(100, 200, 20);
+        // 每行只有一个像素被 JPEG 噪点压暗：严格源图确认不应放过，候选检测可以。
+        for y in 180..200 {
+            img.put_pixel(7, y, Rgb([230, 230, 230]));
+        }
+        assert_eq!(white_bottom_band(&img, 0.03, 3), None);
+        assert_eq!(white_bottom_band_with(&img, 0.03, 3, 98), Some(20));
+    }
+
+    #[test]
+    fn composites_alpha_onto_white() {
+        let mut rgba = RgbaImage::new(2, 1);
+        rgba.put_pixel(0, 0, Rgba([0, 0, 0, 0])); // 透明黑：直接 to_rgb8 会是黑色
+        rgba.put_pixel(1, 0, Rgba([200, 100, 50, 255]));
+        let rgb = flatten_white(&DynamicImage::ImageRgba8(rgba));
+        assert_eq!(rgb.get_pixel(0, 0).0, [255, 255, 255]);
+        assert_eq!(rgb.get_pixel(1, 0).0, [200, 100, 50]);
     }
 
     #[test]

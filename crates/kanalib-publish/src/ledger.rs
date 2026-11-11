@@ -13,7 +13,11 @@ use serde::{Deserialize, Serialize};
 use crate::fsutil;
 
 pub const LEDGER_FILE: &str = "publish-ledger.json";
-pub const LEDGER_VERSION: u32 = 1;
+/// 账本文件结构版本：不兼容变更时递增；旧版本整份作废（全量重建）。
+pub const LEDGER_VERSION: u32 = 2;
+/// 产物渲染版本：解码表面、白带检测、裁剪、缩放或编码规则变化时递增。
+/// 与源指纹分开记，旧条目即使源文件没变也要重建 thumb/tier/trim 缓存。
+pub const RENDER_VERSION: u32 = 2;
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LedgerEntry {
@@ -28,11 +32,20 @@ pub struct LedgerEntry {
     /// 源图纯白底带裁剪行数（反馈 §5.6）：增量跑据此保持 manifest 高度不回退。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub trim_band: Option<u32>,
+    /// 上次写出这些产物时的渲染版本；旧账本缺省为 0，必然失效。
+    #[serde(default)]
+    pub render: u32,
 }
 
 impl LedgerEntry {
+    /// 源文件指纹是否未变（不含渲染版本）。
     pub fn is_current(&self, sha1: Option<&str>, mtime: u64, bytes: u64) -> bool {
         self.mtime == mtime && self.bytes == bytes && self.sha1.as_deref() == sha1
+    }
+
+    /// 产物是否由当前渲染版本写出。
+    pub fn render_current(&self) -> bool {
+        self.render == RENDER_VERSION
     }
 }
 
@@ -71,10 +84,12 @@ impl Ledger {
         match serde_json::from_str::<Ledger>(&text) {
             Ok(ledger) => {
                 if ledger.version != LEDGER_VERSION {
+                    // 结构版本不一致时字段语义不可信：整份作废，本次全量重建。
                     eprintln!(
-                        "[kanalib-publish] 警告：账本版本 {} 与当前 {} 不一致，仍按字段复用",
+                        "[kanalib-publish] 警告：账本版本 {} 与当前 {} 不一致，丢弃旧账本并全量重建",
                         ledger.version, LEDGER_VERSION
                     );
+                    return Self::default();
                 }
                 ledger
             }
@@ -158,6 +173,7 @@ mod tests {
                 bytes: 99,
                 files: vec!["t512/abc.jpg".to_string()],
                 trim_band: None,
+                render: RENDER_VERSION,
             },
         );
         ledger.save(&dir.path).unwrap();
@@ -183,10 +199,39 @@ mod tests {
             bytes: 6,
             files: Vec::new(),
             trim_band: None,
+            render: RENDER_VERSION,
         };
         assert!(entry.is_current(Some("aa"), 5, 6));
         assert!(!entry.is_current(Some("bb"), 5, 6));
         assert!(!entry.is_current(Some("aa"), 6, 6));
         assert!(!entry.is_current(None, 5, 6));
+        assert!(entry.render_current());
+        assert!(
+            !LedgerEntry {
+                render: RENDER_VERSION - 1,
+                ..entry
+            }
+            .render_current()
+        );
+    }
+
+    #[test]
+    fn old_schema_version_discards_ledger() {
+        let dir = TempDir::new("version");
+        let mut ledger = Ledger::default();
+        ledger.insert(
+            "abc",
+            LedgerEntry {
+                sha1: Some("aa".to_string()),
+                mtime: 5,
+                bytes: 6,
+                files: Vec::new(),
+                trim_band: None,
+                render: RENDER_VERSION,
+            },
+        );
+        ledger.version = LEDGER_VERSION - 1;
+        ledger.save(&dir.path).unwrap();
+        assert!(Ledger::load(&dir.path).is_empty());
     }
 }

@@ -3,7 +3,7 @@ r"""图片墙静态导出目录的契约 v1 校验（F-080 -> F-081 接口的验
 
 用法：
     python scripts/wall_manifest_check.py .kanalib/wall_export
-    python scripts/wall_manifest_check.py --dir web/public/data --max-errors 80
+    python scripts/wall_manifest_check.py web/public/data --max-errors 80
 
 校验口径以 docs/backlog/photo-wall-contract.md（v1）为准：
   1) index.json 必备 schema / count / shard_size / shards / paths 及类型；
@@ -15,7 +15,13 @@ r"""图片墙静态导出目录的契约 v1 校验（F-080 -> F-081 接口的验
      g 若存在为分组名（string；契约可选字段，缺失不算错）；
   3) 每条 item 的 t512/<id>.jpg 必须存在（t256 可缺，只统计覆盖率）；
   4) facets.tags 按 count 降序、最多 2000 项（facets.groups 最多 200 项）；
-  5) 导出目录内的文本文件不得出现本地绝对路径（盘符、\Users\、/home/、/Users/）。
+  5) 导出目录内的文本文件不得出现本地绝对路径（盘符、\Users\、/home/、/Users/）；
+  6) search-index.json（契约 §2.1）：v=1；tags 升序去重且覆盖分片全部标签；
+     groups 升序去重且不含空串；items 行数与分片条目数一致，
+     每行 [id, n, [tagIdx...], groupIdx, st, rt] 逐项与分片对齐：
+     tagIdx 升序去重、不越界、标签集合与该条一致；未分组 groupIdx=-1；
+     st 为 0-5 整数；rt 为 g/s/q/e/空。
+     文件缺失只记警告（旧发布器产物），不影响退出码；同时打印原始与 gzip 体积。
 
 退出码：0 通过；1 契约违规；2 环境问题（目录/index.json 缺失或 JSON 解析失败）。
 只用标准库，无第三方依赖；不写任何文件、不修改导出目录（纯只读校验）。
@@ -25,6 +31,7 @@ r"""图片墙静态导出目录的契约 v1 校验（F-080 -> F-081 接口的验
 from __future__ import annotations
 
 import argparse
+import gzip
 import json
 import os
 import pathlib
@@ -419,6 +426,219 @@ def scan_privacy(root: pathlib.Path, report: Report, suffixes: tuple[str, ...], 
     stats["text_files"] = total
 
 
+SEARCH_DETAIL_LIMIT = 5  # 逐条错误只打前几条，其余聚合成一条，避免 937 条刷屏
+SEARCH_RATINGS = ("g", "s", "q", "e", "")
+
+
+def check_item_tags(
+    value: object, tags: list[str], where: str, report: Report
+) -> set[str] | None:
+    """校验一行的 tagIdx 数组：整数、严格升序（已去重）、不越界；返回标签名集合。"""
+    if not isinstance(value, list):
+        report.error(where, "tags", f"必须是数组，实际 {type(value).__name__}")
+        return None
+    names: set[str] = set()
+    previous = -1
+    for position, index in enumerate(value):
+        if not isinstance(index, int) or isinstance(index, bool):
+            report.error(where, "tags", f"第 {position} 项必须是整数，实际 {type(index).__name__}")
+            return None
+        if index <= previous:
+            report.error(
+                where, "tags", f"第 {position} 项 {index} 未严格升序（上一个是 {previous}；同条标签必须去重）"
+            )
+            return None
+        if index >= len(tags):
+            report.error(where, "tags", f"第 {position} 项下标 {index} 越界（tags 只有 {len(tags)} 项）")
+            return None
+        previous = index
+        names.add(tags[index])
+    return names
+
+
+def check_search_index(
+    root: pathlib.Path,
+    report: Report,
+    summaries: list[dict],
+    stats: dict[str, int],
+) -> None:
+    """校验 search-index.json（契约 §2.1/§7）：共享表、行对齐、下标与集合一致性。
+
+    summaries 是按分片顺序收集的清单摘要（id/n/rt/g/st/tags），只读现有分片，用来逐项对齐。
+    文件缺失只记警告：旧发布器产物仍应通过其余校验。
+    """
+    path = root / "search-index.json"
+    if not path.is_file():
+        report.warn("search-index.json", "文件", "不存在（旧发布器产物；用 --index-only 生成）")
+        return
+    try:
+        raw = path.read_bytes()
+    except OSError as exc:
+        report.error("search-index.json", "文件", f"读取失败：{exc}")
+        return
+    stats["search_bytes"] = len(raw)
+    try:
+        stats["search_gzip_bytes"] = len(gzip.compress(raw, 6, mtime=0))
+    except (OSError, ValueError):
+        pass
+    payload = load_json(path, report, "search-index.json")
+    if not isinstance(payload, dict):
+        return
+
+    version = payload.get("v")
+    if not isinstance(version, int) or isinstance(version, bool):
+        report.error("search-index.json", "v", f"必须是整数，实际 {type(version).__name__}")
+    elif version != 1:
+        report.error("search-index.json", "v", f"当前契约只有 v1，实际 {version}")
+
+    count = len(summaries)
+    tags = payload.get("tags")
+    if not isinstance(tags, list):
+        report.error("search-index.json", "tags", f"必须是数组，实际 {type(tags).__name__}")
+        tags = []
+    elif any(not isinstance(name, str) or not name for name in tags):
+        report.error("search-index.json", "tags", "必须是标签名（非空字符串）数组")
+        tags = [name for name in tags if isinstance(name, str) and name]
+    previous = None
+    for position, name in enumerate(tags):
+        if previous is not None and name <= previous:
+            report.error(
+                "search-index.json",
+                "tags",
+                f"必须升序且去重：第 {position} 项 {brief(name)} 不大于上一项 {brief(previous)}",
+            )
+            break
+        previous = name
+    stats["search_tags"] = len(tags)
+
+    groups = payload.get("groups")
+    if not isinstance(groups, list):
+        report.error("search-index.json", "groups", f"必须是数组，实际 {type(groups).__name__}")
+        groups = []
+    else:
+        for position, name in enumerate(groups):
+            if not isinstance(name, str) or not name:
+                report.error(
+                    "search-index.json",
+                    f"groups[{position}]",
+                    "必须是非空字符串（未分组用 groupIdx=-1，不写空串）",
+                )
+                groups = []
+                break
+        for position, name in enumerate(groups):
+            if position > 0 and name <= groups[position - 1]:
+                report.error(
+                    "search-index.json",
+                    "groups",
+                    f"必须升序且去重：第 {position} 项 {brief(name)} 不大于上一项 {brief(groups[position - 1])}",
+                )
+                break
+
+    rows = payload.get("items")
+    if not isinstance(rows, list):
+        report.error("search-index.json", "items", f"必须是数组，实际 {type(rows).__name__}")
+        return
+    if len(rows) != count:
+        report.error("search-index.json", "items", f"行数 {len(rows)} 与分片条目数 {count} 不一致")
+
+    details = 0
+    for position, summary in enumerate(summaries):
+        if details >= SEARCH_DETAIL_LIMIT or position >= len(rows):
+            break
+        where = f"search-index.json item[{position}]"
+        row = rows[position]
+        if not isinstance(row, list) or len(row) != 6:
+            details += 1
+            report.error(
+                where, "items", "每行必须是 [id, n, [tagIdx...], groupIdx, st, rt]（6 项）"
+            )
+            continue
+        item_id, name, indices, group_index, star, rating = row
+        if summary["id"] is not None and item_id != summary["id"]:
+            details += 1
+            report.error(where, "id", f"{brief(item_id)} 与分片条目 id {brief(summary['id'])} 不一致")
+            continue
+        if summary["n"] is not None and name != summary["n"]:
+            details += 1
+            report.error(where, "n", f"{brief(name)} 与分片条目 n {brief(summary['n'])} 不一致")
+            continue
+        if not isinstance(rating, str) or rating not in SEARCH_RATINGS:
+            details += 1
+            report.error(where, "rt", f"必须是 g/s/q/e/空，实际 {brief(rating)}")
+            continue
+        if summary["rt"] is not None and rating != str(summary["rt"]).strip().lower():
+            details += 1
+            report.error(where, "rt", f"{brief(rating)} 与分片条目 rt {brief(summary['rt'])} 不一致")
+            continue
+        if not isinstance(star, int) or isinstance(star, bool) or not 0 <= star <= 5:
+            details += 1
+            report.error(where, "st", f"必须是 0-5 的整数，实际 {brief(star)}")
+            continue
+        if (
+            isinstance(summary["st"], int)
+            and not isinstance(summary["st"], bool)
+            and star != summary["st"]
+        ):
+            details += 1
+            report.error(where, "st", f"{star} 与分片条目 st {summary['st']} 不一致")
+            continue
+        if not isinstance(group_index, int) or isinstance(group_index, bool) or group_index < -1:
+            details += 1
+            report.error(where, "groupIdx", f"必须是 -1 或 groups 下标，实际 {brief(group_index)}")
+            continue
+        expected_group = summary["g"]
+        if group_index == -1:
+            if expected_group:
+                details += 1
+                report.error(
+                    where, "groupIdx", f"-1 表示未分组，但分片条目分组是 {brief(expected_group)}"
+                )
+                continue
+        elif group_index >= len(groups):
+            details += 1
+            report.error(where, "groupIdx", f"下标 {group_index} 越界（groups 只有 {len(groups)} 项）")
+            continue
+        elif groups[group_index] != expected_group:
+            details += 1
+            report.error(
+                where,
+                "groupIdx",
+                f"指向 {brief(groups[group_index])}，但分片条目分组是 {brief(expected_group)}",
+            )
+            continue
+        decoded_names = check_item_tags(indices, tags, where, report)
+        if decoded_names is None:
+            details += 1
+            continue
+        if summary["tags_ok"] and decoded_names != set(summary["tags"]):
+            details += 1
+            missing = sorted(set(summary["tags"]) - decoded_names)[:3]
+            extra = sorted(decoded_names - set(summary["tags"]))[:3]
+            report.error(
+                where, "tags", f"与分片标签集合不一致：缺 {missing}、多 {extra}"
+            )
+    if details >= SEARCH_DETAIL_LIMIT and count > SEARCH_DETAIL_LIMIT:
+        report.error(
+            "search-index.json",
+            "行对齐",
+            f"至少 {SEARCH_DETAIL_LIMIT} 条出现错位，其余条目未逐项展开（先修前几条再重跑）",
+        )
+
+    # 共享表必须覆盖全库标签：既不能漏（长尾搜索失效），也不能多（死条目）。
+    if summaries and all(summary["tags_ok"] for summary in summaries):
+        expected_tags: set[str] = set()
+        for summary in summaries:
+            expected_tags.update(summary["tags"])
+        actual_tags = set(tags)
+        if expected_tags != actual_tags:
+            report.error(
+                "search-index.json",
+                "tags",
+                f"标签表与分片标签集合不一致：缺 {sorted(expected_tags - actual_tags)[:3]}、"
+                f"多 {sorted(actual_tags - expected_tags)[:3]}",
+            )
+
+
 def parse_args(argv: list[str] | None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="校验图片墙静态导出目录是否符合契约 v1（只读，不写任何文件）。",
@@ -461,6 +681,7 @@ def main(argv: list[str] | None = None) -> int:
         "orig_ref", "orig_ok", "orig_missing", "t512_ok", "t512_missing",
         "t256_ok", "t1024_ok", "t2048_ok", "sharp_declared", "sharp_1024", "sharp_2048",
         "facet_tags", "facet_groups", "text_files", "shards", "dups", "group_ref",
+        "search_tags", "search_bytes", "search_gzip_bytes",
     )}
 
     print(f"图片墙导出目录契约校验 v1 —— {root.resolve()}")
@@ -526,6 +747,7 @@ def main(argv: list[str] | None = None) -> int:
     declared_sum = 0
     loaded_sum = 0
     seen_ids: dict[str, str] = {}
+    summaries: list[dict] = []  # 搜索索引逐项对齐用的摘要（顺序 = 分片顺序）
     for position, shard in enumerate(shards):
         field = f"shards[{position}]"
         if not isinstance(shard, dict):
@@ -578,6 +800,31 @@ def main(argv: list[str] | None = None) -> int:
             global_index = loaded_sum - len(items) + offset
             where = f"{rel} item[{offset}]（全局 #{global_index}）"
             item_id = check_item(report, where, item, files, stats)
+            if isinstance(item, dict):
+                raw_tags = item.get("tags")
+                summaries.append({
+                    "id": item_id,
+                    "n": item.get("n"),
+                    "rt": item.get("rt"),
+                    "g": item.get("g") if isinstance(item.get("g"), str) else "",
+                    "st": item.get("st"),
+                    "tags_ok": isinstance(raw_tags, list),
+                    "tags": [
+                        tag[0]
+                        for tag in raw_tags
+                        if isinstance(tag, list) and tag and isinstance(tag[0], str)
+                    ] if isinstance(raw_tags, list) else [],
+                })
+            else:
+                summaries.append({
+                    "id": item_id,
+                    "n": None,
+                    "rt": None,
+                    "g": "",
+                    "st": None,
+                    "tags_ok": False,
+                    "tags": [],
+                })
             if item_id is not None:
                 previous = seen_ids.get(item_id)
                 if previous is not None:
@@ -594,6 +841,7 @@ def main(argv: list[str] | None = None) -> int:
     stats["items"] = loaded_sum
 
     check_facets(report, index.get("facets"), stats)
+    check_search_index(root, report, summaries, stats)
 
     if not args.no_privacy:
         suffixes = tuple(part.strip().lstrip(".").lower() for part in args.suffixes.split(",") if part.strip())
@@ -630,6 +878,12 @@ def main(argv: list[str] | None = None) -> int:
           f"t2048 {stats['sharp_2048']}；缺失表示旧发布器）")
     print(f"  原图          声明 {stats['orig_ref']} 条，在位 {stats['orig_ok']} 个，缺 {stats['orig_missing']} 个")
     print(f"  facets.tags   {stats['facet_tags']} 项，facets.groups {stats['facet_groups']} 项")
+    if stats["search_bytes"]:
+        gzip_ratio = (100.0 * stats["search_gzip_bytes"] / stats["search_bytes"]) if stats["search_bytes"] else 0.0
+        print(f"  search-index  {stats['search_tags']} 个标签，原始 {stats['search_bytes'] / 1024:.1f}KB，"
+              f"gzip {stats['search_gzip_bytes'] / 1024:.1f}KB（{gzip_ratio:.1f}%）")
+    else:
+        print("  search-index  未生成（旧发布器产物；--index-only 可补）")
     if not args.no_privacy:
         print(f"  隐私扫描      {stats['text_files']} 个文本文件")
     print(f"  重复 id       {stats['dups']} 条")
