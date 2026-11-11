@@ -1,6 +1,6 @@
 # 图片墙视觉与信息架构改版（v2 设计任务书）
 
-> 上级：[cloud-photo-wall.md](cloud-photo-wall.md) · 契约：[photo-wall-contract.md](photo-wall-contract.md)
+> 上级：[cloud-photo-wall.md](../../backlog/cloud-photo-wall.md) · 契约：[photo-wall-contract.md](../../backlog/photo-wall-contract.md)
 >
 > **状态：已实施（2026-11-09）。** 本文是 web/ 改版的唯一视觉依据；代码落点见 §10，验收截图 `web/screenshots/v2-*.png`（本地，已 gitignore）。
 

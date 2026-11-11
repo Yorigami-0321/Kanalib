@@ -1,6 +1,6 @@
 # 第二轮任务包（2026-10-27）
 
-> 上级索引：[../FEATURE-BACKLOG.md](../FEATURE-BACKLOG.md) · 文档地图：[README](./README.md) · 第一轮：[parallel-plan.md](parallel-plan.md)
+> 上级索引：[../FEATURE-BACKLOG.md](../../FEATURE-BACKLOG.md) · 文档地图：[README](../../backlog/README.md) · 第一轮：[parallel-plan.md](parallel-plan.md)
 
 > 第一轮状态：任务 0/A/B/C/E/D 已全部落地并合入（`5fb45f4` 依赖骨架、`5672b97` 备份、`cf6943c` 日志、`fe18b60` 扫描/排除/监听、`f11eec6` 重命名修复、`6b1b88b` 监听恢复、`dbd6f35` 便携校验、`5226eee` UI 集成）。第二轮核心线可以并行。
 >
@@ -92,7 +92,7 @@
 
 - **D2b 交付**：只改 `crates/kanalib-ui/src/lib.rs`。低置信度审核接到设置页（读 `pending_tag_reviews`，按资产分组显示候选标签、类别、分数与阈值，逐条或整张接受/忽略）；搜索输入 220ms 防抖，只在 `dup:true` 时构造去重路径集，查询走任务 B 的 `search_page`（`MAX_SEARCH_PAGE`），结果超分页上限时回退到不截断的内存过滤；检查器加格式友好名与解码能力提示（AVIF 需要 FFmpeg），`friendly_media_error` 补 AVIF/FFmpeg/不支持编码等提示。
 - **验证**：`cargo test --workspace` core 82（7 项按需忽略）+ UI 15 + bin 3 全绿；`cargo check --workspace` 无警告。隔离数据根 `.kanalib/r2_ui_root`（sample_library，15 资产）实测：AVIF 资产检查器显示「格式 · AVIF · 需要 FFmpeg 解码」、PNG 显示「内置解码」；待审候选 5 条，接受 `#chibi` 后提示「接受候选 #chibi · 处理 1 条」，DB 中 `asset_scores.review_state='accepted'` 且标签写入；搜索 `girl`→1 张、`tag:chibi`→仅 anime_chibi.png、`dup:true`→0 张、清空→15 张。截图 `.kanalib/r2b_*.png`。所有 UI 冒烟使用隔离数据根，未触碰真实图库。
-- **基准**：release、`KANALIB_BENCH_ROWS=100000` 重新生成的 10 万库，名称排序 p95 133ms（达标），命中全库的非名称排序 276–304ms（未达标）。明细见 [pending/search-organization.md](pending/search-organization.md)。
+- **基准**：release、`KANALIB_BENCH_ROWS=100000` 重新生成的 10 万库，名称排序 p95 133ms（达标），命中全库的非名称排序 276–304ms（未达标）。明细见 [pending/search-organization.md](../../backlog/pending/search-organization.md)。
 - **未完成边界**：F-012 非名称排序 p95 仍超 150ms（临时 B 树排序）；F-033 还差 HEIC/RAW/PSD 与动画播放入口；F-040 阶段 2 还差 pHash/损坏修复迁移、ffprobe 与许可落盘；F-012/F-033/F-040 保留在 pending。浏览增强、相册/集合、网络源仍在第三轮。
 - **禁止回退**：schema 仍为 v8（A 是唯一 schema owner）；sidecar 协议保持向后兼容；UI 仍只有一条车道；标签别名由调用方 `SearchQuery::resolve_tag_aliases` 解析（SQL 侧按标签名精确匹配，不解析别名），改搜索路径时不能漏掉这一步。
 

@@ -17,6 +17,7 @@
 /sidecar_test.out
 /.qoder-credits/
 /.qoder/
+/.qoder-collab-runtime/
 __pycache__/
 /crates/*/.kanalib/
 

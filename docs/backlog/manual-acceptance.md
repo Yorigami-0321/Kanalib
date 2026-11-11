@@ -2,7 +2,7 @@
 
 > 用途：集中需要窗口前台、真实键盘鼠标、真实系统环境或长耗时数据生成的验收项。**未勾选不代表失败，也不代表通过**；完成后在对应项打勾，并把证据路径补在「证据/备注」列。
 >
-> 上级索引：[README.md](README.md) · 路线：[next-steps.md](next-steps.md) · 逐项实现记录：[pending/browse.md](pending/browse.md)
+> 上级索引：[README.md](README.md) · 未完成项：[pending/overview.md](pending/overview.md) · 图片墙路线图：[photo-wall-status.md](photo-wall-status.md) · 逐项实现记录：[pending/browse.md](pending/browse.md)
 >
 > 最后整理：2026-11-07（第八轮副屏验收后）。
 

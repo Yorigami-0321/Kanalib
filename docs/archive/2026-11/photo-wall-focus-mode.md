@@ -6,9 +6,9 @@
 > 1) **保留挤压重排**：以点击瞬间的 world rect 为锚，英雄卡留在原处放大，其余图挤到它四周；`gridColumns()` 按区域宽高比/图片平均比例选列，修掉细条；点邻卡只切换放大对象，不把图片搬到固定英雄位、不与旧英雄互换；
 > 2) 相机**不居中**，只在英雄卡被缝/检查器/sheet 遮住时做最小平移；
 > 3) 卡片 key 与渲染顺序改为 `item.id + 格子`，重排时 DOM 不移动/重挂，挤压与放大都能连续过渡；
-> 4) 本文件 §4/§9/§11 中“相机居中 / 零重叠”的描述作废；“挤压重排”保留，详见 [photo-wall-status.md](photo-wall-status.md) §4.12。
+> 4) 本文件 §4/§9/§11 中“相机居中 / 零重叠”的描述作废；“挤压重排”保留，详见 [photo-wall-status.md](../../backlog/photo-wall-status.md) §4.12。
 >
-> 关联：[photo-wall-v3.md](photo-wall-v3.md)（现行交互标准）· [photo-wall-status.md](photo-wall-status.md)（§4.9 的本轮实测）· [photo-wall-contract.md](photo-wall-contract.md)（数据契约）· `.kanalib/folia-ui-spec.md`（Folia 实测规格）
+> 关联：[photo-wall-v3.md](../../backlog/photo-wall-v3.md)（现行交互标准）· [photo-wall-status.md](../../backlog/photo-wall-status.md)（§4.9 的本轮实测）· [photo-wall-contract.md](../../backlog/photo-wall-contract.md)（数据契约）· `.kanalib/folia-ui-spec.md`（Folia 实测规格）
 
 ## 0. 结论先行
 

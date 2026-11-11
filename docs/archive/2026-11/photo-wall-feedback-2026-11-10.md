@@ -1,6 +1,6 @@
 # 图片墙实机反馈修复：第一轮（2026-11-10 深夜）
 
-> 上级状态：[photo-wall-status.md](photo-wall-status.md) · 分支 `feature/cloud-photo-wall`
+> 上级状态：[photo-wall-status.md](../../backlog/photo-wall-status.md) · 分支 `feature/cloud-photo-wall`
 >
 > 用户 2026-11-10 晚实机反馈共 7 条（编号沿用用户原话的 1/2/3/4/6/7）。**本轮按指示只修「问题 1 + 问题 3」（同一根因：聚焦英雄卡布局），修完即暂停**；其余问题未动，现状与根因记录在 §3，供下一轮直接开工。
 >

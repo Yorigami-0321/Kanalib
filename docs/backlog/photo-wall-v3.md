@@ -1,12 +1,12 @@
 # 图片墙 v3：方向与验收标准（草案，待你确认后动手）
 
-> 上级：[cloud-photo-wall.md](cloud-photo-wall.md) · 视觉基线：[photo-wall-design.md](photo-wall-design.md) · 契约：[photo-wall-contract.md](photo-wall-contract.md)
+> 上级：[cloud-photo-wall.md](cloud-photo-wall.md) · 视觉基线：[photo-wall-design.md](../archive/2026-11/photo-wall-design.md) · 契约：[photo-wall-contract.md](photo-wall-contract.md)
 >
 > 2026-11-09 起。**本文件只定标准，不含实现**；问题清单在 §6，确认前不动代码。
 >
 > **2026-11-09 晚已按本标准实施完毕**，落地状态与复验数据见 [photo-wall-status.md](photo-wall-status.md)。
 > **2026-11-10 复查补齐**：Q8 四入口、详情触摸横滑/缩放平移、标签按类别分组折叠、Q7a 强调色分层已落地；以代码 + 浏览器实测为准，见 status §4.9。
-> **2026-11-10 v4**：单击=原位聚焦（不跳详情）、双击=详情；详情底部信息层删除，标题/元数据/标签/相似搬进 300px 左侧检查器；触控板 deltaX/详情横向 wheel 见 [photo-wall-focus-mode.md](photo-wall-focus-mode.md)。
+> **2026-11-10 v4**：单击=原位聚焦（不跳详情）、双击=详情；详情底部信息层删除，标题/元数据/标签/相似搬进 300px 左侧检查器；触控板 deltaX/详情横向 wheel 见 [photo-wall-focus-mode.md](../archive/2026-11/photo-wall-focus-mode.md)。
 >
 > 参考材料：Folia 源码规格（`.kanalib/folia-ui-spec.md`，36KB，从 `.kanalib/refs/folia` 实测）+ 用户 2026-11-09 给的四类"无界"站点清单。
 
@@ -249,8 +249,8 @@ Folia 已实测、可直接抄的硬指标：缝宽 120px、padding `16px 10px 0
 - 其余 Q2–Q23、Q7a–Q7d 全部按建议值执行。
 
 ### E. 工程与验收
-**Q19.** 性能红线：9899 张时允许首屏渲染多少？是否必须虚拟化（只渲染视口内的卡）？
-默认建议：纵向滚动**不虚拟化**（实测 5000 张流畅），画布方案**必须虚拟化**。
+**Q19.** 性能红线：首屏允许渲染多少？是否必须虚拟化（只渲染视口内的卡）？
+默认建议：画布方案**必须虚拟化**；当前实库 937 张，规模上限按虚拟化与按需分片设计，不以某个固定张数作为通过线。
 
 **Q20.** 这一轮范围：A. 只做首页 + 标签层；B. 首页 + 标签层 + 详情页；C. 连筛选面板一起重做。
 默认建议：**B**。

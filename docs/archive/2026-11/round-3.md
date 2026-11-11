@@ -1,6 +1,6 @@
 # 第三轮任务包（2026-10-27）
 
-> 上级索引：[../FEATURE-BACKLOG.md](../FEATURE-BACKLOG.md) · 文档地图：[README](./README.md) · 第一轮：[parallel-plan.md](parallel-plan.md) · 第二轮：[round-2.md](round-2.md)
+> 上级索引：[../FEATURE-BACKLOG.md](../../FEATURE-BACKLOG.md) · 文档地图：[README](../../backlog/README.md) · 第一轮：[parallel-plan.md](parallel-plan.md) · 第二轮：[round-2.md](round-2.md)
 
 > 本轮目标：补齐整理与浏览工作流（智能集合/相册、以图找相似、相似阈值预览、分组浏览），补齐扫描可观测性与小交互（进度/ETA、拖拽导入、从图库移除）。备份恢复、媒体评估与搜索性能三条留作顺延；网络来源实现仍不进入本轮。
 
@@ -48,8 +48,8 @@
   - F-004：`similar_to_anchor(path, threshold, limit)`——直接复用库里已存的 `phash`，不重新解码；按汉明距离升序返回距离/相似度百分比；与全库分组解耦（不做链式合并）。
   - F-045：阈值预览 API——给定候选阈值返回预估组数/成员数（可用采样，需说明采样比例与误差）；阈值语义与去重 6/10/14 预设统一，支持 0–32 连续值；低阈值时返回可判定的「链式合并风险」标记。
   - 阈值改变只影响展示与预览，不清空既有评审状态（沿用现有签名策略）。
-- **不做**：滑杆/结果视图 UI（任务 G2）；不换 `image_hasher`（换库会使评审状态失效，见 [component-research.md](component-research.md)）。
-- **验收**：10 万暖库单张锚点查询 ≤300ms，实测数字写回 [pending/browse.md](pending/browse.md)；距离排序与 `similarity_pct_from_distance` 一致；预览组数与实扫组数偏差有记录；阈值/距离相关单测覆盖边界 0 与 32。
+- **不做**：滑杆/结果视图 UI（任务 G2）；不换 `image_hasher`（换库会使评审状态失效，见 [component-research.md](../../backlog/component-research.md)）。
+- **验收**：10 万暖库单张锚点查询 ≤300ms，实测数字写回 [pending/browse.md](../../backlog/pending/browse.md)；距离排序与 `similarity_pct_from_distance` 一致；预览组数与实扫组数偏差有记录；阈值/距离相关单测覆盖边界 0 与 32。
 - **冲突**：`dedup.rs` 由本任务独占；任务 C 不改去重分组语义；UI 结果视图只消费本任务返回的路径序列。
 
 ### 任务 C：F-063 + F-037 + F-032 剩余 + F-030 剩余（扫描/来源运维核心，`state.rs` 扫描路径唯一负责人）
@@ -61,7 +61,7 @@
   - F-032 剩余：排除/忽略规则的编辑与执行接口（校验、命中预览已有，需要「对已入库但被规则排除的资产」提供保留/移出的批量结果），任何移出都只动 DB。
   - F-030 剩余：目录级重命名/跨来源移动的识别策略结论；来源在启动即离线时的自恢复监听；真实 `notify` 集成测试（临时目录事件风暴不阻塞、不产生重复条目）。
 - **不做**：进度条/状态栏/设置页 UI（任务 G3）；不改搜索 SQL、不改打标队列内部逻辑。
-- **验收**：10 万冷导入可看到阶段切换与 ETA（数字记录到 [pending/ops.md](pending/ops.md)）；停止后状态正确；节流不降低扫描吞吐（与 42.3min 基线对比不劣化）；移除后磁盘文件不变、重扫不重新导入、可恢复；忽略规则不误删磁盘文件；监听测试在无 UI 环境可跑。
+- **验收**：10 万冷导入可看到阶段切换与 ETA（数字记录到 [pending/ops.md](../../backlog/pending/ops.md)）；停止后状态正确；节流不降低扫描吞吐（与 42.3min 基线对比不劣化）；移除后磁盘文件不变、重扫不重新导入、可恢复；忽略规则不误删磁盘文件；监听测试在无 UI 环境可跑。
 - **冲突**：`state.rs` 扫描/对账路径由本任务独占；任务 A 只加组织接口、任务 B 只加相似查询函数，都要避开扫描函数；后续与顺延 1 共享 `main.rs` 时按 rebase 处理。
 
 ## 顺延任务（本轮不派；方案与门禁保留，等 A/B/C 收口后再排）
@@ -92,7 +92,7 @@
 - **决定**（2026-10-27 确认）：`p95 ≤ 150ms` 不再当硬门禁，改为「先小基准，取实测上限并写回文档」；A/B/C 收口后再排这条线。
 - **文件**：`db.rs` 的排序/分页路径与 `ensure_search_indexes`；不碰 `lib.rs`。
 - **内容**：先做小基准再拍板，候选方案至少覆盖：每排序键的覆盖索引 + `INDEXED BY`、把 FTS 命中 rowid 物化到临时表再排序、denormalized 预排序键列（若要加列须并入任务 A 的 v9，不得另起迁移）、以及「接受当前上限 + UI 侧异步分页缓解」的兜底结论。短词 `LIKE` 回退保持现状。
-- **不做**：不引入 Tantivy（沿用 [component-research.md](component-research.md) 结论）；不改 UI 防抖。
+- **不做**：不引入 Tantivy（沿用 [component-research.md](../../backlog/component-research.md) 结论）；不改 UI 防抖。
 - **验收**：同一份 10 万合成库上重测，给出方案对照表、实测 p50/p95 与选定理由；把 F-012 的验收写成记录到的上限（当前记录：名称排序 p95 133ms、非名称排序 p95 276–304ms）；结果与内存过滤逐条一致的单测继续通过。
 - **冲突**：`db.rs` 在任务 A 之后合；`SearchQuery::resolve_tag_aliases` 的别名解析仍在调用方，改排序路径不能漏。
 
@@ -109,7 +109,7 @@
 ### 任务 G2：F-004/F-045/F-005/F-003 相似与浏览 UI
 
 - **内容**：检查器与右键菜单「查找相似」入口，结果为可继续筛选/多选/快速查看的临时视图并显示距离与相似度；设置页与去重页的 0–32 阈值滑杆 + 预估组数/成员数预览，保留 6/10/14 快捷档与临时值/默认值区分；分组浏览与时间线在现有 6 种视图与固定格尺寸（大 288/268、中 160/150、小 128/112，行高 +68）之上加组头，不改动格内布局；对比模式支持当前去重组或选中 2–4 张，同步缩放/平移、差异高亮、可标记保留项。
-- **验收**：不违反 [constraints.md](constraints.md) 的 UI 固定规格（6 视图、`Contain` 不裁切、无平铺/幻灯片）；10 万库分组滚动不劣于现有基线；对比中只加载当前对比图、复用 `ThumbCache`；Esc 返回原视图与滚动位置；截图与 UIA 记录。
+- **验收**：不违反 [constraints.md](../../backlog/constraints.md) 的 UI 固定规格（6 视图、`Contain` 不裁切、无平铺/幻灯片）；10 万库分组滚动不劣于现有基线；对比中只加载当前对比图、复用 `ThumbCache`；Esc 返回原视图与滚动位置；截图与 UIA 记录。
 - **待确认**：F-005 组头吸顶与 F-003 并排布局属新版式，需要用户先确认视觉方向再实现。
 
 ### 任务 G3：F-036/F-037/F-063/F-032 交互与运维 UI
@@ -135,7 +135,7 @@
 
 ## 验收与验证约定
 
-- 每轮收尾重跑默认成员的 `cargo test`（core + UI + bin；当时基线 core 82 + UI 15，7 项按需忽略）与 `cargo check --workspace`。`cargo test --workspace` 会连带 vendor 测试，不作为门禁（见 [../TESTING-PROCESS.md](../TESTING-PROCESS.md)）。
+- 每轮收尾重跑默认成员的 `cargo test`（core + UI + bin；当时基线 core 82 + UI 15，7 项按需忽略）与 `cargo check --workspace`。`cargo test --workspace` 会连带 vendor 测试，不作为门禁（见 [../TESTING-PROCESS.md](../../TESTING-PROCESS.md)）。
 - 每轮收尾重跑 `bash scripts/check_backlog_docs.sh`：registry ID 不重复、不丢失，implemented/pending 状态互不矛盾。
 - 基准数字必须说明用的是哪份库（第二轮已出现同一查询在不同合成库上 276–304ms 与 350–380ms 的差异）。
 - `.ps1` 一律 `pwsh -NoLogo -NoProfile`；UI 自动化只针对本应用窗口，用窗口内 UIA/消息，不用全局键鼠。
@@ -144,7 +144,7 @@
 
 1. **任务 0 拆分 `lib.rs`：执行。** 用一条不产出用户可见功能的前置任务，换取 Wave 2 三条 UI 线的并行度。
 2. **Wave 1 只开 A（F-013/014）、B（F-004/045）、C（F-063/037/032/030 剩余）。** 备份恢复（F-061）、媒体评估（F-033/F-040）、搜索性能（F-012）转为本文件的「顺延任务」，本轮不派发。
-3. **F-012 非名称排序：`p95 ≤ 150ms` 不再是硬门禁。** 改为「先小基准，取实测上限并写回文档」，已同步到 [constraints.md](constraints.md) 与 [pending/search-organization.md](pending/search-organization.md)。
+3. **F-012 非名称排序：`p95 ≤ 150ms` 不再是硬门禁。** 改为「先小基准，取实测上限并写回文档」，已同步到 [constraints.md](../../backlog/constraints.md) 与 [pending/search-organization.md](../../backlog/pending/search-organization.md)。
 4. **HEIC/RAW/PSD：按「实测样本 + 许可门」处理。** 只有真实样本解码成功率、安装包体积增量与 LGPL 原生依赖审查都过关才接进扫描，否则在文档里明确写「不支持」及原因。
 
 ## 视觉方向（2026-10-28 用户确认）

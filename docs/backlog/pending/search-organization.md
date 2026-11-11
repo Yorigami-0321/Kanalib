@@ -1,6 +1,6 @@
 # 搜索与组织
 
-> 上级索引：[../README.md](../README.md) · 文档地图：[README](../README.md) · 第三轮任务包：[round-3.md](../round-3.md)
+> 上级索引：[../README.md](../README.md) · 文档地图：[README](../README.md) · 第三轮任务包：[round-3.md](../../archive/2026-11/round-3.md)
 
 ## F-012 搜索与筛选性能
 
