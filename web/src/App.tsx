@@ -410,7 +410,8 @@ export function App() {
 
   // 所有列表/总览页都要全量分片：搜索与封面计数必须在整库上算，
   // 不能只看已滚到的部分（之前的"筛选只过滤已加载"就是这里的缺口）。
-  const needAll = route.view !== 'detail';
+  // 未知路由只渲染缺失页，不需要拉数据。
+  const needAll = route.view !== 'detail' && route.view !== 'notfound';
   useEffect(() => {
     if (!needAll || allLoaded) return;
     if (wall.phase === 'boot' || wall.phase === 'loading' || wall.phase === 'error') return;
@@ -464,7 +465,9 @@ export function App() {
   }, [detailId, wall.items, wall.loadedShards, wall.hasMore, wall.phase]);
 
   useEffect(() => {
-    if (route.view !== 'detail') setRailView(route.view === 'wall' ? 'home' : route.view);
+    if (route.view !== 'detail') {
+      setRailView(route.view === 'wall' || route.view === 'notfound' ? 'home' : route.view);
+    }
   }, [route]);
 
   useEffect(() => {
@@ -673,6 +676,17 @@ export function App() {
     window.scrollTo(0, 0);
   }, []);
 
+  /** 未知地址缺失页的「去搜索」：回首页并打开侧栏搜索面板（输入框自带 autoFocus）。 */
+  const handleGoSearch = useCallback(() => {
+    setSpotlightItem(null);
+    navigate(wallHref());
+    window.scrollTo(0, 0);
+    // 侧栏常驻；等路由切到首页后再开面板，避免面板开在缺失页上。
+    window.requestAnimationFrame(() => {
+      document.getElementById('seam-panel-trigger-search')?.click();
+    });
+  }, []);
+
   // 自动放映：每张停留 4.2s，到最后一张回到第一张；离开详情自动停。
   const PLAY_INTERVAL = 4200;
   useEffect(() => {
@@ -863,6 +877,29 @@ export function App() {
           ? '换个分组或回首页看看。'
           : undefined;
 
+  /** 空态至少给一个可执行动作：清掉搜索，或回到该类内容的总览。 */
+  const emptyAction = !filtered ? null : queryActive ? (
+    <button type="button" className="ghost" onClick={() => setFilters((prev) => ({ ...prev, query: '' }))}>
+      清空搜索
+    </button>
+  ) : route.view === 'fav' ? (
+    <button type="button" className="ghost" onClick={handleHome}>
+      回首页
+    </button>
+  ) : route.view === 'tag' ? (
+    <button type="button" className="ghost" onClick={handleTags}>
+      回标签总览
+    </button>
+  ) : route.view === 'rating' ? (
+    <button type="button" className="ghost" onClick={handleRatings}>
+      回分级总览
+    </button>
+  ) : route.view === 'group' ? (
+    <button type="button" className="ghost" onClick={handleGroups}>
+      回分组总览
+    </button>
+  ) : null;
+
   const loadingBuckets = !allLoaded && wall.hasMore;
 
   const inspector = inspectorItem
@@ -937,6 +974,21 @@ export function App() {
           ) : (
             <p className="stage__hint">正在定位…</p>
           )
+        ) : route.view === 'notfound' ? (
+          <section className="stage__missing" aria-labelledby="notfound-title">
+            <h1 className="stage__missing-title" id="notfound-title">
+              这个地址没有对应的页面
+            </h1>
+            <p className="stage__missing-sub">链接可能拼错了，或者这个页面已经改名。</p>
+            <div className="stage__missing-actions" role="group" aria-label="缺失页面的处理">
+              <button type="button" className="ghost" onClick={handleHome}>
+                回首页
+              </button>
+              <button type="button" className="ghost" onClick={handleGoSearch}>
+                去搜索
+              </button>
+            </div>
+          </section>
         ) : route.view === 'tags' ? (
           <TagGallery
             entries={tagEntries}
@@ -952,6 +1004,11 @@ export function App() {
             paths={wall.paths}
             loading={loadingBuckets}
             emptyText="还没有收藏（收藏状态来自工作台）"
+            emptyAction={
+              <button type="button" className="ghost" onClick={handleHome}>
+                回首页
+              </button>
+            }
             onOpen={handleOpenBucket}
           />
         ) : route.view === 'ratings' ? (
@@ -962,6 +1019,11 @@ export function App() {
             paths={wall.paths}
             loading={loadingBuckets}
             emptyText="这份数据没有分级"
+            emptyAction={
+              <button type="button" className="ghost" onClick={handleHome}>
+                回首页
+              </button>
+            }
             onOpen={handleOpenBucket}
           />
         ) : route.view === 'groups' ? (
@@ -972,6 +1034,11 @@ export function App() {
             paths={wall.paths}
             loading={loadingBuckets}
             emptyText="这份数据没有分组"
+            emptyAction={
+              <button type="button" className="ghost" onClick={handleHome}>
+                回首页
+              </button>
+            }
             onOpen={handleOpenBucket}
           />
         ) : (
@@ -997,6 +1064,7 @@ export function App() {
               tagCounts={tagCounts}
               emptyText={emptyText}
               emptyHint={emptyHint}
+              emptyAction={emptyAction}
               spotlightId={spotlightItem?.id ?? null}
               spotlightAnchor={spotlightAnchor}
               spotlightAnchorRect={spotlightRect}

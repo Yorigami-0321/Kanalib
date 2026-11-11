@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type RefObject } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode, type RefObject } from 'react';
 import type { Rect } from '../lib/expand';
 import type { TierPaths, WallItem } from '../source/types';
 import type { WallPhase } from '../state/useWall';
@@ -83,6 +83,8 @@ export interface WallViewProps {
   emptyText?: string;
   /** 空态第二行提示；不传用「换个标签或清掉筛选再看」。 */
   emptyHint?: string;
+  /** 空态动作（清空搜索 / 回总览等）；由 App 按当前路由给出。 */
+  emptyAction?: ReactNode;
   /** 当前聚焦卡 id（受控）；单击卡片时由视图层上抛。 */
   spotlightId?: string | null;
   /** 聚焦卡的世界坐标中心；从详情返回时用它恢复聚焦位置。 */
@@ -168,6 +170,7 @@ export function WallView({
   tagCounts,
   emptyText,
   emptyHint,
+  emptyAction,
   spotlightId,
   spotlightAnchor,
   spotlightAnchorRect,
@@ -217,9 +220,22 @@ export function WallView({
   const sizeRef = useRef(size);
   sizeRef.current = size;
 
-  // 画布自身从缝的右缘开始（styles.css `.canvas` 左边距 = --seam-w），
-  // size.w 就是可用画布宽度，不再需要"世界右移让开缝"的 worldInset。
-  // 窄屏阈值按画布宽度取：原视口 760 在 64px 缝下约等于画布 700。
+  // 导航缝宽度（CSS 变量 --seam-w）：画布铺满视口后，图会垫到缝下面（玻璃要透），
+  // 但缝区仍是导航——画布手势在 pointerdown / wheel 里按这个宽度绕开。
+  const seamWidthRef = useRef(0);
+  useEffect(() => {
+    const read = () => {
+      const raw = getComputedStyle(document.documentElement).getPropertyValue('--seam-w');
+      const parsed = Number.parseFloat(raw);
+      seamWidthRef.current = Number.isFinite(parsed) ? parsed : 0;
+    };
+    read();
+    window.addEventListener('resize', read);
+    return () => window.removeEventListener('resize', read);
+  }, []);
+
+  // size.w 是整块画布（含缝下区域）；窄屏阈值按整宽判定。
+
   const narrow = size.w <= 700;
   const viewWidth = Math.max(200, size.w);
   const worldWidth = narrow
@@ -501,8 +517,8 @@ export function WallView({
     const hostBox = viewportRef.current?.getBoundingClientRect();
     const left = box.left - (hostBox?.left ?? 0);
     const top = box.top - (hostBox?.top ?? 0);
-    // 相机坐标就是画布坐标：安全区按画布内 24px 计算，不再假设缝宽。
-    const safeLeft = 24;
+    // 相机坐标就是画布坐标：左侧安全区要越过压在画布上的缝，不然焦点卡会藏在玻璃下。
+    const safeLeft = seamWidthRef.current + 24;
     const safeRight = size.w - 24;
     const safeTop = 24;
     const safeBottom = size.h - 24;
@@ -658,7 +674,7 @@ export function WallView({
     [stopGlide, stopInertia],
   );
 
-  /** 以"可见区"中心为锚缩放：键盘 +/- 与侧栏按钮共用一条路。画布坐标已不含缝宽度。 */
+  /** 以画布中心为锚缩放：键盘 +/- 与侧栏按钮共用一条路。 */
   const zoomByFactor = useCallback(
     (factor: number) => {
       const cam = cameraRef.current;
@@ -726,7 +742,7 @@ export function WallView({
   /** 让世界坐标 (wx, wy) 落在内容区中心；rightInset/bottomInset 为聚焦时侧栏/sheet 占用的空间。 */
   const centerOnWorld = useCallback(
     (wx: number, wy: number, zoom = cameraRef.current.zoom, rightInset = 0, bottomInset = 0) => {
-      // 用画布的实际宽度：首帧 size 还是默认视口宽，画布让出缝后会偏 ~17px。
+      // 用画布的实际宽度：首帧 size 还是默认视口宽，等 ResizeObserver 落定。
       const hostWidth = viewportRef.current?.clientWidth || viewWidth;
       const availableW = Math.max(200, hostWidth - rightInset);
       const availableH = Math.max(200, size.h - bottomInset);
@@ -830,6 +846,9 @@ export function WallView({
   };
 
   const onPointerDown = (event: React.PointerEvent<HTMLDivElement>) => {
+    // 缝区硬拦截：画布铺到侧栏下面只是为了玻璃能透图，缝仍是导航。
+    // 必须在 setPointerCapture 之前返回，否则缝里的按下会被吃成画布拖拽/选卡。
+    if (event.clientX < seamWidthRef.current) return;
     // 鼠标只认左键；触摸/手写笔的每个 pointerId 都要收（第二根手指是缩放）。
     if (event.pointerType === 'mouse' && event.button !== 0) return;
     const element = event.target as Element | null;
@@ -1066,6 +1085,8 @@ export function WallView({
     const host = viewportRef.current;
     if (!host) return;
     const onWheelNative = (event: WheelEvent) => {
+      // 缝区滚轮留给侧栏自己滚：不 preventDefault、不平移、不缩放。
+      if (event.clientX < seamWidthRef.current) return;
       event.preventDefault();
       stopInertia();
       classifyWheel(event);
@@ -1134,7 +1155,7 @@ export function WallView({
       // 无限空间没有世界尺寸：.world 只当坐标系原点用，尺寸交给卡片自己。
       width: infinite ? undefined : worldWidth,
       height: infinite ? undefined : Math.max(layout.height, size.h),
-      // 画布从缝的右缘开始，世界坐标原点就是画布左上角；
+      // 画布铺满视口，世界坐标原点就是视口左上角；
       // origin：rebase 后的世界偏移，卡片按 (rect - origin) 渲染，这里把偏移补回屏幕。
       // bounce：撞边界时的纯视觉越界补偿（≤28px），camera 本身始终合法。
       transform:
@@ -1280,8 +1301,8 @@ export function WallView({
     ensuredSpot.current = spotlightKey;
     const cam = cameraRef.current;
     const zoom = cam.zoom;
-    // 画布坐标原点就是缝的右缘，安全区直接按画布内边距算，不再叠加缝宽。
-    const safeLeft = 24;
+    // 画布铺满视口，缝压在左侧：英雄卡的安全区要叠加缝宽，避免聚焦后藏在玻璃下。
+    const safeLeft = seamWidthRef.current + 24;
     const safeRight = size.w - 24;
     const safeTop = 24;
     const safeBottom = size.h - 24;
@@ -1416,6 +1437,7 @@ export function WallView({
             <>
               <strong>{emptyText ?? '没有符合条件的图片'}</strong>
               {emptyHint ?? '换个标签或清掉筛选再看。'}
+              {emptyAction ? <div className="wall__note-actions">{emptyAction}</div> : null}
             </>
           ) : (
             <>

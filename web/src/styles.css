@@ -182,6 +182,19 @@ a {
 .stage__missing .stage__hint {
   min-height: 0;
 }
+.stage__missing-title {
+  margin: 0;
+  color: var(--ink);
+  font-size: 18px;
+  font-weight: 500;
+}
+.stage__missing-sub {
+  margin: 0;
+  max-width: 36em;
+  color: var(--ink-soft);
+  font-size: 13px;
+  line-height: 1.6;
+}
 .stage__missing-actions {
   display: flex;
   gap: 10px;
@@ -528,8 +541,10 @@ a {
 
 .canvas {
   position: fixed;
-  /* 画布从缝的右缘开始：缝下方不再有画布内容/命中区，侧栏区域不会被穿透。 */
-  inset: 0 0 0 var(--seam-w);
+  /* 画布铺满视口：图要垫到侧栏玻璃下面，76% 半透明 + blur(10px) 才有内容可透。
+     缝区不靠画布让位隔离，改由 Wall.tsx 在 pointerdown / wheel 里对 clientX < 缝宽
+     硬拦截——按下不拖拽、不缩放、不选卡，滚轮留给缝自己滚。 */
+  inset: 0;
   z-index: 0;
   overflow: hidden;
   cursor: grab;
@@ -556,10 +571,11 @@ a {
 
 .tile {
   position: absolute;
-  overflow: hidden;
+  /* 卡片本体不再裁切：概要遮罩要越过裁切边界铺满最外设备像素（见 .tile__media /
+     .tile__info 注释）。图片和底部压暗的圆角裁切交给 .tile__media。 */
   border-radius: 12px;
   background: #101012;
-  contain: layout paint;
+  contain: layout;
   cursor: pointer;
   box-shadow: inset 0 0 0 1px rgba(247, 244, 238, 0.055);
   /* 聚焦时卡片在布局里换到更大的 rect：位置/尺寸走 320ms，周围图被平滑挤开。 */
@@ -579,9 +595,8 @@ a {
 .tile:hover {
   filter: saturate(1.08) brightness(1.05);
   transform: translateY(-2px);
-  box-shadow:
-    inset 0 0 0 1px rgba(247, 244, 238, 0.12),
-    inset 0 -44px 60px rgba(0, 0, 0, 0.24);
+  /* 描边挪到 .tile__ring（见下），父级只留底部压暗。 */
+  box-shadow: inset 0 -44px 60px rgba(0, 0, 0, 0.24);
 }
 
 /* ===== 单击聚焦（v4）：格子/有限墙局部重排，英雄卡占更大的 rect；所有图仍在同一层 ===== */
@@ -615,7 +630,6 @@ a {
     box-shadow 240ms var(--ease);
   box-shadow:
     0 36px 90px rgba(0, 0, 0, 0.58),
-    inset 0 0 0 1px rgba(247, 244, 238, 0.2),
     inset 0 -80px 100px rgba(0, 0, 0, 0.18);
 }
 
@@ -632,14 +646,56 @@ a {
 /* 硬规则 6：焦点与当前项都走内描边，没有任何外发光。 */
 .tile:focus-visible {
   outline: none;
-  box-shadow: inset 0 0 0 1px var(--accent);
 }
 
-/* 「当前项」= 刚点开 / 刚右键看概要的那张：2px accent 内描边。
-   和焦点环合并成一条规则，两套永不叠加。 */
-.tile[data-current='true'],
-.tile[data-current='true']:focus-visible {
+/* ===== 反馈描边层 =====
+   所有 hover / 聚焦 / 当前项的描边都画在这一层：盖在概要遮罩（z-index 5）之上，
+   inset:0 + border-radius:inherit，四边同宽同色，pointer-events:none。
+   为什么不留在父级 box-shadow：父级内描边会被遮罩半透明地压住，又贴着裁切边界
+   参与抗锯齿，分数缩放/分数坐标下从边缘漏成 1px 亮线（zoom 1.2635 / 1.6 实测）。
+   单独一层和遮罩同层叠放，形状是完整的 2px 环，不存在"透光细线"。 */
+.tile__ring {
+  position: absolute;
+  inset: 0;
+  z-index: 6;
+  border-radius: inherit;
+  pointer-events: none;
+  transition: box-shadow 240ms var(--ease);
+}
+
+.tile:hover .tile__ring {
+  box-shadow: inset 0 0 0 2px rgba(247, 244, 238, 0.16);
+}
+
+.tile--spotlight .tile__ring {
+  box-shadow: inset 0 0 0 2px rgba(247, 244, 238, 0.2);
+}
+
+/* 「当前项」= 刚点开 / 刚右键看概要的那张：2px accent；和焦点环合并成一条规则。 */
+.tile:focus-visible .tile__ring,
+.tile[data-current='true'] .tile__ring,
+.tile[data-current='true']:focus-visible .tile__ring {
   box-shadow: inset 0 0 0 2px var(--accent);
+}
+
+/* 概要态只留内容：装饰环（hover / 当前项 / 聚焦卡）会让"铺满边缘"的最外两像素
+   出现刻意的亮边，与验收口径冲突；文案与操作已经在叠层里，识别性不靠环。
+   键盘焦点环例外——可访问性优先，且只在键盘操作时出现。 */
+.tile[data-summary='true'] .tile__ring,
+.tile[data-summary='true']:hover .tile__ring,
+.tile--spotlight[data-summary='true'] .tile__ring {
+  box-shadow: none;
+}
+
+.tile[data-summary='true']:focus-visible .tile__ring {
+  box-shadow: inset 0 0 0 2px var(--accent);
+}
+
+/* 概要态压掉卡片自己的描边与投影：最外 1px 的内描边会从半透明遮罩下透出来，
+   是反馈里"边缘亮线"的一半来源；遮罩铺满后也要一并关掉，否则最外两像素仍比
+   内部亮 3–4/255。英雄卡的投影是叠层关系、不在边缘，保持不动。 */
+.tile[data-summary='true']:not(.tile--spotlight) {
+  box-shadow: none;
 }
 
 /* 入场（§2.5）：只动 opacity + transform。延迟由 JS 按对角线波次写在 inline style。
@@ -656,10 +712,27 @@ a {
   }
 }
 
+/* ===== 卡片的圆角裁切层 =====
+   图片、底部压暗、加载骨架都收在这一层里做 overflow:hidden + 圆角裁切；
+   卡片本体不再裁切，否则概要遮罩的边界也被一起裁掉（分数缩放下裁切边界只有
+   部分像素覆盖，遮罩永远铺不满最外 1 个设备像素，下面的图/描边就漏成亮线）。
+   概要挂载期间外扩 1px：让卡片最外设备像素被图片完整覆盖，遮罩边缘才不会混入
+   图片抗锯齿（分数缩放 1.2635 / 1.6 实测会差 20+/255）。 */
+.tile__media {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  border-radius: inherit;
+}
+
+.tile:has(.tile__info) .tile__media {
+  inset: -1px;
+}
+
 /* 渐进揭示：虚拟化平移时每张新挂载的卡都会跑一遍过渡，过渡越重越掉帧。
    原来 14px 模糊 + 1.035 缩放在 700–900ms 内收敛，是滚轮/触控板平移的主要瓶颈
    （2.2s 合成滚轮：46fps → 64fps 仅靠去掉过渡）。现在只保留 200ms 线性淡入，
-   加载骨架交给 .tile::before 的渐变；filter 过渡只服务单色模式（N）的淡入淡出。 */
+   加载骨架交给 .tile__media::before 的渐变；filter 过渡只服务单色模式（N）的淡入淡出。 */
 .tile__img {
   display: block;
   width: 100%;
@@ -689,7 +762,7 @@ a {
 
 /* 加载骨架：真实图未到之前扫一条低对比高光，避免整面墙先黑一片。
    1.5s 一个循环，只动 background-position，不触发布局。 */
-.tile::before {
+.tile__media::before {
   content: '';
   position: absolute;
   inset: 0;
@@ -707,7 +780,7 @@ a {
   transition: opacity 240ms var(--ease);
 }
 
-.tile:has(> img:not(.is-loaded))::before {
+.tile__media:has(> img:not(.is-loaded))::before {
   opacity: 1;
   animation: tile-shimmer 1.5s ease-in-out infinite;
 }
@@ -982,6 +1055,8 @@ a {
   display: grid;
   min-height: 100vh;
   place-items: center;
+  /* 文案 + 动作作为一个整体垂直居中；默认 stretch 会把三行撑满视口，按钮被甩到底部。 */
+  align-content: center;
   padding: 40px 20px;
   color: var(--ink-soft);
   text-align: center;
@@ -1002,6 +1077,24 @@ a {
   background: rgba(247, 244, 238, 0.09);
 }
 
+/* 空态动作行：与提示文案同列居中，按钮样式沿用 .ghost。 */
+.wall__note-actions {
+  display: flex;
+  justify-content: center;
+  gap: 10px;
+  margin-top: 14px;
+}
+
+/* 按钮的 14px 间距由动作行统一给，避免行内按钮被 margin 顶偏。 */
+.wall__note-actions button {
+  margin-top: 0;
+}
+
+.wall__note-actions .ghost {
+  flex: none;
+  min-width: 124px;
+}
+
 /* ===== 卡片上的右键概要层（Folia 图4 那种：信息直接叠在自己的图上） ===== */
 
 /* 叠层自带文件名与 meta：卡片自己的角标和常驻标题必须让位，
@@ -1013,12 +1106,17 @@ a {
 
 .tile__info {
   position: absolute;
-  inset: 0;
+  /* 外扩 2px 越过卡片边界（卡片本体已不裁切，见 .tile__media）：图片在 -1px
+     处完成抗锯齿，遮罩在 -2px 处收边，两者边界都在采样到的卡片像素之外，
+     最外一像素是"遮罩 × 完整图片"，和内部亮度一致。圆角随卡片，越界部分
+     压在深色页底上不可见。内边距同步 +2（12 → 14），内容位置保持不变。 */
+  inset: -2px;
+  border-radius: inherit;
   z-index: 5;
   display: flex;
   flex-direction: column;
   justify-content: space-between;
-  padding: 12px;
+  padding: 14px;
   /* 遮罩边缘要压得住亮图：旧版中段 40% / 顶部 72% 不透明度，
      亮图从边缘透出来像一条边界缝（反馈问题 4a）。 */
   background: linear-gradient(
@@ -1103,12 +1201,39 @@ a {
   left: calc(var(--seam-w) + 20px);
   z-index: 8;
   display: flex;
+  /* 负 margin 抵消内边距：衬底向外长，文字仍停在原来的位置。 */
+  margin: -10px 0 0 -16px;
+  padding: 10px 16px 14px;
   max-width: calc(100vw - var(--seam-w) - 40px);
+  border-radius: 18px;
   align-items: center;
   gap: 10px;
   /* 纯标题层：不拦指针，否则会挡住下面一行的卡片点击/拖拽。 */
   pointer-events: none;
   animation: page-in 350ms var(--ease);
+}
+
+/* 无界画布会把卡片拖到标题下方：给标题一层柔和纸面衬底（顶部压暗 + 背景虚化），
+   边缘用径向遮罩淡出，空画布上几乎看不出来。衬底不参与命中测试，卡片照常点/拖；
+   不做"顶部安全区"是因为无界世界没有固定边缘——留白要么限制平移，要么被拖走，
+   而这里的诉求只是"静止时标题可读"。 */
+.wallhead::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  border-radius: inherit;
+  background: linear-gradient(
+    180deg,
+    color-mix(in srgb, var(--bg) 90%, transparent) 0%,
+    color-mix(in srgb, var(--bg) 62%, transparent) 58%,
+    transparent 100%
+  );
+  -webkit-backdrop-filter: blur(14px) saturate(1.05);
+  backdrop-filter: blur(14px) saturate(1.05);
+  -webkit-mask-image: radial-gradient(165% 170% at 6% 0%, #000 52%, transparent 100%);
+  mask-image: radial-gradient(165% 170% at 6% 0%, #000 52%, transparent 100%);
+  pointer-events: none;
 }
 
 .wallhead__title {

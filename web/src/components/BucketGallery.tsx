@@ -1,3 +1,4 @@
+import type { ReactNode } from 'react';
 import { tierUrl } from '../lib/assetUrl';
 import { formatCount } from '../lib/format';
 import type { TierPaths } from '../source/types';
@@ -18,6 +19,8 @@ export interface BucketGalleryProps {
   paths: TierPaths;
   loading: boolean;
   emptyText: string;
+  /** 空态动作（回首页等）；由 App 给出，保持按钮可键盘触发。 */
+  emptyAction?: ReactNode;
   onOpen: (href: string) => void;
 }
 
@@ -32,6 +35,7 @@ export function BucketGallery({
   paths,
   loading,
   emptyText,
+  emptyAction,
   onOpen,
 }: BucketGalleryProps) {
   return (
@@ -75,7 +79,10 @@ export function BucketGallery({
           ))}
         </div>
       ) : !loading ? (
-        <p className="tags__empty">{emptyText}</p>
+        <>
+          <p className="tags__empty">{emptyText}</p>
+          {emptyAction ? <div className="tags__empty-actions">{emptyAction}</div> : null}
+        </>
       ) : null}
     </section>
   );

@@ -224,28 +224,31 @@ export const WallCard = memo(function WallCard({
       aria-label={item.n}
       title={item.n}
     >
-      {failed ? (
-        <span className="tile__fallback">缩略图缺失</span>
-      ) : (
-        <img
-          ref={imgRef}
-          className={'tile__img' + (loaded ? ' is-loaded' : '')}
-          src={spotlight && !spotReady && holdSrc ? holdSrc : sources[tierIndex]}
-          srcSet={gridAttrs?.srcSet}
-          sizes={gridAttrs?.sizes}
-          alt={item.n}
-          // 画布本身已经把 DOM 限制在视口附近，再叠加浏览器懒加载会因为 .world 的
-          // translate 只触发左上角一小撮，其余卡一直是空的。这里全量即时加载。
-          loading="eager"
-          fetchPriority={spotlight ? 'high' : 'auto'}
-          decoding="async"
-          draggable={false}
-          onLoad={() => setLoaded(true)}
-          onError={handleError}
-        />
-      )}
+      {/* 圆角裁切层：卡片本体不裁切，概要遮罩要越过边界铺满最外像素（见样式注释）。 */}
+      <div className="tile__media">
+        {failed ? (
+          <span className="tile__fallback">缩略图缺失</span>
+        ) : (
+          <img
+            ref={imgRef}
+            className={'tile__img' + (loaded ? ' is-loaded' : '')}
+            src={spotlight && !spotReady && holdSrc ? holdSrc : sources[tierIndex]}
+            srcSet={gridAttrs?.srcSet}
+            sizes={gridAttrs?.sizes}
+            alt={item.n}
+            // 画布本身已经把 DOM 限制在视口附近，再叠加浏览器懒加载会因为 .world 的
+            // translate 只触发左上角一小撮，其余卡一直是空的。这里全量即时加载。
+            loading="eager"
+            fetchPriority={spotlight ? 'high' : 'auto'}
+            decoding="async"
+            draggable={false}
+            onLoad={() => setLoaded(true)}
+            onError={handleError}
+          />
+        )}
 
-      <span className="tile__shade" />
+        <span className="tile__shade" />
+      </div>
 
       <span className="tile__chip">
         {item.fav ? '♥ ' : ''}
@@ -310,6 +313,8 @@ export const WallCard = memo(function WallCard({
           </div>
         </div>
       ) : null}
+      {/* 反馈描边层：在概要遮罩之上画统一的 2px 环，避免从裁切边漏成亮线。 */}
+      <span className="tile__ring" aria-hidden="true" />
     </div>
   );
 });

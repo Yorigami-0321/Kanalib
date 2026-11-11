@@ -80,6 +80,15 @@
   font-size: 13px;
 }
 
+.app .tags__empty-actions {
+  margin-top: 14px;
+}
+
+.app .tags__empty-actions .ghost {
+  flex: none;
+  min-width: 124px;
+}
+
 /* ===== 封面卡：超大标签名压在图上 ===== */
 
 .app .tagcard {

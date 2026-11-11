@@ -15,6 +15,38 @@ const MAX_ZOOM = 4;
 const WHEEL_NAV_THRESHOLD = 80;
 const WHEEL_NAV_COOLDOWN = 450;
 
+/** 详情预加载窗口：正中那张前后各预取几张 t512 占位。 */
+const PRELOAD_RADIUS = 3;
+/** 预取名单上限：连续翻很多张时别把内存/带宽无上限地攒着。 */
+const PRELOAD_LIMIT = 120;
+/** 同一个 t512 URL 只预取一次；邻屏挂载时直接命中缓存，不重复拉档。 */
+const prefetchedPreviews = new Set<string>();
+
+/**
+ * 中心图前后各 PRELOAD_RADIUS 张的 t512 占位。
+ * 只拉占位档：锐利档仍由居中屏独占（"居中才升档"不变）。
+ */
+function prefetchPreviewWindow(items: readonly WallItem[], index: number, paths: TierPaths): void {
+  if (index < 0) return;
+  for (let distance = 2; distance <= PRELOAD_RADIUS; distance += 1) {
+    for (const offset of [distance, -distance]) {
+      const target = items[index + offset];
+      if (!target) continue;
+      const url = tierUrl(paths, 't512', target.id);
+      if (prefetchedPreviews.has(url)) continue;
+      prefetchedPreviews.add(url);
+      if (prefetchedPreviews.size > PRELOAD_LIMIT) {
+        const oldest = prefetchedPreviews.values().next().value;
+        if (oldest) prefetchedPreviews.delete(oldest);
+      }
+      const image = new Image();
+      image.decoding = 'async';
+      image.fetchPriority = 'low';
+      image.src = url;
+    }
+  }
+}
+
 function clampZoom(scale: number, x: number, y: number): ZoomState {
   const nextScale = Math.min(MAX_ZOOM, Math.max(1, scale));
   if (nextScale <= 1.001) return NO_ZOOM;
@@ -520,6 +552,17 @@ export function Detail({
   }, [veiled]);
 
   const routeIndex = items.findIndex((entry) => entry.id === item.id);
+
+  // 邻屏（±1）挂载时已经各拉一张 t512；这里只补窗口外围的 ±2/±3。
+  // 停留 800ms 后再预取：首屏与邻屏先拿到带宽，连续快速翻页时旧的定时器被清掉，
+  // 不会为中途掠过、根本没停留的图浪费流量。同一 URL 只预取一次（见上面的 Set）。
+  useEffect(() => {
+    if (routeIndex < 0 || slowNetwork()) return;
+    const timer = window.setTimeout(() => {
+      prefetchPreviewWindow(items, routeIndex, paths);
+    }, 800);
+    return () => window.clearTimeout(timer);
+  }, [routeIndex, items, paths]);
 
   const navigateDir = useCallback(
     (direction: -1 | 1) => {

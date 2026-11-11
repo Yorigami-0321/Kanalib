@@ -142,28 +142,46 @@ const MEASURE = String.raw`
         hit: tiles.some((t) => t.rect.right > x && t.rect.left < end && t.rect.bottom > cr.top && t.rect.top < cr.bottom),
       });
     }
-    const fullyVisible = tiles
-      .filter((t) => t.rect.top >= cr.top && t.rect.bottom <= cr.bottom && t.rect.left >= cr.left && t.rect.right <= cr.right)
-      .sort((a, b) => a.rect.top - b.rect.top || a.rect.left - b.rect.left);
+    const seamEl = document.querySelector('.seam');
+    const seamBox = seamEl ? seamEl.getBoundingClientRect() : null;
+    const seamRight = seamBox ? seamBox.right : cr.left;
+    // 取样/操作点落在缝的中心，而不是"画布左缘的一半"（画布现在从 0 开始）。
+    const probeX = seamBox ? seamBox.left + seamBox.width / 2 : Math.max(2, cr.left / 2);
+    // 焦点用例要点一张整张都在缝右侧的卡：只完全可见但中心压着缝的话，
+    // 点击会被缝区守卫正确拦下，测不到 spotlight。
+    const visibleRightOfSeam = tiles.filter(
+      (t) =>
+        t.rect.top >= cr.top &&
+        t.rect.bottom <= cr.bottom &&
+        t.rect.left >= seamRight - 1 &&
+        t.rect.right <= cr.right,
+    );
+    const fullyVisible = (visibleRightOfSeam.length ? visibleRightOfSeam : tiles.filter(
+      (t) => t.rect.top >= cr.top && t.rect.bottom <= cr.bottom && t.rect.left >= cr.left && t.rect.right <= cr.right,
+    )).sort((a, b) => a.rect.top - b.rect.top || a.rect.left - b.rect.left);
     const topmost = fullyVisible[0] || null;
     const head = document.querySelector('.wallhead');
     const headRect = head ? head.getBoundingClientRect() : null;
     const headProbe = headRect
       ? document.elementFromPoint(headRect.left + Math.min(40, headRect.width / 2), headRect.top + headRect.height / 2)
       : null;
-    const seamProbe = document.elementFromPoint(Math.max(2, cr.left / 2), cr.top + cr.height / 2);
+    const seamProbe = document.elementFromPoint(probeX, cr.top + cr.height / 2);
     const blank = (() => {
       for (let y = cr.top + 120; y < cr.bottom - 120; y += 40) {
-        const el = document.elementFromPoint(Math.max(2, cr.left / 2), y);
+        const el = document.elementFromPoint(probeX, y);
         if (el && !el.closest('.canvas') && !el.closest('button, a, input, select, textarea')) {
-          return { x: Math.max(2, cr.left / 2), y };
+          return { x: probeX, y };
         }
       }
-      return { x: Math.max(2, cr.left / 2), y: cr.top + cr.height / 2 };
+      return { x: probeX, y: cr.top + cr.height / 2 };
     })();
+    const seamRect = document.querySelector('.seam')?.getBoundingClientRect() ?? null;
     return {
       viewport: { w: innerWidth, h: innerHeight },
       canvas: { left: cr.left, top: cr.top, w: cr.width, h: cr.height },
+      seam: seamRect ? { left: seamRect.left, right: seamRect.right, width: seamRect.width } : null,
+      // 画布必须真的铺到缝下面，玻璃才有内容可透（不是"缝右边才开始画"）。
+      canvasCoversSeam: !!seamRect && cr.left <= seamRect.left && cr.right >= seamRect.right,
       transform: world ? world.style.transform : null,
       zoom: world ? new DOMMatrixReadOnly(getComputedStyle(world).transform).a : 1,
       tileCount: tiles.length,
@@ -185,7 +203,7 @@ const MEASURE = String.raw`
       tileSample: tiles.slice(0, 6).map((t) => ({ x: Math.round(t.rect.x), y: Math.round(t.rect.y), w: Math.round(t.rect.w), h: Math.round(t.rect.h) })),
       seamPoints: Array.from({ length: 9 }, (_, i) => {
         const y = cr.top + 60 + i * 90;
-        const el = document.elementFromPoint(Math.max(2, cr.left / 2), y);
+        const el = document.elementFromPoint(probeX, y);
         return { y, insideCanvas: !!(el && el.closest('.canvas')), tag: el ? (typeof el.className === 'string' ? el.className : el.tagName) : null };
       }),
     };
@@ -251,8 +269,8 @@ async function main() {
       }
       return result.result?.value;
     };
-    const shot = async (name) => {
-      const png = await cdp.send('Page.captureScreenshot', { format: 'png' });
+    const shot = async (name, clip) => {
+      const png = await cdp.send('Page.captureScreenshot', clip ? { format: 'png', clip } : { format: 'png' });
       const path = join(outDir, name);
       writeFileSync(path, Buffer.from(png.data, 'base64'));
       return path;
@@ -341,6 +359,8 @@ async function main() {
     report.cases.desktop = {
       viewport: initial.viewport,
       canvas: initial.canvas,
+      canvasCoversSeam: initial.canvasCoversSeam,
+      seamWidth: initial.seam ? initial.seam.width : null,
       tileCount: initial.tileCount,
       uniqueIds: initial.uniqueIds,
       rowsMissing: initial.rowsMissing,
@@ -349,12 +369,18 @@ async function main() {
       tileWidths: initial.tileWidths,
     };
     const desktopShot = await shot('tag360-desktop-initial.png');
+    // 缝下有图：只截左侧一栏，确认玻璃里能看到画布内容。
+    const glassShot = await shot('sidebar-glass-desktop.png', { x: 0, y: 0, width: 260, height: 900, scale: 1 });
 
-    // 侧栏区域：既命中不到画布，也不在 wallhead 里。
+    // 缝区硬拦截：画布铺到缝下面后，不再断言"缝内采样点不在 canvas 内"，
+    // 而是验证"在缝里按下拖动 220px，画布/路由/聚焦都不动；右侧滚轮照常平移缩放"。
     const seamBefore = await evaluate(`({ transform: document.querySelector('.world')?.style.transform, hash: location.hash })`);
     report.cases.seam = {
       canvasLeft: initial.canvas.left,
+      canvasCoversSeam: initial.canvasCoversSeam,
+      seamWidth: initial.seam ? initial.seam.width : null,
       seamTag: initial.seamTag,
+      // 仅作记录：缝元素自己盖在画布上，命中测试仍返回缝而不是 canvas。
       seamInsideCanvas: initial.seamInsideCanvas,
       seamPointsInsideCanvas: initial.seamPoints.filter((p) => p.insideCanvas).length,
       seamPoints: initial.seamPoints,
@@ -371,6 +397,65 @@ async function main() {
     report.cases.seam.moved = seamBefore.transform !== seamAfter.transform;
     report.cases.seam.spotted = seamAfter.spotlight;
     report.cases.seam.hashChanged = seamBefore.hash !== seamAfter.hash;
+
+    // 真实滚轮落在缝上：事件归缝，画布不能动。
+    const seamRealWheelBefore = await evaluate(`document.querySelector('.world')?.style.transform`);
+    await cdp.send('Input.dispatchMouseEvent', {
+      type: 'mouseWheel',
+      x: initial.blank.x,
+      y: initial.blank.y,
+      deltaX: 0,
+      deltaY: 240,
+    });
+    await sleep(450);
+    const seamRealWheelAfter = await evaluate(`document.querySelector('.world')?.style.transform`);
+    report.cases.seam.realWheelMoved = seamRealWheelBefore !== seamRealWheelAfter;
+
+    // 缝区滚轮（合成事件直接打到画布，模拟事件从缝下冒上来）：guard 必须放行。
+    const seamWheelBefore = await evaluate(`document.querySelector('.world')?.style.transform`);
+    const seamWheelPrevented = await evaluate(`(() => {
+      const host = document.querySelector('.canvas');
+      const event = new WheelEvent('wheel', { clientX: 40, clientY: 420, deltaY: 300, bubbles: true, cancelable: true });
+      return !host.dispatchEvent(event);
+    })()`);
+    await sleep(450);
+    const seamWheelAfter = await evaluate(`document.querySelector('.world')?.style.transform`);
+    report.cases.seam.wheelBefore = seamWheelBefore;
+    report.cases.seam.wheelAfter = seamWheelAfter;
+    report.cases.seam.wheelPrevented = seamWheelPrevented;
+    report.cases.seam.wheelMoved = seamWheelBefore !== seamWheelAfter;
+
+    // 右侧滚轮：仍然可以平移，Ctrl+滚轮仍然可以缩放。
+    const wheelX = Math.round(initial.canvas.left + initial.canvas.w * 0.72);
+    const wheelY = Math.round(initial.canvas.top + initial.canvas.h * 0.55);
+    const panBefore = await evaluate(`document.querySelector('.world')?.style.transform`);
+    await cdp.send('Input.dispatchMouseEvent', { type: 'mouseWheel', x: wheelX, y: wheelY, deltaX: 0, deltaY: 240 });
+    await sleep(500);
+    const panAfter = await evaluate(`document.querySelector('.world')?.style.transform`);
+    const zoomBefore = await evaluate(
+      `(() => { const w = document.querySelector('.world'); return w ? new DOMMatrixReadOnly(getComputedStyle(w).transform).a : 1; })()`,
+    );
+    await cdp.send('Input.dispatchMouseEvent', {
+      type: 'mouseWheel',
+      x: wheelX,
+      y: wheelY,
+      deltaX: 0,
+      deltaY: -120,
+      modifiers: 2,
+    });
+    await sleep(500);
+    const zoomAfter = await evaluate(
+      `(() => { const w = document.querySelector('.world'); return w ? new DOMMatrixReadOnly(getComputedStyle(w).transform).a : 1; })()`,
+    );
+    report.cases.seam.wheelPoint = {
+      x: wheelX,
+      y: wheelY,
+      target: await evaluate(`(() => { const el = document.elementFromPoint(${wheelX}, ${wheelY}); return el ? (el.closest('.canvas') ? 'canvas' : el.tagName) : null; })()`),
+    };
+    report.cases.seam.wheelPanMoved = panBefore !== panAfter;
+    report.cases.seam.zoomBefore = zoomBefore;
+    report.cases.seam.zoomAfter = zoomAfter;
+    report.cases.seam.zoomChanged = Math.abs(zoomAfter - zoomBefore) > 0.001;
 
     // 顶部卡片：点它，截聚焦后的画面。
     const top = initial.topmost;
@@ -413,6 +498,8 @@ async function main() {
     report.cases.mobile = {
       viewport: mobile.viewport,
       canvas: mobile.canvas,
+      canvasCoversSeam: mobile.canvasCoversSeam,
+      seamWidth: mobile.seam ? mobile.seam.width : null,
       tileCount: mobile.tileCount,
       rowsMissing: mobile.rowsMissing,
       colsMissing: mobile.colsMissing,
@@ -421,12 +508,15 @@ async function main() {
       seamPointsInsideCanvas: mobile.seamPoints.filter((p) => p.insideCanvas).length,
     };
     const mobileShot = await shot('tag360-mobile-initial.png');
+    const mobileGlassShot = await shot('sidebar-glass-mobile.png', { x: 0, y: 0, width: 160, height: 844, scale: 1 });
 
     // ---------- 有限小标签（显式排序）：verticalSlack 下点击锚点不偏 ----------
     // 1 张图的标签墙走有限世界：内容比视口矮时整墙垂直居中（verticalSlack > 0），
     // 点击卡片还原世界坐标必须扣掉这段纯视觉余量，否则英雄卡会被甩到错误位置。
     await setViewport(1440, 900, false);
-    await cdp.send('Page.navigate', { url: base + '#/t/rating:e?sort=name' });
+    // 带一个查询参数强制整页重载：前面的滚轮缩放会留在同一文档的相机里，
+    // 不清掉会让"点击锚点不偏"的基线带着 1.26× 缩放跑。
+    await cdp.send('Page.navigate', { url: base + '?probe=finite#/t/rating:e?sort=name' });
     const finite = await waitReady('finite', 30000, 1);
     const finiteBefore = await evaluate(`(() => {
       const el = document.querySelector('.tile');
@@ -465,20 +555,29 @@ async function main() {
     const dragUp = report.cases.dragUp;
     const m = report.cases.mobile;
     const fin = report.cases.finiteAnchor;
-    report.screenshots = { desktopShot, focusShot, dragShot, mobileShot };
+    report.screenshots = { desktopShot, glassShot, focusShot, dragShot, mobileShot, mobileGlassShot };
     report.passed =
       report.errors.length === 0 &&
-      Math.abs(d.canvas.left - 120) <= 1 &&
+      // 画布铺满视口，并且真的盖住缝（玻璃下有图）。
+      Math.abs(d.canvas.left) <= 1 &&
+      Math.abs(d.canvas.w - d.viewport.w) <= 1 &&
+      d.canvasCoversSeam === true &&
       d.tileCount >= 12 &&
       d.rowsMissing.length === 0 &&
       d.colsMissing.length === 0 &&
-      seam.canvasLeft === 120 &&
-      seam.seamInsideCanvas === false &&
+      // 缝区按下/拖动/滚轮都不驱动画布；右侧滚轮照常平移与缩放。
+      Math.abs(seam.canvasLeft) <= 1 &&
+      Math.abs(seam.seamWidth - 120) <= 1 &&
+      seam.canvasCoversSeam === true &&
       seam.wallheadBlocksClick === false &&
-      seam.seamPointsInsideCanvas === 0 &&
       seam.moved === false &&
       seam.spotted === false &&
       seam.hashChanged === false &&
+      seam.realWheelMoved === false &&
+      seam.wheelMoved === false &&
+      seam.wheelPrevented === false &&
+      seam.wheelPanMoved === true &&
+      seam.zoomChanged === true &&
       focus.spotlight === true &&
       focus.rowsMissing.length === 0 &&
       focus.colsMissing.length === 0 &&
@@ -487,12 +586,13 @@ async function main() {
       dragUp.rowsMissing.length === 0 &&
       dragUp.colsMissing.length === 0 &&
       dragUp.aboveTop > 0 &&
-      Math.abs(m.canvas.left - 64) <= 1 &&
+      Math.abs(m.canvas.left) <= 1 &&
+      Math.abs(m.canvas.w - m.viewport.w) <= 1 &&
+      m.canvasCoversSeam === true &&
+      Math.abs(m.seamWidth - 64) <= 1 &&
       m.overflowX <= 0 &&
       m.rowsMissing.length === 0 &&
       m.colsMissing.length === 0 &&
-      m.seamInsideCanvas === false &&
-      m.seamPointsInsideCanvas === 0 &&
       fin.delta !== null &&
       Math.abs(fin.delta[0]) <= 40 &&
       Math.abs(fin.delta[1]) <= 40 &&

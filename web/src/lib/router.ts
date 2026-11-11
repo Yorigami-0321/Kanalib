@@ -10,7 +10,8 @@ export type Route =
   | { view: 'rating'; rating: string }
   | { view: 'groups' }
   | { view: 'group'; group: string }
-  | { view: 'detail'; id: string };
+  | { view: 'detail'; id: string }
+  | { view: 'notfound' };
 
 /** 浏览状态里跟排序有关的取值；与 Sidebar 的 SortMode 是同一组字面量。 */
 export type SortParam = 'random' | 'time' | 'name' | 'stars';
@@ -83,10 +84,12 @@ let lastWritten = typeof window === 'undefined' ? '' : window.location.hash;
  * 地址：首页随机墙（#/）、标签总览/单标签墙（#/tags、#/t/<tag>）、
  * 收藏总览/收藏墙（#/favs、#/fav）、分级总览/分级墙（#/ratings、#/r/<G|S|Q|E>）、
  * 分组总览/分组墙（#/groups、#/g/<group>）、详情（#/d/<id>）。
+ * 其余非空路径归入 notfound，由 App 渲染轻量缺失页，不再静默回落首页。
  * query 部分（q/sort/mono/matte）由 `parseUiParams` 处理，不参与路径匹配。
  */
 export function parseRoute(hash: string): Route {
   const clean = splitHash(hash).path;
+  if (clean === '' || clean === '/') return { view: 'wall' };
   // 详情地址以 #/d/<id> 为准；#/a/<id> 是 v3 早期的写法，保留为兼容别名。
   const detail = /^\/d\/([^/?#]+)/.exec(clean) ?? /^\/a\/([^/?#]+)/.exec(clean);
   if (detail) return { view: 'detail', id: safeDecode(detail[1]) };
@@ -101,7 +104,7 @@ export function parseRoute(hash: string): Route {
   if (/^\/fav\/?$/.test(clean)) return { view: 'fav' };
   if (/^\/ratings\/?$/.test(clean)) return { view: 'ratings' };
   if (/^\/groups\/?$/.test(clean)) return { view: 'groups' };
-  return { view: 'wall' };
+  return { view: 'notfound' };
 }
 
 export function wallHref(): string {
