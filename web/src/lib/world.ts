@@ -205,6 +205,11 @@ function pickStrip(
   const minWidth = Math.min(box.w * 0.45, 96);
   for (const enforceWidth of [true, false]) {
     if (picked.length > 0) break;
+    // 拉伸比最接近 1 的前缀胜出：旧版固定补到“拉伸 ≤ 1.35”就停，
+    // 竖图会被统一拉到 1.3 倍横框（cover 裁掉上下）。这里逐个前缀记录
+    // |log(scale)|，越过 1（开始压缩）就停——再多补只会更变形。
+    let bestCount = 0;
+    let bestScore = Infinity;
     for (let step = 0; step < total && picked.length < 8; step += 1) {
       const index = (start + step) % total;
       if (used.has(index)) continue;
@@ -215,9 +220,42 @@ function pickStrip(
       ratioSum += ratio;
       const natural = ratioSum * box.h;
       const gaps = gap * (picked.length - 1);
+      const score = Math.abs(Math.log((box.w - gaps) / Math.max(1, natural)));
+      if (score < bestScore) {
+        bestScore = score;
+        bestCount = picked.length;
+      }
       if (natural + gaps >= box.w) break;
-      // 剩下的宽度要拉伸 35% 以上才填得满？再补一张更划算。
-      if ((box.w - gaps) / natural <= 1.35) break;
+    }
+    if (bestCount > 0 && bestCount < picked.length) {
+      for (const drop of picked.slice(bestCount)) ratioSum -= drop.ratio;
+      picked.length = bestCount;
+    }
+    // 末位换牌：前缀只能“截断”，最后一张比例不合时整行仍会被拉变形
+    // （两张 1.78+0.71 拉成 1.68 倍横框）。在扫描窗口里给末位找一张
+    // 让整行 scale 更接近 1 的替换，竖图不再被横条裁切。
+    if (picked.length > 0) {
+      const baseSum = ratioSum - picked[picked.length - 1].ratio;
+      const gaps = gap * (picked.length - 1);
+      let bestScale = (box.w - gaps) / Math.max(1, ratioSum * box.h);
+      let bestSwap: { index: number; ratio: number } | null = null;
+      for (let step = 0; step < total && step < 64; step += 1) {
+        const index = (start + step) % total;
+        if (used.has(index)) continue;
+        if (picked.some((entry) => entry.index === index)) continue;
+        const entry = items[index];
+        const ratio = entry.w > 0 && entry.h > 0 ? entry.w / entry.h : 1;
+        if (picked.length === 1 && enforceWidth && ratio * box.h < minWidth) continue;
+        const scale = (box.w - gaps) / Math.max(1, (baseSum + ratio) * box.h);
+        if (Math.abs(Math.log(scale)) < Math.abs(Math.log(bestScale))) {
+          bestScale = scale;
+          bestSwap = { index, ratio };
+        }
+      }
+      if (bestSwap) {
+        ratioSum = baseSum + bestSwap.ratio;
+        picked[picked.length - 1] = bestSwap;
+      }
     }
   }
   if (picked.length === 0) return;
@@ -252,16 +290,23 @@ function pickColumn(
   const aspect = box.h / Math.max(1, box.w * 0.78);
   const wanted = Math.max(1, Math.min(4, Math.round(aspect)));
   const start = Math.floor(rng() * total);
-  const picked: { index: number; ratio: number }[] = [];
-  for (let step = 0; step < total && picked.length < wanted; step += 1) {
+  // 按格位比例选图：每格 slotRatio，挑比例最接近的 wanted 张，
+  // 填满后 scale 自然接近 1——旧版“顺次取前 N 张”会把竖图塞进宽扁列
+  // （947×496 的列装 0.75 竖图，cover 只剩 39%）。
+  const usable = box.h - gap * (wanted - 1);
+  const slotRatio = (box.w * wanted) / Math.max(1, usable);
+  const candidates: { index: number; ratio: number; delta: number }[] = [];
+  for (let step = 0; step < total && step < 64; step += 1) {
     const index = (start + step) % total;
     if (used.has(index)) continue;
     const entry = items[index];
-    picked.push({ index, ratio: entry.w > 0 && entry.h > 0 ? entry.w / entry.h : 1 });
+    const ratio = entry.w > 0 && entry.h > 0 ? entry.w / entry.h : 1;
+    candidates.push({ index, ratio, delta: Math.abs(Math.log(ratio / slotRatio)) });
   }
-  if (picked.length === 0) return;
+  if (candidates.length === 0) return;
+  candidates.sort((left, right) => left.delta - right.delta);
+  const picked = candidates.slice(0, wanted);
   const natural = picked.reduce((sum, entry) => sum + box.w / entry.ratio, 0);
-  const usable = box.h - gap * (picked.length - 1);
   const scale = usable / Math.max(1, natural);
   let y = box.y;
   for (const entry of picked) {
@@ -308,7 +353,7 @@ export function layoutCell(spec: CellSpec, b: number, c: number): PlacedTile[] {
     const target = heroWidth / heroHeight;
     let heroIndex = -1;
     let bestDelta = Infinity;
-    for (let probe = 0; probe < 8; probe += 1) {
+    for (let probe = 0; probe < 12; probe += 1) {
       const index = Math.floor(rng() * total);
       const entry = spec.items[index];
       const ratio = entry.w > 0 && entry.h > 0 ? entry.w / entry.h : 1;
@@ -318,7 +363,9 @@ export function layoutCell(spec: CellSpec, b: number, c: number): PlacedTile[] {
         heroIndex = index;
       }
     }
-    if (heroIndex >= 0) {
+    // 比例差超过 30% 就不做主图：竖图装进横框会被 cover 裁掉头脚
+    // （用户反馈“一张竖图你给我按横图截”），宁可退回常规横条。
+    if (heroIndex >= 0 && bestDelta <= Math.log(1.3)) {
       used.add(heroIndex);
       tiles.push({
         item: spec.items[heroIndex],
@@ -401,9 +448,9 @@ export function cellTilesInView(
 
 /* ===== v5.2：聚焦挤压（保留 v4 的重排语义，修正细条） =====
  *
- * 英雄卡放大后，同格其余图仍被挤到右侧列/底部带；区别是列数不再写死 1，
- * 而是按“剩余区域宽高比 × 条目平均图片比例”选列，让每张卡接近原图比例，
- * 不再出现 300×90 那种横向细条。
+ * 英雄卡放大后，同格其余图被装进英雄四周的剩余区域（上下通宽横带 + 左右中柱）；
+ * 列数不写死 1，按“区域宽高比 × 条目平均图片比例”选列，让每张卡接近原图比例，
+ * 不再出现 300×90 那种横向细条；末行不满时 justified 拉平，区域内不留空槽。
  */
 
 interface GridEntry {
@@ -455,11 +502,15 @@ function gridRects(
   if (count === 0) return [];
   const cols = Math.max(1, Math.min(columns, count));
   const rows = Math.ceil(count / cols);
-  const cellW = Math.max(1, (box.w - gap * (cols - 1)) / cols);
   const cellH = Math.max(1, (box.h - gap * (rows - 1)) / rows);
   return entries.map((entry, position) => {
     const row = Math.floor(position / cols);
-    const col = position % cols;
+    const rowStart = row * cols;
+    // 末行不满时按实际张数均分整行宽（justified）：box 内不留空槽，
+    // 旧版会把第 4 格留空，聚焦时看起来就是英雄旁边的“空缺”。
+    const inRow = row === rows - 1 ? count - rowStart : cols;
+    const cellW = Math.max(1, (box.w - gap * (inRow - 1)) / inRow);
+    const col = position - rowStart;
     return {
       item: entry.item,
       index: entry.index,
@@ -473,7 +524,7 @@ function gridRects(
   });
 }
 
-/** 重排一个格子：hero 占左上大块，右侧列 + 底部网格装下同格其余条目。 */
+/** 重排一个格子：英雄卡在原地等比放大，邻图装进四周剩余区域（上下横带 + 左右中柱）。 */
 export function layoutSpotlightCell(
   spec: CellSpec,
   b: number,
@@ -494,39 +545,69 @@ export function layoutSpotlightCell(
   const ratio = hero.item.w > 0 && hero.item.h > 0 ? hero.item.w / hero.item.h : 1;
   const narrow = innerW < 620;
 
+  // 英雄卡只做等比缩放：把原图比例装进包围盒（宽支路 60% 宽×62% 高，
+  // 窄支路全宽×62% 高），碰到哪条边就以哪条边为准。不做任何单边的
+  // 最小/最大钳制——旧版 46% 宽度下限会把竖图硬拉成横框，object-fit
+  // 裁切掉头脚、挤压出周围空缺；等比后竖图就是竖框、横图就是横框。
+  const fitHero = (maxW: number, maxH: number) => {
+    let w = maxW;
+    let h = maxW / ratio;
+    if (h > maxH) {
+      h = maxH;
+      w = maxH * ratio;
+    }
+    return { w, h };
+  };
   let heroW: number;
   let heroH: number;
   if (narrow) {
-    heroW = innerW;
-    heroH = Math.min(innerH * 0.62, Math.max(innerH * 0.42, innerW / ratio));
+    ({ w: heroW, h: heroH } = fitHero(innerW, innerH * 0.62));
   } else {
-    // 英雄卡约 60% 宽 / 62% 高；比 v4 稍收，给挤压区更多面积。
-    const maxW = innerW * 0.6;
-    const maxH = innerH * 0.62;
-    heroW = maxW;
-    heroH = maxW / ratio;
-    if (heroH > maxH) {
-      heroH = maxH;
-      heroW = maxH * ratio;
-    }
-    heroW = Math.min(heroW, innerW - gap - 140);
-    heroH = Math.min(heroH, innerH - gap - 110);
-    heroW = Math.max(innerW * 0.46, heroW);
-    heroH = Math.max(innerH * 0.46, heroH);
+    ({ w: heroW, h: heroH } = fitHero(innerW * 0.6, innerH * 0.62));
   }
+
+  // 聚焦 = 放大：英雄面积不得小于被点卡片的可见面积（用户反馈“点击后
+  // 图片还没原来的大”——主图大卡被 60%×62% 包围盒收小了）。基础包围盒
+  // 不够就等比放大到 1.05 倍原面积；上限留出邻图区域：每轴至少 88px，
+  // 否则上下横带/左右中柱会被压成 <70px 的细条（v5.2 用户投诉过）。
+  // 极端比例碰顶时面积保底让位于几何必然。
+  if (anchorRect && anchorRect.w > 0 && anchorRect.h > 0) {
+    const minArea = anchorRect.w * anchorRect.h * 1.05;
+    const area = heroW * heroH;
+    if (area < minArea) {
+      const grow = Math.sqrt(minArea / area);
+      heroW *= grow;
+      heroH *= grow;
+    }
+  }
+  const maxW = narrow ? innerW : innerW - 88;
+  const maxH = innerH - 88;
+  const shrink = Math.min(1, maxW / heroW, maxH / heroH);
+  heroW *= shrink;
+  heroH *= shrink;
 
   // 锚定被点图片的当前位置：点哪张，哪张就在原地放大；邻图围到它周围，
   // 不再把新英雄搬到格子左上角、旧英雄挪到新位置（那会像“交换图片”）。
   const anchorX = anchorRect ? anchorRect.x + anchorRect.w / 2 : hero.rect.x + hero.rect.w / 2;
   const anchorY = anchorRect ? anchorRect.y + anchorRect.h / 2 : hero.rect.y + hero.rect.h / 2;
-  const heroX = Math.min(
+  let heroX = Math.min(
     Math.max(originX, anchorX - heroW / 2),
     originX + innerW - heroW,
   );
-  const heroY = Math.min(
+  let heroY = Math.min(
     Math.max(originY, anchorY - heroH / 2),
     originY + innerH - heroH,
   );
+
+  // 贴边收缝：某一侧剩余空间不足 96px（放不下一条 usable 的邻图带/列）时
+  // 向近侧贴齐，把细缝并给另一侧。旧版 48px 只收细缝；面积保底把英雄放大后
+  // 48–96px 的剩余会排成 <70px 的细条卡，所以阈值提到 96。
+  const SNAP = 96;
+  if (heroX - originX - gap < SNAP) heroX = originX;
+  else if (originX + innerW - heroX - heroW - gap < SNAP) heroX = originX + innerW - heroW;
+  if (heroY - originY - gap < SNAP) heroY = originY;
+  else if (originY + innerH - heroY - heroH - gap < SNAP) heroY = originY + innerH - heroH;
+
   const out: PlacedTile[] = [
     { item: hero.item, index: hero.index, rect: { x: heroX, y: heroY, w: heroW, h: heroH }, cell },
   ];
@@ -534,61 +615,64 @@ export function layoutSpotlightCell(
     .filter((tile) => tile.item.id !== heroId)
     .map((tile) => ({ item: tile.item, index: tile.index }));
 
-  // 英雄四周的剩余区域：横向选更宽的一侧作列，纵向选更高的一侧作带；
-  // 两块互不重叠，各自用 gridColumns 保持比例。
-  const rightW = Math.max(0, originX + innerW - (heroX + heroW) - gap);
+  // 英雄四周全部利用（旧版只装“一侧整列 + 一带”，锚在格子中部时会留下
+  // L 形空白）：顶部/底部两条通宽横带 + 英雄左右两段中柱。四块互不重叠，
+  // 拼起来正好补满格子剩余空间；配合 gridRects 的末行 justified，不再有洞。
+  const MIN_REGION = 48;
   const leftW = Math.max(0, heroX - originX - gap);
-  const bottomH = Math.max(0, originY + innerH - (heroY + heroH) - gap);
+  const rightW = Math.max(0, originX + innerW - heroX - heroW - gap);
   const topH = Math.max(0, heroY - originY - gap);
-  const sideRight = rightW >= leftW;
-  const sideW = sideRight ? rightW : leftW;
-  const verticalBottom = bottomH >= topH;
-  const bandH = verticalBottom ? bottomH : topH;
+  const bottomH = Math.max(0, originY + innerH - heroY - heroH - gap);
+  const regions: { x: number; y: number; w: number; h: number }[] = [];
+  if (topH >= MIN_REGION) regions.push({ x: originX, y: originY, w: innerW, h: topH });
+  if (bottomH >= MIN_REGION) {
+    regions.push({ x: originX, y: heroY + heroH + gap, w: innerW, h: bottomH });
+  }
+  if (leftW >= MIN_REGION) regions.push({ x: originX, y: heroY, w: leftW, h: heroH });
+  if (rightW >= MIN_REGION) {
+    regions.push({ x: heroX + heroW + gap, y: heroY, w: rightW, h: heroH });
+  }
 
-  const sideBox =
-    sideW > 4
-      ? {
-          x: sideRight ? heroX + heroW + gap : originX,
-          y: originY,
-          w: sideW,
-          h: innerH,
+  if (rest.length > 0) {
+    if (regions.length === 0) {
+      // 防御兜底（理论上到不了：英雄高度有 62% 上限，上下带必有一条 ≥ 48px）：
+      // 退回英雄下方整宽重排，至少邻图不丢。
+      const box = {
+        x: originX,
+        y: heroY + heroH + gap,
+        w: innerW,
+        h: Math.max(2, originY + innerH - heroY - heroH - gap),
+      };
+      const cols = Math.max(1, Math.min(rest.length, gridColumns(rest, box, gap)));
+      for (const entry of gridRects(rest, box, cols, gap)) out.push({ ...entry, cell });
+    } else {
+      // 图少于区域数时丢最小的区域（只在低密度格子出现，损失一条窄带好过留洞）。
+      const kept = [...regions]
+        .sort((a, b) => b.w * b.h - a.w * a.h)
+        .slice(0, Math.min(regions.length, rest.length));
+      // 水位分配：每块至少 1 张，剩余名额反复给“单张摊到面积最大”的块，
+      // 让各区域的图密度大致均匀。
+      const areas = kept.map((region) => region.w * region.h);
+      const counts = kept.map(() => 1);
+      for (let extra = rest.length - kept.length; extra > 0; extra -= 1) {
+        let neediest = 0;
+        for (let i = 1; i < kept.length; i += 1) {
+          if (areas[i] / counts[i] > areas[neediest] / counts[neediest]) neediest = i;
         }
-      : null;
-  const bandBox =
-    bandH > 4
-      ? {
-          x: sideRight ? originX : heroX,
-          y: verticalBottom ? heroY + heroH + gap : originY,
-          w: sideRight ? heroX + heroW - originX : originX + innerW - heroX,
-          h: bandH,
+        counts[neediest] += 1;
+      }
+      let cursor = 0;
+      for (let i = 0; i < kept.length; i += 1) {
+        const entries = rest.slice(cursor, cursor + counts[i]);
+        cursor += counts[i];
+        if (entries.length === 0) continue;
+        const box = kept[i];
+        const cols = Math.max(1, Math.min(entries.length, gridColumns(entries, box, gap)));
+        for (const entry of gridRects(entries, box, cols, gap)) {
+          out.push({ ...entry, cell });
         }
-      : null;
-
-  const pack = (
-    entries: { item: WallItem; index: number }[],
-    box: { x: number; y: number; w: number; h: number } | null,
-  ) => {
-    if (!box || entries.length === 0 || box.w < 2 || box.h < 2) return;
-    const cols = Math.max(1, Math.min(entries.length, gridColumns(entries, box, gap)));
-    for (const entry of gridRects(entries, box, cols, gap)) {
-      out.push({ ...entry, cell });
+      }
     }
-  };
-
-  if (sideBox && bandBox) {
-    const sideArea = sideBox.w * sideBox.h;
-    const bandArea = bandBox.w * bandBox.h;
-    let split = Math.round((rest.length * sideArea) / Math.max(1, sideArea + bandArea));
-    split = Math.max(1, Math.min(rest.length - 1, split));
-    pack(rest.slice(0, split), sideBox);
-    pack(rest.slice(split), bandBox);
-  } else if (sideBox) {
-    pack(rest, sideBox);
-  } else if (bandBox) {
-    pack(rest, bandBox);
-  } else {
-    // 极端比例下两侧都放不下：退回格子左上角重排，至少不重叠。
-    pack(rest, { x: originX, y: originY + heroH + gap, w: innerW, h: Math.max(2, innerH - heroH - gap) });
   }
   return out;
 }
@@ -617,6 +701,17 @@ export function layoutFeaturedWorld(
   if (heroH > maxH) {
     heroH = maxH;
     heroW = maxH * ratio;
+  }
+  // 与无限墙同一保底：聚焦后的面积不小于被点卡片（有限墙可以纵向滚动，
+  // 高度不设上限，只夹世界宽）。
+  if (anchorRect && anchorRect.w > 0 && anchorRect.h > 0) {
+    const minArea = anchorRect.w * anchorRect.h * 1.05;
+    const area = heroW * heroH;
+    if (area < minArea) {
+      const grow = Math.min(Math.sqrt(minArea / area), width / heroW);
+      heroW *= grow;
+      heroH *= grow;
+    }
   }
   // 有锚点时英雄留在被点图片的位置；没有锚点（兼容旧调用）才回到内容区中心。
   let heroX: number;
