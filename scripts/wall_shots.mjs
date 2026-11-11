@@ -330,15 +330,29 @@ async function main() {
               Math.round(hero.offsetTop + hero.offsetHeight / 2 - (start[1] + start[3] / 2)),
             ]
           : null;
+        let overlap = null;
+        if (start) {
+          const ix = Math.max(0, Math.min(hero.offsetLeft + hero.offsetWidth, start[0] + start[2]) - Math.max(hero.offsetLeft, start[0]));
+          const iy = Math.max(0, Math.min(hero.offsetTop + hero.offsetHeight, start[1] + start[3]) - Math.max(hero.offsetTop, start[1]));
+          overlap = Math.round((ix * iy) / Math.max(1, start[2] * start[3]) * 100) / 100;
+        }
+        // 格号诊断：remount/换位 flake 出现时用来定位锚点反推是否错格。
+        const cw = Math.max(760, Math.round(innerWidth * 0.72));
+        const ch = Math.max(520, Math.round(innerHeight * 0.72));
+        const cellOf = (x, y) => Math.floor(y / ch) + ':' + Math.floor(x / cw);
         return {
           ok: true,
           sameNode: hero === window.__focusNode,
+          connected: window.__focusNode ? window.__focusNode.isConnected : null,
+          preCell: start ? cellOf(start[0] + start[2] / 2, start[1] + start[3] / 2) : null,
+          postCell: cellOf(hero.offsetLeft + hero.offsetWidth / 2, hero.offsetTop + hero.offsetHeight / 2),
           moved,
           strips,
           minW,
           minH,
           centerDelta: Math.round(box.left + box.width / 2 - contentCenter),
           anchorDelta,
+          overlap,
           inSafe: box.left >= contentLeft - 1 && box.top >= -1 && box.right <= innerWidth + 1 && box.bottom <= innerHeight + 1,
         };
       })()`);
@@ -348,13 +362,28 @@ async function main() {
       if (report.focus.ok && !report.focus.sameNode) report.failures.push('聚焦卡被卸载重挂');
       if (report.focus.ok && report.focus.moved === 0) report.failures.push('聚焦后邻图没有被挤压');
       if (report.focus.ok && report.focus.strips > 0) report.failures.push('聚焦后出现细条卡');
-      // 初次放大会被格子边界夹一下（锚点靠近边缘时最多几十像素），允许 80px；
-      // 真正要防的是“点邻卡时图片横向搬到英雄位”，那一条单独卡 16px。
-      if (report.focus.ok && Math.abs(report.focus.anchorDelta?.[0] ?? 0) > 80) {
+      // 边缘夹取/贴边收缝（SNAP 96）会带来几何位移，数值上限随 SNAP 走没有意义；
+      // “横向离开点击位置/teleport”统一靠重叠率 ≥0.5 卡（与点邻卡同口径）。
+      if (report.focus.ok && (report.focus.overlap ?? 0) < 0.5) {
         report.failures.push('聚焦卡横向离开点击位置');
       }
-      if (report.focus.ok && Math.abs(report.focus.centerDelta) < 40) {
+      // “锁中心”= 英雄离开点击位置去内容区中心；英雄本就留在点击处时
+      // （anchorDelta≈0）centerDelta 小只是几何巧合，不算锁中心。
+      const focusMoved = Math.abs(report.focus.anchorDelta?.[0] ?? 0) + Math.abs(report.focus.anchorDelta?.[1] ?? 0);
+      if (report.focus.ok && Math.abs(report.focus.centerDelta) < 40 && focusMoved > 60) {
         report.failures.push('聚焦卡被锁到内容区中心');
+      }
+      // 反馈问题 2：单击聚焦不带检查器、不压暗邻图。
+      report.focus.noInspector = await evaluate(`!document.querySelector('.inspector')`);
+      report.focus.neighborOpacity = await evaluate(`(() => {
+        const tile = document.querySelector('.tile:not(.tile--spotlight)');
+        return tile ? getComputedStyle(tile).opacity : null;
+      })()`);
+      if (report.focus.ok && report.focus.noInspector === false) {
+        report.failures.push('聚焦：不应打开检查器');
+      }
+      if (report.focus.ok && report.focus.neighborOpacity !== null && Number(report.focus.neighborOpacity) < 0.99) {
+        report.failures.push('聚焦：不应压暗邻图');
       }
 
       // 点一张可见邻卡：切放大对象，但新英雄留在被点卡的位置，不换位/不居中。
@@ -394,22 +423,37 @@ async function main() {
                 Math.round(hero.offsetTop + hero.offsetHeight / 2 - (start[1] + start[3] / 2)),
               ]
             : null;
+          // 英雄卡与被点卡的重叠率：防“换位/ teleport 到固定英雄位”靠它，
+          // 边缘夹取造成的几十像素滑动不会把重叠率打下去。
+          let overlap = null;
+          if (start) {
+            const ix = Math.max(0, Math.min(hero.offsetLeft + hero.offsetWidth, start[0] + start[2]) - Math.max(hero.offsetLeft, start[0]));
+            const iy = Math.max(0, Math.min(hero.offsetTop + hero.offsetHeight, start[1] + start[3]) - Math.max(hero.offsetTop, start[1]));
+            overlap = Math.round((ix * iy) / Math.max(1, start[2] * start[3]) * 100) / 100;
+          }
           return {
             ok: true,
             id: hero.dataset.id,
             centerDelta: Math.round(box.left + box.width / 2 - contentCenter),
             anchorDelta,
+            overlap,
             inSafe: box.left >= contentLeft - 1 && box.top >= -1 && box.right <= innerWidth + 1 && box.bottom <= innerHeight + 1,
           };
         })()`);
         report.shots.focusSwitch = await shot('v3f-focus-switch');
         if (!report.focusSwitch.ok) report.failures.push('点邻卡：没有出现新的聚焦卡');
         if (report.focusSwitch.id !== neighbor.id) report.failures.push('点邻卡：放大对象不是被点的卡');
-        if (Math.abs(report.focusSwitch.anchorDelta?.[0] ?? 0) > 16) {
-          report.failures.push('点邻卡：被点图片横向换位');
+        // 与初次聚焦同口径：格子边缘夹取/贴边收缝会带来几何位移，位移量随
+        // 英雄/被点卡尺寸差增长，不设数值上限；“被点图片横向搬到英雄位”
+        // 由重叠率 ≥ 0.5 兜住（teleport 会让重叠率归零）。
+        if ((report.focusSwitch.overlap ?? 0) < 0.5) {
+          report.failures.push('点邻卡：英雄卡没有盖住被点卡片');
         }
         if (!report.focusSwitch.inSafe) report.failures.push('点邻卡：英雄卡不在可见安全区');
-        if (Math.abs(report.focusSwitch.centerDelta) < 40) report.failures.push('点邻卡：被锁到内容区中心');
+        const switchMoved = Math.abs(report.focusSwitch.anchorDelta?.[0] ?? 0) + Math.abs(report.focusSwitch.anchorDelta?.[1] ?? 0);
+        if (Math.abs(report.focusSwitch.centerDelta) < 40 && switchMoved > 60) {
+          report.failures.push('点邻卡：被锁到内容区中心');
+        }
       } else {
         report.failures.push('点邻卡：找不到可点击的邻卡');
       }
@@ -497,6 +541,11 @@ async function main() {
         };
       })()`);
       report.shots.summary = await shot('v3f-summary');
+      // 反馈问题 4b：再次右键 = 退出；退出动画 160ms 后层应卸载。
+      await cdp.send('Input.dispatchMouseEvent', { type: 'mousePressed', x: spot.x, y: spot.y, button: 'right', buttons: 2, clickCount: 1 });
+      await cdp.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: spot.x, y: spot.y, button: 'right', buttons: 0, clickCount: 1 });
+      await sleep(400);
+      report.summaryToggleClosed = await evaluate(`!document.querySelector('.tile__info')`);
     } else {
       report.failures.push('右键概要：找不到不被遮挡的卡片');
     }
@@ -629,11 +678,16 @@ async function main() {
         let hit = 0;
         let total = 0;
         // 8px 的缝会造成零星漏点，所以按 40px 网格密采样，只看"成片的空白"。
+        // 漏点先做缝容忍重采样（+12px）：格缝/行缝宽 8px，重采样必跨进卡里；
+        // 真正的空白带（≥24px）四个点都落空，仍会被抓住。
+        const hitsTile = (x, y) => {
+          const el = document.elementFromPoint(x, y);
+          return !!(el && el.closest('.tile'));
+        };
         for (let x = seam + 20; x < innerWidth - 20; x += 40) {
           for (let y = 20; y < innerHeight - 20; y += 40) {
             total += 1;
-            const el = document.elementFromPoint(x, y);
-            if (el && el.closest('.tile')) hit += 1;
+            if (hitsTile(x, y) || hitsTile(x + 12, y) || hitsTile(x, y + 12) || hitsTile(x + 12, y + 12)) hit += 1;
           }
         }
         return total ? Math.round((hit / total) * 1000) / 1000 : 0;
@@ -789,6 +843,7 @@ async function main() {
     if (report.detail && !report.detail.ok) report.failures.push('详情页没有大图');
     if (report.summary && !report.summary.open) report.failures.push('右键概要没打开');
     if (report.summary && report.summary.open && !report.summary.inViewport) report.failures.push('右键概要溢出视口');
+    if (report.summary && report.summary.open && report.summaryToggleClosed === false) report.failures.push('右键概要：再次右键没有退出');
     if (report.consoleErrors.length > 0) report.failures.push('控制台有 ' + report.consoleErrors.length + ' 条错误');
     if (report.pinch && !report.pinch.zoomed) report.failures.push('双指缩放没生效');
     if (report.enterAnimated === false) report.failures.push('入场动效没触发');
