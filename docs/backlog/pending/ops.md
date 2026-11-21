@@ -50,3 +50,18 @@
 - **验收**：单测覆盖收藏/星级/手工标签/批量/栈上限/失败路径；撤销后计数、FTS 与搜索一致；隔离数据根验证 Ctrl+Z 与命令面板；`cargo test --workspace`、`cargo check --workspace` 通过。
 - **状态**：2026-11-02 已实现（核心 `45e83df`、UI `ce49509`），详见 [round-7.md](../../archive/2026-11/round-7.md) 与 [implemented.md](../implemented.md)。会话内撤销，不跨重启；GUI/UIA 手动验收顺延。
 
+
+## F-088 网页轻量后端与动态化（2026-11-21 登记）
+
+> 设计全文：[../web-dynamic-backend.md](../web-dynamic-backend.md)。本节只保留登记与边界。
+
+- **形态**：独立 `crates/kanalib-web`（axum + tower-http + tokio + rusqlite），部署在 2c2g 轻量云；**不读桌面 DB、不做统一后端**，使用自己的 SQLite（WAL）。
+- **数据来源**：只接收 box 入库过滤服务（F-089）推送的 `decision=allow` 批次；不持有 Pixiv 令牌、不直连来源。内部写入接口用 HMAC + 时间戳 + 幂等键；非 allow 批次整批 400。
+- **网页**：`WallSource` 增加 `ApiSource`，`VITE_WALL_SOURCE=api|static` 切换；默认 static，现有部署不变；静态导出与 `StaticSource` 保留为兜底。现有 `App.tsx` 直接 `new StaticSource`，W3 必须引入 `createSource()`；API 模式的搜索/筛选/排序/计数走服务端 `setQuery`，不能继续只过滤已加载页。
+- **接口**：`/api/health`、`/api/index`、`/api/items`、`/api/items/{id}`、`/api/works`、`/api/authors`、`/api/collections`、`/api/tags`、`/media/{tier}/{file}`；keyset 游标；服务端搜索。
+- **媒体**：缩略图 t256/t512 存云（t1024/t2048 可选）；原图默认不落云，`GET /api/items/{id}/original` 302 到 box 的短期签名 URL。
+- **安全**：公开只读；媒体路径 id 正则 + DB 反查 + canonicalize 前缀；`/internal/*` 只允许共享密钥；桌面设备令牌只存哈希、可撤销。
+- **边界**：不做账号/多用户、不做 SSR、不引入 ORM；`search-index.json` 在 api 模式不再使用。
+- **依赖**：F-089 的 item DTO 先行；F-080 静态契约保持兼容（新增字段全部可选）；动态 `/api/index` 的 `schema` 仍为 1，用 `api_version` + `capabilities` 区分，不升 2。
+- **容量**：2c2g 上内存目标 <150MB，只存缩略图；压测不达标时先降 `limit` 上限与并发，不引入重型缓存。
+- **验收**：`kanalib-web` 集成测试；`wall_api_check.mjs`；静态/动态同形状；`npm run typecheck && npm run build` 两种模式各一次；2c2g 上 32 并发读无 5xx。

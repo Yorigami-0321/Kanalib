@@ -236,10 +236,169 @@ pub fn run(options: &Options) -> Result<Stats> {
         folders.join("；")
     );
 
-    let mut publisher = Publisher::new(options)?;
-    publisher.scan(&db, &folders)?;
-    let stats = publisher.finish()?;
+    // 预演仍然只算不写；正式发布先在同级暂存目录里完成整套产物，
+    // 成功后再整体替换 out_dir，避免中断留下新旧混合的半套数据。
+    if options.dry_run {
+        let mut publisher = Publisher::new(options)?;
+        publisher.scan(&db, &folders)?;
+        return publisher.finish();
+    }
+
+    let staging = Staging::prepare(&options.out_dir)?;
+    let staged_options = Options {
+        out_dir: staging.path.clone(),
+        ..options.clone()
+    };
+    let result = (|| -> Result<Stats> {
+        let mut publisher = Publisher::new(&staged_options)?;
+        publisher.scan(&db, &folders)?;
+        publisher.finish()
+    })();
+    let stats = result?;
+    staging.commit(&options.out_dir)?;
     Ok(stats)
+}
+
+/// 同级暂存目录：先把整套产物写在这里，再整体替换正式导出目录。
+///
+/// 旧产物用硬链接（失败回退复制）预置到暂存目录，账本命中时仍能直接跳过；
+/// 发布器只做“新文件覆盖 + 原子 rename”，不会原地改到旧目录里的链接目标。
+struct Staging {
+    path: PathBuf,
+    committed: bool,
+}
+
+impl Staging {
+    fn prepare(out_dir: &Path) -> Result<Self> {
+        let parent = out_dir.parent().unwrap_or_else(|| Path::new("."));
+        fsutil::ensure_dir(parent)?;
+        let name = out_dir
+            .file_name()
+            .map(|value| value.to_string_lossy().to_string())
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(|| "out".to_string());
+        let path = parent.join(format!(".{name}.staging-{}", fsutil::unique_suffix()));
+        fsutil::ensure_dir(&path)?;
+        if out_dir.is_dir() {
+            seed_from(out_dir, &path)?;
+        }
+        Ok(Self {
+            path,
+            committed: false,
+        })
+    }
+
+    /// 旧目录 -> 备份，暂存 -> 正式，最后删除备份；任一步失败都尽量还原。
+    fn commit(mut self, out_dir: &Path) -> Result<()> {
+        let parent = out_dir.parent().unwrap_or_else(|| Path::new("."));
+        let name = out_dir
+            .file_name()
+            .map(|value| value.to_string_lossy().to_string())
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(|| "out".to_string());
+        let backup = parent.join(format!(".{name}.backup-{}", fsutil::unique_suffix()));
+        let had_previous = out_dir.is_dir();
+        if had_previous {
+            fs::rename(out_dir, &backup).with_context(|| {
+                format!(
+                    "暂存目录就绪，但无法把旧目录 {} 移到备份 {}",
+                    out_dir.display(),
+                    backup.display()
+                )
+            })?;
+        }
+        if let Err(error) = fs::rename(&self.path, out_dir) {
+            if had_previous {
+                let _ = fs::rename(&backup, out_dir);
+            }
+            return Err(error).with_context(|| {
+                format!(
+                    "无法把暂存目录 {} 替换为 {}；旧目录已还原",
+                    self.path.display(),
+                    out_dir.display()
+                )
+            });
+        }
+        self.committed = true;
+        if had_previous {
+            if let Err(error) = remove_tree(&backup) {
+                eprintln!(
+                    "[kanalib-publish] 警告：新产物已就位，但清理备份 {} 失败（{error:#}）",
+                    backup.display()
+                );
+            }
+        }
+        Ok(())
+    }
+}
+
+impl Drop for Staging {
+    fn drop(&mut self) {
+        if !self.committed {
+            let _ = remove_tree(&self.path);
+        }
+    }
+}
+
+/// 递归复制/链接旧产物。硬链接优先（同盘零拷贝）；跨盘或文件系统不支持时退回复制。
+fn seed_from(source: &Path, target: &Path) -> Result<()> {
+    for entry in
+        fs::read_dir(source).with_context(|| format!("读取旧导出目录 {}", source.display()))?
+    {
+        let entry = entry.with_context(|| format!("遍历旧导出目录 {}", source.display()))?;
+        let from = entry.path();
+        let to = target.join(entry.file_name());
+        let file_type = entry
+            .file_type()
+            .with_context(|| format!("读取类型 {}", from.display()))?;
+        if file_type.is_dir() {
+            fsutil::ensure_dir(&to)?;
+            seed_from(&from, &to)?;
+        } else if file_type.is_file() {
+            if fs::hard_link(&from, &to).is_err() {
+                // 复制前必须删除硬链接候选：fs::copy 会原地截断已存在的目标，
+                // 若同一路径其实链到了旧产物，就会把正式目录里的文件写坏。
+                let _ = fs::remove_file(&to);
+                fs::copy(&from, &to)
+                    .with_context(|| format!("复制 {} -> {}", from.display(), to.display()))?;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// 删除目录树；Windows 下只读文件先去掉只读位再删。
+fn remove_tree(path: &Path) -> Result<()> {
+    if !path.exists() {
+        return Ok(());
+    }
+    for entry in walk_files(path) {
+        let _ = make_writable(&entry);
+    }
+    fs::remove_dir_all(path).with_context(|| format!("删除目录 {}", path.display()))
+}
+
+fn walk_files(dir: &Path) -> Vec<PathBuf> {
+    let mut files = Vec::new();
+    let Ok(entries) = fs::read_dir(dir) else {
+        return files;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            files.extend(walk_files(&path));
+        } else {
+            files.push(path);
+        }
+    }
+    files
+}
+
+fn make_writable(path: &Path) -> std::io::Result<()> {
+    let mut permissions = fs::metadata(path)?.permissions();
+    #[allow(clippy::permissions_set_readonly_false)]
+    permissions.set_readonly(false);
+    fs::set_permissions(path, permissions)
 }
 
 /// 把设置/来源表里的本地根目录整理成 assets.folder 值列表。
@@ -967,6 +1126,12 @@ impl<'a> Publisher<'a> {
         }
         if let Some(parent) = target.parent() {
             fsutil::ensure_dir(parent)?;
+        }
+        // 暂存目录里的旧产物是硬链接：fs::copy 会原地截断目标，
+        // 必须先断开链接，否则会把正式目录里的旧文件一起写坏。
+        if target.is_file() {
+            fs::remove_file(&target)
+                .with_context(|| format!("替换暂存文件 {rel} 前无法删除旧链接"))?;
         }
         match fs::copy(source, &target) {
             Ok(_) => {

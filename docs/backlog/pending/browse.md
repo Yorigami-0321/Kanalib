@@ -620,17 +620,33 @@
 ## F-075 Shift+Tab 反向焦点遍历下线
 
 > 2026-11-07 用户指示：把 Shift+Tab 标记为待移除项（产品决定下线）。状态「待移除」= 行为当前已存在，但产品决定移除；本次只登记，不改代码。
+>
+> 2026-11-21：代码已解绑，静态回归与键位解析测试已通过；剩余真实键盘验收。
 
-- 现状：反向遍历已由用户真实键盘验收通过（70-2，证据 `.kanalib/verify_round9/tab_user_final.png`）。绑定来自 vendor `ely-gpui-components/crates/ely-core/src/lib.rs` 的 `KeyBinding::new("shift-tab", FocusPrev, Some(FOCUS_CONTEXT))`；Kanalib 侧未单独绑定 Shift+Tab。
-- 下线范围：Shift+Tab 不再反向移动焦点；正向 Tab 由 F-076 另行登记下线，二者合并构成焦点遍历整体下线。实现方式（解绑或覆盖键位）待做，本次不写代码。
-- 验收：真实键盘按 Shift+Tab 焦点不反向移动；与 F-076（Tab 正向）一并验收，鼠标点击与快捷键路径不回归。未做前保留「待移除」状态，不写成已移除。
+- 原现状：反向遍历曾由用户真实键盘验收通过（70-2，证据 `.kanalib/verify_round9/tab_user_final.png`）。绑定来自 vendor `ely-gpui-components/crates/ely-core/src/lib.rs` 的 `KeyBinding::new("shift-tab", FocusPrev, Some(FOCUS_CONTEXT))`；Kanalib 侧未单独绑定 Shift+Tab。
+- 实现：`kanalib_ui::disable_tab_focus_traversal(cx)` 在 `src/main.rs` 的 `ely_gpui_component::init(cx)` 之后绑定 `shift-tab` → `Unbind("ely::FocusPrev")`，上下文 `ElyFocus`；vendor 源码不改。
+- 下线范围：Shift+Tab 不再反向移动焦点；正向 Tab 由 F-076 一并下线。F6 / Shift+F6 保留，深层组件自带的 Tab 语义不变。
+- 验收：`check_ui_invariants.py` 第 11 项校验解绑键位与调用顺序；`kanalib-ui` 单测 `tab_focus_traversal_is_unbound_but_f6_stays` 校验 Tab / Shift+Tab 在 `ElyFocus` 下无匹配、F6 仍匹配 `ely::FocusNext`。真实键盘按 Shift+Tab 焦点不反向移动仍待用户复验；鼠标点击与快捷键路径不回归。
 - 连带更新：`manual-acceptance.md` 70-2 保留通过记录并标注转待移除；`next-steps.md` C 类清单不再把 Shift+Tab 列为待复验项。
 
 ## F-076 Tab 正向焦点遍历下线
 
 > 2026-11-07 用户指示：Tab 切换焦点也标记为待移除项（产品决定下线）。状态「待移除」= 行为当前已存在，但产品决定移除；本次只登记，不改代码。
+>
+> 2026-11-21：代码已解绑，静态回归与键位解析测试已通过；剩余真实键盘验收。
 
-- 现状：正向 Tab 顺序与焦点环已通过（70-2、F-070/F-073 验收；证据 `.kanalib/verify_f070/tab_walk*.log`、`.kanalib/verify_round9/`）。绑定来自 vendor `ely-gpui-components/crates/ely-core/src/lib.rs` 的 `KeyBinding::new("tab", FocusNext, Some(FOCUS_CONTEXT))`；Kanalib 侧另有根 `FocusScope`（`kanalib-root-focus`）与 13 处控件的 `.tab_index(0)` 停靠点。
-- 下线范围：Tab 不再在 Kanalib 控件间切换焦点；与 F-075（Shift+Tab 反向）一起构成焦点遍历整体下线。深层组件若自带 Tab 语义，保持组件现有行为，不在本条范围。实现方式（解绑或覆盖键位、停靠点处理）待做，本次不写代码。
-- 验收：真实键盘按 Tab 焦点不移动；与 F-075 一并验收，鼠标点击与快捷键路径不回归。未做前保留「待移除」状态，不写成已移除。
+- 原现状：正向 Tab 顺序与焦点环曾通过（70-2、F-070/F-073 验收；证据 `.kanalib/verify_f070/tab_walk*.log`、`.kanalib/verify_round9/`）。绑定来自 vendor `ely-gpui-components/crates/ely-core/src/lib.rs` 的 `KeyBinding::new("tab", FocusNext, Some(FOCUS_CONTEXT))`；Kanalib 侧另有根 `FocusScope`（`kanalib-root-focus`）与 13 处控件的 `.tab_index(0)` 停靠点。
+- 实现：`kanalib_ui::disable_tab_focus_traversal(cx)` 在 `src/main.rs` 的 `ely_gpui_component::init(cx)` 之后绑定 `tab` → `Unbind("ely::FocusNext")`，上下文 `ElyFocus`。根 `FocusScope` 与 `.tab_index(0)` 保留：它们仍服务于焦点回退、浮层焦点管理和可访问性，但不再由 Tab 触发遍历。
+- 下线范围：Tab 不再在 Kanalib 控件间切换焦点；与 F-075（Shift+Tab 反向）一起构成焦点遍历整体下线。深层组件若自带 Tab 语义，保持组件现有行为，不在本条范围。F6 / Shift+F6 保留。
+- 验收：`check_ui_invariants.py` 第 11 项校验解绑键位与调用顺序，并防止 F6 被误解绑；`kanalib-ui` 单测 `tab_focus_traversal_is_unbound_but_f6_stays` 覆盖 `ElyFocus` 上下文下的 Tab / Shift+Tab 抑制与 F6 保留。真实键盘按 Tab 焦点不移动仍待用户复验；鼠标点击与快捷键路径不回归。
 - 连带更新：`manual-acceptance.md` 70-2 与已通过项索引「根 FocusScope + 正向 Tab 顺序」保留通过记录并标注转待移除（70-2 的 Esc 分层子项仍待验收）；`next-steps.md` 不再把 Tab 顺序/焦点遍历列为待复验项。
+
+## F-087 网页横向导航改版（2026-11-21 登记）
+
+> 规格全文：[../web-rail-horizontal.md](../web-rail-horizontal.md)。本节只保留登记与边界。
+
+- **现状**：`web/src/components/Sidebar.tsx` 是 120px 竖排「缝」（`writing-mode: vertical-rl`），窄屏 ≤760 变底部条；`--seam-w` 同时被 `Wall.tsx` 的缝区命中、`inspector.css`/`detail.css` 的定位读取。
+- **目标**：208px 横排文字导航（图标 + 13px 文字），可折叠到 60px；≤760 底部横向条；≤560 主入口 5 个 + 「更多」。
+- **约束**：仍是浮层，不推挤画布（硬规则 2）；保留 `--seam-w` 作为 `--rail-w` 别名，P1 不改 `Wall.tsx`/`inspector.css`/`detail.css` 逻辑；**DOM 上 `.seam` 类与 `#seam-panel-trigger-*` 也必须保留到探针改完**（`Sidebar.tsx` 外部点击判断、`App.tsx` 搜索触发、`wall_*` 探针均依赖）；断点沿用现有 900/760/560，不另造 1100；选中只用一个状态通道（底色 + 2px 竖条）；不使用外发光。
+- **边界**：不做拖拽调宽、不换图标库、不做第二套主题、不把搜索框塞进导航。
+- **验收**：六档截图（1440/1280/1024/900/760/390）；折叠持久化；现有 `wall_shots.mjs`、`wall_probe_tag360.mjs`、`wall_probe_inspector_sheet.mjs`、`wall_probe_edge.mjs` 全绿。

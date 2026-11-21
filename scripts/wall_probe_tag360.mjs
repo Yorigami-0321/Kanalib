@@ -6,12 +6,12 @@
  *   node scripts/wall_probe_tag360.mjs --base http://127.0.0.1:4273/ --out web/screenshots/tag360
  *
  * 断言：
- *  1) `#/t/solo`：画布左边缘 = 缝宽（桌面 120 / 窄屏 64），缝区域命中不到画布。
+ *  1) `#/t/solo`：画布铺满视口；缝区域（桌面侧缝 / 窄屏底部 tab）命中不到画布手势。
  *  2) 缝上按下拖动 / 点击：画布 transform 与 hash 都不变，也不进入聚焦。
  *  3) 初始视野横/纵每 100px 条带都有卡片（无大片空缺）。
  *  4) 点最上面一张卡进入聚焦后，仍然每条带都有卡片，且卡片越过画布上边缘。
  *  5) 向上拖动 420px 相机确实移动（有限世界会被夹在 y=0 不动），移动后依旧无空缺。
- *  6) 390×844 窄屏：画布左边缘 = 64，无横向溢出，条带覆盖正常。
+ *  6) 390×844 窄屏：底部 tab 高 56，无横向溢出，条带覆盖正常。
  *
  * 退出码：0 通过；1 断言失败；2 环境问题。
  */
@@ -179,9 +179,13 @@ const MEASURE = String.raw`
     return {
       viewport: { w: innerWidth, h: innerHeight },
       canvas: { left: cr.left, top: cr.top, w: cr.width, h: cr.height },
-      seam: seamRect ? { left: seamRect.left, right: seamRect.right, width: seamRect.width } : null,
+      seam: seamRect
+        ? { left: seamRect.left, right: seamRect.right, top: seamRect.top, width: seamRect.width, height: seamRect.height }
+        : null,
       // 画布必须真的铺到缝下面，玻璃才有内容可透（不是"缝右边才开始画"）。
-      canvasCoversSeam: !!seamRect && cr.left <= seamRect.left && cr.right >= seamRect.right,
+      canvasCoversSeam: !!seamRect
+        && cr.left <= seamRect.left && cr.right >= seamRect.right
+        && cr.top <= seamRect.top && cr.bottom >= seamRect.bottom,
       transform: world ? world.style.transform : null,
       zoom: world ? new DOMMatrixReadOnly(getComputedStyle(world).transform).a : 1,
       tileCount: tiles.length,
@@ -229,6 +233,7 @@ async function main() {
       '--headless=new',
       `--remote-debugging-port=${port}`,
       `--user-data-dir=${profile}`,
+      '--in-process-gpu',
       '--no-first-run',
       '--no-default-browser-check',
       '--disable-extensions',
@@ -500,6 +505,7 @@ async function main() {
       canvas: mobile.canvas,
       canvasCoversSeam: mobile.canvasCoversSeam,
       seamWidth: mobile.seam ? mobile.seam.width : null,
+      seam: mobile.seam,
       tileCount: mobile.tileCount,
       rowsMissing: mobile.rowsMissing,
       colsMissing: mobile.colsMissing,
@@ -589,7 +595,9 @@ async function main() {
       Math.abs(m.canvas.left) <= 1 &&
       Math.abs(m.canvas.w - m.viewport.w) <= 1 &&
       m.canvasCoversSeam === true &&
-      Math.abs(m.seamWidth - 64) <= 1 &&
+      !!m.seam &&
+      Math.abs(m.seam.height - 56) <= 1 &&
+      m.seam.top >= m.viewport.h - m.seam.height - 1 &&
       m.overflowX <= 0 &&
       m.rowsMissing.length === 0 &&
       m.colsMissing.length === 0 &&

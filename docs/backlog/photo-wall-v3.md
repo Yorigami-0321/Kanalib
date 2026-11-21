@@ -7,6 +7,7 @@
 > **2026-11-09 晚已按本标准实施完毕**，落地状态与复验数据见 [photo-wall-status.md](photo-wall-status.md)。
 > **2026-11-10 复查补齐**：Q8 四入口、详情触摸横滑/缩放平移、标签按类别分组折叠、Q7a 强调色分层已落地；以代码 + 浏览器实测为准，见 status §4.9。
 > **2026-11-10 v4**：单击=原位聚焦（不跳详情）、双击=详情；详情底部信息层删除，标题/元数据/标签/相似搬进 300px 左侧检查器；触控板 deltaX/详情横向 wheel 见 [photo-wall-focus-mode.md](../archive/2026-11/photo-wall-focus-mode.md)。
+> **2026-11-21 导航规格更新**：本文的「120px 竖排缝 / 竖排文字」是 v3 历史基线，**已被 [web-rail-horizontal.md](web-rail-horizontal.md)（F-087）取代**。现行目标为 208px 横排文字导航、60px 折叠、≤760 底部横向条；画布/详情/检查器与硬规则 1–11 仍有效。
 >
 > 参考材料：Folia 源码规格（`.kanalib/folia-ui-spec.md`，36KB，从 `.kanalib/refs/folia` 实测）+ 用户 2026-11-09 给的四类"无界"站点清单。
 
@@ -21,7 +22,7 @@
 | 层 | 做什么 | 状态 |
 |---|---|---|
 | L0 空间层 | 首页 = 随机拼贴的连续画面。**已拍板：360° 全向无限拓展**——上下左右任意方向都能一直走，没有边界（细则见 §1.1） | 已拍板（2026-11-09） |
-| L1 导航层 | 左侧"缝"：窄、黑白、竖排文字页签，永不被内容推挤，只让导航区内部滚动 | 已实现（120px 竖排缝；C′ 常驻半透明） |
+| L1 导航层 | 左侧导航：窄、黑白、永不被内容推挤，只让导航区内部滚动 | **v3 已实现 120px 竖排缝；F-087 改为 208px 横排文字导航（待实现）** |
 | L2 索引层 | 标签总览 = 排版驱动的封面墙（大字标签 + 一张固定封面），点进第二层看全部 | 已实现；收藏/分级/分组同构两级入口 |
 | L3 详情层 | 全屏视觉：图占满视口，信息在左侧检查器 | 已实现（v4：单击聚焦、双击详情、触摸横滑、缩放平移、标签分组折叠） |
 
@@ -85,7 +86,7 @@
 
 - 字族：`Inter, "Segoe UI", Noto Sans CJK SC, Source Han Sans SC, PingFang SC, Microsoft YaHei`。
 - 层级（只保留四档，不再增加）：`13 / 15 / 20 / clamp(22px, 2vw, 36px)`；详情标题可用 `clamp(28px, 3vw, 44px)`。
-- 导航项：14px / 700 / `letter-spacing: .18em`；竖排时 `writing-mode: vertical-rl`。
+- 导航项（v3 历史基线）：14px / 700 / `letter-spacing: .18em`；竖排时 `writing-mode: vertical-rl`。**现行 F-087 规格：13px / 500 / 0，禁止 `writing-mode`，见 [web-rail-horizontal.md](web-rail-horizontal.md)。**
 - 卡片标题：`line-height: .96`、`letter-spacing: -.045em`、最多 3 行、`text-wrap: balance`。
 - 所有数字 `font-variant-numeric: tabular-nums`。
 - 角标：11px / 800 / `.12em` / 直角 / 底色 `rgba(0,0,0,.62)`——**不用 blur**（每张卡各升一层合成，是整墙最大的 GPU 开销）。

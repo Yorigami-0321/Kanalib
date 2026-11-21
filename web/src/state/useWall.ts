@@ -20,14 +20,11 @@ export interface WallController extends WallSnapshot {
   loadMore: () => void;
   /** 从失败分片续拉（不重载 index、不清空已加载）；index 本身失败时才会重新 boot。 */
   retry: () => void;
-  /** 详情页深链：若该 id 尚未加载，顺序补拉分片直到命中（有上限）。 */
+  /** 详情页深链：若该 id 尚未加载，顺序补拉分片直到命中或整库读完。 */
   findItem: (id: string) => Promise<WallItem | undefined>;
   /** 详情页找不到条目时手动继续拉片。 */
   loadMoreUntilFound: (id: string) => Promise<WallItem | undefined>;
 }
-
-/** 深链定位时一次最多补拉的分片数，避免一进来就把整库拉空。 */
-const MAX_PROBE_SHARDS = 8;
 
 /**
  * 分片失败后的自动补拉间隔。只补拉失败的那一片（游标未推进），
@@ -163,8 +160,10 @@ export function useWall(source: WallSource): WallController {
       // 没有更多分片：立刻返回，绝不再 sync。sync 会换掉 items 引用，
       // App 的定位 effect 会因此重跑，形成「找不到 → sync → 再找」的死循环。
       if (!source.hasMore()) return undefined;
+      // 不设固定分片上限：大库的 id 可能落在任意分片。StaticSource 只在请求成功
+      // 后推进游标，因此循环最多等于剩余分片数，不会无限重试同一片。
       let progressed = false;
-      for (let i = 0; i < MAX_PROBE_SHARDS && source.hasMore(); i += 1) {
+      while (source.hasMore()) {
         try {
           await source.loadMore();
           progressed = true;

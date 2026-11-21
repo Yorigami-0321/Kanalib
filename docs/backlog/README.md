@@ -51,6 +51,10 @@
 | [photo-wall-contract.md](photo-wall-contract.md) | 图片墙静态导出契约 v1：目录布局/index.json/分片/item 字段/id 规则/前端读取规则/不变量 |
 | [photo-wall-v3.md](photo-wall-v3.md) | 图片墙视觉与交互规格：空间画布/黑白竖排缝/动态强调色/两级入口/全屏详情 + 硬规则 |
 | [photo-wall-status.md](photo-wall-status.md) | 图片墙**现状与路线图**：已实现功能面、验证基线、已知问题、下一批任务 |
+| [pixiv-integration.md](pixiv-integration.md) | Pixiv 归档能力合并总计划（F-084–F-086、F-089）：box 入库过滤 → 网页轻量后端 → 桌面工作台；**不做数据迁移** |
+| [web-rail-horizontal.md](web-rail-horizontal.md) | 网页导航横向化规格（F-087）：208px 横排文字 + 折叠 + 窄屏底部条 + 验收 |
+| [web-dynamic-backend.md](web-dynamic-backend.md) | 网页轻量后端与动态化设计（F-088）：独立 `kanalib-web`/SQLite/API/媒体/`ApiSource`/安全/阶段 |
+| [ingest-service.md](ingest-service.md) | 入库过滤服务设计（F-089）：box 上的来源适配/下载/打标/规则/审核/HMAC 推送/签名回源 |
 | [manual-acceptance.md](manual-acceptance.md) | 手动验收总清单：前台/GUI/UIA/真实输入/长耗时项、夹具、证据与已通过项索引 |
 | [../TESTING-PROCESS.md](../TESTING-PROCESS.md) | 轻量测试流程：测试分层、风险定档、改动类型矩阵、门禁与反过度测试约束 |
 | [constraints.md](constraints.md) | 安全/性能/缓存/许可/本机脚本等全局约束 |

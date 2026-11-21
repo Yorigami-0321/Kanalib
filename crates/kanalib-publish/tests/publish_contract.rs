@@ -605,6 +605,70 @@ fn ledger_skips_unchanged_assets_and_rewrites_changed() {
     assert_eq!(third.originals.skipped, 1);
 }
 
+/// 原子发布：暂存目录成功后才替换正式目录；失败不碰旧产物，也不留临时目录。
+#[test]
+fn publish_replaces_output_atomically_and_keeps_old_on_failure() {
+    let fixture = Fixture::new("atomic");
+    let db = fixture.open();
+    fixture.add(&db, "a.png", 100, &sha1_of(1), true);
+    fixture.add(&db, "b.png", 200, &sha1_of(2), true);
+    drop(db);
+
+    let mut options = fixture.options();
+    options.with_originals = true;
+    let first = run(&options).unwrap();
+    assert_eq!(first.exported, 2);
+    let before_index = fs::read(options.out_dir.join("index.json")).unwrap();
+    let before_items = read_items(&options.out_dir);
+    let out = options.out_dir.clone();
+    let parent = out.parent().unwrap().to_path_buf();
+    let siblings = |suffix: &str| {
+        fs::read_dir(&parent)
+            .unwrap()
+            .flatten()
+            .filter(|entry| entry.file_name().to_string_lossy().contains(suffix))
+            .count()
+    };
+    assert_eq!(siblings(".staging-"), 0, "成功后不应留下暂存目录");
+    assert_eq!(siblings(".backup-"), 0, "成功后不应留下备份目录");
+
+    // 第二次：账本命中，产物内容不重写；旧文件与新目录不是同一份（硬链接已断开）。
+    let second = run(&options).unwrap();
+    assert_eq!(second.thumbs.written, 0);
+    assert_eq!(second.thumbs.skipped, 4);
+    assert_eq!(read_items(&out).len(), 2);
+    assert!(!fs::read(out.join("index.json")).unwrap().is_empty());
+    assert_eq!(before_items.len(), 2);
+    assert!(!before_index.is_empty(), "首次发布应写出 index.json");
+    assert_eq!(siblings(".staging-"), 0);
+    assert_eq!(siblings(".backup-"), 0);
+
+    // 失败路径：把导出目录指到一个普通文件下面，暂存目录无法创建；
+    // 旧产物必须原样保留，也不能留下暂存目录。
+    let before = snapshot(&out);
+    let blocker = parent.join("not-a-dir");
+    fs::write(&blocker, b"x").unwrap();
+    let mut failing = options.clone();
+    failing.out_dir = blocker.join("out");
+    assert!(run(&failing).is_err(), "父路径是文件时发布应失败");
+    assert_eq!(snapshot(&out), before, "失败不应改动旧产物");
+    assert_eq!(siblings(".staging-"), 0, "失败后不应留下暂存目录");
+}
+
+fn snapshot(dir: &Path) -> Vec<(PathBuf, Vec<u8>, std::time::SystemTime)> {
+    let mut files = Vec::new();
+    walk(dir, &mut files);
+    files.sort();
+    files
+        .into_iter()
+        .map(|path| {
+            let meta = fs::metadata(&path).unwrap();
+            let bytes = fs::read(&path).unwrap();
+            (path, bytes, meta.modified().unwrap())
+        })
+        .collect()
+}
+
 #[test]
 fn missing_thumb_source_is_skipped_without_error() {
     let fixture = Fixture::new("missing-thumb");

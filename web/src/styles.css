@@ -15,6 +15,7 @@
   --hairline: rgba(247, 244, 238, 0.08);
   --accent: #8f8f92;
   --seam-w: 120px;
+  --seam-h: 0px;
   --panel: 300px;
   --gap: 8px;
   --ease: cubic-bezier(0.2, 0.7, 0.25, 1);
@@ -600,13 +601,7 @@ a {
 }
 
 /* ===== 单击聚焦（v4）：格子/有限墙局部重排，英雄卡占更大的 rect；所有图仍在同一层 ===== */
-/* 聚焦卡只留图；邻图不压暗（反馈问题 2：非聚焦图不要遮罩），
-   视觉重心靠英雄卡自身的放大 + 内描边 + 投影建立。 */
-.tile--spotlight .tile__shade,
-.tile--spotlight .tile__chip,
-.tile--spotlight .tile__copy {
-  opacity: 0;
-}
+/* 聚焦卡保留名称 + 主标签（2026-11-16 决策）；底部压暗随之保留，标题在亮图上仍可读。 */
 
 .canvas.is-spotlight .canvas__hint {
   opacity: 0;
@@ -669,6 +664,35 @@ a {
 
 .tile--spotlight .tile__ring {
   box-shadow: inset 0 0 0 2px rgba(247, 244, 238, 0.2);
+}
+
+/* 聚焦卡的「打开」按钮：进详情（等同双击）。交互控件不透给画布手势（Wall.tsx 的 INTERACTIVE 判定）。 */
+.tile__open {
+  position: absolute;
+  right: 12px;
+  bottom: 12px;
+  z-index: 4;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 7px 12px;
+  border-radius: 999px;
+  color: #fff;
+  background: rgba(10, 10, 12, 0.72);
+  box-shadow: inset 0 0 0 1px rgba(247, 244, 238, 0.28);
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  transition:
+    background-color 160ms var(--ease),
+    box-shadow 160ms var(--ease);
+}
+
+.tile__open:hover {
+  background: rgba(10, 10, 12, 0.86);
+  box-shadow: inset 0 0 0 1px rgba(247, 244, 238, 0.44);
 }
 
 /* 「当前项」= 刚点开 / 刚右键看概要的那张：2px accent；和焦点环合并成一条规则。 */
@@ -1636,6 +1660,110 @@ a {
   }
 
   .tile__copy small {
+    display: none;
+  }
+
+  /* ===== 移动端导航：底部 tab（2026-11-16 决策）。侧缝变底栏，画布铺满视口的口径不变，
+     缝区拦截由 Wall.tsx 按 --seam-w / --seam-h 双向绕开。 ===== */
+  :root {
+    /* 底栏高度：Wall.tsx 的手势拦截和 .stage 的底部留白都读这个值。 */
+    --seam-h: 56px;
+  }
+
+  .stage {
+    padding-left: 0;
+    padding-bottom: var(--seam-h);
+  }
+
+  .seam {
+    top: auto;
+    right: 0;
+    bottom: 0;
+    flex-direction: row;
+    align-items: center;
+    width: auto;
+    height: var(--seam-h);
+    gap: 6px;
+    padding: 8px 10px;
+    overflow-x: auto;
+    overflow-y: hidden;
+    border-right: 0;
+    border-top: 1px solid var(--hairline);
+  }
+
+  .seam__dot,
+  .seam__word {
+    display: none;
+  }
+
+  .seam__nav {
+    flex-direction: row;
+    width: auto;
+    flex: none;
+    padding-top: 0;
+    border-top: 0;
+  }
+
+  .seam__tab {
+    width: auto;
+    flex: none;
+    gap: 3px;
+    padding: 5px 8px;
+  }
+
+  .seam__label {
+    display: block;
+    font-size: 10px;
+    letter-spacing: 0.08em;
+    writing-mode: horizontal-tb;
+  }
+
+  .seam__tab.is-on::after {
+    top: auto;
+    right: 8px;
+    bottom: 0;
+    left: 8px;
+    width: auto;
+    height: 2px;
+  }
+
+  .seam__ops {
+    display: flex;
+    width: auto;
+    flex: none;
+    gap: 4px;
+    padding-top: 0;
+  }
+
+  .seam__ops--detail {
+    gap: 4px;
+  }
+
+  .seam__ops .seam__count {
+    grid-column: auto;
+  }
+
+  .seam__foot {
+    flex-direction: row;
+    width: auto;
+    flex: none;
+    gap: 6px;
+    margin-top: 0;
+    margin-left: auto;
+    padding-top: 0;
+  }
+
+  .seam__count {
+    display: block;
+    writing-mode: horizontal-tb;
+  }
+
+  .seam__foot-actions {
+    gap: 4px;
+  }
+
+  /* ≤560px 一行放不下七个带字的 tab：收成纯图标，横向可滚作为兜底。 */
+  .seam__nav .seam__label {
     display: none;
   }
 }

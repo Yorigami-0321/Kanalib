@@ -45,6 +45,8 @@ export function Inspector({
   leaving = false,
 }: InspectorProps) {
   const [expanded, setExpanded] = useState(false);
+  /** 移动端底部 sheet 的展开态；桌面端把手隐藏，该状态不生效。 */
+  const [sheetOpen, setSheetOpen] = useState(true);
   const [copied, setCopied] = useState(false);
   const copyTimer = useRef(0);
   useEffect(() => () => window.clearTimeout(copyTimer.current), []);
@@ -99,9 +101,25 @@ export function Inspector({
   const visibleGroups: (typeof groups[number] & { hidden?: number })[] = expanded ? groups : collapsedGroups;
 
   return (
-    <aside className={'inspector' + (leaving ? ' inspector--leave' : '')} aria-label="图片信息">
-      <span className="inspector__handle" aria-hidden="true" />
-      <div className="inspector__scroll">
+    <aside
+      className={
+        'inspector' +
+        (sheetOpen ? '' : ' inspector--collapsed') +
+        (leaving ? ' inspector--leave' : '')
+      }
+      aria-label="图片信息"
+    >
+      <button
+        type="button"
+        className="inspector__handle"
+        aria-expanded={sheetOpen}
+        aria-controls="inspector-body"
+        title={sheetOpen ? '收起信息' : '展开信息'}
+        onClick={() => setSheetOpen((value) => !value)}
+      >
+        <span className="sr-only">{sheetOpen ? '收起信息' : '展开信息'}</span>
+      </button>
+      <div className="inspector__scroll" id="inspector-body">
         <header className="inspector__head">
           <div>
             <p className="inspector__eyebrow">详情</p>

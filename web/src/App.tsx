@@ -59,6 +59,27 @@ const FOCUS_RETRY_FRAMES = 30;
 /** 二级墙：这些路由共用「筛选后的一组图 + 标题」形态。 */
 const WALL_VIEWS = new Set(['tag', 'fav', 'rating', 'group']);
 
+/** 第一层总览页：先出目录/封面，剩余分片空闲再补。 */
+const OVERVIEW_VIEWS = new Set(['tags', 'favs', 'ratings', 'groups']);
+
+type IdleHandle = { kind: 'idle' | 'timeout'; id: number };
+
+/** 首屏画完后再补拉剩余分片；没有 requestIdleCallback 的浏览器退回短延时。 */
+function scheduleIdle(callback: () => void): IdleHandle {
+  if (typeof window.requestIdleCallback === 'function') {
+    return {
+      kind: 'idle',
+      id: window.requestIdleCallback(callback, { timeout: 1200 }),
+    };
+  }
+  return { kind: 'timeout', id: window.setTimeout(callback, 180) };
+}
+
+function cancelIdle(handle: IdleHandle) {
+  if (handle.kind === 'idle') window.cancelIdleCallback(handle.id);
+  else window.clearTimeout(handle.id);
+}
+
 function sortItems(items: readonly WallItem[], mode: SortMode): WallItem[] {
   if (mode === 'random') return [...items];
   const copy = [...items];
@@ -408,8 +429,10 @@ export function App() {
     [],
   );
 
-  // 所有列表/总览页都要全量分片：搜索与封面计数必须在整库上算，
+  // 所有列表/总览页最终都要全量分片：搜索与封面计数必须在整库上算，
   // 不能只看已滚到的部分（之前的"筛选只过滤已加载"就是这里的缺口）。
+  // 但"要全量"不等于"首屏等全量"：无限墙首片到达就铺满，剩余分片在空闲时补；
+  // 搜索/有限墙仍按序立刻补拉，避免搜索结果和排序长时间停在半库上。
   // 未知路由只渲染缺失页，不需要拉数据。
   const needAll = route.view !== 'detail' && route.view !== 'notfound';
   useEffect(() => {
@@ -419,8 +442,23 @@ export function App() {
       setAllLoaded(true);
       return;
     }
+    if (infiniteWall || OVERVIEW_VIEWS.has(route.view)) {
+      // 首页/大标签随机墙首屏已经出图；总览页也已从 index.facets 出目录。
+      // 剩余分片让出首帧后再补，避免全库拉取和封面请求抢主线程。
+      const handle = scheduleIdle(() => wall.loadMore());
+      return () => cancelIdle(handle);
+    }
     wall.loadMore();
-  }, [needAll, allLoaded, wall.hasMore, wall.phase, wall.loadedShards, wall.loadMore]);
+  }, [
+    needAll,
+    allLoaded,
+    wall.hasMore,
+    wall.phase,
+    wall.loadedShards,
+    wall.loadMore,
+    infiniteWall,
+    route.view,
+  ]);
 
   useEffect(() => {
     if (wall.loadedShards === 0) setAllLoaded(false);
@@ -900,7 +938,11 @@ export function App() {
     </button>
   ) : null;
 
-  const loadingBuckets = !allLoaded && wall.hasMore;
+  // 标签总览的目录与张数来自 index.facets，index 一到就能出真数字；
+  // 收藏/分级/分组的计数只能从条目算，仍等全量到位再报数（卡片本身照常渐进渲染）。
+  const libraryIndexed = Boolean(wall.index);
+  const loadingTags = !libraryIndexed || (facetTags.length === 0 && !dataComplete);
+  const loadingBuckets = !dataComplete;
 
   const inspector = inspectorItem
     ? {
@@ -993,7 +1035,7 @@ export function App() {
           <TagGallery
             entries={tagEntries}
             paths={wall.paths}
-            loading={loadingBuckets}
+            loading={loadingTags}
             onOpenTag={handleOpenTag}
           />
         ) : route.view === 'favs' ? (

@@ -14,7 +14,7 @@
  * 退出码：0 通过；1 断言失败；2 环境问题。
  */
 import { spawn, spawnSync } from 'node:child_process';
-import { existsSync, mkdtempSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { setTimeout as sleep } from 'node:timers/promises';
@@ -266,7 +266,13 @@ async function main() {
     hardDelete(profile);
   }
 
-  console.log(JSON.stringify(report, null, 2));
+  // 在部分 Windows/Node 组合下，process.exit 会丢掉尚未刷出的 stdout；
+  // 传 `--out <file>` 时把报告落盘，终端里仍打印一行摘要。
+  const out = arg('out');
+  if (out) writeFileSync(out, JSON.stringify(report, null, 2));
+  console.log(
+    JSON.stringify({ passed: report.passed, errors: report.errors.length, out: out ?? null }),
+  );
   process.exit(report.passed ? 0 : 1);
 }
 

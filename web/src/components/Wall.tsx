@@ -220,14 +220,16 @@ export function WallView({
   const sizeRef = useRef(size);
   sizeRef.current = size;
 
-  // 导航缝宽度（CSS 变量 --seam-w）：画布铺满视口后，图会垫到缝下面（玻璃要透），
-  // 但缝区仍是导航——画布手势在 pointerdown / wheel 里按这个宽度绕开。
   const seamWidthRef = useRef(0);
+  const seamHeightRef = useRef(0);
   useEffect(() => {
     const read = () => {
       const raw = getComputedStyle(document.documentElement).getPropertyValue('--seam-w');
       const parsed = Number.parseFloat(raw);
       seamWidthRef.current = Number.isFinite(parsed) ? parsed : 0;
+      const rawHeight = getComputedStyle(document.documentElement).getPropertyValue('--seam-h');
+      const parsedHeight = Number.parseFloat(rawHeight);
+      seamHeightRef.current = Number.isFinite(parsedHeight) ? parsedHeight : 0;
     };
     read();
     window.addEventListener('resize', read);
@@ -846,9 +848,10 @@ export function WallView({
   };
 
   const onPointerDown = (event: React.PointerEvent<HTMLDivElement>) => {
-    // 缝区硬拦截：画布铺到侧栏下面只是为了玻璃能透图，缝仍是导航。
+    // 缝区硬拦截：画布铺到导航（侧缝 / 底部 tab）下面只是为了玻璃能透图，缝仍是导航。
     // 必须在 setPointerCapture 之前返回，否则缝里的按下会被吃成画布拖拽/选卡。
     if (event.clientX < seamWidthRef.current) return;
+    if (event.clientY > document.documentElement.clientHeight - seamHeightRef.current) return;
     // 鼠标只认左键；触摸/手写笔的每个 pointerId 都要收（第二根手指是缩放）。
     if (event.pointerType === 'mouse' && event.button !== 0) return;
     const element = event.target as Element | null;
@@ -1085,8 +1088,9 @@ export function WallView({
     const host = viewportRef.current;
     if (!host) return;
     const onWheelNative = (event: WheelEvent) => {
-      // 缝区滚轮留给侧栏自己滚：不 preventDefault、不平移、不缩放。
+      // 缝区滚轮留给导航自己滚：不 preventDefault、不平移、不缩放。
       if (event.clientX < seamWidthRef.current) return;
+      if (event.clientY > document.documentElement.clientHeight - seamHeightRef.current) return;
       event.preventDefault();
       stopInertia();
       classifyWheel(event);

@@ -13,12 +13,18 @@
 | F-072 | 搜索入口与搜索态收敛：去掉重复搜索按钮，Esc/点击空白/清除可退出，统一搜索作用域 | 高 | 已确认方案 A 并落地：活动栏搜索移除，标题栏搜索补 Esc/清除/点击外部失焦；待补 UI 验收 | 2026-11-02 首批 |
 | F-073 | 全局 UI 组件与视觉体系重构：token、组件状态、外围界面与可访问性（主图库/查看器布局保持） | 高（当前最高） | 已落地 token/空状态/页头/chip/分段控件/设置卡片；2026-11-04 五批收口菜单键位与确认层、loading/输入状态、命令面板键位、错误就地反馈与键盘可达；副屏 GUI 验收重采 16 张基线、修复去重页窄宽头部溢出、补根 FocusScope 让 Tab 遍历真正生效；项目级 i18n UI 全量完成（六批；语言切换 + 全部静态页面/对话框/toast；六页 English 巡检；2026-11-06 补漏设置页网络来源整段并加第 8 项直接 UI 中文静态检查）；core 状态消息 D4 已结构化（`StatusMessage` + 138 个 `notice.*` 键中英，`check_ui_invariants.py` 第 7 项；2026-11-07 副屏部分实机验收：扫描开始/完成、相似完成、来源卡 last-scan 英文通过；中途瞬态未截到、来源错误行/去重保留原因等 core 原串泄漏由 D5 修复（2026-11-07：来源错误 keyed + watch_retry + 去重原因映射 + 打开链单前缀 + 英文单数；English 实机复验通过（第九轮））；D1 UI 打开失败重试已落地（2026-11-07 副屏 zh+en：失败显示/重试失败保留/补文件重试成功清除/1024 宽无溢出；四个展示位全部验完）；剩 tooltip/loading 视觉、渲染后可访问性实测（Shift+Tab 已由用户真实键盘验过；Tab/Shift+Tab 焦点遍历同日转 F-075/F-076 待移除）；1440/1920 与浮层/查看器基线已于 2026-11-07 主屏验收；2026-11-08 用户拍板精简：剩余展示面验收（tooltip/loading 视觉、渲染后 WCAG、帧率 p99、100k 滚动内存）冻结，见 [../cloud-photo-wall.md](../cloud-photo-wall.md) §6 | 2026-11-07 第八轮副屏验收 |
 | F-074 | 查看器默认加载原图：双击/快速查看不显示 512 缩略图或处理后的 sRGB 预览 | 高 | 默认原图/快速预览/色彩管理三态已落地；副屏复核双击入口与缺失原图错误态；超大图 100MP 阈值与回退提示已实现并实测；剩宽色域样本/连续切图内存；2026-11-08 剩余冻结（web 墙承接） | 2026-11-04 超大图保护 |
-| F-075 | Shift+Tab 反向焦点遍历下线（产品决定移除） | 中 | 行为已由 70-2 真实键盘验收通过；绑定来自 vendor `ely-core` 的 `shift-tab` → `FocusPrev`，Kanalib 未单独绑定；2026-11-07 只登记为待移除，代码解绑未做 | 2026-11-07 登记 |
-| F-076 | Tab 正向焦点遍历下线（产品决定移除） | 中 | 正向 Tab 顺序与焦点环已验收通过；绑定来自 vendor `ely-core` 的 `tab` → `FocusNext`，Kanalib 侧另有根 `FocusScope` 与 `.tab_index(0)` 停靠点；2026-11-07 只登记为待移除，代码解绑未做 | 2026-11-07 登记 |
+| F-075 | Shift+Tab 反向焦点遍历下线（产品决定移除） | 中 | 2026-11-21 已实现解绑：`disable_tab_focus_traversal` 在 Ely init 后绑定 `shift-tab` → `Unbind(ely::FocusPrev)` @ `ElyFocus`；`check_ui_invariants.py` 第 11 项与键位单测通过；剩真实键盘验收 | 2026-11-21 实现 |
+| F-076 | Tab 正向焦点遍历下线（产品决定移除） | 中 | 2026-11-21 已实现解绑：`tab` → `Unbind(ely::FocusNext)` @ `ElyFocus`；根 `FocusScope` 与 `.tab_index(0)` 保留用于焦点回退/浮层/可访问性；F6 保留；剩真实键盘验收 | 2026-11-21 实现 |
 | F-080 | 云端图片墙：发布导出与同步 | 高 | 计划 [../cloud-photo-wall.md](../cloud-photo-wall.md)；契约 v1 见 [../photo-wall-contract.md](../photo-wall-contract.md)；发布器 `crates/kanalib-publish` 已实现 index+分片+t256/t512/t1024/t2048+可选原图+ledger 增量+`--dry-run`/`--no-tiers`+`sharp` 声明，导出侧裁剪纯白底带、透明图合成白底、GIF 取首帧，账本记录渲染版本；默认数据 937 条已导出；rclone 未做 | 2026-11-11 更新 |
 | F-081 | 云端图片墙：墙前端与交互 | 高 | 依赖 F-080 契约 v1；`web/` v3 空间画布 + v4 单击聚焦/检查器已落地并复验；功能面、验证基线与已知问题统一见 [../photo-wall-status.md](../photo-wall-status.md)；下一批：全库搜索索引、首页按需分片、URL 状态持久化、标签页目录化/窗口化、移动端布局 | 2026-11-11 更新 |
 | F-082 | 云端图片墙：详情页 | 中 | 随 v3 落地：标签 chips、pHash 相似条、元数据、原图链接、大图回退链；信息全部进 300px 检查器；触摸横滑/缩放平移已实现 | 2026-11-11 更新 |
 | F-083 | 云端图片墙：部署与同步运维 | 中 | rclone 单向 --checksum 先 dry-run；托管 R2+Pages 或 VPS；W4=A 公开只读（可选 noindex） | 2026-11-08 登记 |
+| F-084 | Pixiv 来源适配与作品层（box） | 高 | F-089 的子项；计划 [../pixiv-integration.md](../pixiv-integration.md) §3 + 设计 [../ingest-service.md](../ingest-service.md) §3/§4；作品/页/作者在 box 库，**不改桌面 schema、不新增桌面导入管线**；**不做数据迁移** | 2026-11-21 调研 |
+| F-085 | Pixiv 元数据同步与作者（box） | 高 | F-089 的子项；设计 [../ingest-service.md](../ingest-service.md) §4.2/§6；refresh token 只在 box；404 保留元数据并标 deleted；失败分类退避；作者改名/头像更新 | 2026-11-21 调研 |
+| F-086 | Pixiv 收藏订阅与可靠下载（box） | 中 | F-089 的子项；设计 [../ingest-service.md](../ingest-service.md) §4.2/§5；订阅按用户 ID、快速追平；`.part`/Range/多页并发；动图 GIF；sync 与 subs 并行；**不做数据迁移** | 2026-11-21 调研 |
+| F-087 | 网页横向导航改版 | 高 | 规格 [../web-rail-horizontal.md](../web-rail-horizontal.md)；208px 横排文字 + 60px 折叠 + ≤760 底部条；浮层不推挤画布；保留 `--seam-w` 别名 | 2026-11-21 调研 |
+| F-088 | 网页轻量后端与动态化 | 高 | 设计 [../web-dynamic-backend.md](../web-dynamic-backend.md)；独立 `kanalib-web`（axum + SQLite WAL）+ `ApiSource`；**不读桌面 DB、不做统一后端**；只收 F-089 的 allow 批次；静态导出保留 | 2026-11-21 调研 |
+| F-089 | 入库过滤服务（box） | 高 | 设计 [../ingest-service.md](../ingest-service.md)；外部来源唯一入口；来源→下载→打标→黑名单/规则→review→HMAC 推送；**fail-closed**；不服务浏览器、不写网页 DB、不扫桌面库；部署在 box | 2026-11-21 调研 |
 
 > 2026-11-02：F-069、F-070、F-071、F-072、F-073、F-074 由用户截图/口述登记；F-073 为用户指定的当前最高优先级，F-074 与 F-069 联动。细节与调研见 [browse.md](browse.md) 与 [../ui-refactor.md](../ui-refactor.md)。
 >

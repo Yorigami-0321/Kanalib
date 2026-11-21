@@ -28,6 +28,10 @@
 | [backlog/photo-wall-contract.md](backlog/photo-wall-contract.md) | 静态导出契约 v1：目录布局/index.json/分片/item 字段/id 规则/前端读取规则/不变量 |
 | [backlog/photo-wall-v3.md](backlog/photo-wall-v3.md) | 视觉与交互规格：空间画布/黑白竖排缝/动态强调色/两级入口/全屏详情 + 硬规则 |
 | [backlog/cloud-photo-wall.md](backlog/cloud-photo-wall.md) | 计划与决策记录：产品边界、W1–W5 决策、F-083 部署 |
+| [backlog/pixiv-integration.md](backlog/pixiv-integration.md) | Pixiv 归档能力合并总计划（F-084–F-086、F-089）：box 入库过滤 → 网页轻量后端 → 桌面工作台；不含数据迁移 |
+| [backlog/web-rail-horizontal.md](backlog/web-rail-horizontal.md) | 网页导航横向化规格（F-087）：208px 横排文字、折叠、窄屏底部条 |
+| [backlog/web-dynamic-backend.md](backlog/web-dynamic-backend.md) | 网页轻量后端与动态化设计（F-088）：独立 `kanalib-web`、SQLite、API、媒体、`ApiSource`、安全与阶段 |
+| [backlog/ingest-service.md](backlog/ingest-service.md) | 入库过滤服务设计（F-089）：box 上的来源适配、下载、打标、规则、审核、HMAC 推送与签名回源 |
 
 ## 使用约定（摘要）
 

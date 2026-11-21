@@ -15,6 +15,15 @@ pub fn ensure_dir(path: &Path) -> Result<()> {
     fs::create_dir_all(path).with_context(|| format!("创建目录 {}", path.display()))
 }
 
+/// 进程内唯一的临时后缀：`<pid>-<纳秒>`，用于暂存/备份目录名。
+pub fn unique_suffix() -> String {
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|value| value.as_nanos())
+        .unwrap_or(0);
+    format!("{}-{nonce}", std::process::id())
+}
+
 /// 原子写：先写同目录 `.名字.pid-nonce.tmp`，再 rename 覆盖目标。
 pub fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
     let parent = path.parent().unwrap_or_else(|| Path::new("."));
@@ -23,11 +32,7 @@ pub fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
         .file_name()
         .map(|value| value.to_string_lossy().to_string())
         .unwrap_or_else(|| "out".to_string());
-    let nonce = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|value| value.as_nanos())
-        .unwrap_or(0);
-    let temp = parent.join(format!(".{name}.{}-{nonce}.tmp", std::process::id()));
+    let temp = parent.join(format!(".{name}.{}.tmp", unique_suffix()));
     let result = (|| -> Result<()> {
         let mut file = File::create(&temp).with_context(|| format!("创建 {}", temp.display()))?;
         file.write_all(bytes)

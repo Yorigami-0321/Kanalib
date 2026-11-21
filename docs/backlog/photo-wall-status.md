@@ -24,7 +24,7 @@
 
 | 面 | 已实现 |
 |---|---|
-| 画布 | 左键拖拽、滚轮/Ctrl+滚轮/双指缩放、方向键/PageUp/PageDown/Home/缩放键、360° 无限格位、有限墙边界回弹、缩放比例瞬态提示；画布全幅铺满（图垫在左侧 76% 半透明缝下，玻璃可见），缝区在画布 pointer/wheel 层硬拦截（不拖动、不缩放、不选中）；标签墙点顶部卡片时四周自动补图 |
+| 画布 | 左键拖拽、滚轮/Ctrl+滚轮/双指缩放、方向键/PageUp/PageDown/Home/缩放键、360° 无限格位、有限墙边界回弹、缩放比例瞬态提示；画布全幅铺满（图垫在左侧 76% 半透明导航下，玻璃可见），导航区在画布 pointer/wheel 层硬拦截（不拖动、不缩放、不选中）；标签墙点顶部卡片时四周自动补图。**导航宽度/排向以 F-087 [web-rail-horizontal.md](web-rail-horizontal.md) 为准：208px 横排、60px 折叠；下表 120px/64px 为 v3 历史实测值。** |
 | 卡片 | 单击原位聚焦（邻图挤压、不居中）、双击/Enter 进详情、长按概要、hover 微缩放、渐进模糊加载、入场波次 |
 | 详情 | 键盘/侧栏翻页、触摸横滑、Ctrl/双指缩放与放大后平移、双击复位、自动放映（P）、单色（N）、留白视图（M）、复制深链、全屏；停留 800ms 后预取前后 ±2/±3 的 t512（弱网跳过，同 URL 只取一次） |
 | 信息 | 侧栏 300px 检查器：元数据、按类别折叠标签、相似条、原图；窄屏为底部 sheet |
@@ -36,7 +36,7 @@
 |---|---|
 | 默认数据 | `web/public/data`：**937 条**，1 个分片 `m/0000.json`（1.385 MB，约 1.48 KB/条），2,000 标签 / 73 分组 |
 | 图片档 | t256/t512 937、t1024 785（83.8%）、t2048 346（36.9%），未发布原图 |
-| 发布器 | `crates/kanalib-publish`：index + 分片 + 四档 + 可选原图 + ledger 增量 + `--dry-run` + `--no-tiers` |
+| 发布器 | `crates/kanalib-publish`：index + 分片 + 四档 + 可选原图 + ledger 增量 + `--dry-run` + `--no-tiers`；正式发布先写同级暂存目录再整体替换（原子发布） |
 | 导出修正 | 源图纯白底带裁剪、透明图 alpha 合成白底、GIF 明确取首帧；账本记录渲染版本，渲染逻辑变更会触发对应条目重编 |
 | 增量 | ledger 指纹 = 源文件指纹 + 渲染版本；首次升级账本会全量重建一次 |
 | 契约校验 | `python scripts/wall_manifest_check.py web/public/data` |
@@ -57,6 +57,7 @@ node scripts/wall_probe_cold_search.mjs --base http://127.0.0.1:4273/ # 冷开�
 node scripts/wall_probe_detail_nav.mjs --base http://127.0.0.1:4273/  # 详情 ←/→/侧栏/放映/相似与路由同步
 node scripts/wall_probe_tag360.mjs --base http://127.0.0.1:4273/     # 标签墙 360° 补图 / 缝不穿透 / 移动端
 node scripts/wall_probe_tag_threshold.mjs --base http://127.0.0.1:4273/  # 1/7/8/9/大标签的世界形态边界
+node scripts/wall_probe_inspector_sheet.mjs --base http://127.0.0.1:4273/  # 移动端检查器收起/展开 + 桌面不受影响
 node scripts/wall_probe_edge.mjs --base http://127.0.0.1:4273/      # 未知 hash 缺失页 / 空态动作 / 历史
 node scripts/wall_probe_mask_edge.mjs --base http://127.0.0.1:4273/ --out web/screenshots/mask-edge  # 概要遮罩边缘像素 + 反馈环形态
 node scripts/wall_probe_detail_preload.mjs --serve-dist web/dist    # 详情预取窗口与网络计数（自带缓存静态服务）
@@ -97,16 +98,18 @@ cargo test -p kanalib-publish         # 25 单元 + 23 集成契约测试
 | # | 问题 | 代码位置 | 影响 | 计划 |
 |---|---|---|---|---|
 | 1 | ~~搜索只匹配文件名~~ **已完成**：`search-index.json` 全库检索（名称/标签/分组/分级；空格 AND、`-词` 排除、`tag:` 限定；索引缺失时退回文件名） | `state/filters.ts`、`source/StaticSource.ts` | — | 回归：`wall_probe_state`、`wall_probe_cold_search` |
-| 2 | 所有列表路由都串行拉全部分片；无限首页要等全量到齐才生成格位 | `App.tsx` `needAll` / `infinite && !ready` | 分片一多首屏即被拖住，单分片失败全网卡死 | P0：首页按需渲染 + 全量改为后台渐进；搜索索引独立 |
+| 2 | ~~所有列表路由都串行拉全部分片~~ **已完成（2026-11-21）**：无限首页/大标签墙首片到达即铺满，剩余分片在 `requestIdleCallback` 空闲期补拉；总览页 `index.json` 一到就出标签目录，封面与桶计数后台补齐；搜索/有限墙仍立即补全 | `App.tsx` `needAll` / `infiniteWall` / `loadingTags` | — | 回归：`wall_probe_state`、`wall_probe_cold_search`、`wall_probe_tag360`、`wall_probe_tag_threshold`、`wall_probe_edge`、`wall_probe_detail_nav` |
 | 3 | ~~分片失败后没有就地重试~~ **已修复（2026-11-11）**：游标改为请求成功后才推进 + generation 作废旧请求；失败自动补拉 800/2000ms；空态与“已有卡片”错误条均可重试/续拉，不清空已加载 | `StaticSource.ts`、`useWall.ts`、`Wall.tsx` | — | 回归：`wall_probe_recover.mjs` 连续 3 次失败 → 真实坐标点击 → 84 张恢复 |
-| 4 | 标签总览一次渲染全部 2,000 张卡 | `TagGallery.tsx` | 大库首屏 DOM 与封面请求过重 | P1：分类目录 + 分组展开/窗口化 + 搜索置顶 |
+| 4 | ~~标签总览一次渲染全部 2,000 张卡~~ **已决策维持现状（2026-11-16）**：标签页保持全量平铺，不做目录化/窗口化 | `TagGallery.tsx` | 大库首屏 DOM 与封面请求偏重，已知并接受 | — |
 | 5 | ~~筛选/排序/单色/留白只在内存~~ **已完成**：`q/sort/mono/matte` 写入 hash query，刷新/深链可恢复 | `App.tsx`、`lib/router.ts` | — | 遗留：跨入口静默延续 query 无可视 chip（见 §5 第二批 B） |
-| 6 | 详情深链最多补拉 8 个分片（约 4 万条），更靠后的 id 找不到 | `useWall.ts` `MAX_PROBE_SHARDS` | 大库深链可能“图片不存在” | P1：按 id 前缀定位分片，或提供 id→分片索引 |
+| 6 | ~~详情深链最多补拉 8 个分片~~ **已完成（2026-11-21）**：去掉固定上限，按序读到命中或整库读完；`StaticSource` 只在成功后才推进游标，失败片不会被反复重试 | `useWall.ts` `findItem` | — | 回归：`wall_probe_state`（无效深链 8s 内落到缺失页、console 0）、`wall_probe_detail_nav`（深链刷新/翻页不拉分片） |
 | 7 | ~~未知 hash 静默回落首页~~ **已完成**：未知非空路径解析为 `notfound`，渲染缺失页（说明 + 回首页 / 去搜索），不进全量拉取；有效路由与历史前进后退正常 | `lib/router.ts`、`App.tsx` | — | 回归：`wall_probe_edge` |
 | 8 | ~~标签/分组墙为空时动作不足~~ **已完成**：五类空态各带动作（清空搜索 / 回标签·分级·分组总览 / 回首页） | `App.tsx`、`Wall.tsx`、`BucketGallery.tsx` | — | 回归：`wall_probe_edge` |
-| 9 | 移动端检查器为底部 sheet，遮挡较多画面 | `inspector.css` | 390 宽下内容区被压 | P2：改底部 tab 或可折叠把手（待产品决策） |
-| 10 | 发布非原子：中断可能留下半套产物 | `crates/kanalib-publish` | 部署时可能出现版本不一致 | P2：写临时目录后原子替换，或产物带版本号目录 |
+| 9 | ~~移动端检查器为底部 sheet，遮挡较多画面~~ **已完成（2026-11-21）**：把手改成真实按钮（`aria-expanded`），收起只留 88px 标题条，再点恢复 55vh；桌面把手隐藏、300px 侧栏不变 | `Inspector.tsx`、`inspector.css` | — | 回归：`wall_probe_inspector_sheet` |
+| 10 | ~~发布非原子：中断可能留下半套产物~~ **已完成（2026-11-21）**：同级暂存目录 + 硬链接预置旧产物，成功后整体 rename 替换，失败清理暂存并保留旧目录；`fs::copy` 前先断开硬链接避免截断旧文件 | `crates/kanalib-publish` `Staging`、`sync_file` | — | 回归：`cargo test -p kanalib-publish`（49 项，含 `publish_replaces_output_atomically_and_keeps_old_on_failure`） |
 | 11 | 语义搜索缺失 | — | 只能按文件名/标签找图 | 候选：CLIP（F-016），先不做 |
+| 12 | **同一张图在无限墙中出现两次时，两张会同时被判定为聚焦/当前项并高亮。** 用户截图（2026-11-21）：id `1749606256441` 的截图卡在上下两个位置同时显示聚焦态。 | `Wall.tsx`：`current={tile.item.id === activeId}`、`spotlight={tile.item.id === spotlightId}`；`layoutSpotlightCell()` 也用 `item.id` 查找/过滤英雄卡。 | 用户无法分辨哪一张被真正选中；两处同图同时放大/高亮。 | 修复方向：选择态应改为“实例级”标识（cell 坐标 + index + id），而不是仅比较 `item.id`。 |
+| 13 | **单击聚焦的邻图挤压规则仍需优化。** 用户反馈（2026-11-21）：聚焦时周围卡片会被过度挤压，出现扁条状、小尺寸或布局不自然的区域；截图显示邻图被压缩成低高度横条。 | `world.ts` `layoutSpotlightCell()` / `layoutFeaturedWorld()`；列数与区域分配在 `gridColumns()` / `gridRects()`。 | 聚焦观感不稳定；邻图可读性差。 | 需要重新设计挤压规则：优先保持邻图最小可读尺寸与接近原比例，避免细条；明确英雄卡、四周区域、空隙和极端长宽比的处理。 |
 
 ### 4.1 2026-11-11 已闭环（明细归档）
 
@@ -166,19 +169,19 @@ cargo test -p kanalib-publish         # 25 单元 + 23 集成契约测试
 
 ### 第二批 A（已开工，不依赖产品决策）
 
-1. `search-index.json`：发布器侧仍待交付；前端已按元组契约接入并复验（索引缺失时退回文件名搜索）。
+1. `search-index.json`：已完成——发布器生成/重建（`crates/kanalib-publish/src/search.rs`、`--index-only`），前端按元组契约接入并复验（索引缺失时退回文件名搜索）。
 2. URL 状态持久化：已完成并复验。**遗留**：跨入口会静默延续 query（URL 可见但画布无 chip），可清除筛选条进 2B。
 3. 稳定性与信任小修：无效深链、弱网骨架、小集合有限墙、0 收藏空态，均已完成并复验。
 4. 详情体验（前端二号）：邻屏 t512 占位不重复拉档；相似为空回退同标签/分组；去掉不可达的“打开原图”承诺。**已完成并复核**（正常网首屏 64–196KB，Fast 3G 50–368KB；t512 ≤1.03s、锐利层 ≤2.04s；B2 抽样 10 页回退 10/10；原图入口 0）。
 5. 详情翻页路由同步（前端一号）：A4 引入的 `replaceState` 无事件回归，**已完成并复核**；`wall_probe_detail_nav` 固化“→ 后 500ms 画面必须变”。
 6. 冷启动带 q 深链（前端一号）：搜索索引请求与 `init()` 的 generation 竞态，**已完成并复核**；`wall_probe_cold_search` 固化冷开/刷新/新标签/404 四种场景。
 
-### 第二批 B（部分已完成，其余待决策）
+### 第二批 B（已完成）
 
-3. 首页按需分片与无限格位渐进生成；后台补全其余分片。（待决策）
-4. 标签页目录化：默认分类目录、每组限量、搜索置顶。（待决策）
-5. 移动端布局调整（底部 tab 或可折叠 sheet）。（待决策）
-6. 卡面信息与打开方式（聚焦保留名称+主标签+“打开”按钮 / 双击窗口）。（待决策）
+3. ~~首页按需分片与无限格位渐进生成；后台补全其余分片~~ **已完成（2026-11-21）**：无限墙首片即铺满，剩余分片空闲期补拉；总览页从 `index.facets` 先出目录。回归：`wall_probe_state` / `cold_search` / `tag360` / `tag_threshold` / `edge` / `detail_nav`。
+4. ~~标签页目录化~~ **已决策不做（2026-11-16）**：维持全量平铺。
+5. ~~移动端布局调整~~ **已完成（2026-11-16）**：≤760px 导航改底部 tab（`--seam-h: 56px`，画布手势按 `--seam-w`/`--seam-h` 双向拦截）；回归：`wall_probe_tag360`（移动端断言改为底栏高度）。
+6. ~~卡面信息与打开方式~~ **已完成（2026-11-16）**：聚焦卡保留名称 + 主标签，右下角新增「打开」按钮进详情。
 7. ~~空态动作与 404 提示~~ **已完成并复验**：未知非空 hash → 缺失页（回首页 / 去搜索）；无匹配 / 空标签 / 空分级 / 空分组 / 空收藏 / `#/favs` 桶空态均带可执行动作。回归：`wall_probe_edge`（1440，console 0，历史前进后退正常）。
 
 ### 第三批（体验打磨）
@@ -186,18 +189,21 @@ cargo test -p kanalib-publish         # 25 单元 + 23 集成契约测试
 - ~~详情左右切换的预加载窗口扩大~~ **已完成并复核**：停留 800ms 后预取前后 ±2/±3 的 t512（`PRELOAD_RADIUS=3`，URL 去重、上限 120、弱网跳过）；4g 打开 7 张 t512 / 276 KB，窗口外 0；弱网预取 0、首屏体积 +0%。回归：`wall_probe_detail_preload`。
 - ~~无界标签页标题被首行卡片压住~~ **已完成并复核**：`.wallhead::before` 纸面衬底（顶部压暗 + blur 14px + 径向遮罩淡出），不拦指针，相机与 360° 补图不受影响。回归：`wall_probe_tag360`。
 - ~~概要遮罩边缘 1px 亮边~~ **已完成并复核**：遮罩外扩 2px 越出卡片裁切边界，`.tile__media` 承担圆角裁切，装饰环改为遮罩之上的 `.tile__ring`（概要态关闭/键盘焦点保留）。回归：`wall_probe_mask_edge`（zoom 1 / 1.2635 / 1.6 / DPR 2.5 四边 Δ ≤3/255）、`wall_probe_tag360`、`wall_probe_tag_threshold`、`wall_probe_edge`、`wall_probe_detail_nav`、`wall_probe_detail_preload`。明细见 §4.4。
+- **重复图同时聚焦（§4 #12）**：待修。先补一个可复现探针：同一 id 在同一/相邻格子出现两次时，仅点击位置应进入 `spotlight`，另一实例不得高亮或放大。
+- **聚焦挤压规则重构（§4 #13）**：待设计。目标：英雄卡保持真实比例且不小于原可见面积；邻图短边不低于可读阈值；优先按原图比例分配区域；极端长图/横图宁可减少邻图数量，也不切成细条。
 - 检查器信息密度与标签分组交互（默认组、展开记忆）。
-- 发布器线程池（大库首编耗时）与原子发布。
+- ~~发布器原子发布~~ **已完成（2026-11-21）**：暂存目录 + 整体替换，失败保留旧产物。
+- 发布器线程池（大库首编耗时）。
 - 真实设备手感复验（触控板/触屏/高分屏 DPR）。
 
-## 6. 待产品决策
+## 6. 产品决策（2026-11-16 已定）
 
-| # | 问题 | 选项 |
+| # | 问题 | 决策 |
 |---|---|---|
-| 1 | 桌面单击聚焦后是否保留名称+主标签并加“打开”按钮 | A 保留并加按钮；B 维持纯图 |
-| 2 | 移动端导航形态 | A 底部 tab（内容区 326→≥346px）；B 继续 64px 侧缝 |
-| 3 | 标签页默认形态 | A 分类目录 + 每组 60 + 搜索置顶；B 维持全量平铺 |
-| 4 | 内容分级闸门（2026-11-11 新增） | A 默认只显示 G，可手动切换；B 记住上次选择；C 进入前确认。全库 S 504/937，当前首屏可能含受限内容 |
+| 1 | 桌面单击聚焦后是否保留名称+主标签并加“打开”按钮 | 保留名称 + 主标签，加「打开」按钮（已实现） |
+| 2 | 移动端导航形态 | 底部 tab（已实现，≤760px） |
+| 3 | 标签页默认形态 | 维持全量平铺，不做目录化 |
+| 4 | 内容分级闸门 | 不做 |
 
 ## 7. 历史记录
 

@@ -401,6 +401,8 @@ fn main() {
         .with_assets(Assets)
         .run(move |cx: &mut App| {
             ely_gpui_component::init(cx).expect("Ely failed to start");
+            // F-075/F-076：产品决定下线 Tab / Shift+Tab 焦点遍历，保留 F6。
+            kanalib_ui::disable_tab_focus_traversal(cx);
             kanalib_ui::install_i18n(cx);
             Theme::set_mode_now(Mode::Dark, cx);
             Theme::update(cx, |theme| {

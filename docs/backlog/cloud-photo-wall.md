@@ -157,10 +157,10 @@ manifest 契约要点（F-080 首产物）：分片按排序键切（每片 ≤5
 | F-071 | 标题栏拖拽区验收 | 实现中（剩余冻结） | 外壳 polish |
 | F-072 | 待补 UI 验收 | 保留一次轻量验收后归档（不冻） | 搜索是管理核心入口 |
 | F-030/F-033/F-036 | 等真实环境/手动 | 维持现状挂起，不新增投入 | 与 web 无直接关系 |
-| F-075/F-076 | 待移除 | 保留移除任务 | 产品已决定下线 |
+| F-075/F-076 | 待移除 | 2026-11-21 已解绑 Tab / Shift+Tab（保留 F6）；剩真实键盘验收 | 产品已决定下线 |
 | F-016/F-026/F-048/F-066 | 远期 | 维持远期不启动 | 候选池不变 |
 
-精简后本地车道只保留：管理核心写链路验收（F-020/F-072）、F-075/F-076 移除、发布器 F-080；其余展示面尾巴冻结等 web 墙承接。
+精简后本地车道只保留：管理核心写链路验收（F-020/F-072）、F-075/F-076 真实键盘复验、发布器 F-080；其余展示面尾巴冻结等 web 墙承接。
 
 ## 7. 决策点（W1–W5 全部已定，2026-11-08）
 
@@ -193,7 +193,7 @@ manifest 契约要点（F-080 首产物）：分片按排序键切（每片 ≤5
 | F-081 墙前端 | `web/`（Vite + React + TS，包名 kanalib-wall） | 实现中 | v3 空间画布 + v4 单击聚焦/检查器已落地并复验；功能面、验证基线与已知问题统一记在 [photo-wall-status.md](photo-wall-status.md)，本文不再重复 |
 | 验收脚手架 | `scripts/wall_manifest_check.py`、`scripts/wall_verify.ps1`、`scripts/wall_shots.mjs`、`wall_visual_probe.mjs`、`wall_perf.mjs`、`wall_probe_wheel.mjs` | 已提交 | 契约不变量校验 + 四页/交互/390 窄屏/聚焦/滚轮手感闸门（零依赖 CDP） |
 | 视觉改版 v2 | [archive/2026-11/photo-wall-design.md](../archive/2026-11/photo-wall-design.md) | **已被 v3 取代（归档）** | 珊瑚红 + 光晕/噪点、左侧 76/232px 边栏、6px 密集拼贴、展示型详情页；历史记录，不再执行 |
-| 视觉改版 v3 | [photo-wall-v3.md](photo-wall-v3.md) | **已实施** | 空间画布 + 黑白竖排缝 + 动态强调色 + 两级入口 + 全屏详情；硬规则 1–11 全部通过 |
+| 视觉改版 v3 | [photo-wall-v3.md](photo-wall-v3.md) | **已实施** | 空间画布 + 黑白竖排缝 + 动态强调色 + 两级入口 + 全屏详情；硬规则 1–11 全部通过。**导航层由 F-087 改为 208px 横排（[web-rail-horizontal.md](web-rail-horizontal.md)）** |
 
 - 当前实现状态、数据规模、性能与已知问题：见 [photo-wall-status.md](photo-wall-status.md)。
 - 数据：发布器导出到 `web/public/data/`（已 gitignore），`npm run dev` 直接以 `/data/` 读取；构建产物 `web/dist` 与 `data/` 一起上传。

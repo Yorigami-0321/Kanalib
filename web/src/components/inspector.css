@@ -43,6 +43,11 @@
   display: none;
 }
 
+.inspector__handle:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
 .inspector__scroll {
   flex: 1;
   min-height: 0;
@@ -349,6 +354,7 @@
     left: var(--seam-w);
     width: auto;
     max-height: 55vh;
+    transition: max-height 240ms var(--ease);
     border-top: 1px solid var(--hairline);
     border-right: 0;
     border-radius: 14px 14px 0 0;
@@ -375,13 +381,54 @@
   }
 
   .inspector__handle {
-    display: block;
+    display: flex;
+    width: 100%;
+    height: 22px;
+    flex: none;
+    align-items: center;
+    justify-content: center;
+    padding: 0;
+    border: 0;
+    background: none;
+    cursor: pointer;
+  }
+
+  .inspector__handle::before {
     width: 36px;
     height: 4px;
-    flex: none;
-    margin: 8px auto 0;
     border-radius: 2px;
     background: rgba(247, 244, 238, 0.24);
+    content: '';
+    transition:
+      background-color 160ms var(--ease),
+      transform 240ms var(--ease);
+  }
+
+  .inspector__handle:hover::before {
+    background: rgba(247, 244, 238, 0.42);
+  }
+
+  .inspector--collapsed .inspector__handle::before {
+    transform: scaleX(0.72);
+  }
+
+  /* 收起态只留把手 + 标题行：内容与操作区隐藏，画面让出 55vh。 */
+  .inspector--collapsed {
+    max-height: 112px;
+  }
+
+  .inspector--collapsed .inspector__scroll {
+    flex: none;
+    overflow: hidden;
+    padding-bottom: 0;
+  }
+
+  .inspector--collapsed .inspector__scroll > :not(.inspector__head) {
+    display: none;
+  }
+
+  .inspector--collapsed > .inspector__actions {
+    display: none;
   }
 
   .inspector__scroll {
