@@ -1,6 +1,6 @@
 # 第五轮任务包（2026-10-28）
 
-> 上级索引：[../FEATURE-BACKLOG.md](../FEATURE-BACKLOG.md) · 文档地图：[README](./README.md) · 第四轮：[round-4.md](round-4.md)
+> 上级索引：[../FEATURE-BACKLOG.md](../../FEATURE-BACKLOG.md) · 文档地图：[README](../../backlog/README.md) · 第四轮：[round-4.md](round-4.md)
 >
 > 第四轮已完成（F-061/F-033/F-040/F-012/F-030/E1），但留下真实拖放、Ctrl 多选、真实网络盘、10 万真实缩略图键入延迟、大库备份进度等边界。本轮先做桌面基础与验收，再启动 F-035 网络源主线和媒体扩展；所有 UI 仍只有一条车道。
 
@@ -77,24 +77,24 @@
 
 | 验收项 | 状态 | 证据 / 缺口 |
 |---|---|---|
-| F-036 真实 Windows 资源管理器拖放 | 待用户手动 | 无真实拖放 E2E；窗口内 UIA/消息模拟不算。手动清单 1–7 项（文件夹、来源内图片、来源外图片、取消、Unicode 日文/长路径、重复来源、自绘标题栏兼容）见 [pending/library-sources-formats.md](pending/library-sources-formats.md) 的 F-036。缺少环境：人工从资源管理器发起拖放。 |
+| F-036 真实 Windows 资源管理器拖放 | 待用户手动 | 无真实拖放 E2E；窗口内 UIA/消息模拟不算。手动清单 1–7 项（文件夹、来源内图片、来源外图片、取消、Unicode 日文/长路径、重复来源、自绘标题栏兼容）见 [pending/library-sources-formats.md](../../backlog/pending/library-sources-formats.md) 的 F-036。缺少环境：人工从资源管理器发起拖放。 |
 | F-003 Ctrl 多选 2–4 张进入对比 | 未通过 | 去重组「对比此组」3 张对比通过（`.kanalib/r4_task0/screens/10k-compare-3up.png`、`10k-compare-zoomin.png`、`10k-compare-pan-left.png`、`10k-compare-esc-return.png`：并排 3 栏、同步缩放/平移、差异表、保留标记、Esc 返回），但不能当作多选入口；Ctrl 多选尝试 `.kanalib/r4_task0/screens/10k-multiselect-ctrl-attempt.png` 显示仅 1 张（`synthetic_00002_city_合成.jpg`）被选中。缺口：真实 Ctrl/Shift 选中 2–4 张后经「对比选中」进入对比未复现，待用户手动复核。 |
 | F-005 10 万真实缩略图库分组滚动 | 环境不可用 | 分组菜单（修改/拍摄时间、来源、评级）、组头吸顶、折叠、连续滚动可用；600s 采样工作集约 145MB、私有约 190MB 无增长（`.kanalib/r4_task0/100k-scroll-memory.csv`、`screens/100k-*.png`、`uia-100k-grouped.txt`）。但 `.kanalib/r4_task0/logs/100k-group.log` 记录 `source inaccessible: C:\bench` 与 `thumb missing and could not rebuild`，网格只有占位符。缺少环境：可访问的 10 万真实缩略图库。 |
 | F-030 真实 OneDrive/网络盘事件与断线恢复 | 环境不可用 | 只有临时目录的离线/恢复/目录重命名模拟（第四轮 D）；`.kanalib/` 下无 OneDrive/SMB/断线重放证据。缺少环境：真实 OneDrive 同步目录（占位/已水合文件）、SMB 共享与断线重连。 |
 | F-012 10 万真实缩略图库 UI 键入延迟 | 环境不可用 | 仅有 `C:\bench` 离线的缺图库：`synthetic` visible 931ms、`sky` 657ms、`synthetic_0004` 修复后 360ms（`.kanalib/r4_e1/logs/search100k-limit512c.log`、`search100k-fixed.log`）。缺少环境：缩略图可访问的 10 万库；现有库上 `p95≤150ms` 仍未达成。 |
-| F-061 大库备份进度 / VACUUM | 未通过 | 备份进度/取消与 VACUUM 维护入口未实现，`.kanalib/` 无大库备份采样或 VACUUM 记录；见 [pending/ops.md](pending/ops.md) 的 F-061。 |
+| F-061 大库备份进度 / VACUUM | 未通过 | 备份进度/取消与 VACUUM 维护入口未实现，`.kanalib/` 无大库备份采样或 VACUUM 记录；见 [pending/ops.md](../../backlog/pending/ops.md) 的 F-061。 |
 
 **文档立项（同日）**
 
-- F-035 由「远期」改为「实现中」（第五轮任务 B）；范围限定为 Source 抽象、Immich 只读、WebDAV 只读、跨源 SHA1 精确去重与只读边界，详见 [pending/library-sources-formats.md](pending/library-sources-formats.md)。
-- F-038/F-039 由「候选」改为「实现中」（第五轮任务 A）；F-038 只做窗口位置/大小/最大化/屏幕恢复，F-039 只做单实例置前，托盘/开机启动仍不做，详见 [pending/ops.md](pending/ops.md)。
-- F-046/F-047/F-015/F-025/F-068 保持「候选」，仅标记为「待任务 D」；未实现前不得写成已实现。（第六轮任务 A 已实现，见 [round-6.md](round-6.md) 与 [implemented.md](implemented.md)。）
+- F-035 由「远期」改为「实现中」（第五轮任务 B）；范围限定为 Source 抽象、Immich 只读、WebDAV 只读、跨源 SHA1 精确去重与只读边界，详见 [pending/library-sources-formats.md](../../backlog/pending/library-sources-formats.md)。
+- F-038/F-039 由「候选」改为「实现中」（第五轮任务 A）；F-038 只做窗口位置/大小/最大化/屏幕恢复，F-039 只做单实例置前，托盘/开机启动仍不做，详见 [pending/ops.md](../../backlog/pending/ops.md)。
+- F-046/F-047/F-015/F-025/F-068 保持「候选」，仅标记为「待任务 D」；未实现前不得写成已实现。（第六轮任务 A 已实现，见 [round-6.md](round-6.md) 与 [implemented.md](../../backlog/implemented.md)。）
 - `implemented.md` 的 F-040 阶段 1 行改为“部分实现条目”说明，避免与 registry「实现中」及脚本的状态互斥检查冲突。
 - 文档自检 `bash scripts/check_backlog_docs.sh` 通过：registry 50 条无重复/丢失（已实现 30、候选 8、实现中 7、远期 5）；「已实现但无归档行」「implemented 有行但状态非已实现」「overview 缺口」「详情文件未覆盖」四项均为空。
 
 **待用户手动清单**
 
-1. F-036：按 [pending/library-sources-formats.md](pending/library-sources-formats.md) F-036 的 1–7 项逐一拖放（文件夹、来源内、来源外、取消、`D:\测试\日本語\写真\...` 与 >260 字符长路径、重复来源、自绘标题栏边缘）。
+1. F-036：按 [pending/library-sources-formats.md](../../backlog/pending/library-sources-formats.md) F-036 的 1–7 项逐一拖放（文件夹、来源内、来源外、取消、`D:\测试\日本語\写真\...` 与 >260 字符长路径、重复来源、自绘标题栏边缘）。
 2. F-003：真实 Ctrl/Shift 选中 2–4 张后点「对比选中」，确认栏数与选中数一致、Esc 返回后选择与滚动保持、仅 1 张时提示不可对比。
 3. F-030：若手头有 OneDrive 同步目录或网络共享，验证新增/修改/删除/目录重命名/离线重连，并确认监听批次结束后无过期去重组；没有该环境则保持「环境不可用」。
 4. F-005/F-012：需要可访问的 10 万真实缩略图库后才能补测分组滚动与 UI 键入延迟；不能再用离线占位库替代。
@@ -153,7 +153,7 @@
 | 验证 | `cargo check --workspace`；合并后 core 177/16、UI **52**（46+3+3）、bin 6；隔离数据根实机：视频瓦片首帧与 `视频 · 00:02`（`.kanalib/r5d/grid2.png`）、网络来源区块（`settings3.png`）、添加 WebDAV 对话框（`dialog.png`） |
 | 未验证 | 添加/测试/同步的完整 UI 提交链路未用真实键入跑通（GPUI TextInput 不接受 UIA `ValuePattern`，只验证到对话框）；未联真实 Immich/WebDAV；远端资产在网格/去重组的只读禁用为单测覆盖；小项包（F-015/F-025/F-046/F-047/F-068）未做 |
 
-**第五轮合并后基线**：`cargo check --workspace` 通过；core 177 passed / 16 ignored、UI 52、bin 6。A/B/C/D 全部合入；F-035/F-038/F-039/F-040 归档为已实现（边界见 [implemented.md](implemented.md)），F-033 保留在未完成项，等待 HEIC/RAW 样本与许可链。
+**第五轮合并后基线**：`cargo check --workspace` 通过；core 177 passed / 16 ignored、UI 52、bin 6。A/B/C/D 全部合入；F-035/F-038/F-039/F-040 归档为已实现（边界见 [implemented.md](../../backlog/implemented.md)），F-033 保留在未完成项，等待 HEIC/RAW 样本与许可链。
 
 ## 第六轮预览（不在本轮）
 

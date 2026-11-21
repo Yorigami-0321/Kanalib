@@ -48,19 +48,20 @@
 | [pending/dedup.md](pending/dedup.md) | 去重：F-045 |
 | [pending/ops.md](pending/ops.md) | 性能/可靠性与交付：F-038/F-039、F-061–F-063 |
 | [candidate-pool.md](candidate-pool.md) | 低优先级/远期候选 |
-| [next-steps.md](next-steps.md) | 2026-11-04 暂停点：后续任务分类、优先级、红线与命令速查（未验收项保持未勾选） |
+| [cloud-photo-wall.md](cloud-photo-wall.md) | 云端无界图片墙计划与决策记录（F-080–F-083）：产品边界/W1–W5/部署 |
+| [photo-wall-contract.md](photo-wall-contract.md) | 图片墙静态导出契约 v1：目录布局/index.json/分片/item 字段/id 规则/前端读取规则/不变量 |
+| [photo-wall-v3.md](photo-wall-v3.md) | 图片墙视觉与交互规格：空间画布/黑白竖排缝/动态强调色/两级入口/全屏详情 + 硬规则 |
+| [photo-wall-status.md](photo-wall-status.md) | 图片墙**现状与路线图**：已实现功能面、验证基线、已知问题、下一批任务 |
+| [pixiv-integration.md](pixiv-integration.md) | Pixiv 归档能力合并总计划（F-084–F-086、F-089）：box 入库过滤 → 网页轻量后端 → 桌面工作台；**不做数据迁移** |
+| [web-rail-horizontal.md](web-rail-horizontal.md) | 网页导航横向化规格（F-087）：208px 横排文字 + 折叠 + 窄屏底部条 + 验收 |
+| [web-dynamic-backend.md](web-dynamic-backend.md) | 网页轻量后端与动态化设计（F-088）：独立 `kanalib-web`/SQLite/API/媒体/`ApiSource`/安全/阶段 |
+| [ingest-service.md](ingest-service.md) | 入库过滤服务设计（F-089）：box 上的来源适配/下载/打标/规则/审核/HMAC 推送/签名回源 |
 | [manual-acceptance.md](manual-acceptance.md) | 手动验收总清单：前台/GUI/UIA/真实输入/长耗时项、夹具、证据与已通过项索引 |
 | [../TESTING-PROCESS.md](../TESTING-PROCESS.md) | 轻量测试流程：测试分层、风险定档、改动类型矩阵、门禁与反过度测试约束 |
 | [constraints.md](constraints.md) | 安全/性能/缓存/许可/本机脚本等全局约束 |
-| [parallel-plan.md](parallel-plan.md) | 并行开发矩阵 + 第一轮可直接派发的任务包 |
-| [round-2.md](round-2.md) | 第二轮任务包：打标质量/队列、搜索性能、媒体格式与阶段 2 |
-| [round-3.md](round-3.md) | 第三轮任务包：组织、相似/浏览、扫描运维与 UI 拆分 |
-| [round-4.md](round-4.md) | 第四轮任务包：备份恢复、媒体评估、搜索上限与监听收尾 |
-| [round-5.md](round-5.md) | 第五轮任务包：桌面基础、Immich/WebDAV 网络源、视频与格式门 |
-| [round-6.md](round-6.md) | 第六轮任务包：UI 小项、保护路径 glob、ICC 颜色管理 |
-| [round-7.md](round-7.md) | 第七轮任务包：F-067 会话内撤销/历史（纯代码） |
 | [component-research.md](component-research.md) | 非 UI 现成组件调研（可直接采用/评估/自研） |
 | [references.md](references.md) | 外部参考与本地依据 |
+| [../archive/2026-11/](../archive/2026-11/) | 历史任务包与过时设计/反馈文档（第一至七轮、v2 设计、v4 调研等），非权威，仅作追溯 |
 
 ## 推荐顺序
 
@@ -78,7 +79,8 @@
 
 - **新需求**：先在 [registry.md](registry.md) 加一行，再到 `pending/` 对应职责文件写需求/方案/验收/风险；调研遵循本页准则，补「调研来源/候选对比/复用结论」。
 - **实现后**：从 `pending/` 移入 [implemented.md](implemented.md)，只保留关键约束与验证。
-- **派发任务**：先看 [parallel-plan.md](parallel-plan.md)；UI 只有一条车道，schema/sidecar 单一负责人。
+- **派发任务**：先看 [photo-wall-status.md](photo-wall-status.md) 的路线图与 [pending/overview.md](pending/overview.md)；UI 只有一条车道，schema/sidecar 单一负责人。
+- **历史文档**：第一至七轮任务包、v2 设计、v4 调研与反馈日志已移到 [../archive/2026-11/](../archive/2026-11/)，不再维护，不作为执行依据。
 - **验证**：按 [../TESTING-PROCESS.md](../TESTING-PROCESS.md) 的改动类型矩阵与门禁执行；默认最小验证，不做过度测试。
 - **不写工时/排期**；代码行号会漂移，按函数名搜索。
 - **文档自检**：`bash scripts/check_backlog_docs.sh` 校验 registry 的 F-xxx 不重复不丢失、implemented 与 pending 的状态不互相矛盾；每轮收口后重跑一次。

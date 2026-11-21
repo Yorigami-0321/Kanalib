@@ -1,0 +1,352 @@
+/* v4 详情：画面只留图，信息在左侧检查器。
+   stage 在检查器展开时让出 seam + 300px；≤900px 检查器是底部 sheet，图仍全宽。 */
+
+/* 环境层：同一张图的 512 档，重度模糊后压暗，填住 contain 留下的黑边。
+   静态层，不做漂移动画：模糊滤镜每帧重算在集显上代价太高。
+   亮度/透明度提高一档：旧值 brightness(.44)×opacity(.66) 再叠 scrim，
+   侧边只剩 ~11% 亮度，看起来像纯黑（P1-2）。 */
+.view__ambient {
+  position: absolute;
+  inset: -6%;
+  z-index: 0;
+  background-position: center;
+  background-size: cover;
+  filter: blur(48px) saturate(1.25) brightness(0.7);
+  opacity: 0.82;
+  transform: scale(1.06);
+  pointer-events: none;
+}
+
+.view__ambient::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background:
+    radial-gradient(ellipse at center, transparent 42%, rgba(5, 5, 5, 0.38) 100%),
+    linear-gradient(180deg, rgba(5, 5, 5, 0.26), rgba(5, 5, 5, 0.1));
+}
+
+.view--detail .view__stage {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  overflow: hidden;
+}
+
+.view--detail.view--detail-info .view__stage {
+  left: calc(var(--seam-w) + var(--inspector-w, 0px));
+}
+
+/* 轨道常驻在 -100%：三格里永远显示中间那格。滑动的起止都从这格出发，
+   动画结束换内容时画面不变。 */
+.view--detail .view__track {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  transform: translateX(-100%);
+  will-change: transform;
+}
+
+/* 滑动时长与图片位置/尺寸过渡统一到 420ms（P2-1），commitSlide 仍由 animationend 驱动。 */
+.view--detail .view__track--next {
+  animation: pane-next 420ms var(--ease-out) both;
+}
+
+.view--detail .view__track--prev {
+  animation: pane-prev 420ms var(--ease-out) both;
+}
+
+@keyframes pane-next {
+  from {
+    transform: translateX(-100%);
+  }
+  to {
+    transform: translateX(-200%);
+  }
+}
+
+@keyframes pane-prev {
+  from {
+    transform: translateX(-100%);
+  }
+  to {
+    transform: translateX(0);
+  }
+}
+
+.view--detail .view__pane {
+  position: relative;
+  flex: 0 0 100%;
+  height: 100%;
+  overflow: hidden;
+}
+
+/* 大图：撑满 pane（contain 保比例，绝不裁切）。 */
+.view--detail .view__media {
+  position: absolute;
+  inset: 0;
+  display: block;
+  padding: 0;
+  /* 触摸手势全部交给图片自己：单指横滑换图、双指缩放、放大后拖拽。 */
+  touch-action: none;
+}
+
+.view--detail .view__media.is-zoomed {
+  cursor: grab;
+}
+
+.view--detail .view__media.is-zoomed:active {
+  cursor: grabbing;
+}
+
+/* 底色与锐利层共用一块叠放容器：升级只改上层，底色始终在下面兜着。 */
+.view--detail .view__layers {
+  position: absolute;
+  inset: 0;
+}
+
+.view--detail .view__img {
+  position: absolute;
+  inset: 0;
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  opacity: 0;
+  /* 只做很短的淡入：420ms 滑动里新图必须马上可见，更长会让半屏先空一截。 */
+  transition:
+    opacity 160ms var(--ease),
+    top 420ms var(--ease-out),
+    right 420ms var(--ease-out),
+    bottom 420ms var(--ease-out),
+    left 420ms var(--ease-out),
+    width 420ms var(--ease-out),
+    height 420ms var(--ease-out),
+    filter 420ms var(--ease-out);
+}
+
+.view--detail .view__img.is-loaded {
+  opacity: 1;
+}
+
+/* 锐利层叠在 t512 底色之上：占位图先出，升级完成再淡入覆盖，切换过程不空屏。 */
+.view--detail .view__img--sharp {
+  z-index: 1;
+}
+
+/* 滑动中的目标屏跳过淡入：预取已把它放进缓存，
+   再等 onLoad + 160ms 会让中途出现一段空画面。
+   下一张的目标是 pane2（第 3 格），上一张的目标是 pane0（第 1 格）。 */
+.view--detail .view__track--next .view__pane:nth-child(3) .view__img,
+.view--detail .view__track--prev .view__pane:nth-child(1) .view__img {
+  opacity: 1;
+  transition: none;
+}
+
+/* 双击展开（lib/expand.ts）：克隆图飞行期间把真实内容蒙住；揭示由 Detail
+   用 WAAPI 按飞行时钟驱动（expandRevealDelay），CSS 不再排延迟动画——
+   挂载抖动曾让揭示晚于克隆落位，留下空窗（反馈问题 6）。 */
+
+.view--detail .view__scrim {
+  z-index: 1;
+}
+
+/* 放映模式：4.2s 一条进度线，换图时由 key 重新挂载、从头开始。 */
+.view__playbar {
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  left: 0;
+  z-index: 4;
+  height: 2px;
+  background: linear-gradient(90deg, color-mix(in srgb, var(--accent) 70%, #fff), var(--accent));
+  box-shadow: 0 0 12px color-mix(in srgb, var(--accent) 55%, transparent);
+  transform-origin: 0 50%;
+  animation: play-progress 4200ms linear forwards;
+}
+
+@keyframes play-progress {
+  from {
+    transform: scaleX(0);
+  }
+  to {
+    transform: scaleX(1);
+  }
+}
+
+/* ===== 留白视图（M）：把图收进画框，环境层退到很暗 =====
+   参考 Meech213 的 print-style 卡片与 Cathy Dolle 的极简画廊：
+   大留白 + 很轻的投影 + 一行小字图注，信息栏收起时才出现。 */
+.view--detail.view--matte {
+  --matte-x: clamp(34px, 9vw, 168px);
+  --matte-y: clamp(30px, 8vh, 96px);
+  --matte-b: clamp(72px, 11vh, 132px);
+}
+
+.view--detail.view--matte .view__img {
+  top: var(--matte-y);
+  right: auto;
+  bottom: auto;
+  left: var(--matte-x);
+  width: calc(100% - 2 * var(--matte-x));
+  height: calc(100% - var(--matte-y) - var(--matte-b));
+}
+
+/* 投影只挂在叠放容器上：两层各自投影会叠出双份暗边。 */
+.view--detail.view--matte .view__layers {
+  /* drop-shadow 跟随实际像素，不会把 contain 的透明留边一起框进投影。 */
+  filter: drop-shadow(0 30px 52px rgba(0, 0, 0, 0.56));
+}
+
+.view--detail.view--matte .view__ambient {
+  opacity: 0.22;
+  filter: blur(64px) grayscale(0.35) brightness(0.26);
+}
+
+.view__caption {
+  position: absolute;
+  right: var(--matte-x);
+  bottom: clamp(26px, 4vh, 46px);
+  left: var(--matte-x);
+  z-index: 3;
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 18px;
+  color: rgba(247, 244, 238, 0.42);
+  font-size: 11px;
+  letter-spacing: 0.06em;
+  font-variant-numeric: tabular-nums;
+  animation: caption-in 380ms var(--ease-out);
+  pointer-events: none;
+}
+
+.view--detail.view--detail-info .view__caption {
+  left: clamp(34px, 9vw, 168px);
+}
+
+.view__caption-name {
+  min-width: 0;
+  overflow: hidden;
+  color: rgba(247, 244, 238, 0.72);
+  letter-spacing: 0.01em;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 所有档位都失败时的可见错误态：画面不能只留一块黑。
+   卡片居中、可聚焦按钮可被 Tab 到，重试会重新走一遍档位链。 */
+.view__error {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  z-index: 2;
+  display: grid;
+  gap: 10px;
+  width: min(360px, calc(100% - 48px));
+  padding: 20px 22px;
+  border: 1px solid var(--hairline);
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--surface) 86%, transparent);
+  box-shadow: 0 18px 48px rgba(0, 0, 0, 0.4);
+  text-align: center;
+  transform: translate(-50%, -50%);
+  backdrop-filter: blur(14px);
+  animation: view-error-in 240ms var(--ease-out);
+}
+
+@keyframes view-error-in {
+  from {
+    opacity: 0;
+    transform: translate(-50%, calc(-50% + 8px));
+  }
+}
+
+.view__error-title {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+
+.view__error-hint {
+  margin: 0;
+  color: var(--ink-soft);
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+.view__error-actions {
+  display: flex;
+  justify-content: center;
+  gap: 12px;
+  margin-top: 4px;
+}
+
+.view__error-retry {
+  padding: 7px 16px;
+  border: 0;
+  border-radius: 999px;
+  background: var(--ink);
+  color: #131313;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: filter 160ms var(--ease);
+}
+
+.view__error-retry:hover {
+  filter: brightness(0.94);
+}
+
+.view__error-retry:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 3px;
+}
+
+.view__error-link {
+  align-self: center;
+  color: rgba(247, 244, 238, 0.72);
+  font-size: 12px;
+  text-decoration: none;
+  border-bottom: 1px solid var(--hairline);
+  transition: color 160ms var(--ease), border-color 160ms var(--ease);
+}
+
+.view__error-link:hover {
+  color: var(--ink);
+  border-color: rgba(247, 244, 238, 0.4);
+}
+
+/* 焦点接进整个作品页：容器本身不是交互控件，不要画一圈全局 focus 环。 */
+.view--detail:focus,
+.view--detail:focus-visible {
+  outline: none;
+}
+
+@keyframes caption-in {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+}
+
+@media (max-width: 900px) {
+  .view--detail.view--matte {
+    --matte-x: 16px;
+    --matte-y: 18px;
+    --matte-b: 18px;
+  }
+
+  .view__caption {
+    display: none;
+  }
+}
+
+@media (max-width: 900px) {
+  /* 窄屏检查器是底部 sheet，图保持全宽；seam 仍在最左侧浮着。 */
+  .view--detail.view--detail-info .view__stage {
+    left: 0;
+  }
+}

@@ -1,0 +1,1408 @@
+//! 导出主流程：扫描本地库 -> 写分片/缩略图/锐利档/原图 -> 写 index.json 与账本。
+//!
+//! 语义要点（对照 docs/backlog/photo-wall-contract.md）：
+//! - 排序完全交给 core 的 Db::search_page（Modified 降序 + path 兜底），这里只按游标顺序消费；
+//! - 每个 item 的 t512 必定存在（缩略图源缺失就跳过该资产并 warn），t256 只是锦上添花；
+//! - t1024/t2048 从原图解码一次、按 ICC/EXIF 转 sRGB 与方向、Lanczos 缩放后以 q90 重编码，
+//!   源缺失/不可解码/视频宁可缺档也不放大，前端逐档回退；
+//! - 只读：除账本与产物外不改库；打开库时的补列/建索引由 core 负责（stderr 已提示）；
+//! - --dry-run 不写任何文件；日志一律走 stderr。
+
+use std::collections::{HashMap, HashSet};
+use std::fmt;
+use std::fs;
+use std::path::{Path, PathBuf};
+
+use anyhow::{Context, Result, bail};
+use image::codecs::jpeg::JpegEncoder;
+use image::imageops::FilterType;
+use kanalib_core::color;
+use kanalib_core::db::{Db, SearchCursor, SearchPageRequest, SearchSort};
+use kanalib_core::model::{Asset, Filter, SearchQuery, TagHit};
+use kanalib_core::sources;
+
+use crate::fsutil;
+use crate::ledger::{LEDGER_FILE, Ledger, LedgerEntry, RENDER_VERSION};
+use crate::manifest::{self, Facets, Index, Item, Paths, SCHEMA_VERSION, Shard, ShardRef};
+use crate::search::{SEARCH_INDEX_FILE, SearchBuilder};
+use crate::timefmt;
+
+/// 分页抓取步长（core 允许到 10000，1000 足够减少查询次数又不过度占用内存）。
+const PAGE_LIMIT: usize = 1000;
+
+/// 锐利档：长边像素与目录名。只从原图生成，绝不把小图放大。
+const TIERS: [(&str, u32); 2] = [("t1024", 1024), ("t2048", 2048)];
+/// 锐利档 JPEG 质量（photo-wall W3：高质量、正确 sRGB）。
+const TIER_JPEG_QUALITY: u8 = 90;
+
+/// 源图白带确认阈值：2.5% / 8 行。目标是覆盖 3% 薄白边（4% 老阈值会整条漏掉），
+/// 留 0.5 个百分点吸收 JPEG 边界行的 ringing；2% 及以下仍不裁。
+const SOURCE_BAND_FRAC: f64 = 0.025;
+const SOURCE_BAND_MIN_ROWS: u32 = 8;
+/// 缩略图候选阈值：1.5% / 3 行。候选只负责触发源图确认，真阈值以源图为准；
+/// t256 上 3% 薄带缩放后只剩 3-4 行，还要吸收 JPEG 噪点，所以放得比源图更松。
+const PROBE_BAND_FRAC: f64 = 0.015;
+const PROBE_BAND_MIN_ROWS: u32 = 3;
+/// 候选行允许 2% 的像素被 JPEG 噪点压到阈值以下（源图确认仍是 100%）。
+const PROBE_WHITE_PERCENT: u32 = 98;
+/// 判定「白」的通道下限：纯白带经 JPEG 4:2:2 + q90 往返会掉到 244 左右，
+/// 严格 255 会整条漏检；242 仍能把 240 及以下的浅灰排除在外。
+const WHITE_LEVEL: u8 = 242;
+
+/// 发布参数，由 CLI 或库调用方构造。
+#[derive(Clone, Debug)]
+pub struct Options {
+    pub db_path: PathBuf,
+    pub out_dir: PathBuf,
+    /// 最多导出多少条（None = 全量）。
+    pub limit: Option<usize>,
+    /// 是否导出原图到 o/<id>.<ext>。
+    pub with_originals: bool,
+    /// 是否从原图生成 t1024/t2048 锐利档。
+    pub tiers: bool,
+    /// 只打印统计，不写盘。
+    pub dry_run: bool,
+    pub shard_size: usize,
+    pub max_facet_tags: usize,
+    pub max_facet_groups: usize,
+    /// 显式指定的本地根目录（空 = 读 settings.library.local_roots 再回退 sources）。
+    pub roots: Vec<PathBuf>,
+    /// 是否删除未被本次 index.json 引用的陈旧分片（默认只警告）。
+    pub prune_stale: bool,
+}
+
+impl Default for Options {
+    fn default() -> Self {
+        Self {
+            db_path: PathBuf::new(),
+            out_dir: PathBuf::new(),
+            limit: None,
+            with_originals: false,
+            tiers: true,
+            dry_run: false,
+            shard_size: manifest::DEFAULT_SHARD_SIZE,
+            max_facet_tags: manifest::MAX_FACET_TAGS,
+            max_facet_groups: manifest::MAX_FACET_GROUPS,
+            roots: Vec::new(),
+            prune_stale: false,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct FileStats {
+    pub written: usize,
+    pub skipped: usize,
+    pub missing: usize,
+    pub failed: usize,
+}
+
+/// 锐利档统计。written_* 按文件计；missing/failed 按资产计（一个资产解码失败不会重复计数）。
+#[derive(Clone, Debug, Default)]
+pub struct TierStats {
+    pub written_t1024: usize,
+    pub written_t2048: usize,
+    pub skipped: usize,
+    pub not_needed: usize,
+    pub missing: usize,
+    pub failed: usize,
+}
+
+impl TierStats {
+    pub fn written(&self) -> usize {
+        self.written_t1024 + self.written_t2048
+    }
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct Stats {
+    pub scanned: usize,
+    pub exported: usize,
+    pub skipped_no_thumb: usize,
+    pub skipped_invalid: usize,
+    pub duplicates: usize,
+    /// 从同内容重复副本补回标签的条目数。
+    pub tags_from_duplicates: usize,
+    /// 裁掉源图纯白底带的条目数（反馈 §5.6）。
+    pub trimmed: usize,
+    pub shards: usize,
+    pub shard_size: usize,
+    pub tags: usize,
+    pub groups: usize,
+    /// 搜索索引：去重标签数与序列化后字节数（dry-run 也会算，便于预估首包）。
+    pub search_tags: usize,
+    pub search_bytes: usize,
+    pub thumbs: FileStats,
+    pub tiers: TierStats,
+    pub originals: FileStats,
+    pub stale_shards: usize,
+    pub pruned_shards: usize,
+}
+
+impl fmt::Display for Stats {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        writeln!(
+            f,
+            "扫描 {} 条；导出 {} 条（重复 id {}、缺可用缩略图 {}、字段不合法 {}）",
+            self.scanned,
+            self.exported,
+            self.duplicates,
+            self.skipped_no_thumb,
+            self.skipped_invalid
+        )?;
+        if self.tags_from_duplicates > 0 {
+            writeln!(
+                f,
+                "其中 {} 条的标签来自同内容副本（被保留的那份没打标签）",
+                self.tags_from_duplicates
+            )?;
+        }
+        if self.trimmed > 0 {
+            writeln!(f, "其中 {} 条裁掉了源图纯白底带（全档重编码）", self.trimmed)?;
+        }
+        writeln!(
+            f,
+            "分片 {} 片（每片上限 {}）；facets 标签 {} 个 / 分组 {} 个",
+            self.shards, self.shard_size, self.tags, self.groups
+        )?;
+        writeln!(
+            f,
+            "搜索索引：去重标签 {} 个、{} 字节（{}）",
+            self.search_tags, self.search_bytes, SEARCH_INDEX_FILE
+        )?;
+        writeln!(
+            f,
+            "缩略图 t512/t256：新写 {}、跳过（账本命中）{}、源缺失 {}、失败 {}",
+            self.thumbs.written, self.thumbs.skipped, self.thumbs.missing, self.thumbs.failed
+        )?;
+        writeln!(
+            f,
+            "锐利档 t1024/t2048：新写 {}/{}、跳过（账本命中）{}、无需生成 {}、源缺失 {}、失败 {}",
+            self.tiers.written_t1024,
+            self.tiers.written_t2048,
+            self.tiers.skipped,
+            self.tiers.not_needed,
+            self.tiers.missing,
+            self.tiers.failed
+        )?;
+        write!(
+            f,
+            "原图：新写 {}、跳过（账本命中）{}、源缺失 {}、失败 {}",
+            self.originals.written,
+            self.originals.skipped,
+            self.originals.missing,
+            self.originals.failed
+        )
+    }
+}
+
+/// 源指纹：判定账本里的条目是否仍然有效。
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct FileMeta {
+    sha1: Option<String>,
+    mtime: u64,
+    bytes: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Slot {
+    Thumb,
+    Original,
+}
+
+/// 执行一次导出。返回统计；出错时返回带上下文的错误。
+pub fn run(options: &Options) -> Result<Stats> {
+    if options.shard_size == 0 {
+        bail!("--shard-size 必须大于 0");
+    }
+    if options.out_dir.as_os_str().is_empty() {
+        bail!("--out 不能为空");
+    }
+    if !options.db_path.is_file() {
+        bail!("数据库不存在：{}", options.db_path.display());
+    }
+    eprintln!("[kanalib-publish] 注意：打开库时会执行 core 迁移（补列/建索引），与桌面行为一致");
+    let db = Db::open(&options.db_path)
+        .with_context(|| format!("打开数据库失败：{}", options.db_path.display()))?;
+    let folders = resolve_folders(&db, &options.roots)?;
+    if folders.is_empty() {
+        bail!(
+            "没有可扫描的本地根目录：settings.library.local_roots 与 sources 表均为空，请用 --root 指定"
+        );
+    }
+    eprintln!(
+        "[kanalib-publish] 本地根目录 {} 个：{}",
+        folders.len(),
+        folders.join("；")
+    );
+
+    // 预演仍然只算不写；正式发布先在同级暂存目录里完成整套产物，
+    // 成功后再整体替换 out_dir，避免中断留下新旧混合的半套数据。
+    if options.dry_run {
+        let mut publisher = Publisher::new(options)?;
+        publisher.scan(&db, &folders)?;
+        return publisher.finish();
+    }
+
+    let staging = Staging::prepare(&options.out_dir)?;
+    let staged_options = Options {
+        out_dir: staging.path.clone(),
+        ..options.clone()
+    };
+    let result = (|| -> Result<Stats> {
+        let mut publisher = Publisher::new(&staged_options)?;
+        publisher.scan(&db, &folders)?;
+        publisher.finish()
+    })();
+    let stats = result?;
+    staging.commit(&options.out_dir)?;
+    Ok(stats)
+}
+
+/// 同级暂存目录：先把整套产物写在这里，再整体替换正式导出目录。
+///
+/// 旧产物用硬链接（失败回退复制）预置到暂存目录，账本命中时仍能直接跳过；
+/// 发布器只做“新文件覆盖 + 原子 rename”，不会原地改到旧目录里的链接目标。
+struct Staging {
+    path: PathBuf,
+    committed: bool,
+}
+
+impl Staging {
+    fn prepare(out_dir: &Path) -> Result<Self> {
+        let parent = out_dir.parent().unwrap_or_else(|| Path::new("."));
+        fsutil::ensure_dir(parent)?;
+        let name = out_dir
+            .file_name()
+            .map(|value| value.to_string_lossy().to_string())
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(|| "out".to_string());
+        let path = parent.join(format!(".{name}.staging-{}", fsutil::unique_suffix()));
+        fsutil::ensure_dir(&path)?;
+        if out_dir.is_dir() {
+            seed_from(out_dir, &path)?;
+        }
+        Ok(Self {
+            path,
+            committed: false,
+        })
+    }
+
+    /// 旧目录 -> 备份，暂存 -> 正式，最后删除备份；任一步失败都尽量还原。
+    fn commit(mut self, out_dir: &Path) -> Result<()> {
+        let parent = out_dir.parent().unwrap_or_else(|| Path::new("."));
+        let name = out_dir
+            .file_name()
+            .map(|value| value.to_string_lossy().to_string())
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(|| "out".to_string());
+        let backup = parent.join(format!(".{name}.backup-{}", fsutil::unique_suffix()));
+        let had_previous = out_dir.is_dir();
+        if had_previous {
+            fs::rename(out_dir, &backup).with_context(|| {
+                format!(
+                    "暂存目录就绪，但无法把旧目录 {} 移到备份 {}",
+                    out_dir.display(),
+                    backup.display()
+                )
+            })?;
+        }
+        if let Err(error) = fs::rename(&self.path, out_dir) {
+            if had_previous {
+                let _ = fs::rename(&backup, out_dir);
+            }
+            return Err(error).with_context(|| {
+                format!(
+                    "无法把暂存目录 {} 替换为 {}；旧目录已还原",
+                    self.path.display(),
+                    out_dir.display()
+                )
+            });
+        }
+        self.committed = true;
+        if had_previous {
+            if let Err(error) = remove_tree(&backup) {
+                eprintln!(
+                    "[kanalib-publish] 警告：新产物已就位，但清理备份 {} 失败（{error:#}）",
+                    backup.display()
+                );
+            }
+        }
+        Ok(())
+    }
+}
+
+impl Drop for Staging {
+    fn drop(&mut self) {
+        if !self.committed {
+            let _ = remove_tree(&self.path);
+        }
+    }
+}
+
+/// 递归复制/链接旧产物。硬链接优先（同盘零拷贝）；跨盘或文件系统不支持时退回复制。
+fn seed_from(source: &Path, target: &Path) -> Result<()> {
+    for entry in
+        fs::read_dir(source).with_context(|| format!("读取旧导出目录 {}", source.display()))?
+    {
+        let entry = entry.with_context(|| format!("遍历旧导出目录 {}", source.display()))?;
+        let from = entry.path();
+        let to = target.join(entry.file_name());
+        let file_type = entry
+            .file_type()
+            .with_context(|| format!("读取类型 {}", from.display()))?;
+        if file_type.is_dir() {
+            fsutil::ensure_dir(&to)?;
+            seed_from(&from, &to)?;
+        } else if file_type.is_file() {
+            if fs::hard_link(&from, &to).is_err() {
+                // 复制前必须删除硬链接候选：fs::copy 会原地截断已存在的目标，
+                // 若同一路径其实链到了旧产物，就会把正式目录里的文件写坏。
+                let _ = fs::remove_file(&to);
+                fs::copy(&from, &to)
+                    .with_context(|| format!("复制 {} -> {}", from.display(), to.display()))?;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// 删除目录树；Windows 下只读文件先去掉只读位再删。
+fn remove_tree(path: &Path) -> Result<()> {
+    if !path.exists() {
+        return Ok(());
+    }
+    for entry in walk_files(path) {
+        let _ = make_writable(&entry);
+    }
+    fs::remove_dir_all(path).with_context(|| format!("删除目录 {}", path.display()))
+}
+
+fn walk_files(dir: &Path) -> Vec<PathBuf> {
+    let mut files = Vec::new();
+    let Ok(entries) = fs::read_dir(dir) else {
+        return files;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            files.extend(walk_files(&path));
+        } else {
+            files.push(path);
+        }
+    }
+    files
+}
+
+fn make_writable(path: &Path) -> std::io::Result<()> {
+    let mut permissions = fs::metadata(path)?.permissions();
+    #[allow(clippy::permissions_set_readonly_false)]
+    permissions.set_readonly(false);
+    fs::set_permissions(path, permissions)
+}
+
+/// 把设置/来源表里的本地根目录整理成 assets.folder 值列表。
+fn resolve_folders(db: &Db, explicit: &[PathBuf]) -> Result<Vec<String>> {
+    let mut seen = HashSet::new();
+    let mut folders = Vec::new();
+    if !explicit.is_empty() {
+        for root in explicit {
+            if !root.is_dir() {
+                eprintln!(
+                    "[kanalib-publish] 警告：--root 指定的目录不存在或不是目录：{}",
+                    root.display()
+                );
+            }
+            let text = root.to_string_lossy().to_string();
+            if seen.insert(folder_key(&text)) {
+                folders.push(text);
+            }
+        }
+        return Ok(folders);
+    }
+
+    if let Some(raw) = db
+        .setting("library.local_roots")
+        .context("读取 settings.library.local_roots 失败")?
+    {
+        match serde_json::from_str::<Vec<String>>(&raw) {
+            Ok(list) => {
+                for item in list {
+                    if seen.insert(folder_key(&item)) {
+                        folders.push(item);
+                    }
+                }
+            }
+            Err(error) => eprintln!(
+                "[kanalib-publish] 警告：settings.library.local_roots 不是字符串数组（{error}），改用 sources 表"
+            ),
+        }
+    }
+
+    if folders.is_empty() {
+        let records = db.list_sources().context("读取 sources 表失败")?;
+        for record in records {
+            if record.kind != "local" {
+                continue;
+            }
+            if seen.insert(folder_key(&record.locator)) {
+                folders.push(record.locator);
+            }
+        }
+        eprintln!(
+            "[kanalib-publish] settings.library.local_roots 为空，回退到 sources 表中的 {} 个本地来源",
+            folders.len()
+        );
+    }
+    Ok(folders)
+}
+
+/// 目录比较键：统一分隔符、去尾斜杠，Windows 下忽略大小写。
+fn folder_key(folder: &str) -> String {
+    let trimmed = folder.replace('\\', "/");
+    let trimmed = trimmed.trim_end_matches('/');
+    if cfg!(windows) {
+        trimmed.to_lowercase()
+    } else {
+        trimmed.to_string()
+    }
+}
+
+/// 从缩略图路径派生 t256 网格档路径（core 的实现不公开，规则是 {stem}-t256.jpg）。
+fn tile_thumb_path(thumb: &Path) -> PathBuf {
+    let stem = thumb
+        .file_stem()
+        .map(|value| value.to_string_lossy().to_string())
+        .unwrap_or_default();
+    thumb.with_file_name(format!("{stem}-t256.jpg"))
+}
+
+/// 与 core 缩略图一致的 alpha 合成：透明像素压到白底。
+///
+/// `to_rgb8()` 只是丢掉 alpha，透明区域的 RGB（常见为 0）会变成黑色：
+/// 既让源图检测看不到白带，也会把透明 PNG/GIF 的锐利档导出成黑底。
+/// 不透明图走 `to_rgb8()`，避免大图多分配一份 RGBA。
+fn flatten_white(image: &image::DynamicImage) -> image::RgbImage {
+    if !image.color().has_alpha() {
+        return image.to_rgb8();
+    }
+    let rgba = image.to_rgba8();
+    let (width, height) = rgba.dimensions();
+    let mut rgb = image::RgbImage::new(width, height);
+    for (source, target) in rgba.pixels().zip(rgb.pixels_mut()) {
+        let alpha = u32::from(source[3]);
+        let inverse = 255 - alpha;
+        *target = image::Rgb([
+            ((u32::from(source[0]) * alpha + 255 * inverse) / 255) as u8,
+            ((u32::from(source[1]) * alpha + 255 * inverse) / 255) as u8,
+            ((u32::from(source[2]) * alpha + 255 * inverse) / 255) as u8,
+        ]);
+    }
+    rgb
+}
+
+fn is_white(pixel: &image::Rgb<u8>) -> bool {
+    pixel.0.iter().all(|channel| *channel >= WHITE_LEVEL)
+}
+
+/// 底部连续白行带：源图上传侧垫白/损坏的痕迹（反馈 §5.6）。
+/// 检测表面必须与缩略图/编码表面一致（alpha 已合成白底），阈值见文件头常量。
+/// `min_white_percent` 是单行里至少多少比例的像素算白；源图确认用 100（严格），
+/// 缩略图候选可放宽到 98 吸收 JPEG 噪点。
+fn white_bottom_band(rgb: &image::RgbImage, min_frac: f64, min_rows: u32) -> Option<u32> {
+    white_bottom_band_with(rgb, min_frac, min_rows, 100)
+}
+
+fn white_bottom_band_with(
+    rgb: &image::RgbImage,
+    min_frac: f64,
+    min_rows: u32,
+    min_white_percent: u32,
+) -> Option<u32> {
+    let (width, height) = rgb.dimensions();
+    if width == 0 || height == 0 {
+        return None;
+    }
+    let mut band = 0u32;
+    for y in (0..height).rev() {
+        let white = (0..width)
+            .filter(|x| is_white(rgb.get_pixel(*x, y)))
+            .count();
+        if (white as u64) * 100 < u64::from(width) * u64::from(min_white_percent) {
+            break;
+        }
+        band += 1;
+    }
+    if band >= min_rows && band < height && f64::from(band) >= f64::from(height) * min_frac {
+        Some(band)
+    } else {
+        None
+    }
+}
+
+/// 原图扩展名：小写、无点、只允许字母数字，最长 10。
+fn original_extension(path: &Path) -> Option<String> {
+    let ext = path.extension()?.to_string_lossy().to_ascii_lowercase();
+    if ext.is_empty() || ext.len() > 10 || !ext.chars().all(|c| c.is_ascii_alphanumeric()) {
+        return None;
+    }
+    Some(ext)
+}
+
+struct Publisher<'a> {
+    options: &'a Options,
+    /// 上次发布的账本（用于增量跳过）。
+    previous: Ledger,
+    /// 本次发布写出的账本。
+    next: Ledger,
+    seen: HashSet<String>,
+    /// 同内容重复副本的标签池（键是小写 sha1 / blake3）：保留的那份没标签时用来补位。
+    duplicate_tags: HashMap<String, Vec<TagHit>>,
+    tag_counts: HashMap<String, manifest::TagCount>,
+    group_counts: HashMap<String, usize>,
+    /// 搜索索引构建器：与分片同序收条目，finish 时统一去重 tag 表并编码。
+    search: SearchBuilder,
+    pending: Vec<Item>,
+    shards: Vec<ShardRef>,
+    stats: Stats,
+}
+
+impl<'a> Publisher<'a> {
+    fn new(options: &'a Options) -> Result<Self> {
+        let stats = Stats {
+            shard_size: options.shard_size,
+            ..Stats::default()
+        };
+        Ok(Self {
+            options,
+            previous: Ledger::load(&options.out_dir),
+            next: Ledger::default(),
+            seen: HashSet::new(),
+            duplicate_tags: HashMap::new(),
+            tag_counts: HashMap::new(),
+            group_counts: HashMap::new(),
+            search: SearchBuilder::new(),
+            pending: Vec::new(),
+            shards: Vec::new(),
+            stats,
+        })
+    }
+
+    fn limit_reached(&self) -> bool {
+        self.options
+            .limit
+            .is_some_and(|limit| self.stats.exported >= limit)
+    }
+
+    fn scan(&mut self, db: &Db, folders: &[String]) -> Result<()> {
+        // 同一内容的重复副本只导出第一条；若第一条没标签、另一条有，用这张表补位。
+        // 数据侧真出现过：样例图在 stress 库里有一份未打标签的拷贝，且 mtime 更新，
+        // 于是被保留下来、标签全丢（不是 asset_tags 没 join）。
+        self.duplicate_tags = db
+            .tags_for_duplicated_assets()
+            .context("读取重复资产的标签失败")?;
+        let filter = Filter::All;
+        let query = SearchQuery::default();
+        let mut cursor: Option<SearchCursor> = None;
+        'scan: loop {
+            let request = SearchPageRequest {
+                filter: &filter,
+                query: &query,
+                sort: SearchSort::Modified,
+                ascending: false,
+                limit: PAGE_LIMIT,
+                cursor: cursor.as_ref(),
+                duplicate_paths: None,
+                include_total: false,
+            };
+            let page = db
+                .search_page(folders, request)
+                .context("分页读取资产列表失败")?;
+            if page.paths.is_empty() {
+                break;
+            }
+            for path in &page.paths {
+                if self.limit_reached() {
+                    break 'scan;
+                }
+                self.stats.scanned += 1;
+                match db.load_asset(path) {
+                    Ok(mut asset) => {
+                        self.fill_tags_from_duplicates(&mut asset);
+                        self.push_asset(&asset)?
+                    }
+                    Err(error) => {
+                        self.stats.skipped_invalid += 1;
+                        eprintln!(
+                            "[kanalib-publish] 警告：读取资产失败，跳过 {}（{error:#}）",
+                            path.display()
+                        );
+                    }
+                }
+            }
+            match page.next {
+                Some(next) => cursor = Some(next),
+                None => break,
+            }
+        }
+        Ok(())
+    }
+
+    /// 保留的那份没有任何标签时，用同内容副本的标签补位。
+    /// 只补"空"的情况：两份都有标签时以被保留那条为准，避免把不同批次的打标结果混在一起。
+    fn fill_tags_from_duplicates(&mut self, asset: &mut Asset) {
+        if !asset.tags.is_empty() || !asset.manual_tags.is_empty() || self.duplicate_tags.is_empty()
+        {
+            return;
+        }
+        let lookup = |hash: Option<&str>| {
+            hash.map(|value| value.to_ascii_lowercase())
+                .and_then(|value| self.duplicate_tags.get(&value).cloned())
+        };
+        if let Some(tags) =
+            lookup(asset.sha1.as_deref()).or_else(|| lookup(asset.blake3.as_deref()))
+        {
+            asset.tags = tags;
+            self.stats.tags_from_duplicates += 1;
+        }
+    }
+
+    /// 处理单条资产：校验 -> 复制文件 -> 入账本 -> 攒进当前分片。
+    fn push_asset(&mut self, asset: &Asset) -> Result<()> {
+        let id = manifest::asset_id(asset);
+        if !self.seen.insert(id.clone()) {
+            self.stats.duplicates += 1;
+            return Ok(());
+        }
+        if asset.width == 0 || asset.height == 0 {
+            self.stats.skipped_invalid += 1;
+            eprintln!(
+                "[kanalib-publish] 警告：宽高为 0，跳过 {}",
+                asset.path.display()
+            );
+            return Ok(());
+        }
+        if sources::is_remote_path(&asset.path) {
+            self.stats.skipped_invalid += 1;
+            eprintln!(
+                "[kanalib-publish] 警告：远程只读来源不发布，跳过 {}",
+                asset.path.display()
+            );
+            return Ok(());
+        }
+        let Some(thumb) = asset.thumb.clone() else {
+            self.stats.skipped_no_thumb += 1;
+            eprintln!(
+                "[kanalib-publish] 警告：没有缩略图记录，跳过 {}",
+                asset.path.display()
+            );
+            return Ok(());
+        };
+
+        let meta = FileMeta {
+            sha1: asset
+                .sha1
+                .as_deref()
+                .map(|value| value.to_ascii_lowercase())
+                .or_else(|| {
+                    asset
+                        .blake3
+                        .as_deref()
+                        .map(|value| value.to_ascii_lowercase())
+                }),
+            mtime: asset.mtime,
+            bytes: asset.bytes,
+        };
+        self.next.insert(
+            &id,
+            LedgerEntry {
+                sha1: meta.sha1.clone(),
+                mtime: meta.mtime,
+                bytes: meta.bytes,
+                files: Vec::new(),
+                trim_band: None,
+                render: RENDER_VERSION,
+            },
+        );
+
+        let tile = tile_thumb_path(&thumb);
+        // 纯白底带裁剪（反馈 §5.6）：源图上传侧垫白/损坏留下全宽纯白底带，
+        // 各档缩略图都会继承，与解码瞬态无关。在缩略图上做候选检测（源指纹 +
+        // 渲染版本都命中时用上次产物），精确边界以源图为准；裁掉后全档重编码。
+        // 账本记 trim_band，增量跑据此保持 manifest 高度不回退。
+        let prior = self.previous.get(&id);
+        let source_current = prior
+            .is_some_and(|entry| entry.is_current(meta.sha1.as_deref(), meta.mtime, meta.bytes));
+        let cached_current = source_current && prior.is_some_and(LedgerEntry::render_current);
+        let mut band = if cached_current {
+            prior.and_then(|entry| entry.trim_band)
+        } else {
+            None
+        };
+        if band.is_none() {
+            // 候选读小图即可：上次产物（同源同渲染）→ 新 t256 → t512 → 上次 t256。
+            let out_tile = self.options.out_dir.join(format!("t256/{id}.jpg"));
+            let probe_path = if cached_current {
+                out_tile.clone()
+            } else if tile.is_file() {
+                tile.clone()
+            } else if thumb.is_file() {
+                thumb.clone()
+            } else {
+                out_tile
+            };
+            if let Ok(probe) = image::open(&probe_path).map(|value| flatten_white(&value))
+                && white_bottom_band_with(
+                    &probe,
+                    PROBE_BAND_FRAC,
+                    PROBE_BAND_MIN_ROWS,
+                    PROBE_WHITE_PERCENT,
+                )
+                .is_some()
+                && let Ok(decoded) = color::decode(&asset.path)
+            {
+                // 小档 JPEG ringing 会低估带高，精确边界以源图为准；
+                // 源图同样先合成白底，透明 PNG/GIF 才和缩略图看到同一条带。
+                let mut source = color::convert_to_srgb(decoded.image, &decoded.profile);
+                source.apply_orientation(decoded.orientation);
+                // 裁剪行数以方向套用后的源图为准；与库记高度不一致
+                // （旋转图）时不裁，避免 manifest 高度错配。
+                band = white_bottom_band(
+                    &flatten_white(&source),
+                    SOURCE_BAND_FRAC,
+                    SOURCE_BAND_MIN_ROWS,
+                )
+                .filter(|_| source.height() == asset.height);
+            }
+        }
+
+        let mut item_asset = asset.clone();
+        let sharp = match band.filter(|value| *value < asset.height) {
+            Some(band) => {
+                let height = asset.height - band;
+                let long_edge = asset.width.max(height);
+                let mut rels = vec![format!("t256/{id}.jpg"), format!("t512/{id}.jpg")];
+                rels.extend(
+                    TIERS
+                        .iter()
+                        .filter(|(_, edge)| long_edge > *edge)
+                        .map(|(tier, _)| format!("{tier}/{id}.jpg")),
+                );
+                // 账本命中且裁剪产物都在：跳过重编码，只登记（契约 §6 增量语义）。
+                // 必须确认账本记过 trim_band：升级首跑时旧产物还带白底带，
+                // 不能当作已裁剪缓存跳过。
+                let cached = cached_current
+                    && prior.is_some_and(|entry| {
+                        entry.trim_band.is_some()
+                            && rels.iter().all(|rel| {
+                                entry.files.iter().any(|file| file == rel)
+                                    && self.options.out_dir.join(rel).is_file()
+                            })
+                    });
+                if cached {
+                    for rel in &rels {
+                        self.record_file(&id, rel);
+                    }
+                    self.stats.thumbs.skipped += 2;
+                    self.stats.tiers.skipped += rels.len() - 2;
+                    item_asset.height = height;
+                    if let Some(entry) = self.next.assets.get_mut(&id) {
+                        entry.trim_band = Some(band);
+                    }
+                    Some(
+                        TIERS
+                            .iter()
+                            .filter(|(_, edge)| long_edge > *edge)
+                            .map(|(_, edge)| *edge as u16)
+                            .max()
+                            .unwrap_or(0),
+                    )
+                } else {
+                    match self.write_trimmed_tiers(&id, asset, band)? {
+                        Some(sharp) => {
+                            item_asset.height = height;
+                            if let Some(entry) = self.next.assets.get_mut(&id) {
+                                entry.trim_band = Some(band);
+                            }
+                            self.stats.trimmed += 1;
+                            Some(sharp)
+                        }
+                        None => self.normal_tiers(&id, asset, &thumb, &tile, &meta)?,
+                    }
+                }
+            }
+            None => self.normal_tiers(&id, asset, &thumb, &tile, &meta)?,
+        };
+        let Some(sharp) = sharp else {
+            return Ok(());
+        };
+
+        let mut orig = None;
+        if self.options.with_originals {
+            match original_extension(&asset.path) {
+                Some(ext) => {
+                    if asset.path.is_file() {
+                        let rel = format!("o/{id}.{ext}");
+                        if self.sync_file(&id, &rel, &asset.path, &meta, Slot::Original)? {
+                            orig = Some(ext);
+                        }
+                    } else {
+                        self.stats.originals.missing += 1;
+                        eprintln!(
+                            "[kanalib-publish] 警告：原图文件缺失，不导出 o/ {}",
+                            asset.path.display()
+                        );
+                    }
+                }
+                None => eprintln!(
+                    "[kanalib-publish] 警告：无法识别原图扩展名，不导出 o/ {}",
+                    asset.path.display()
+                ),
+            }
+        }
+
+        let mut item = manifest::build_item(&item_asset);
+        item.orig = orig;
+        item.sharp = Some(sharp);
+        manifest::count_tags(&mut self.tag_counts, &item);
+        manifest::count_group(&mut self.group_counts, &item);
+        self.search.push(&item);
+        self.pending.push(item);
+        self.stats.exported += 1;
+        if self.pending.len() >= self.options.shard_size {
+            self.flush_shard()?;
+        }
+        Ok(())
+    }
+
+    /// 常规路径：t512/t256 增量复制缩略图缓存，锐利档从源解码。
+    /// Ok(None) = t512 硬不变量不满足，整条跳过。
+    fn normal_tiers(
+        &mut self,
+        id: &str,
+        asset: &Asset,
+        thumb: &Path,
+        tile: &Path,
+        meta: &FileMeta,
+    ) -> Result<Option<u16>> {
+        // t512 是硬不变量：源缩略图不可用就整条跳过。
+        let t512 = format!("t512/{id}.jpg");
+        if !self.sync_file(id, &t512, thumb, meta, Slot::Thumb)? {
+            self.stats.skipped_no_thumb += 1;
+            self.next.remove(id);
+            return Ok(None);
+        }
+        // t256 网格档：源缺失不报错，只写 t512 并让前端回退。
+        if tile.is_file() {
+            let t256 = format!("t256/{id}.jpg");
+            let _ = self.sync_file(id, &t256, tile, meta, Slot::Thumb)?;
+        } else {
+            self.stats.thumbs.missing += 1;
+        }
+        Ok(Some(self.sync_sharp_tiers(id, asset, meta)?))
+    }
+
+    /// 白底带裁剪路径：源解码一次、裁掉底带，从裁剪图写 t256/t512/t1024/t2048。
+    /// Ok(None) = 源不可解码或裁完为空，调用方回退常规路径。
+    fn write_trimmed_tiers(
+        &mut self,
+        id: &str,
+        asset: &Asset,
+        band: u32,
+    ) -> Result<Option<u16>> {
+        let decoded = match color::decode(&asset.path) {
+            Ok(value) => value,
+            Err(error) => {
+                eprintln!("[kanalib-publish] 警告：白底带裁剪解码失败，回退常规路径 {id}（{error}）");
+                return Ok(None);
+            }
+        };
+        let mut source = color::convert_to_srgb(decoded.image, &decoded.profile);
+        source.apply_orientation(decoded.orientation);
+        if source.height() != asset.height {
+            return Ok(None);
+        }
+        let height = source.height().saturating_sub(band);
+        if height == 0 {
+            return Ok(None);
+        }
+        let cropped = source.crop_imm(0, 0, source.width(), height);
+        let long_edge = cropped.width().max(cropped.height());
+        let mut available = 0u16;
+        for (tier, edge) in [("t256", 256u32), ("t512", 512), ("t1024", 1024), ("t2048", 2048)] {
+            let sharp = edge >= 1024;
+            if sharp && long_edge <= edge {
+                self.stats.tiers.not_needed += 1;
+                continue;
+            }
+            let rel = format!("{tier}/{id}.jpg");
+            if self.options.dry_run {
+                if sharp {
+                    self.tier_written(tier);
+                    available = available.max(edge as u16);
+                } else {
+                    self.stats.thumbs.written += 1;
+                }
+                continue;
+            }
+            let scaled = if long_edge > edge {
+                cropped.resize(edge, edge, FilterType::Lanczos3)
+            } else {
+                cropped.clone()
+            };
+            let rgb = flatten_white(&scaled);
+            let mut bytes = Vec::new();
+            let encoded =
+                JpegEncoder::new_with_quality(&mut bytes, TIER_JPEG_QUALITY).encode_image(&rgb);
+            let written = match encoded {
+                Ok(()) => {
+                    let target = self.options.out_dir.join(&rel);
+                    if let Some(parent) = target.parent() {
+                        fsutil::ensure_dir(parent)?;
+                    }
+                    fsutil::write_atomic(&target, &bytes).is_ok()
+                }
+                Err(error) => {
+                    eprintln!("[kanalib-publish] 警告：白底带裁剪编码 {rel} 失败（{error}）");
+                    false
+                }
+            };
+            if written {
+                self.record_file(id, &rel);
+                if sharp {
+                    self.tier_written(tier);
+                    available = available.max(edge as u16);
+                } else {
+                    self.stats.thumbs.written += 1;
+                }
+            } else if sharp {
+                self.stats.tiers.failed += 1;
+            } else {
+                self.stats.thumbs.failed += 1;
+            }
+        }
+        Ok(Some(available))
+    }
+
+    /// 生成/跳过 t1024/t2048：解码原图一次，转 sRGB、套 EXIF 方向，再按档缩放重编码。
+    /// 源缺失、视频、不可解码都只降级（前端逐档回退），不中止发布。
+    /// 返回本条目可用的最高档长边（0 = 无锐利档），写进 item.sharp 让前端不必 404 试探。
+    fn sync_sharp_tiers(&mut self, id: &str, asset: &Asset, meta: &FileMeta) -> Result<u16> {
+        if !self.options.tiers {
+            return Ok(0);
+        }
+        // 视频的缩略图是首帧；原图是视频容器，不能当静图解码，也不该把首帧放大成"锐利档"。
+        if kanalib_core::model::is_video(&asset.path) {
+            self.stats.tiers.not_needed += TIERS.len();
+            return Ok(0);
+        }
+        if !asset.path.is_file() {
+            // 源库目录可能已被移除而缩略图缓存还在；这里按缺失计数，不逐条刷警告。
+            self.stats.tiers.missing += 1;
+            return Ok(0);
+        }
+
+        let long_edge = asset.width.max(asset.height);
+        let mut available = 0u16;
+        let mut jobs = Vec::new();
+        for (tier, edge) in TIERS {
+            if long_edge <= edge {
+                self.stats.tiers.not_needed += 1;
+                continue;
+            }
+            let rel = format!("{tier}/{id}.jpg");
+            if self.file_is_current(id, &rel, meta, true) {
+                self.stats.tiers.skipped += 1;
+                self.record_file(id, &rel);
+                available = available.max(edge as u16);
+                continue;
+            }
+            if self.options.dry_run {
+                self.tier_written(tier);
+                available = available.max(edge as u16);
+                continue;
+            }
+            jobs.push((tier, edge, rel));
+        }
+        if jobs.is_empty() {
+            return Ok(available);
+        }
+
+        let decoded = match color::decode(&asset.path) {
+            Ok(value) => value,
+            Err(error) => {
+                self.stats.tiers.failed += 1;
+                eprintln!("[kanalib-publish] 警告：锐利档解码失败，跳过 {id}（{error}）");
+                return Ok(available);
+            }
+        };
+        let mut image = color::convert_to_srgb(decoded.image, &decoded.profile);
+        image.apply_orientation(decoded.orientation);
+
+        let mut failed = false;
+        for (tier, edge, rel) in jobs {
+            let scaled = if image.width().max(image.height()) > edge {
+                image.resize(edge, edge, FilterType::Lanczos3)
+            } else {
+                image.clone()
+            };
+            let rgb = flatten_white(&scaled);
+            let mut bytes = Vec::new();
+            match JpegEncoder::new_with_quality(&mut bytes, TIER_JPEG_QUALITY).encode_image(&rgb) {
+                Ok(()) => {
+                    let target = self.options.out_dir.join(&rel);
+                    if let Some(parent) = target.parent() {
+                        fsutil::ensure_dir(parent)?;
+                    }
+                    match fsutil::write_atomic(&target, &bytes) {
+                        Ok(()) => {
+                            self.tier_written(tier);
+                            self.record_file(id, &rel);
+                            available = available.max(edge as u16);
+                        }
+                        Err(error) => {
+                            failed = true;
+                            eprintln!("[kanalib-publish] 警告：写锐利档 {rel} 失败（{error:#}）");
+                        }
+                    }
+                }
+                Err(error) => {
+                    failed = true;
+                    eprintln!("[kanalib-publish] 警告：编码锐利档 {rel} 失败（{error}）");
+                }
+            }
+        }
+        if failed {
+            self.stats.tiers.failed += 1;
+        }
+        Ok(available)
+    }
+
+    fn tier_written(&mut self, tier: &str) {
+        if tier == "t1024" {
+            self.stats.tiers.written_t1024 += 1;
+        } else {
+            self.stats.tiers.written_t2048 += 1;
+        }
+    }
+
+    /// 账本命中且源指纹未变、目标仍在；`require_render` 时还要求渲染版本一致。
+    fn file_is_current(&self, id: &str, rel: &str, meta: &FileMeta, require_render: bool) -> bool {
+        self.previous.get(id).is_some_and(|entry| {
+            entry.is_current(meta.sha1.as_deref(), meta.mtime, meta.bytes)
+                && (!require_render || entry.render_current())
+                && entry.files.iter().any(|file| file == rel)
+        }) && self.options.out_dir.join(rel).is_file()
+    }
+
+    /// 增量复制：账本命中且源指纹未变、目标仍在 -> 跳过；返回目标是否可用。
+    fn sync_file(
+        &mut self,
+        id: &str,
+        rel: &str,
+        source: &Path,
+        meta: &FileMeta,
+        slot: Slot,
+    ) -> Result<bool> {
+        if !source.is_file() {
+            self.bucket_mut(slot).missing += 1;
+            eprintln!(
+                "[kanalib-publish] 警告：源文件缺失，跳过 {rel}（{}）",
+                source.display()
+            );
+            return Ok(false);
+        }
+        let target = self.options.out_dir.join(rel);
+        // 缩略图产物受渲染版本约束；原图只是源文件拷贝，换渲染器不必重抄。
+        let unchanged = self.file_is_current(id, rel, meta, matches!(slot, Slot::Thumb));
+        if unchanged {
+            self.bucket_mut(slot).skipped += 1;
+            self.record_file(id, rel);
+            return Ok(true);
+        }
+        if self.options.dry_run {
+            self.bucket_mut(slot).written += 1;
+            return Ok(true);
+        }
+        if let Some(parent) = target.parent() {
+            fsutil::ensure_dir(parent)?;
+        }
+        // 暂存目录里的旧产物是硬链接：fs::copy 会原地截断目标，
+        // 必须先断开链接，否则会把正式目录里的旧文件一起写坏。
+        if target.is_file() {
+            fs::remove_file(&target)
+                .with_context(|| format!("替换暂存文件 {rel} 前无法删除旧链接"))?;
+        }
+        match fs::copy(source, &target) {
+            Ok(_) => {
+                self.bucket_mut(slot).written += 1;
+                self.record_file(id, rel);
+                Ok(true)
+            }
+            Err(error) => {
+                self.bucket_mut(slot).failed += 1;
+                eprintln!("[kanalib-publish] 警告：复制 {rel} 失败（{error}）");
+                Ok(false)
+            }
+        }
+    }
+
+    fn bucket_mut(&mut self, slot: Slot) -> &mut FileStats {
+        match slot {
+            Slot::Thumb => &mut self.stats.thumbs,
+            Slot::Original => &mut self.stats.originals,
+        }
+    }
+
+    fn record_file(&mut self, id: &str, rel: &str) {
+        if let Some(entry) = self.next.assets.get_mut(id) {
+            if !entry.files.iter().any(|file| file == rel) {
+                entry.files.push(rel.to_string());
+            }
+        }
+    }
+
+    fn flush_shard(&mut self) -> Result<()> {
+        if self.pending.is_empty() {
+            return Ok(());
+        }
+        let index = self.shards.len();
+        let items = std::mem::take(&mut self.pending);
+        let count = items.len();
+        let path = format!("m/{index:04}.json");
+        if !self.options.dry_run {
+            let shard = Shard {
+                schema: SCHEMA_VERSION,
+                index,
+                items,
+            };
+            let bytes = serde_json::to_vec(&shard).context("序列化分片失败")?;
+            fsutil::write_atomic(&self.options.out_dir.join(&path), &bytes)?;
+        }
+        self.shards.push(ShardRef {
+            i: index,
+            path,
+            count,
+        });
+        Ok(())
+    }
+
+    fn finish(mut self) -> Result<Stats> {
+        self.flush_shard()?;
+        let tags = manifest::build_tag_facets(&self.tag_counts, self.options.max_facet_tags);
+        let groups =
+            manifest::build_group_facets(&self.group_counts, self.options.max_facet_groups);
+        self.stats.shards = self.shards.len();
+        self.stats.tags = tags.len();
+        self.stats.groups = groups.len();
+        // 搜索索引与分片同源同序：dry-run 也算出来（只统计体积，不写盘）。
+        let search = std::mem::take(&mut self.search).finish();
+        let search_bytes = search.to_bytes()?;
+        self.stats.search_tags = search.tags.len();
+        self.stats.search_bytes = search_bytes.len();
+        if self.options.dry_run {
+            return Ok(self.stats);
+        }
+
+        fsutil::ensure_dir(&self.options.out_dir)?;
+        fsutil::ensure_dir(&self.options.out_dir.join("m"))?;
+        fsutil::ensure_dir(&self.options.out_dir.join("t256"))?;
+        fsutil::ensure_dir(&self.options.out_dir.join("t512"))?;
+        if self.options.tiers {
+            fsutil::ensure_dir(&self.options.out_dir.join("t1024"))?;
+            fsutil::ensure_dir(&self.options.out_dir.join("t2048"))?;
+        }
+        if self.options.with_originals {
+            fsutil::ensure_dir(&self.options.out_dir.join("o"))?;
+        }
+
+        let index = Index {
+            schema: SCHEMA_VERSION,
+            generated_at: timefmt::rfc3339_utc_now(),
+            count: self.stats.exported,
+            shard_size: self.options.shard_size,
+            shards: self.shards.clone(),
+            facets: Facets { tags, groups },
+            paths: Paths::default(),
+        };
+        let bytes = serde_json::to_vec(&index).context("序列化 index.json 失败")?;
+        fsutil::write_atomic(&self.options.out_dir.join("index.json"), &bytes)?;
+        search.write(&self.options.out_dir)?;
+        self.next.save(&self.options.out_dir)?;
+        self.prune_stale()?;
+        eprintln!(
+            "[kanalib-publish] 已写出 {}（index.json + {} 分片 + {SEARCH_INDEX_FILE} + 账本 {LEDGER_FILE}）",
+            self.options.out_dir.display(),
+            self.shards.len(),
+        );
+        Ok(self.stats)
+    }
+
+    /// 处理 m/ 下未被本次 index.json 引用的陈旧分片。
+    fn prune_stale(&mut self) -> Result<()> {
+        let dir = self.options.out_dir.join("m");
+        let Ok(entries) = fs::read_dir(&dir) else {
+            return Ok(());
+        };
+        let keep = self.shards.len();
+        let mut stale = Vec::new();
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if !path.is_file() {
+                continue;
+            }
+            let Some(name) = path.file_name().and_then(|value| value.to_str()) else {
+                continue;
+            };
+            let Some(stem) = name.strip_suffix(".json") else {
+                continue;
+            };
+            if stem.is_empty() || !stem.bytes().all(|byte| byte.is_ascii_digit()) {
+                continue;
+            }
+            let Ok(index) = stem.parse::<usize>() else {
+                continue;
+            };
+            if index >= keep {
+                stale.push((index, path));
+            }
+        }
+        stale.sort_by_key(|(index, _)| *index);
+        self.stats.stale_shards = stale.len();
+        if stale.is_empty() {
+            return Ok(());
+        }
+        let names = stale
+            .iter()
+            .map(|(_, path)| {
+                path.file_name()
+                    .map(|value| value.to_string_lossy().to_string())
+                    .unwrap_or_default()
+            })
+            .collect::<Vec<_>>()
+            .join("、");
+        if !self.options.prune_stale {
+            eprintln!(
+                "[kanalib-publish] 警告：m/ 下有 {} 个陈旧分片未被 index.json 引用：{names}；确认后可用 --prune-stale 清理",
+                stale.len()
+            );
+            return Ok(());
+        }
+        let mut removed = 0;
+        for (index, path) in stale {
+            match fs::remove_file(&path) {
+                Ok(()) => {
+                    removed += 1;
+                    eprintln!("[kanalib-publish] 已删除陈旧分片 m/{index:04}.json");
+                }
+                Err(error) => eprintln!(
+                    "[kanalib-publish] 警告：删除陈旧分片 m/{index:04}.json 失败（{error}）"
+                ),
+            }
+        }
+        self.stats.pruned_shards = removed;
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{flatten_white, white_bottom_band, white_bottom_band_with};
+    use image::{DynamicImage, Rgb, RgbImage, Rgba, RgbaImage};
+
+    fn image_with_band(width: u32, height: u32, band: u32) -> RgbImage {
+        let mut img = RgbImage::new(width, height);
+        for y in 0..height {
+            for x in 0..width {
+                let pixel = if y >= height - band {
+                    [255, 255, 255]
+                } else {
+                    [10, 120, 200]
+                };
+                img.put_pixel(x, y, image::Rgb(pixel));
+            }
+        }
+        img
+    }
+
+    #[test]
+    fn detects_trailing_white_band() {
+        assert_eq!(white_bottom_band(&image_with_band(40, 200, 40), 0.04, 8), Some(40));
+    }
+
+    #[test]
+    fn ignores_clean_image() {
+        assert_eq!(white_bottom_band(&image_with_band(40, 200, 0), 0.04, 8), None);
+    }
+
+    #[test]
+    fn ignores_band_below_threshold() {
+        assert_eq!(white_bottom_band(&image_with_band(40, 200, 4), 0.04, 8), None);
+    }
+
+    #[test]
+    fn treats_near_white_as_white() {
+        let mut img = image_with_band(40, 200, 0);
+        for y in 180..200 {
+            for x in 0..40 {
+                img.put_pixel(x, y, Rgb([248, 252, 250]));
+            }
+        }
+        assert_eq!(white_bottom_band(&img, 0.03, 8), Some(20));
+    }
+
+    #[test]
+    fn ignores_light_gray_band() {
+        let mut img = image_with_band(40, 200, 0);
+        for y in 180..200 {
+            for x in 0..40 {
+                img.put_pixel(x, y, Rgb([240, 240, 240]));
+            }
+        }
+        assert_eq!(white_bottom_band(&img, 0.03, 8), None);
+    }
+
+    #[test]
+    fn probe_tolerates_jpeg_noise_per_row() {
+        let mut img = image_with_band(100, 200, 20);
+        // 每行只有一个像素被 JPEG 噪点压暗：严格源图确认不应放过，候选检测可以。
+        for y in 180..200 {
+            img.put_pixel(7, y, Rgb([230, 230, 230]));
+        }
+        assert_eq!(white_bottom_band(&img, 0.03, 3), None);
+        assert_eq!(white_bottom_band_with(&img, 0.03, 3, 98), Some(20));
+    }
+
+    #[test]
+    fn composites_alpha_onto_white() {
+        let mut rgba = RgbaImage::new(2, 1);
+        rgba.put_pixel(0, 0, Rgba([0, 0, 0, 0])); // 透明黑：直接 to_rgb8 会是黑色
+        rgba.put_pixel(1, 0, Rgba([200, 100, 50, 255]));
+        let rgb = flatten_white(&DynamicImage::ImageRgba8(rgba));
+        assert_eq!(rgb.get_pixel(0, 0).0, [255, 255, 255]);
+        assert_eq!(rgb.get_pixel(1, 0).0, [200, 100, 50]);
+    }
+
+    #[test]
+    fn ignores_all_white_image() {
+        assert_eq!(white_bottom_band(&image_with_band(40, 200, 200), 0.04, 8), None);
+    }
+
+    #[test]
+    fn candidate_threshold_is_looser() {
+        assert_eq!(white_bottom_band(&image_with_band(40, 200, 7), 0.03, 3), Some(7));
+        assert_eq!(white_bottom_band(&image_with_band(40, 200, 7), 0.04, 8), None);
+    }
+
+    #[test]
+    fn band_must_reach_bottom_row() {
+        // 白在中间、底行有色：不算底带。
+        let mut img = image_with_band(40, 200, 0);
+        for y in 100..140 {
+            for x in 0..40 {
+                img.put_pixel(x, y, image::Rgb([255, 255, 255]));
+            }
+        }
+        assert_eq!(white_bottom_band(&img, 0.04, 8), None);
+    }
+}

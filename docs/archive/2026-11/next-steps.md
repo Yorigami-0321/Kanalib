@@ -1,7 +1,7 @@
 # 后续任务路线图（2026-11-04 起继续）
 
 > 状态：**GUI 验收已开始**（2026-11-04，窗口限定副屏）。纯代码与后台自验已完成，C 类逐项推进；未勾选项仍不代表通过。
-> 上级索引：[README.md](README.md) · 未完成项速览：[pending/overview.md](pending/overview.md) · 实现记录：[pending/browse.md](pending/browse.md)、[ui-refactor.md](ui-refactor.md)。
+> 上级索引：[README.md](../../backlog/README.md) · 未完成项速览：[pending/overview.md](../../backlog/pending/overview.md) · 实现记录：[pending/browse.md](../../backlog/pending/browse.md)、[ui-refactor.md](../../backlog/ui-refactor.md)。
 
 ## 1. 当前状态
 
@@ -148,7 +148,7 @@ PATH="/c/Users/Administrator/.cargo/bin:$PATH" cargo test          # default-mem
 PATH="/c/Users/Administrator/.cargo/bin:$PATH" cargo test -p kanalib-ui -p kanalib
 ```
 
-测试门禁按 [../TESTING-PROCESS.md](../TESTING-PROCESS.md)：默认最小验证，不把 `cargo test --workspace` 当门禁。
+测试门禁按 [../TESTING-PROCESS.md](../../TESTING-PROCESS.md)：默认最小验证，不把 `cargo test --workspace` 当门禁。
 
 便携包 pre-flight 必须走 PowerShell 工具执行（Bash 里调 `pwsh` 会被安全策略拒绝）：
 

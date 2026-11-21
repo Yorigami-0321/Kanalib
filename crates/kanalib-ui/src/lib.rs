@@ -20,8 +20,8 @@ use gpui::{
     Focusable, FontWeight, Hsla, ImageCache, ImageCacheError, ImageCacheItem, IntoElement,
     KeyBinding, Modifiers, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ObjectFit,
     ParentElement, Pixels, Render, RenderImage, Resource, Role, ScrollStrategy, SharedString,
-    Styled, Task, UniformListScrollHandle, WeakEntity, Window, canvas, div, image_cache, img, px,
-    uniform_list, white,
+    Styled, Task, Unbind, UniformListScrollHandle, WeakEntity, Window, canvas, div, image_cache,
+    img, px, uniform_list, white,
 };
 #[cfg(feature = "frame-profiler")]
 use hdrhistogram::Histogram;
@@ -47,6 +47,25 @@ pub use app::KanalibApp;
 /// 安装项目侧 i18n 目录（zh-CN / en-US），供主程序在 GPUI 启动时调用。
 pub fn install_i18n(cx: &mut App) {
     localization::install(cx);
+}
+
+/// F-075 / F-076：下线 Ely 在 `ElyFocus` 上的 Tab / Shift+Tab 焦点遍历。
+///
+/// 必须在 `ely_gpui_component::init(cx)` 之后调用，用定向 `Unbind` 覆盖 vendor
+/// 默认的 `tab` → `FocusNext`、`shift-tab` → `FocusPrev`；F6 / Shift+F6 保持不变。
+pub fn disable_tab_focus_traversal(cx: &mut App) {
+    cx.bind_keys(tab_focus_unbindings());
+}
+
+fn tab_focus_unbindings() -> [KeyBinding; 2] {
+    [
+        KeyBinding::new("tab", Unbind("ely::FocusNext".into()), Some("ElyFocus")),
+        KeyBinding::new(
+            "shift-tab",
+            Unbind("ely::FocusPrev".into()),
+            Some("ElyFocus"),
+        ),
+    ]
 }
 
 pub use platform::{
@@ -557,6 +576,33 @@ impl ExportTarget {
 
 #[cfg(test)]
 mod tests {
+    use ely_gpui_component::primitives::{FocusNext, FocusPrev};
+    use gpui::{KeyBinding, KeyContext, Keymap, Keystroke};
+
+    #[test]
+    fn tab_focus_traversal_is_unbound_but_f6_stays() {
+        let mut keymap = Keymap::default();
+        keymap.add_bindings([
+            KeyBinding::new("tab", FocusNext, Some("ElyFocus")),
+            KeyBinding::new("shift-tab", FocusPrev, Some("ElyFocus")),
+            KeyBinding::new("f6", FocusNext, Some("ElyFocus")),
+            KeyBinding::new("shift-f6", FocusPrev, Some("ElyFocus")),
+        ]);
+        keymap.add_bindings(super::tab_focus_unbindings());
+
+        let contexts = [KeyContext::parse("ElyFocus").unwrap()];
+        for key in ["tab", "shift-tab"] {
+            let (bindings, pending) =
+                keymap.bindings_for_input(&[Keystroke::parse(key).unwrap()], &contexts);
+            assert!(!pending, "{key} should not wait for more keys");
+            assert!(bindings.is_empty(), "{key} still moves focus");
+        }
+
+        let (bindings, _) =
+            keymap.bindings_for_input(&[Keystroke::parse("f6").unwrap()], &contexts);
+        assert_eq!(bindings.len(), 1);
+        assert_eq!(bindings[0].action().name(), "ely::FocusNext");
+    }
 
     #[test]
     fn view_mode_keys_round_trip() {
@@ -646,24 +692,4 @@ mod tests {
         assert!(binding.predicate().is_some());
     }
 
-    #[test]
-    fn tab_focus_traversal_is_suppressed_under_ely_focus() {
-        use ely_gpui_component::primitives::{FocusNext, FocusPrev};
-        use gpui::{KeyBinding, KeyContext, Keymap, Keystroke};
-
-        // 先注册 vendor 的默认绑定，再叠加 Kanalib 的 NoAction 覆盖。
-        let mut keymap = Keymap::new(vec![
-            KeyBinding::new("tab", FocusNext, Some("ElyFocus")),
-            KeyBinding::new("shift-tab", FocusPrev, Some("ElyFocus")),
-        ]);
-        keymap.add_bindings(super::app::tab_traversal_off_bindings());
-
-        let context = [KeyContext::parse("ElyFocus").unwrap()];
-        for key in ["tab", "shift-tab"] {
-            let stroke = Keystroke::parse(key).unwrap();
-            let (bindings, pending) = keymap.bindings_for_input(&[stroke], &context);
-            assert!(bindings.is_empty(), "{key} 仍会派发动作");
-            assert!(!pending, "{key} 仍可能匹配更长的序列");
-        }
-    }
 }

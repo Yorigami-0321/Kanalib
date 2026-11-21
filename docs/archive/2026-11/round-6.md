@@ -1,6 +1,6 @@
 # 第六轮任务包（2026-10-30）
 
-> 上级索引：[../FEATURE-BACKLOG.md](../FEATURE-BACKLOG.md) · 文档地图：[README](./README.md) · 第五轮：[round-5.md](round-5.md)
+> 上级索引：[../FEATURE-BACKLOG.md](../../FEATURE-BACKLOG.md) · 文档地图：[README](../../backlog/README.md) · 第五轮：[round-5.md](round-5.md)
 >
 > 第五轮 A/B/C/D 已完成；第六轮任务 0/A/B/C 已完成并合入。仅剩 F-030/F-033/F-036 的环境/样本/手动验收门槛，以及第七轮 F-067；本轮已把非远期候选收口到只剩 F-067。
 >
@@ -65,7 +65,7 @@
 
 - **全量回归（main）**：`cargo test --workspace` core 194 通过 / 17 ignored + UI 64 + bin 6；`cargo check --workspace` 通过。
 - **未做/顺延**：F-030 真实 OneDrive/网络盘写入与断线重放；F-033 HEIC/RAW 真实样本与可分发解码链；F-036 资源管理器拖放手动验收；任务 A 的 GUI 交互与剪贴板目标应用粘贴；任务 C 的真实相机/设计软件广色域样本与 GUI 查看器；F-067 撤销/历史未启动。
-- **文档收口**：F-015/F-025/F-046/F-047/F-049/F-064/F-068 已移入 [implemented.md](implemented.md)；registry 其余状态保持 F-030/F-033/F-036「实现中」、F-067「候选」、远期项不变。
+- **文档收口**：F-015/F-025/F-046/F-047/F-049/F-064/F-068 已移入 [implemented.md](../../backlog/implemented.md)；registry 其余状态保持 F-030/F-033/F-036「实现中」、F-067「候选」、远期项不变。
 
 ## 第七轮预览（不在本轮）
 

@@ -10,8 +10,7 @@
   3. 设置页分区标签数量与滚动锚点必须一一对应（F-070 方案 A）。
   4. 命令面板展示的键位必须在 cx.bind_keys 里真实存在。
   5. 上下文侧栏结构：单份标签搜索句柄、四种上下文都有分派、活动栏只在 sidebar.rs 构造。
-  6. 根 FocusScope：应用根必须包 `.root()` + `.node(...)`，否则焦点动作分发与焦点回落在根节点断掉
-     （Tab 遍历已按 F-075/F-076 下线）。
+  6. 根 FocusScope：应用根必须包 `.root()` + `.node(...)`，用于焦点回退、浮层与可访问性。
   7. core 状态 i18n：不得裸写 `shared.status`；所有 `notice.*` 键必须在中英文目录同时存在。
   8. 直接 UI 文案：`.child("…")`、`push_toast(..., "…")`、`Button::new(..., "…")`
      不得直接写中文（`is_english()` 分支除外）。
@@ -19,6 +18,8 @@
      `contains("监听"/"离线")`；去重固定保留原因必须在 UI 映射表里。
  10. UI 消息键：`t(cx, "…")` / `t_args(cx, "…")` / `placeholder_key(…, "…")` 的
      字面量键必须在中英目录同时存在（缺失键会触发 vendor i18n panic）。
+ 11. F-075/F-076：启动时必须在 Ely init 之后解绑 `ElyFocus` 下的 Tab / Shift+Tab，
+     且不得把 F6 / Shift+F6 一并解绑。
 """
 
 from __future__ import annotations
@@ -168,7 +169,7 @@ def check_sidebar_contexts() -> tuple[list[str], int]:
 
 
 def check_root_focus_scope() -> tuple[list[str], int]:
-    """根 FocusScope 保证焦点分发与回落；Tab 遍历已按 F-075/F-076 下线。"""
+    """根 FocusScope 保留焦点回退、浮层与可访问性（Tab 遍历已由 F-075/F-076 下线）。"""
     app = (UI / "app.rs").read_text(encoding="utf-8")
     lib = (UI / "lib.rs").read_text(encoding="utf-8")
     problems: list[str] = []
@@ -188,12 +189,59 @@ def check_root_focus_scope() -> tuple[list[str], int]:
     if ".root()" not in block:
         problems.append("根 FocusScope 缺少 .root()")
     if '.node("kanalib-root-focus"' not in block:
-        problems.append("根 FocusScope 缺少 .node(...)，焦点动作分发会断在无 id 的根节点")
+        problems.append("根 FocusScope 缺少 .node(...)，焦点回退/浮层/可访问性节点会缺失")
 
     checks += 1
     if "FocusScope" not in lib:
         problems.append("lib.rs 未导入 FocusScope")
 
+    return problems, checks
+
+
+def check_tab_traversal_removed() -> tuple[list[str], int]:
+    """F-075/F-076：启动时在 Ely init 之后解绑 Tab / Shift+Tab，但保留 F6。"""
+    app = (UI / "app.rs").read_text(encoding="utf-8")
+    lib = (UI / "lib.rs").read_text(encoding="utf-8")
+    main = (ROOT / "src" / "main.rs").read_text(encoding="utf-8")
+    problems: list[str] = []
+    checks = 0
+
+    checks += 1
+    if "pub fn disable_tab_focus_traversal(cx: &mut App)" not in lib:
+        problems.append("lib.rs 缺少 disable_tab_focus_traversal(cx: &mut App)")
+
+    checks += 1
+    if not re.search(
+        r'KeyBinding::new\(\s*"tab",\s*Unbind\("ely::FocusNext"\.into\(\)\),\s*'
+        r'Some\("ElyFocus"\),?\s*\)',
+        lib,
+    ):
+        problems.append("lib.rs 缺少 tab -> Unbind(ely::FocusNext) @ ElyFocus")
+
+    checks += 1
+    if not re.search(
+        r'KeyBinding::new\(\s*"shift-tab",\s*Unbind\("ely::FocusPrev"\.into\(\)\),\s*'
+        r'Some\("ElyFocus"\),?\s*\)',
+        lib,
+    ):
+        problems.append("lib.rs 缺少 shift-tab -> Unbind(ely::FocusPrev) @ ElyFocus")
+
+    checks += 1
+    init_at = main.find("ely_gpui_component::init(cx)")
+    disable_at = main.find("kanalib_ui::disable_tab_focus_traversal(cx)")
+    if init_at < 0:
+        problems.append("main.rs 找不到 ely_gpui_component::init(cx)")
+    if disable_at < 0:
+        problems.append("main.rs 未调用 kanalib_ui::disable_tab_focus_traversal(cx)")
+    if init_at >= 0 and disable_at >= 0 and disable_at < init_at:
+        problems.append("disable_tab_focus_traversal 必须在 Ely init 之后调用")
+
+    checks += 1
+    for key in ("f6", "shift-f6"):
+        if re.search(rf'KeyBinding::new\(\s*"{key}",\s*Unbind\(', lib):
+            problems.append(f"{key} 不得随 F-075/F-076 一并解绑")
+    if re.search(r'KeyBinding::new\(\s*"(?:tab|shift-tab)"', app):
+        problems.append("app.rs 不应重新绑定 Tab / Shift+Tab")
     return problems, checks
 
 
@@ -365,12 +413,19 @@ def main() -> int:
         ("open_asset_with_system 失败分支（toast + 就地错误）", *check_open_errors()),
         ("设置页分区标签与滚动锚点一一对应", *check_settings_anchors()),
         ("上下文侧栏结构（单搜索/四上下文/单一活动栏与菜单）", *check_sidebar_contexts()),
-        ("根 FocusScope（.root() + .node()，保证焦点分发/回落）", *check_root_focus_scope()),
+        (
+            "根 FocusScope（.root() + .node()，焦点回退/浮层/可访问性）",
+            *check_root_focus_scope(),
+        ),
         ("命令面板键位（必须真实绑定）", *check_palette_keys()),
         ("core 状态 i18n（结构化写入 + 双语键齐全）", *check_core_status_i18n()),
         ("直接 UI 文案（不得硬编码中文）", *check_direct_ui_text()),
         ("D5 来源错误结构化（key/类型化恢复/去重原因映射）", *check_source_error_structure()),
         ("UI 消息键（t/t_args/placeholder_key 双语齐全）", *check_ui_message_keys()),
+        (
+            "F-075/F-076（Ely init 后解绑 Tab / Shift+Tab，保留 F6）",
+            *check_tab_traversal_removed(),
+        ),
     ]
     failed = False
     for name, problems, count in checks:

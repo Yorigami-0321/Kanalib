@@ -14,6 +14,6 @@
 
 > 第六轮任务 A/B/C（2026-11-02）已实现并归档：F-015、F-025、F-046、F-047、F-049、F-064、F-068，见 [implemented.md](implemented.md)。本池只保留尚未进入推荐批次的候选/远期项。
 
-> 第七轮立项移出候选池：F-067（会话内撤销/历史）由任务 A/B 实现并归档，见 [round-7.md](round-7.md) 与 [implemented.md](implemented.md)。
+> 第七轮立项移出候选池：F-067（会话内撤销/历史）由任务 A/B 实现并归档，见 [round-7.md](../archive/2026-11/round-7.md) 与 [implemented.md](implemented.md)。
 
 ---

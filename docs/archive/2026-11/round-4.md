@@ -1,6 +1,6 @@
 # 第四轮任务包（2026-10-28）
 
-> 上级索引：[../FEATURE-BACKLOG.md](../FEATURE-BACKLOG.md) · 文档地图：[README](./README.md) · 第三轮：[round-3.md](round-3.md)
+> 上级索引：[../FEATURE-BACKLOG.md](../../FEATURE-BACKLOG.md) · 文档地图：[README](../../backlog/README.md) · 第三轮：[round-3.md](round-3.md)
 >
 > 第三轮 G2b2 已完成；当前剩余：F-012 非名称排序上限、F-030 网络盘/去重刷新收尾、F-033/F-040 媒体评估、F-036 真实拖放验收、F-061 自动备份/恢复、F-065 安装器，以及候选池。
 >
@@ -99,7 +99,7 @@
 
 > 范围：只做验收、证据归档与文档，不改功能代码；本轮未重跑 UI 自动化，截图/UIA/日志/内存采样均来自 2026-10-29 的同一轮实测。原始目录 `target/r4-task0-data/`（不入库），本地归档 `.kanalib/r4_task0/`（`.kanalib/` 已在 `.gitignore`，图片与日志不提交）。
 
-- **F-036 拖拽导入：未通过 E2E，待用户手动验收。** 真实 Windows 资源管理器拖放无法在窗口内自动化中可靠复现（`ExternalPaths` 由系统拖放目标注入，UIA/消息模拟不可靠），本轮未做，不写成已通过；手动验收清单（文件夹、来源内图片、来源外图片、取消、Unicode/日文/长路径、重复来源、自绘标题栏兼容）已写入 [pending/library-sources-formats.md](pending/library-sources-formats.md)，registry 保持「实现中」。
+- **F-036 拖拽导入：未通过 E2E，待用户手动验收。** 真实 Windows 资源管理器拖放无法在窗口内自动化中可靠复现（`ExternalPaths` 由系统拖放目标注入，UIA/消息模拟不可靠），本轮未做，不写成已通过；手动验收清单（文件夹、来源内图片、来源外图片、取消、Unicode/日文/长路径、重复来源、自绘标题栏兼容）已写入 [pending/library-sources-formats.md](../../backlog/pending/library-sources-formats.md)，registry 保持「实现中」。
 - **F-005 分组浏览：通过（带边界）。** 100000 张合成库上，修改时间/拍摄时间/来源/评级四种分组菜单可用，组头吸顶、折叠展开、连续滚动正常；600s 滚动采样工作集约 145MB、私有约 190MB，无增长（`.kanalib/r4_task0/100k-scroll-memory.csv`，无表头 30 行，第一列 20–600s）。边界：该库来源目录 `C:\bench` 已离线（`logs/100k-group.log` 记录 `source inaccessible: C:\bench` 与 `thumb missing and could not rebuild`），网格只有占位符，因此只证明分组布局/行级虚拟化/内存，不证明 10 万真实缩略图滚动；10k 副本（缩略图缓存可用、源目录离线）分组/滚动视觉通过。
 - **F-003 图片对比：3 张去重组对比通过，多选入口未复现。** 从 10k 去重组「对比此组」进入 3 张并排对比：同步缩放 ×1.95、同步平移、差异表（差异 1 项/相同 8 项）、保留标记、Esc 返回去重组均通过。边界：Ctrl 多选 2–4 张后进入对比仍未复现——`.kanalib/r4_task0/screens/10k-multiselect-ctrl-attempt.png` 显示 Ctrl 点击多张后仅 1 张（`synthetic_00002_city_合成.jpg`）被选中；不能把去重组入口当作多选复现，多选对比入口待手动验收。
 - **证据**：`.kanalib/r4_task0/screens/`（28 张：100k 分组/折叠/连续滚动/菜单、10k 分组/滚动、4 张对比截图（并排/缩放/平移/Esc 返回）、多选未复现、命令面板）；`.kanalib/r4_task0/100k-scroll-memory.csv`；`.kanalib/r4_task0/uia-100k-grouped.txt`、`.kanalib/r4_task0/uia-100k-menu.txt`、`.kanalib/r4_task0/uia-10k-dedup.txt`、`.kanalib/r4_task0/uia-10k-palette.txt`；`.kanalib/r4_task0/logs/100k-group.log`、`.kanalib/r4_task0/logs/10k-group.log`。
@@ -111,7 +111,7 @@
 
 - **F-061 备份/恢复 UI**：命令面板新增「备份与恢复」（立即备份、恢复备份…、取消待恢复、打开设置·数据库备份）；启动时 `pending_restore` 通过 `pending_restore_hint` 提示“重启后生效，可在设置页取消”，不自动替换运行中的库；设置页备份计划/保留/恢复/损坏候选拒绝均已截图。恢复仍走“校验 + safety backup + 下次启动应用”，运行期不换库。
 - **F-033 格式 UI**：PSD 检查器显示「需要 FFmpeg 解码 · 仅合成图」及图层/Alpha/pHash/`.psb` 边界；GIF/WebP 显示「内置解码 · 动画仅首帧」，查看器提供「用系统应用播放」出口，未实现应用内逐帧播放；HEIC/RAW 仍不支持。
-- **F-012 搜索 UI**：单次 SQL 探测上限从 10000 降为 `UI_SEARCH_PAGE_LIMIT=512`（超过回退内存过滤，结果语义不变）；`KANALIB_SEARCH_TIMING` 记录防抖/page/run/visible/frame。100k 缺图最坏库上 `synthetic` 热查 0.93s、`sky` 0.66s（原约 1.6/1.45s），但仍未达 150ms。`synthetic_0004` 10 命中 14s 异常已定位：`search_extent` 普通 `JOIN` 在 SQLite 3.46 下逐行探 FTS；改 `CROSS JOIN` 后核心 `search_page` 3.5ms、UI page 55ms/visible 360ms，回归测试 `fts_extent_query_plan_prefers_fts_driver`（修复提交 `fed7857`）。完整表见 [pending/search-organization.md](pending/search-organization.md)。
+- **F-012 搜索 UI**：单次 SQL 探测上限从 10000 降为 `UI_SEARCH_PAGE_LIMIT=512`（超过回退内存过滤，结果语义不变）；`KANALIB_SEARCH_TIMING` 记录防抖/page/run/visible/frame。100k 缺图最坏库上 `synthetic` 热查 0.93s、`sky` 0.66s（原约 1.6/1.45s），但仍未达 150ms。`synthetic_0004` 10 命中 14s 异常已定位：`search_extent` 普通 `JOIN` 在 SQLite 3.46 下逐行探 FTS；改 `CROSS JOIN` 后核心 `search_page` 3.5ms、UI page 55ms/visible 360ms，回归测试 `fts_extent_query_plan_prefers_fts_driver`（修复提交 `fed7857`）。完整表见 [pending/search-organization.md](../../backlog/pending/search-organization.md)。
 - **验证**：`cargo test --workspace` core **150 passed / 15 ignored**、UI **36 passed**、bin **3**；`cargo check --workspace` 无警告（仅 vendor profile 提示）。
 - **截图**：`.kanalib/r4_e1/screens/settings-backup-section.png`、`settings-backup-plan-enabled.png`、`settings-backup-now.png`、`restore-corrupt-failure.png`、`psd-inspector.png`、`gif-inspector.png`、`gif-viewer.png`；搜索日志 `.kanalib/r4_e1/logs/search100k-limit512c.log`。
 - **未完成边界**：应用内动画逐帧播放、100k 真实缩略图库的键入延迟、备份大库进度/VACUUM、真实 OneDrive/网络盘事件语义、F-036 真实拖放与 F-003 Ctrl 多选仍待手动验收。

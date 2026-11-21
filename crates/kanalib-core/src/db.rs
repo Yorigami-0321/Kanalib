@@ -3915,6 +3915,41 @@ impl Db {
         Ok(tags)
     }
 
+    /// 内容相同（同一 sha1 / blake3）的多份资产上出现过的标签，按哈希归并（键为小写哈希）。
+    ///
+    /// 导出的 item 以内容哈希为 id：重复副本只保留一条。若被保留的那份恰好没有标签，
+    /// 而同一内容的另一份打过标签，标签就会从墙上消失。发布器用这张表在
+    /// 「当前资产没有标签」时补位。
+    pub fn tags_for_duplicated_assets(&self) -> Result<HashMap<String, Vec<TagHit>>> {
+        let mut pool: HashMap<String, Vec<TagHit>> = HashMap::new();
+        for column in ["sha1", "blake3"] {
+            let sql = format!(
+                "SELECT lower(a.{column}), t.name, t.category, at.confidence, t.vocab_index
+                 FROM asset_tags at
+                 JOIN assets a ON a.id = at.asset_id
+                 JOIN tags t ON t.id = at.tag_id
+                 WHERE a.{column} != '' AND a.{column} IN (
+                     SELECT {column} FROM assets WHERE {column} != ''
+                     GROUP BY {column} HAVING COUNT(*) > 1
+                 )
+                 ORDER BY a.{column}, at.confidence DESC, t.name"
+            );
+            let mut statement = self.conn.prepare(&sql)?;
+            let mut rows = statement.query([])?;
+            while let Some(row) = rows.next()? {
+                let hash: String = row.get(0)?;
+                let hit = TagHit {
+                    tag: row.get(1)?,
+                    category: row.get(2)?,
+                    score: row.get::<_, f64>(3)? as f32,
+                    vocab_index: row.get::<_, Option<i64>>(4)?.map(|value| value as u32),
+                };
+                pool.entry(hash).or_default().push(hit);
+            }
+        }
+        Ok(pool)
+    }
+
     fn source_id(&self, folder: &str) -> Result<i64> {
         let config = serde_json::json!({ "path": folder }).to_string();
         self.conn.execute(

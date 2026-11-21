@@ -1,6 +1,6 @@
 # 第七轮任务包（2026-11-02）
 
-> 上级索引：[../FEATURE-BACKLOG.md](../FEATURE-BACKLOG.md) · 文档地图：[README](./README.md) · 第六轮：[round-6.md](round-6.md)
+> 上级索引：[../FEATURE-BACKLOG.md](../../FEATURE-BACKLOG.md) · 文档地图：[README](../../backlog/README.md) · 第六轮：[round-6.md](round-6.md)
 >
 > 第六轮 A/B/C 已完成；非远期只剩 F-067（撤销/历史）是纯代码项。F-030（真实网络盘）、F-033（HEIC/RAW 样本/许可）、F-036（真实资源管理器拖放）都需要外部环境或手动验收，**本轮回跳过，不写成通过**。
 >
@@ -54,7 +54,7 @@
 
 - **全量回归（worktree）**：`cargo test --workspace` core 204/17 ignored + UI 67 + bin 6；`cargo check --workspace` 通过。
 - **未做/顺延**：真实图库 GUI/UIA 与真实文本输入按键验收；跨重启操作历史；删除/回收站、去重评审、来源移除、文件系统操作撤销。F-030/F-033/F-036 仍按第六轮结论保持 pending，不写成通过。
-- **文档收口**：F-067 已移入 [implemented.md](implemented.md)；registry 其余状态保持 F-030/F-033/F-036「实现中」，远期项不变。
+- **文档收口**：F-067 已移入 [implemented.md](../../backlog/implemented.md)；registry 其余状态保持 F-030/F-033/F-036「实现中」，远期项不变。
 
 ## 后续（不在本轮）
 

@@ -41,7 +41,7 @@ comm -13 /tmp/pend /tmp/undone
 echo
 echo "== pending 详情文件是否覆盖 overview 的 ID =="
 for id in $(cat /tmp/pend); do
-  if ! grep -rq "$id" pending/browse.md pending/dedup.md pending/library-sources-formats.md pending/ops.md pending/search-organization.md pending/tags.md; then
+  if ! grep -rq "$id" pending/browse.md pending/dedup.md pending/library-sources-formats.md pending/ops.md pending/search-organization.md pending/tags.md cloud-photo-wall.md; then
     echo "$id 没有出现在任何 pending 详情文件"
   fi
 done

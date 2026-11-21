@@ -1,0 +1,1911 @@
+/* Kanalib 图片墙 v3：黑白"缝" + 可拖拽的图片空间
+   标准见 docs/backlog/photo-wall-v3.md */
+
+@property --accent {
+  syntax: '<color>';
+  inherits: true;
+  initial-value: #8f8f92;
+}
+
+:root {
+  --bg: #070707;
+  --surface: #0c0c0c;
+  --ink: #f7f4ee;
+  --ink-soft: color-mix(in srgb, #f7f4ee 55%, transparent);
+  --hairline: rgba(247, 244, 238, 0.08);
+  --accent: #8f8f92;
+  --seam-w: 120px;
+  --seam-h: 0px;
+  --panel: 300px;
+  --gap: 8px;
+  --ease: cubic-bezier(0.2, 0.7, 0.25, 1);
+  --ease-out: cubic-bezier(0.22, 1, 0.36, 1);
+  --cjk: 'Noto Sans CJK SC', 'Source Han Sans SC', 'PingFang SC', 'Hiragino Sans GB',
+    'Microsoft YaHei', sans-serif;
+  color-scheme: dark;
+  transition: --accent 600ms var(--ease);
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  overflow: hidden;
+  background-color: var(--bg);
+  background-image:
+    radial-gradient(circle at 14% 12%, color-mix(in srgb, var(--accent) 16%, transparent), transparent 29%),
+    radial-gradient(circle at 86% 82%, rgba(106, 72, 255, 0.2), transparent 32%);
+  background-attachment: fixed;
+  color: var(--ink);
+  font-family: Inter, 'Segoe UI', var(--cjk);
+  font-size: 13px;
+  line-height: 1.5;
+  font-variant-numeric: tabular-nums;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* 噪点 */
+body::before {
+  content: '';
+  position: fixed;
+  inset: 0;
+  z-index: 1;
+  pointer-events: none;
+  opacity: 0.13;
+  mix-blend-mode: soft-light;
+  background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='140' height='140'><filter id='n'><feTurbulence type='fractalNoise' baseFrequency='0.92' numOctaves='2' stitchTiles='stitch'/></filter><rect width='140' height='140' filter='url(%23n)'/></svg>");
+}
+
+/* 暗角 */
+body::after {
+  content: '';
+  position: fixed;
+  inset: 0;
+  z-index: 2;
+  pointer-events: none;
+  background: radial-gradient(ellipse at center, transparent 78%, rgba(0, 0, 0, 0.52) 100%);
+}
+
+::selection {
+  background: color-mix(in srgb, var(--accent) 38%, transparent);
+}
+
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+::-webkit-scrollbar-track {
+  background: #18181b;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #3f3f46;
+  border-radius: 4px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #52525b;
+}
+
+button,
+input,
+a {
+  font: inherit;
+  color: inherit;
+}
+
+button {
+  border: 0;
+  background: none;
+  cursor: pointer;
+}
+
+a {
+  text-decoration: none;
+}
+
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.app {
+  position: relative;
+  z-index: 3;
+  min-height: 100vh;
+}
+
+/* 信息检查器展开时，详情 stage 让出 seam + 300px；窄屏是底部 sheet，不占水平空间。 */
+.app.has-inspector {
+  --inspector-w: 300px;
+}
+
+@media (max-width: 900px) {
+  .app.has-inspector {
+    --inspector-w: 0px;
+  }
+}
+
+.stage {
+  position: relative;
+  z-index: 3;
+  height: 100vh;
+  padding-left: var(--seam-w);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+/* 全站诊断条：数据源级错误（含数据根路径）。
+   放顶部居中而不是右下——右下已经属于画布的“加载中断 + 重试”错误条（.canvas__error），
+   两条同时出现会叠在一起。这里只做提示，不参与交互。 */
+.app__error {
+  position: fixed;
+  top: 12px;
+  left: calc(50% + var(--seam-w) / 2);
+  transform: translateX(-50%);
+  z-index: 20;
+  max-width: min(640px, calc(100vw - var(--seam-w) - 40px));
+  margin: 0;
+  padding: 8px 12px;
+  border-radius: 10px;
+  color: #ff9d8f;
+  background: rgba(20, 8, 8, 0.82);
+  font-size: 12px;
+  text-align: center;
+  pointer-events: none;
+}
+
+.stage__hint {
+  display: grid;
+  place-items: center;
+  min-height: 60vh;
+  color: var(--ink-soft);
+}
+
+/* 无效深链：停在稳定缺失页，给回首页/用 ID 搜索两个动作。 */
+.stage__missing {
+  display: grid;
+  place-items: center;
+  align-content: center;
+  gap: 18px;
+  min-height: 60vh;
+  padding: 24px;
+  text-align: center;
+}
+.stage__missing .stage__hint {
+  min-height: 0;
+}
+.stage__missing-title {
+  margin: 0;
+  color: var(--ink);
+  font-size: 18px;
+  font-weight: 500;
+}
+.stage__missing-sub {
+  margin: 0;
+  max-width: 36em;
+  color: var(--ink-soft);
+  font-size: 13px;
+  line-height: 1.6;
+}
+.stage__missing-actions {
+  display: flex;
+  gap: 10px;
+}
+.stage__missing-actions .ghost {
+  flex: none;
+  min-width: 124px;
+}
+
+/* ===== 左侧的"缝" ===== */
+
+.seam {
+  position: fixed;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  z-index: 40;
+  display: flex;
+  width: var(--seam-w);
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+  padding: 18px 10px 16px;
+  overflow: hidden auto;
+  border-right: 1px solid var(--hairline);
+  background: var(--surface);
+  box-shadow: 0 24px 64px rgba(0, 0, 0, 0.42);
+  transition:
+    background-color 240ms var(--ease),
+    backdrop-filter 240ms var(--ease);
+  scrollbar-width: none;
+}
+
+.seam::-webkit-scrollbar {
+  display: none;
+}
+
+/* 鼠标进入时切成薄玻璃，墙透一点出来 */
+.seam:hover {
+  background: color-mix(in srgb, var(--bg) 64%, transparent);
+  backdrop-filter: blur(18px);
+}
+
+.seam__dot {
+  flex: none;
+  width: 8px;
+  height: 8px;
+  margin: 2px 0 6px;
+  border-radius: 50%;
+  background: var(--accent);
+  box-shadow: 0 0 14px color-mix(in srgb, var(--accent) 70%, transparent);
+  transition: background-color 600ms var(--ease);
+}
+
+.seam__word {
+  flex: none;
+  margin-bottom: 8px;
+  color: var(--ink-soft);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.3em;
+  text-transform: uppercase;
+  writing-mode: vertical-rl;
+  text-orientation: upright;
+}
+
+.seam__nav {
+  display: flex;
+  width: 100%;
+  flex: none;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  padding-top: 6px;
+  border-top: 1px solid var(--hairline);
+}
+
+.seam__tab {
+  position: relative;
+  display: flex;
+  width: 100%;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  padding: 9px 4px;
+  border-radius: 10px;
+  color: var(--ink-soft);
+  transition:
+    background-color 160ms var(--ease),
+    color 160ms var(--ease);
+}
+
+.seam__tab svg {
+  opacity: 0.85;
+}
+
+.seam__label {
+  font-size: 13px;
+  font-weight: 700;
+  letter-spacing: 0.18em;
+  line-height: 1.15;
+  writing-mode: vertical-rl;
+}
+
+.seam__tab:hover {
+  color: var(--ink);
+  background: color-mix(in srgb, currentColor 16%, transparent);
+}
+
+.seam__tab.is-on {
+  color: var(--ink);
+  background: color-mix(in srgb, currentColor 14%, transparent);
+}
+
+.seam__tab.is-on::after {
+  content: '';
+  position: absolute;
+  top: 10px;
+  bottom: 10px;
+  left: -6px;
+  width: 2px;
+  border-radius: 1px;
+  background: var(--accent);
+  transform-origin: 50% 50%;
+  animation: seam-rule-in 240ms var(--ease);
+  transition: background-color 600ms var(--ease);
+}
+
+@keyframes seam-rule-in {
+  from {
+    transform: scaleY(0);
+  }
+}
+
+.seam__foot {
+  display: flex;
+  width: 100%;
+  flex: none;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  margin-top: auto;
+  padding-top: 10px;
+  border-top: 1px solid var(--hairline);
+}
+
+.seam__foot-actions {
+  display: flex;
+  gap: 6px;
+}
+
+.seam__count {
+  color: rgba(247, 244, 238, 0.62);
+  font-size: 10px;
+  letter-spacing: 0.04em;
+  writing-mode: vertical-rl;
+  text-orientation: mixed;
+}
+
+.seam__tab--icon {
+  width: 36px;
+  height: 36px;
+  padding: 0;
+  display: grid;
+  place-items: center;
+}
+
+/* ===== 浮层面板 ===== */
+
+.panel {
+  position: fixed;
+  top: 14px;
+  left: calc(var(--seam-w) + 12px);
+  z-index: 45;
+  width: var(--panel);
+  max-height: calc(100vh - 28px);
+  padding: 16px;
+  overflow: auto;
+  border-radius: 14px;
+  background: color-mix(in srgb, var(--bg) 92%, var(--ink));
+  box-shadow: 0 24px 64px rgba(0, 0, 0, 0.55);
+  backdrop-filter: blur(18px);
+  animation: panel-in 160ms var(--ease);
+}
+
+@keyframes panel-in {
+  from {
+    opacity: 0;
+    transform: translateX(-8px);
+  }
+}
+
+.panel__title {
+  margin: 0 0 12px;
+  color: var(--ink-soft);
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.panel__hint {
+  margin: 12px 0 0;
+  color: var(--ink-soft);
+  font-size: 11px;
+}
+
+.panel__keys {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 5px 14px;
+  margin: 12px 0 4px;
+  padding-top: 10px;
+  border-top: 1px solid var(--hairline);
+  font-size: 11px;
+}
+
+.panel__keys dt {
+  color: rgba(247, 244, 238, 0.72);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.panel__keys dd {
+  margin: 0;
+  color: rgba(247, 244, 238, 0.42);
+}
+
+.panel__actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.field {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 34px;
+  padding: 0 10px;
+  border-radius: 10px;
+  background: rgba(247, 244, 238, 0.06);
+}
+
+.field input {
+  width: 100%;
+  min-width: 0;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--ink);
+  outline: none;
+}
+
+.field input::placeholder {
+  color: rgba(247, 244, 238, 0.3);
+}
+
+.field svg {
+  flex: none;
+  color: var(--ink-soft);
+}
+
+.list {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  margin: 10px -4px 0;
+  max-height: 50vh;
+  overflow: auto;
+}
+
+.list__row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 7px 8px;
+  border-radius: 9px;
+  color: rgba(247, 244, 238, 0.72);
+  text-align: left;
+  transition:
+    background-color 160ms var(--ease),
+    color 160ms var(--ease);
+}
+
+.list__row:hover {
+  color: var(--ink);
+  background: rgba(247, 244, 238, 0.05);
+}
+
+.list__row.is-on {
+  color: var(--ink);
+  background: color-mix(in srgb, var(--accent) 18%, transparent);
+}
+
+.list__text {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  font-size: 13px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.list__num {
+  flex: none;
+  color: var(--ink-soft);
+  font-size: 11px;
+}
+
+.mark {
+  flex: none;
+  width: 14px;
+  height: 14px;
+  border-radius: 4px;
+  box-shadow: inset 0 0 0 1px rgba(247, 244, 238, 0.16);
+}
+
+.list__row.is-on .mark {
+  background: var(--accent);
+  box-shadow: none;
+}
+
+.ghost {
+  flex: 1;
+  height: 34px;
+  padding: 0 12px;
+  border-radius: 10px;
+  color: rgba(247, 244, 238, 0.78);
+  background: rgba(247, 244, 238, 0.06);
+  font-size: 12px;
+  transition:
+    background-color 160ms var(--ease),
+    color 160ms var(--ease);
+}
+
+.ghost:hover {
+  color: var(--ink);
+  background: rgba(247, 244, 238, 0.12);
+}
+
+/* ===== 画布 ===== */
+
+.canvas {
+  position: fixed;
+  /* 画布铺满视口：图要垫到侧栏玻璃下面，76% 半透明 + blur(10px) 才有内容可透。
+     缝区不靠画布让位隔离，改由 Wall.tsx 在 pointerdown / wheel 里对 clientX < 缝宽
+     硬拦截——按下不拖拽、不缩放、不选卡，滚轮留给缝自己滚。 */
+  inset: 0;
+  z-index: 0;
+  overflow: hidden;
+  cursor: grab;
+  touch-action: none;
+  user-select: none;
+}
+
+.canvas.is-grabbing {
+  cursor: grabbing;
+}
+
+/* 画布本身可 Tab 聚焦（方向键平移）：焦点环画在视口内侧，不然 outline-offset 会跑出屏幕。 */
+.canvas:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
+.world {
+  position: absolute;
+  top: 0;
+  left: 0;
+  will-change: auto;
+}
+
+.tile {
+  position: absolute;
+  /* 卡片本体不再裁切：概要遮罩要越过裁切边界铺满最外设备像素（见 .tile__media /
+     .tile__info 注释）。图片和底部压暗的圆角裁切交给 .tile__media。 */
+  border-radius: 12px;
+  background: #101012;
+  contain: layout;
+  cursor: pointer;
+  box-shadow: inset 0 0 0 1px rgba(247, 244, 238, 0.055);
+  /* 聚焦时卡片在布局里换到更大的 rect：位置/尺寸走 320ms，周围图被平滑挤开。 */
+  transition:
+    left 320ms var(--ease),
+    top 320ms var(--ease),
+    width 320ms var(--ease),
+    height 320ms var(--ease),
+    filter 240ms var(--ease),
+    opacity 320ms var(--ease),
+    box-shadow 240ms var(--ease),
+    transform 360ms var(--ease);
+}
+
+/* hover 在滤镜之外补一层很轻的抬升 + 图片放大；通道仍收敛，不做描边/字号变化。
+   不抬 z-index：所有卡片始终在同一层，聚焦靠布局重排而不是叠层。 */
+.tile:hover {
+  filter: saturate(1.08) brightness(1.05);
+  transform: translateY(-2px);
+  /* 描边挪到 .tile__ring（见下），父级只留底部压暗。 */
+  box-shadow: inset 0 -44px 60px rgba(0, 0, 0, 0.24);
+}
+
+/* ===== 单击聚焦（v4）：格子/有限墙局部重排，英雄卡占更大的 rect；所有图仍在同一层 ===== */
+/* 聚焦卡保留名称 + 主标签（2026-11-16 决策）；底部压暗随之保留，标题在亮图上仍可读。 */
+
+.canvas.is-spotlight .canvas__hint {
+  opacity: 0;
+}
+
+/* 英雄卡：只加内描边和一点内阴影，不引入外发光（规则 6）。 */
+/* 原位放大：英雄卡叠在未重排的邻卡之上，靠 z-index + 投影建立层次；
+   contain 从 paint 降为 layout，否则外层投影会被裁掉。 */
+.tile--spotlight {
+  z-index: 3;
+  contain: layout;
+  border-radius: 18px;
+  /* 放大用稍长、先加速再收住的曲线；收回走基础 320ms，展开从容、收起利落。 */
+  transition:
+    left 420ms cubic-bezier(0.4, 0, 0.2, 1),
+    top 420ms cubic-bezier(0.4, 0, 0.2, 1),
+    width 420ms cubic-bezier(0.4, 0, 0.2, 1),
+    height 420ms cubic-bezier(0.4, 0, 0.2, 1),
+    opacity 320ms var(--ease),
+    filter 240ms var(--ease),
+    box-shadow 240ms var(--ease);
+  box-shadow:
+    0 36px 90px rgba(0, 0, 0, 0.58),
+    inset 0 -80px 100px rgba(0, 0, 0, 0.18);
+}
+
+.tile--spotlight:hover {
+  transform: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .tile {
+    transition: none;
+  }
+}
+
+/* 硬规则 6：焦点与当前项都走内描边，没有任何外发光。 */
+.tile:focus-visible {
+  outline: none;
+}
+
+/* ===== 反馈描边层 =====
+   所有 hover / 聚焦 / 当前项的描边都画在这一层：盖在概要遮罩（z-index 5）之上，
+   inset:0 + border-radius:inherit，四边同宽同色，pointer-events:none。
+   为什么不留在父级 box-shadow：父级内描边会被遮罩半透明地压住，又贴着裁切边界
+   参与抗锯齿，分数缩放/分数坐标下从边缘漏成 1px 亮线（zoom 1.2635 / 1.6 实测）。
+   单独一层和遮罩同层叠放，形状是完整的 2px 环，不存在"透光细线"。 */
+.tile__ring {
+  position: absolute;
+  inset: 0;
+  z-index: 6;
+  border-radius: inherit;
+  pointer-events: none;
+  transition: box-shadow 240ms var(--ease);
+}
+
+.tile:hover .tile__ring {
+  box-shadow: inset 0 0 0 2px rgba(247, 244, 238, 0.16);
+}
+
+.tile--spotlight .tile__ring {
+  box-shadow: inset 0 0 0 2px rgba(247, 244, 238, 0.2);
+}
+
+/* 聚焦卡的「打开」按钮：进详情（等同双击）。交互控件不透给画布手势（Wall.tsx 的 INTERACTIVE 判定）。 */
+.tile__open {
+  position: absolute;
+  right: 12px;
+  bottom: 12px;
+  z-index: 4;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 7px 12px;
+  border-radius: 999px;
+  color: #fff;
+  background: rgba(10, 10, 12, 0.72);
+  box-shadow: inset 0 0 0 1px rgba(247, 244, 238, 0.28);
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  transition:
+    background-color 160ms var(--ease),
+    box-shadow 160ms var(--ease);
+}
+
+.tile__open:hover {
+  background: rgba(10, 10, 12, 0.86);
+  box-shadow: inset 0 0 0 1px rgba(247, 244, 238, 0.44);
+}
+
+/* 「当前项」= 刚点开 / 刚右键看概要的那张：2px accent；和焦点环合并成一条规则。 */
+.tile:focus-visible .tile__ring,
+.tile[data-current='true'] .tile__ring,
+.tile[data-current='true']:focus-visible .tile__ring {
+  box-shadow: inset 0 0 0 2px var(--accent);
+}
+
+/* 概要态只留内容：装饰环（hover / 当前项 / 聚焦卡）会让"铺满边缘"的最外两像素
+   出现刻意的亮边，与验收口径冲突；文案与操作已经在叠层里，识别性不靠环。
+   键盘焦点环例外——可访问性优先，且只在键盘操作时出现。 */
+.tile[data-summary='true'] .tile__ring,
+.tile[data-summary='true']:hover .tile__ring,
+.tile--spotlight[data-summary='true'] .tile__ring {
+  box-shadow: none;
+}
+
+.tile[data-summary='true']:focus-visible .tile__ring {
+  box-shadow: inset 0 0 0 2px var(--accent);
+}
+
+/* 概要态压掉卡片自己的描边与投影：最外 1px 的内描边会从半透明遮罩下透出来，
+   是反馈里"边缘亮线"的一半来源；遮罩铺满后也要一并关掉，否则最外两像素仍比
+   内部亮 3–4/255。英雄卡的投影是叠层关系、不在边缘，保持不动。 */
+.tile[data-summary='true']:not(.tile--spotlight) {
+  box-shadow: none;
+}
+
+/* 入场（§2.5）：只动 opacity + transform。延迟由 JS 按对角线波次写在 inline style。
+   虚拟化滚动时挂载的新卡不带 .tile--enter（enter 开关只在换页窗口内为 true），
+   所以不会出现"滚一下闪一片"（规则 9）。 */
+.tile--enter {
+  animation: tile-in 240ms var(--ease) both;
+}
+
+@keyframes tile-in {
+  from {
+    opacity: 0;
+    transform: translateY(12px);
+  }
+}
+
+/* ===== 卡片的圆角裁切层 =====
+   图片、底部压暗、加载骨架都收在这一层里做 overflow:hidden + 圆角裁切；
+   卡片本体不再裁切，否则概要遮罩的边界也被一起裁掉（分数缩放下裁切边界只有
+   部分像素覆盖，遮罩永远铺不满最外 1 个设备像素，下面的图/描边就漏成亮线）。
+   概要挂载期间外扩 1px：让卡片最外设备像素被图片完整覆盖，遮罩边缘才不会混入
+   图片抗锯齿（分数缩放 1.2635 / 1.6 实测会差 20+/255）。 */
+.tile__media {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  border-radius: inherit;
+}
+
+.tile:has(.tile__info) .tile__media {
+  inset: -1px;
+}
+
+/* 渐进揭示：虚拟化平移时每张新挂载的卡都会跑一遍过渡，过渡越重越掉帧。
+   原来 14px 模糊 + 1.035 缩放在 700–900ms 内收敛，是滚轮/触控板平移的主要瓶颈
+   （2.2s 合成滚轮：46fps → 64fps 仅靠去掉过渡）。现在只保留 200ms 线性淡入，
+   加载骨架交给 .tile__media::before 的渐变；filter 过渡只服务单色模式（N）的淡入淡出。 */
+.tile__img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  /* 深色兜底：任何解码/加载瞬态露出的都是暗底而不是白底（反馈 §5 方案 C）。 */
+  background: #101012;
+  opacity: 0;
+  transition:
+    opacity 200ms linear,
+    transform 180ms var(--ease),
+    filter 300ms var(--ease);
+}
+
+.tile__img.is-loaded {
+  opacity: 1;
+}
+
+.tile:hover .tile__img.is-loaded {
+  transform: scale(1.045);
+}
+
+.tile--spotlight .tile__img.is-loaded,
+.tile--spotlight:hover .tile__img.is-loaded {
+  transform: scale(1.001);
+}
+
+/* 加载骨架：真实图未到之前扫一条低对比高光，避免整面墙先黑一片。
+   1.5s 一个循环，只动 background-position，不触发布局。 */
+.tile__media::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  border-radius: inherit;
+  background: linear-gradient(
+    105deg,
+    transparent 28%,
+    rgba(247, 244, 238, 0.085) 44%,
+    transparent 60%
+  );
+  background-size: 220% 100%;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 240ms var(--ease);
+}
+
+.tile__media:has(> img:not(.is-loaded))::before {
+  opacity: 1;
+  animation: tile-shimmer 1.5s ease-in-out infinite;
+}
+
+@keyframes tile-shimmer {
+  from {
+    background-position: 120% 0;
+  }
+  to {
+    background-position: -120% 0;
+  }
+}
+
+.tile__shade,
+.tile__chip,
+.tile__copy {
+  z-index: 2;
+}
+
+.tile__shade {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  /* 亮图上的白标题需要更稳的底部衬托：56% 处 0.24 → 0.31，
+     78% 处补一档 0.62，渐变只作用于卡面，不整墙压暗（P1-1）。
+     末档必须收满 1.0：0.93 会在底边留约 7% 图片透出，亮图是一条浅色细边，
+     hover 的 brightness(1.05) 会更明显；96% 补 0.9 做过渡，避免出现硬边。 */
+  background: linear-gradient(
+    180deg,
+    rgba(0, 0, 0, 0.05) 34%,
+    rgba(0, 0, 0, 0.31) 56%,
+    rgba(0, 0, 0, 0.62) 78%,
+    rgba(0, 0, 0, 0.9) 96%,
+    rgba(0, 0, 0, 1) 100%
+  );
+}
+
+/* 角标：11px / 800 / .12em / 直角 / rgba(0,0,0,.62)，不 blur、不圆角、不渐变（硬规则 5）。 */
+.tile__chip {
+  position: absolute;
+  top: 14px;
+  left: 14px;
+  max-width: calc(100% - 28px);
+  overflow: hidden;
+  padding: 3px 7px;
+  border-radius: 0;
+  color: rgba(255, 255, 255, 0.9);
+  background: rgba(0, 0, 0, 0.62);
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: 0.12em;
+  line-height: 1.35;
+  text-overflow: ellipsis;
+  text-transform: uppercase;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+  pointer-events: none;
+}
+
+/* 文字块 inset 17px（§2.3）；标题字号由 JS 按卡宽分级写在 inline style 上。 */
+.tile__copy {
+  position: absolute;
+  right: 17px;
+  bottom: 15px;
+  left: 17px;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  pointer-events: none;
+}
+
+/* 最多两行收尾（本轮审查下调自三行）：line-height .96 / letter-spacing -.045em / balance。
+   前端用 displayTitle 去掉扩展名并中间省略长哈希；CSS 只做兜底折行，不再让
+   任意字符（anywhere）把标题拆成无意义的碎片。 */
+.tile__copy strong {
+  display: -webkit-box;
+  overflow: hidden;
+  color: #fff;
+  font-weight: 700;
+  letter-spacing: -0.045em;
+  line-height: 0.96;
+  overflow-wrap: break-word;
+  word-break: normal;
+  text-wrap: balance;
+  /* 局部双层阴影：近处压住亮底，远处扩一圈柔光，不抬高整墙的暗度。 */
+  text-shadow:
+    0 1px 3px rgba(0, 0, 0, 0.78),
+    0 2px 14px rgba(0, 0, 0, 0.5);
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+
+/* 硬规则 4（lead 裁定口径）：标题常驻合规，藏的是分辨率 · 星级这一行。
+   默认不可见，hover / 键盘焦点 / 当前项时淡入；只动 opacity（规则 9）。 */
+.tile__copy small {
+  overflow: hidden;
+  color: rgba(255, 255, 255, 0.66);
+  font-size: 11px;
+  opacity: 0;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  transition: opacity 160ms var(--ease);
+}
+
+.tile:hover .tile__copy small,
+.tile:focus-visible .tile__copy small,
+.tile[data-current='true'] .tile__copy small {
+  opacity: 1;
+}
+
+.tile__fallback {
+  display: grid;
+  width: 100%;
+  height: 100%;
+  place-items: center;
+  color: var(--ink-soft);
+  font-size: 11px;
+  background: #0f0f11;
+}
+
+/* 提示条：首屏短暂出现一次就淡出（硬规则 1：不常显），淡出后 visibility:hidden
+   连命中区一起收掉；窄屏直接不出现（D4：390 下贴右缘会裁字、压内容）。 */
+.canvas__hint {
+  position: fixed;
+  right: 18px;
+  bottom: 46px;
+  z-index: 6;
+  max-width: min(58ch, calc(100vw - var(--seam-w) - 36px));
+  padding: 6px 12px;
+  border-radius: 999px;
+  color: rgba(247, 244, 238, 0.55);
+  background: rgba(10, 10, 12, 0.5);
+  font-size: 11px;
+  letter-spacing: 0.04em;
+  text-align: right;
+  backdrop-filter: blur(10px);
+  /* 纯提示层：不拦指针，否则头几秒会挡住它下面卡片的点击/拖拽。 */
+  pointer-events: none;
+  animation: hint-out 700ms var(--ease) 2.6s forwards;
+}
+
+@keyframes hint-out {
+  to {
+    opacity: 0;
+    visibility: hidden;
+    transform: translateY(-6px);
+  }
+}
+
+/* 注意：这里原本有 .canvas:hover { animation-play-state: paused }。
+   画布铺满整屏，鼠标基本永远在画布上，那条规则等于让提示条永不淡出，已删除。 */
+
+/* 加载态只留一条 1px 进度线（硬规则 1 + D4）：不写 N/M，不压任何卡片。 */
+.canvas__progress {
+  position: fixed;
+  right: 0;
+  bottom: 0;
+  left: var(--seam-w);
+  z-index: 6;
+  height: 1px;
+  background: var(--accent);
+  opacity: 0;
+  transform: scaleX(0.12);
+  transform-origin: 0 50%;
+  transition:
+    opacity 160ms var(--ease),
+    transform 900ms var(--ease);
+  pointer-events: none;
+}
+
+.canvas__progress[data-active='true'] {
+  opacity: 0.55;
+  transform: scaleX(1);
+}
+
+/* 屏幕阅读器专用文本 */
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+/* 弱网首屏骨架：图位占位不是纯黑；reduced motion 下静止。 */
+.wall-skeleton {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  padding: 40px 8vw;
+  pointer-events: none;
+}
+.wall-skeleton__grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+  align-content: center;
+  gap: 12px;
+  width: min(1080px, 100%);
+}
+.wall-skeleton__tile {
+  display: block;
+  min-height: 96px;
+  border-radius: 10px;
+  background-color: rgba(247, 244, 238, 0.055);
+  background-image: linear-gradient(
+    100deg,
+    transparent 20%,
+    rgba(247, 244, 238, 0.055) 40%,
+    transparent 62%
+  );
+  background-size: 240% 100%;
+  animation: wall-skeleton-sweep 1.7s var(--ease) infinite;
+}
+@keyframes wall-skeleton-sweep {
+  from {
+    background-position: 130% 0;
+  }
+  to {
+    background-position: -30% 0;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .wall-skeleton__tile {
+    animation: none;
+  }
+}
+
+/* 只有真正出错才给一句话（不是计数，也不是"到底了"）。 */
+.canvas__error {
+  position: fixed;
+  right: 18px;
+  bottom: 16px;
+  z-index: 6;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  color: rgba(247, 244, 238, 0.62);
+  font-size: 11px;
+  letter-spacing: 0.08em;
+  pointer-events: none;
+}
+
+/* 错误条里的重试入口：容器不吃指针（避免挡住画布右下角平移），只让按钮可点。 */
+.canvas__error-retry {
+  pointer-events: auto;
+  padding: 4px 12px;
+  border-radius: 8px;
+  border: 1px solid rgba(247, 244, 238, 0.18);
+  background: rgba(247, 244, 238, 0.09);
+  color: rgba(247, 244, 238, 0.88);
+  font-size: 11px;
+  letter-spacing: 0.08em;
+  transition: background 160ms ease, color 160ms ease;
+}
+
+.canvas__error-retry:hover {
+  background: rgba(247, 244, 238, 0.16);
+  color: #f7f4ee;
+}
+
+.canvas__error-retry:focus-visible {
+  outline: 2px solid rgba(247, 244, 238, 0.7);
+  outline-offset: 2px;
+}
+
+.wall__note {
+  display: grid;
+  min-height: 100vh;
+  place-items: center;
+  /* 文案 + 动作作为一个整体垂直居中；默认 stretch 会把三行撑满视口，按钮被甩到底部。 */
+  align-content: center;
+  padding: 40px 20px;
+  color: var(--ink-soft);
+  text-align: center;
+}
+
+.wall__note strong {
+  display: block;
+  margin-bottom: 6px;
+  color: var(--ink);
+  font-size: 15px;
+  font-weight: 500;
+}
+
+.wall__note button {
+  margin-top: 14px;
+  padding: 8px 18px;
+  border-radius: 10px;
+  background: rgba(247, 244, 238, 0.09);
+}
+
+/* 空态动作行：与提示文案同列居中，按钮样式沿用 .ghost。 */
+.wall__note-actions {
+  display: flex;
+  justify-content: center;
+  gap: 10px;
+  margin-top: 14px;
+}
+
+/* 按钮的 14px 间距由动作行统一给，避免行内按钮被 margin 顶偏。 */
+.wall__note-actions button {
+  margin-top: 0;
+}
+
+.wall__note-actions .ghost {
+  flex: none;
+  min-width: 124px;
+}
+
+/* ===== 卡片上的右键概要层（Folia 图4 那种：信息直接叠在自己的图上） ===== */
+
+/* 叠层自带文件名与 meta：卡片自己的角标和常驻标题必须让位，
+   否则两层文字叠在一起出重影（实测抓到过）。 */
+.tile[data-summary='true'] .tile__chip,
+.tile[data-summary='true'] .tile__copy {
+  opacity: 0;
+}
+
+.tile__info {
+  position: absolute;
+  /* 外扩 2px 越过卡片边界（卡片本体已不裁切，见 .tile__media）：图片在 -1px
+     处完成抗锯齿，遮罩在 -2px 处收边，两者边界都在采样到的卡片像素之外，
+     最外一像素是"遮罩 × 完整图片"，和内部亮度一致。圆角随卡片，越界部分
+     压在深色页底上不可见。内边距同步 +2（12 → 14），内容位置保持不变。 */
+  inset: -2px;
+  border-radius: inherit;
+  z-index: 5;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  padding: 14px;
+  /* 遮罩边缘要压得住亮图：旧版中段 40% / 顶部 72% 不透明度，
+     亮图从边缘透出来像一条边界缝（反馈问题 4a）。 */
+  background: linear-gradient(
+    180deg,
+    rgba(5, 5, 6, 0.88) 0%,
+    rgba(5, 5, 6, 0.7) 38%,
+    rgba(5, 5, 6, 0.94) 100%
+  );
+  animation: tile-info-in 160ms var(--ease);
+}
+
+@keyframes tile-info-in {
+  from {
+    opacity: 0;
+  }
+}
+
+/* 退出：再次右键/Esc/点别处关闭时先淡出，WallCard 160ms 后才卸载。 */
+.tile__info.tile__info--leave {
+  animation: tile-info-out 160ms var(--ease) forwards;
+  pointer-events: none;
+}
+
+@keyframes tile-info-out {
+  to {
+    opacity: 0;
+  }
+}
+
+.tile__info-bar {
+  display: flex;
+  justify-content: flex-end;
+  gap: 6px;
+}
+
+/* 概要层的图标按钮比详情页顶栏的小一号：卡片可能只有一百多像素宽。 */
+.tile__info .icon-btn {
+  width: 28px;
+  height: 28px;
+}
+
+.tile__info-body {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.tile__info-name {
+  overflow: hidden;
+  color: var(--ink);
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1.3;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+}
+
+.tile__info-meta {
+  overflow: hidden;
+  color: rgba(247, 244, 238, 0.66);
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tile__info-tags {
+  overflow: hidden;
+  color: color-mix(in srgb, var(--accent) 80%, var(--ink));
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  transition: color 600ms var(--ease);
+}
+
+/* ===== 二级墙标题 ===== */
+
+.wallhead {
+  position: fixed;
+  top: 16px;
+  left: calc(var(--seam-w) + 20px);
+  z-index: 8;
+  display: flex;
+  /* 负 margin 抵消内边距：衬底向外长，文字仍停在原来的位置。 */
+  margin: -10px 0 0 -16px;
+  padding: 10px 16px 14px;
+  max-width: calc(100vw - var(--seam-w) - 40px);
+  border-radius: 18px;
+  align-items: center;
+  gap: 10px;
+  /* 纯标题层：不拦指针，否则会挡住下面一行的卡片点击/拖拽。 */
+  pointer-events: none;
+  animation: page-in 350ms var(--ease);
+}
+
+/* 无界画布会把卡片拖到标题下方：给标题一层柔和纸面衬底（顶部压暗 + 背景虚化），
+   边缘用径向遮罩淡出，空画布上几乎看不出来。衬底不参与命中测试，卡片照常点/拖；
+   不做"顶部安全区"是因为无界世界没有固定边缘——留白要么限制平移，要么被拖走，
+   而这里的诉求只是"静止时标题可读"。 */
+.wallhead::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  border-radius: inherit;
+  background: linear-gradient(
+    180deg,
+    color-mix(in srgb, var(--bg) 90%, transparent) 0%,
+    color-mix(in srgb, var(--bg) 62%, transparent) 58%,
+    transparent 100%
+  );
+  -webkit-backdrop-filter: blur(14px) saturate(1.05);
+  backdrop-filter: blur(14px) saturate(1.05);
+  -webkit-mask-image: radial-gradient(165% 170% at 6% 0%, #000 52%, transparent 100%);
+  mask-image: radial-gradient(165% 170% at 6% 0%, #000 52%, transparent 100%);
+  pointer-events: none;
+}
+
+.wallhead__title {
+  min-width: 0;
+  margin: 0;
+  overflow: hidden;
+  font-size: clamp(22px, 2vw, 36px);
+  font-weight: 500;
+  letter-spacing: -0.035em;
+  line-height: 1;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.wallhead__count {
+  flex: none;
+  color: rgba(247, 244, 238, 0.42);
+  font-size: 13px;
+  letter-spacing: 0.04em;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+
+/* ===== 标签总览 ===== */
+
+.tags {
+  padding: 18px 22px 60px;
+  /* Q4：总览/二级墙直接切页，加 350ms 淡入；不做页面之间的位移。 */
+  animation: page-in 350ms var(--ease);
+}
+
+@keyframes page-in {
+  from {
+    opacity: 0;
+  }
+}
+
+.tags__head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 2px 2px 14px;
+}
+
+.tags__title {
+  margin: 0;
+  font-size: 20px;
+  font-weight: 500;
+}
+
+.tags__sub {
+  margin: 0;
+  color: var(--ink-soft);
+  font-size: 12px;
+}
+
+.tags__group + .tags__group {
+  margin-top: 26px;
+}
+
+.tags__group-title {
+  margin: 0 0 10px;
+  color: rgba(247, 244, 238, 0.4);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+}
+
+.tags__grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(190px, 1fr));
+  gap: 10px;
+}
+
+.tags__empty {
+  margin-top: 40px;
+  color: var(--ink-soft);
+}
+
+.tagcard {
+  position: relative;
+  display: block;
+  padding: 0;
+  overflow: hidden;
+  aspect-ratio: 4 / 5;
+  border-radius: 12px;
+  background: #0f0f12;
+  text-align: left;
+  transition:
+    transform 260ms var(--ease),
+    filter 260ms var(--ease);
+}
+
+.tagcard:hover {
+  transform: translateY(-2px);
+  filter: saturate(1.06) brightness(1.06);
+}
+
+.tagcard__img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  transition: transform 700ms var(--ease);
+}
+
+.tagcard:hover .tagcard__img {
+  transform: scale(1.045);
+}
+
+.tagcard__blank {
+  display: block;
+  width: 100%;
+  height: 100%;
+  background: linear-gradient(160deg, #17171a, #0c0c0e);
+}
+
+.tagcard__shade {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background: linear-gradient(
+    180deg,
+    rgba(0, 0, 0, 0.4) 0%,
+    rgba(0, 0, 0, 0.06) 30%,
+    rgba(0, 0, 0, 0.55) 74%,
+    rgba(0, 0, 0, 0.86) 100%
+  );
+}
+
+.tagcard__chip {
+  position: absolute;
+  top: 9px;
+  left: 9px;
+  padding: 3px 8px;
+  color: rgba(255, 255, 255, 0.86);
+  background: rgba(0, 0, 0, 0.62);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.1em;
+}
+
+.tagcard__body {
+  position: absolute;
+  right: 13px;
+  bottom: 12px;
+  left: 13px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.tagcard__name {
+  overflow: hidden;
+  color: #fff;
+  font-size: 16px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  text-overflow: ellipsis;
+  text-shadow: 0 1px 4px rgba(0, 0, 0, 0.6);
+  white-space: nowrap;
+}
+
+.tagcard__cat {
+  color: rgba(255, 255, 255, 0.6);
+  font-size: 11px;
+}
+
+/* ===== 详情：全屏视觉 ===== */
+
+.view {
+  position: fixed;
+  inset: 0;
+  z-index: 30;
+  background: #050505;
+  animation: view-in 350ms var(--ease);
+}
+
+@keyframes view-in {
+  from {
+    opacity: 0;
+  }
+}
+
+.view__media {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  padding: 28px;
+}
+
+/* 详情大图：撑满视口（contain 保比例）。以前只有 max-*，512 缩略图在 1440 屏里
+   只占 512px，四周全是黑边，全屏视觉不成立。 */
+.view__img {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+}
+
+.view__scrim {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background: linear-gradient(
+    180deg,
+    rgba(0, 0, 0, 0.55) 0%,
+    rgba(0, 0, 0, 0.05) 26%,
+    rgba(0, 0, 0, 0) 58%,
+    rgba(0, 0, 0, 0.86) 100%
+  );
+}
+
+.icon-btn {
+  display: grid;
+  width: 34px;
+  height: 34px;
+  place-items: center;
+  border-radius: 50%;
+  color: rgba(247, 244, 238, 0.78);
+  background: rgba(247, 244, 238, 0.08);
+  transition:
+    background-color 160ms var(--ease),
+    color 160ms var(--ease);
+}
+
+.icon-btn:hover {
+  color: #fff;
+  background: rgba(247, 244, 238, 0.16);
+}
+
+.view__info {
+  position: absolute;
+  right: 22px;
+  bottom: 22px;
+  left: 22px;
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 24px;
+  pointer-events: none;
+}
+
+.view__text {
+  max-width: 54ch;
+  pointer-events: auto;
+}
+
+.view__title {
+  margin: 0;
+  color: #fff;
+  font-size: clamp(24px, 3vw, 40px);
+  font-weight: 600;
+  letter-spacing: -0.02em;
+  line-height: 1.05;
+  overflow-wrap: anywhere;
+}
+
+.view__meta {
+  margin: 8px 0 0;
+  color: rgba(247, 244, 238, 0.6);
+  font-size: 12px;
+}
+
+.view__tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 12px;
+}
+
+.chip {
+  padding: 4px 10px;
+  border-radius: 999px;
+  color: rgba(247, 244, 238, 0.8);
+  background: rgba(247, 244, 238, 0.08);
+  font-size: 12px;
+  transition:
+    background-color 160ms var(--ease),
+    color 160ms var(--ease);
+}
+
+.chip:hover {
+  color: #fff;
+  background: rgba(247, 244, 238, 0.16);
+}
+
+.chip--accent {
+  color: color-mix(in srgb, var(--accent) 70%, #fff);
+  background: color-mix(in srgb, var(--accent) 22%, transparent);
+  transition:
+    background-color 600ms var(--ease),
+    color 600ms var(--ease);
+}
+
+.view__similar {
+  display: flex;
+  flex: none;
+  gap: 6px;
+  pointer-events: auto;
+}
+
+.similar__item {
+  width: 58px;
+  height: 58px;
+  overflow: hidden;
+  border-radius: 8px;
+  background: #0f0f11;
+  transition: transform 200ms var(--ease);
+}
+
+.similar__item:hover {
+  transform: translateY(-2px);
+}
+
+.similar__item img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+/* ===== 响应式 ===== */
+
+@media (max-width: 900px) {
+  :root {
+    --seam-w: 64px;
+  }
+
+  .seam__word,
+  .seam__label {
+    display: none;
+  }
+
+  .seam__tab {
+    gap: 0;
+    padding: 11px 0;
+  }
+
+  .seam__count {
+    display: none;
+  }
+
+  .tags {
+    padding: 12px 10px 48px;
+  }
+
+  .tags__grid {
+    grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+    gap: 8px;
+  }
+}
+
+@media (max-width: 760px) {
+  .panel {
+    top: 8px;
+    left: calc(var(--seam-w) + 8px);
+    width: min(300px, calc(100vw - var(--seam-w) - 16px));
+    max-height: calc(100vh - 16px);
+  }
+
+  .wallhead {
+    left: calc(var(--seam-w) + 12px);
+    max-width: calc(100vw - var(--seam-w) - 24px);
+  }
+
+  /* D4：390 下提示条贴右缘会裁字、压卡片，窄屏干脆不出现。 */
+  .canvas__hint {
+    display: none;
+  }
+
+  .canvas__error {
+    right: 10px;
+    bottom: 10px;
+  }
+
+  /* 窄屏卡片往往只有 100–160px 宽：角标和标题必须同步收小，
+     否则一行标题会吃掉三分之一卡宽。 */
+  .tile__chip {
+    top: 8px;
+    left: 8px;
+    max-width: calc(100% - 16px);
+    padding: 2px 5px;
+    font-size: 9px;
+    letter-spacing: 0.06em;
+  }
+
+  .tile__copy {
+    right: 10px;
+    bottom: 10px;
+    left: 10px;
+    gap: 2px;
+  }
+
+  .tile__copy strong {
+    letter-spacing: -0.025em;
+    line-height: 1.04;
+    -webkit-line-clamp: 2;
+  }
+
+  .tile__copy small {
+    display: none;
+  }
+
+  /* ===== 移动端导航：底部 tab（2026-11-16 决策）。侧缝变底栏，画布铺满视口的口径不变，
+     缝区拦截由 Wall.tsx 按 --seam-w / --seam-h 双向绕开。 ===== */
+  :root {
+    /* 底栏高度：Wall.tsx 的手势拦截和 .stage 的底部留白都读这个值。 */
+    --seam-h: 56px;
+  }
+
+  .stage {
+    padding-left: 0;
+    padding-bottom: var(--seam-h);
+  }
+
+  .seam {
+    top: auto;
+    right: 0;
+    bottom: 0;
+    flex-direction: row;
+    align-items: center;
+    width: auto;
+    height: var(--seam-h);
+    gap: 6px;
+    padding: 8px 10px;
+    overflow-x: auto;
+    overflow-y: hidden;
+    border-right: 0;
+    border-top: 1px solid var(--hairline);
+  }
+
+  .seam__dot,
+  .seam__word {
+    display: none;
+  }
+
+  .seam__nav {
+    flex-direction: row;
+    width: auto;
+    flex: none;
+    padding-top: 0;
+    border-top: 0;
+  }
+
+  .seam__tab {
+    width: auto;
+    flex: none;
+    gap: 3px;
+    padding: 5px 8px;
+  }
+
+  .seam__label {
+    display: block;
+    font-size: 10px;
+    letter-spacing: 0.08em;
+    writing-mode: horizontal-tb;
+  }
+
+  .seam__tab.is-on::after {
+    top: auto;
+    right: 8px;
+    bottom: 0;
+    left: 8px;
+    width: auto;
+    height: 2px;
+  }
+
+  .seam__ops {
+    display: flex;
+    width: auto;
+    flex: none;
+    gap: 4px;
+    padding-top: 0;
+  }
+
+  .seam__ops--detail {
+    gap: 4px;
+  }
+
+  .seam__ops .seam__count {
+    grid-column: auto;
+  }
+
+  .seam__foot {
+    flex-direction: row;
+    width: auto;
+    flex: none;
+    gap: 6px;
+    margin-top: 0;
+    margin-left: auto;
+    padding-top: 0;
+  }
+
+  .seam__count {
+    display: block;
+    writing-mode: horizontal-tb;
+  }
+
+  .seam__foot-actions {
+    gap: 4px;
+  }
+
+  /* ≤560px 一行放不下七个带字的 tab：收成纯图标，横向可滚作为兜底。 */
+  .seam__nav .seam__label {
+    display: none;
+  }
+}
+
+/* 手机竖屏的卡片只有 150–180px 宽，角标会被截成「240×…」这种无信息量的碎片；
+   尺寸/标签都进检查器，画面只留标题。标题压到一行，文字不抢图片主体（P1-3）。 */
+@media (max-width: 560px) {
+  .tile__chip {
+    display: none;
+  }
+
+  .tile__copy {
+    right: 9px;
+    bottom: 9px;
+    left: 9px;
+  }
+
+  .tile__copy strong {
+    line-height: 1.08;
+    -webkit-line-clamp: 1;
+  }
+}
+
+@media (max-width: 760px) {
+  .view__info {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 14px;
+  }
+
+  .view__similar {
+    max-width: 100%;
+    overflow-x: auto;
+  }
+}
+
+/* ===== 单色预览（N）=====
+   只给图片去色，UI 与动态强调色保留。图片自身的 filter 过渡会把这层
+   grayscale 一起淡入淡出，所以切换时不会硬跳。 */
+.app.is-mono .tile__img,
+.app.is-mono .tagcard__img,
+.app.is-mono .inspector__similar-item img,
+.app.is-mono .view__img {
+  filter: grayscale(1) contrast(1.04);
+}
+
+.app.is-mono .view__ambient {
+  filter: blur(48px) grayscale(1) brightness(0.7);
+}
+
+/* 单色 + 留白：保留画框投影，否则会被上面的 grayscale 规则覆盖掉。 */
+.app.is-mono .view--detail.view--matte .view__img {
+  filter: grayscale(1) contrast(1.04) drop-shadow(0 30px 52px rgba(0, 0, 0, 0.56));
+}
+
+.app.is-mono .tile:hover .tile__img.is-loaded {
+  filter: grayscale(1) contrast(1.04);
+}
+
+.app .tagcard__img {
+  transition:
+    transform 700ms var(--ease),
+    filter 300ms var(--ease);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  * {
+    animation-duration: 0.01ms !important;
+    transition-duration: 0.01ms !important;
+  }
+}
+
+/* ===== 兜底错误页（ErrorBoundary）=====
+   任一子树抛错时替代整站白屏：仍用纸面/墨色这一套 token，给刷新入口。 */
+.crash {
+  display: grid;
+  place-content: center;
+  justify-items: start;
+  gap: 10px;
+  min-height: 100vh;
+  padding: 48px clamp(20px, 6vw, 72px);
+  background: var(--bg);
+  color: var(--ink);
+}
+
+.crash__eyebrow {
+  margin: 0;
+  color: var(--ink-soft);
+  font-size: 11px;
+  letter-spacing: 0.22em;
+  text-transform: uppercase;
+}
+
+.crash__title {
+  margin: 0;
+  font-size: clamp(26px, 3vw, 40px);
+  font-weight: 500;
+  letter-spacing: -0.035em;
+  line-height: 1.05;
+}
+
+.crash__hint {
+  margin: 0;
+  color: var(--ink-soft);
+  font-size: 13px;
+}
+
+.crash__detail {
+  max-width: min(640px, 100%);
+  max-height: 220px;
+  margin: 6px 0 4px;
+  padding: 12px 14px;
+  overflow: auto;
+  border: 1px solid var(--hairline);
+  border-radius: 8px;
+  background: var(--surface);
+  color: rgba(247, 244, 238, 0.72);
+  font-family: ui-monospace, 'SFMono-Regular', Consolas, monospace;
+  font-size: 12px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.crash__retry {
+  padding: 8px 18px;
+  border: 0;
+  border-radius: 999px;
+  background: var(--ink);
+  color: #131313;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: filter 160ms var(--ease);
+}
+
+.crash__retry:hover {
+  filter: brightness(0.94);
+}
+
+.crash__retry:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 3px;
+}

@@ -1,6 +1,6 @@
 # 并行开发与第一轮任务包
 
-> 上级索引：[../FEATURE-BACKLOG.md](../FEATURE-BACKLOG.md) · 文档地图：[README](./README.md)
+> 上级索引：[../FEATURE-BACKLOG.md](../../FEATURE-BACKLOG.md) · 文档地图：[README](../../backlog/README.md)
 
 > 2026-10-27 状态：第一轮任务 0/A/B/C/E/D 全部完成并合入；第二轮任务 0/A/B/C/D1/D2 全部完成并合入，见 [round-2.md](round-2.md)。第三轮 G2b2 已完成，剩余项见 [round-3.md](round-3.md)；第四轮已完成，见 [round-4.md](round-4.md)；第五轮 A/B/C/D 已完成并合入，见 [round-5.md](round-5.md)；第六轮任务 0/A/B/C 已完成并合入，见 [round-6.md](round-6.md)；第七轮任务 A/B 已完成并合入，见 [round-7.md](round-7.md)。
 >

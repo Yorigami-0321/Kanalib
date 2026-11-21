@@ -1,6 +1,6 @@
 # 图库、来源与格式
 
-> 上级索引：[../README.md](../README.md) · 文档地图：[README](../README.md) · 第三轮任务包：[round-3.md](../round-3.md)
+> 上级索引：[../README.md](../README.md) · 文档地图：[README](../README.md) · 第三轮任务包：[round-3.md](../../archive/2026-11/round-3.md)
 
 ## F-030 文件监听与增量同步
 
@@ -85,3 +85,15 @@
 - **验收**：阶段 2 的真实/合成样本（竖图、横图、alpha、CMYK、动画首帧、Unicode、超大图）通过；无进程/临时文件泄漏；许可与打包清单明确；pHash/修复迁移不改变现有去重评审语义；ffprobe 随包体积与许可落盘。
 - **未决问题（第四轮已决）**：pHash 不换（会改变全部哈希/评审状态，且无等价算法）；修复保留 Python（ffmpeg 缺少 JSON/`--max-size`/EXIF/alpha 契约）；`ffprobe` 随包（同一 LGPL 构建，`bin` 除 `ffplay` 外全部复制）；LGPL 打包范围保持 `runtime/ffmpeg` 全 `bin`；alpha 继续白底 JPEG；失败回退保持预取二分 + `image`。
 - **依赖/风险**：F-009 的大图标 512 档；F-060 缓存预算/访问记录；F-033 格式扩展；F-002 查看器原图；GPL/LGPL、213MB 单文件体积是首要风险；同机 10k 复测基线二进制 103.7s、本轮 78.5s（历史 52.2s 在当前机器状态不可复现），100k 未重跑。
+
+## F-084 / F-085 / F-086 / F-089 Pixiv 来源、元数据、订阅下载与入库过滤（2026-11-21 登记）
+
+> 计划全文：[../pixiv-integration.md](../pixiv-integration.md)；服务设计：[../ingest-service.md](../ingest-service.md)。本节只保留登记与边界。
+
+- **唯一入口**：外部来源（Pixiv 等）只能经 box 的 `kanalib-ingest`（F-089）进入；网页后端不持有来源凭据、不直连来源。桌面端现有扫描/打标/相册/发布器不拆分、不升级 schema。
+- **F-084 来源适配与作品层**：在 box 服务内建 `authors`/`works`/`items`；`SourceAdapter` 隔离来源差异。外部来源不经过桌面库，也**不在桌面新增 Pixiv 导入管线**；若未来桌面需要识别本地文件名，只作为现有扫描的解析增强，独立评估。
+- **F-085 元数据同步与作者**：refresh token 只在 box（keyring/0600 文件）；标签分 `origin=model|pixiv|manual` 并存；404 保留元数据并置 `status='deleted'`；作者改名/头像 URL 变化才重下。
+- **F-086 收藏订阅与可靠下载**：订阅按**用户** ID；公开收藏快速追平；`.part`/Range/多页并发/重启恢复；动图合成 GIF（帧数上限 500）；sync 与 subs 并行，共享节流器与图片信号量。
+- **F-089 过滤与推送**：打标 → 黑名单/规则 → `allow/block/review`，fail-closed；只把 allow 推给网页；review 留在 box 管理页；原图留 box，网页按签名 URL 回源。
+- **边界**：**不做数据迁移**（不导入 Pixiv-Archive 或旧版 Kanalib 数据）；不联真实 Pixiv 做 CI；参考项目 GPL-3.0，只借鉴设计不复制代码。
+- **依赖**：F-089 是 F-084–F-086 的承载服务；F-088 的 DTO 与 F-089 的 item 契约一致。
