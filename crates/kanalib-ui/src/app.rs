@@ -10,7 +10,10 @@ use crate::thumb_cache::IMAGE_CACHE_LIMIT;
 #[cfg(feature = "frame-profiler")]
 use crate::thumb_cache::watch_enabled;
 use crate::viewer::VIEWER_CONTEXT;
-use crate::views::{GRID_CONTEXT, grid_columns};
+use crate::views::{
+    GRID_CONTEXT, GRID_GAP, GRID_PADDING, ROW_PADDING, grid_columns, grid_tile_width,
+    marquee_tile_positions,
+};
 use crate::*;
 use ely_gpui_component::forms::{InputEvent, SelectAll};
 use gpui::{ExternalPaths, ScrollHandle};
@@ -58,6 +61,15 @@ pub(crate) fn push_toast(
     toaster.update(cx, |toaster, cx| {
         toaster.push(Toast::new(message).severity(severity).stay(Some(stay)), cx);
     });
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct GridMarquee {
+    pub(crate) start: gpui::Point<gpui::Pixels>,
+    pub(crate) current: gpui::Point<gpui::Pixels>,
+    base: HashSet<PathBuf>,
+    additive: bool,
+    engaged: bool,
 }
 
 #[derive(Default)]
@@ -138,6 +150,10 @@ pub struct KanalibApp {
     /// 每次查询自增；后台回包只有代次仍是最新时才允许写回 UI。
     pub(crate) search_epoch: u64,
     pub(crate) last_scanning: bool,
+    /// 导入灯箱是否展开；冷导入开始时自动打开。
+    pub(crate) import_lab_open: bool,
+    /// 扫描结束后灯箱的资产快照缓存：(revision, 最近导入)。
+    pub(crate) import_lab_cache: std::cell::RefCell<Option<(u64, Vec<Asset>)>>,
     pub(crate) view: ViewCache,
     pub(crate) grid_rows: usize,
     pub(crate) grid_columns: usize,
@@ -193,6 +209,14 @@ pub struct KanalibApp {
     pub(crate) sort: SortMode,
     pub(crate) sort_ascending: bool,
     pub(crate) view_mode: ViewMode,
+    /// 网格密度的无级缩放系数；只作用于三种图标视图，列表/详情/内容不受影响。
+    pub(crate) grid_zoom: f32,
+    /// 滚轮缩放停止后再写 `ui.grid_zoom`，避免每个滚轮事件同步打开数据库。
+    pub(crate) grid_zoom_persist_task: Option<Task<()>>,
+    /// 中键平移的上一帧指针位置；`Some` 表示正在拖动画布。
+    pub(crate) grid_pan: Option<gpui::Point<gpui::Pixels>>,
+    /// 左键拖出的框选区域；仅平铺图标网格可用。
+    pub(crate) grid_marquee: Option<GridMarquee>,
     pub(crate) pane_mode: PaneMode,
     pub(crate) show_sidebar: bool,
     pub(crate) sidebar_width: f32,
@@ -243,6 +267,8 @@ pub struct KanalibApp {
     pub(crate) org_dialog_epoch: u64,
     /// 相册列表与归属缓存；侧栏/检查器只读，按 `shared.revision` 失效。
     pub(crate) album_cache: std::cell::RefCell<crate::sidebar::AlbumCache>,
+    /// 侧栏来源封面/日期跨度缓存；扫描中不计算，扫描结束后按 revision 刷新。
+    pub(crate) source_card_cache: std::cell::RefCell<crate::sidebar::SourceCardCache>,
     // ---- F-005（第三轮 G2b1）：分组浏览状态，全部追加在末尾。 ----
     /// 当前分组维度（`ui.group_by`，默认关闭）。
     pub(crate) group_by: GroupMode,
@@ -472,6 +498,12 @@ impl Render for KanalibApp {
         let query_changed = search_text != self.view.visible_search;
         let scan_changed = scanning != self.last_scanning;
         self.last_scanning = scanning;
+        // 冷导入（扫描开始时图库为空）自动打开导入灯箱；用户收起后本次扫描不再弹开。
+        if scan_changed && scanning {
+            if self.view.counts.total == 0 {
+                self.import_lab_open = true;
+            }
+        }
         if scan_changed && !scanning && !self.selection.is_empty() {
             let selected = self.selection.clone();
             let retained = assets
@@ -805,7 +837,7 @@ impl Render for KanalibApp {
             }
         }
         let columns = if self.view_mode.is_grid() {
-            grid_columns(main_width.as_f32(), self.view_mode.min_width())
+            grid_columns(main_width.as_f32(), self.grid_min_width())
         } else {
             1
         };
@@ -888,7 +920,7 @@ impl Render for KanalibApp {
         let viewer_content = (self.screen == Screen::Library || self.screen == Screen::Similar)
             .then(|| {
                 self.viewer_at
-                    .and_then(|at| self.render_viewer(&this, at, colors))
+                    .and_then(|at| self.render_viewer(&this, at, colors, &blocked_tags))
             })
             .flatten();
         // F-045：设置页/去重页进入或切换阈值时，后台计算一次预览（同步调用可能 1.8–2.6s）。
@@ -1004,7 +1036,6 @@ impl Render for KanalibApp {
                     .render_inspector(
                         &this,
                         selected_asset.as_ref(),
-                        &blocked_tags,
                         &source_aliases,
                         inspector_width,
                         colors,
@@ -2276,6 +2307,9 @@ impl Render for KanalibApp {
         });
         // 组织弹窗（智能集合重命名 / 相册增删改）：与其它弹窗一样挂在根节点。
         let org_dialog = self.render_org_dialog(window, cx, &this);
+        let import_lab = self
+            .import_lab_open
+            .then(|| self.render_import_lab(&this, colors, cx));
         let titlebar = self.render_titlebar(
             &this,
             window,
@@ -2357,6 +2391,7 @@ impl Render for KanalibApp {
                 .children(drop_dialog)
                 .children(drop_overlay)
                 .children(org_dialog)
+                .children(import_lab)
                 .child(ToastViewport::new("kanalib-toasts", &self.toaster))
                 .on_action(cx.listener(|this, _: &OpenPalette, _, cx| {
                     if !this.palette_open && this.viewer_at.is_some() {
@@ -2951,6 +2986,11 @@ impl KanalibApp {
             state.setting("ui.view_mode").as_deref(),
             state.setting("ui.density").as_deref(),
         );
+        let grid_zoom = state
+            .setting("ui.grid_zoom")
+            .and_then(|value| value.parse::<f32>().ok())
+            .map(|value| value.clamp(GRID_ZOOM_MIN, GRID_ZOOM_MAX))
+            .unwrap_or(1.);
         let pane_mode = state
             .setting("ui.pane_mode")
             .map(|value| PaneMode::from_key(&value))
@@ -3030,6 +3070,8 @@ impl KanalibApp {
             search_running: false,
             search_epoch: 0,
             last_scanning: false,
+            import_lab_open: false,
+            import_lab_cache: std::cell::RefCell::new(None),
             view: ViewCache::default(),
             grid_rows: 0,
             grid_columns: 1,
@@ -3091,6 +3133,10 @@ impl KanalibApp {
             sort,
             sort_ascending,
             view_mode,
+            grid_zoom,
+            grid_zoom_persist_task: None,
+            grid_pan: None,
+            grid_marquee: None,
             pane_mode,
             show_sidebar,
             sidebar_width,
@@ -3134,6 +3180,7 @@ impl KanalibApp {
             org_dialog: None,
             org_dialog_epoch: 0,
             album_cache: std::cell::RefCell::new(crate::sidebar::AlbumCache::default()),
+            source_card_cache: std::cell::RefCell::new(crate::sidebar::SourceCardCache::default()),
             group_by,
             collapsed_groups: HashSet::new(),
             group_cache: crate::views::GroupCache::default(),
@@ -3963,6 +4010,41 @@ impl KanalibApp {
         cx.notify();
     }
 
+    /// 导入灯箱里直接打分：把目标图设为当前选中，再走与检查器一致的持久化路径。
+    pub(crate) fn rate_imported_asset(&mut self, path: PathBuf, star: u8, cx: &mut Context<Self>) {
+        self.select_imported_asset(path);
+        self.apply_star(star, cx);
+    }
+
+    /// 导入灯箱里的收藏开关；与检查器一样在离开收藏筛选时立即收尾。
+    pub(crate) fn toggle_imported_favorite(
+        &mut self,
+        path: PathBuf,
+        favorite: bool,
+        cx: &mut Context<Self>,
+    ) {
+        self.select_imported_asset(path.clone());
+        self.apply_favorite(favorite, cx);
+        self.after_favorite_change(&path, favorite, cx);
+    }
+
+    /// 从灯箱跳到图库里的对应图片：切回图库、选中并滚动到它。
+    pub(crate) fn focus_imported_asset(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+        self.screen = Screen::Library;
+        self.tag_return_pending = false;
+        self.dedup_confirm = None;
+        self.select_imported_asset(path);
+        self.pending_scroll_position = Some(self.selected_visible_position());
+        self.import_lab_open = false;
+        cx.notify();
+    }
+
+    fn select_imported_asset(&mut self, path: PathBuf) {
+        self.selection = Arc::new(HashSet::from([path.clone()]));
+        self.selection_anchor = Some(path.clone());
+        self.state.select(Some(path));
+    }
+
     /// F-067：撤销上一条可逆编辑（收藏/星级/手工标签）。
     /// 核心已负责刷新计数、搜索索引与 revision；这里只负责提示与重绘。
     pub(crate) fn undo_last(&mut self, cx: &mut Context<Self>) {
@@ -4225,12 +4307,278 @@ impl KanalibApp {
         self.pending_scroll_position = Some(self.selected_visible_position());
     }
 
+    pub(crate) fn grid_min_width(&self) -> f32 {
+        self.view_mode.min_width_at(self.grid_zoom)
+    }
+
+    pub(crate) fn grid_image_height(&self) -> f32 {
+        self.view_mode.image_height_at(self.grid_zoom)
+    }
+
+    pub(crate) fn grid_row_height(&self) -> f32 {
+        self.view_mode.row_height_at(self.grid_zoom)
+    }
+
+    /// Ctrl/Cmd + 滚轮与标题栏缩放按钮共用的无级缩放入口。
+    /// 先记住当前顶部行，放大/缩小后仍把同一行放回顶部。
+    pub(crate) fn zoom_grid_by(&mut self, factor: f32, cx: &mut Context<Self>) {
+        if self.screen != Screen::Library || !self.view_mode.is_grid() || !factor.is_finite() {
+            return;
+        }
+        let next = (self.grid_zoom * factor).clamp(GRID_ZOOM_MIN, GRID_ZOOM_MAX);
+        if (next - self.grid_zoom).abs() < 0.001 {
+            return;
+        }
+        let top_row = self
+            .grid_scroll
+            .0
+            .borrow()
+            .base_handle
+            .logical_scroll_top()
+            .0;
+        self.grid_zoom = next;
+        self.schedule_grid_zoom_persist(cx);
+        self.grid_scroll
+            .scroll_to_item_strict(top_row, ScrollStrategy::Top);
+        cx.notify();
+    }
+
+    fn schedule_grid_zoom_persist(&mut self, cx: &mut Context<Self>) {
+        let weak = cx.entity().downgrade();
+        self.grid_zoom_persist_task = Some(cx.spawn(async move |_, cx| {
+            cx.background_executor()
+                .timer(Duration::from_millis(250))
+                .await;
+            let _ = weak.update(cx, |app, cx| {
+                let value = format!("{:.3}", app.grid_zoom);
+                app.persist_setting("ui.grid_zoom", value, cx);
+            });
+        }));
+    }
+
+    /// 中键拖动画布：直接平移虚拟列表的滚动偏移，不重写网格虚拟化。
+    pub(crate) fn pan_grid_by(&mut self, dx: f32, dy: f32, cx: &mut Context<Self>) {
+        if self.screen != Screen::Library {
+            return;
+        }
+        let (current, max) = {
+            let state = self.grid_scroll.0.borrow();
+            (
+                state.base_handle.offset(),
+                state.base_handle.max_offset(),
+            )
+        };
+        let target = gpui::point(
+            (current.x + px(dx)).clamp(-max.x, px(0.)),
+            (current.y + px(dy)).clamp(-max.y, px(0.)),
+        );
+        if target == current {
+            return;
+        }
+        self.grid_scroll
+            .0
+            .borrow()
+            .base_handle
+            .set_offset(target);
+        cx.notify();
+    }
+
+    /// 左键从网格空白处拖出框选；点在卡片上时仍交给卡片自己的点击路径。
+    pub(crate) fn begin_grid_marquee(
+        &mut self,
+        position: gpui::Point<gpui::Pixels>,
+        modifiers: gpui::Modifiers,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if self.screen != Screen::Library
+            || !self.view_mode.is_grid()
+            || self.grouped_layout().is_some()
+            || self.current_visible_indices().is_empty()
+        {
+            return false;
+        }
+        let Some(bounds) = self.grid_viewport_bounds() else {
+            return false;
+        };
+        if !bounds.contains(&position) || self.grid_asset_at(position).is_some() {
+            return false;
+        }
+        let additive = modifiers.shift || modifiers.secondary(cx);
+        self.grid_marquee = Some(GridMarquee {
+            start: position,
+            current: position,
+            base: if additive {
+                (*self.selection).clone()
+            } else {
+                HashSet::new()
+            },
+            additive,
+            engaged: false,
+        });
+        true
+    }
+
+    pub(crate) fn update_grid_marquee(
+        &mut self,
+        position: gpui::Point<gpui::Pixels>,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(marquee) = self.grid_marquee.clone() else {
+            return;
+        };
+        if !self.view_mode.is_grid() || self.grouped_layout().is_some() {
+            self.grid_marquee = None;
+            cx.notify();
+            return;
+        }
+        let Some(bounds) = self.grid_viewport_bounds() else {
+            self.grid_marquee = None;
+            cx.notify();
+            return;
+        };
+        let current = gpui::point(
+            position.x.clamp(bounds.left(), bounds.right()),
+            position.y.clamp(bounds.top(), bounds.bottom()),
+        );
+        let marquee = GridMarquee { current, ..marquee };
+        if !marquee.engaged
+            && (current.x - marquee.start.x).abs() < px(3.)
+            && (current.y - marquee.start.y).abs() < px(3.)
+        {
+            self.grid_marquee = Some(marquee);
+            return;
+        }
+        let marquee = GridMarquee {
+            engaged: true,
+            ..marquee
+        };
+        let paths = self.grid_marquee_paths(&marquee, bounds);
+        let mut selection = if marquee.additive {
+            marquee.base.clone()
+        } else {
+            HashSet::new()
+        };
+        selection.extend(paths.iter().cloned());
+        let primary = self
+            .state
+            .shared
+            .lock()
+            .unwrap()
+            .selected
+            .clone()
+            .filter(|path| selection.contains(path))
+            .or_else(|| paths.first().cloned());
+        self.selection = Arc::new(selection);
+        if let Some(path) = paths.first() {
+            self.selection_anchor = Some(path.clone());
+        } else if !marquee.additive {
+            self.selection_anchor = None;
+        }
+        self.state.select(primary);
+        self.grid_marquee = Some(marquee);
+        cx.notify();
+    }
+
+    pub(crate) fn finish_grid_marquee(&mut self, cx: &mut Context<Self>) {
+        if self.grid_marquee.take().is_some() {
+            cx.notify();
+        }
+    }
+
+    fn grid_viewport_bounds(&self) -> Option<gpui::Bounds<gpui::Pixels>> {
+        let bounds = self.grid_scroll.0.borrow().base_handle.bounds();
+        (bounds.size.width > px(0.) && bounds.size.height > px(0.)).then_some(bounds)
+    }
+
+    fn grid_asset_at(&self, position: gpui::Point<gpui::Pixels>) -> Option<PathBuf> {
+        let bounds = self.grid_viewport_bounds()?;
+        let offset = self.grid_scroll.0.borrow().base_handle.offset();
+        let columns = self.grid_columns.max(1);
+        let tile_width = grid_tile_width(bounds.size.width.as_f32(), columns);
+        let row_height = self.grid_row_height();
+        let local = position.relative_to(&bounds.origin);
+        let x = local.x.as_f32() - GRID_PADDING;
+        let y = local.y.as_f32() - offset.y.as_f32() - ROW_PADDING;
+        if x < 0. || y < 0. {
+            return None;
+        }
+        let step_x = tile_width + GRID_GAP;
+        let column = (x / step_x).floor() as usize;
+        if column >= columns || x - column as f32 * step_x > tile_width {
+            return None;
+        }
+        let row = (y / row_height).floor() as usize;
+        if y - row as f32 * row_height > row_height - ROW_PADDING * 2. {
+            return None;
+        }
+        let indices = self.current_visible_indices();
+        let &index = indices.get(row * columns + column)?;
+        let shared = self.state.shared.lock().unwrap();
+        let assets = shared.assets.read().unwrap();
+        assets.get(index).map(|asset| asset.path.clone())
+    }
+
+    fn grid_marquee_paths(
+        &self,
+        marquee: &GridMarquee,
+        bounds: gpui::Bounds<gpui::Pixels>,
+    ) -> Vec<PathBuf> {
+        let indices = self.current_visible_indices();
+        if indices.is_empty() {
+            return Vec::new();
+        }
+        let columns = self.grid_columns.max(1);
+        let row_height = self.grid_row_height();
+        let tile_width = grid_tile_width(bounds.size.width.as_f32(), columns);
+        let offset = self.grid_scroll.0.borrow().base_handle.offset();
+        let positions = marquee_tile_positions(
+            marquee.start,
+            marquee.current,
+            bounds,
+            offset,
+            columns,
+            row_height,
+            tile_width,
+            indices.len().div_ceil(columns),
+            indices.len(),
+        );
+        let shared = self.state.shared.lock().unwrap();
+        let assets = shared.assets.read().unwrap();
+        positions
+            .into_iter()
+            .filter_map(|position| indices.get(position))
+            .filter_map(|&index| assets.get(index).map(|asset| asset.path.clone()))
+            .collect()
+    }
+
+    /// 一键整理：回到中等密度与会话起点，固定网格本身已经自动排布。
+    pub(crate) fn tidy_grid(&mut self, cx: &mut Context<Self>) {
+        if self.screen != Screen::Library {
+            return;
+        }
+        if self.view_mode.is_grid() && self.view_mode != ViewMode::IconsMedium {
+            self.view_mode = ViewMode::IconsMedium;
+            self.persist_setting("ui.view_mode", self.view_mode.key(), cx);
+        }
+        if self.grid_zoom != 1. {
+            self.grid_zoom = 1.;
+            self.persist_setting("ui.grid_zoom", "1.000", cx);
+        }
+        self.grid_scroll.scroll_to_item(0, ScrollStrategy::Top);
+        self.focus_grid_pending = true;
+        cx.notify();
+    }
+
     pub(crate) fn set_view_mode(&mut self, mode: ViewMode, cx: &mut Context<Self>) {
         if self.screen != Screen::Library || self.view_mode == mode {
             return;
         }
         self.anchor_scroll();
         self.view_mode = mode;
+        if mode.is_grid() && self.grid_zoom != 1. {
+            self.grid_zoom = 1.;
+            self.persist_setting("ui.grid_zoom", "1.000", cx);
+        }
         self.persist_setting("ui.view_mode", mode.key(), cx);
         self.focus_grid_pending = true;
         cx.notify();
@@ -4585,7 +4933,7 @@ impl KanalibApp {
                 px(220.)
             }
         } else if compact {
-            px(180.)
+            px(260.)
         } else {
             px(220.)
         };
@@ -4678,6 +5026,7 @@ impl KanalibApp {
             let search_escape = search.clone();
             div()
                 .w(search_width)
+                .flex_none()
                 .flex()
                 .items_center()
                 .gap(px(SPACE_HALF))
@@ -4719,12 +5068,22 @@ impl KanalibApp {
         });
 
         let show_brand = !library || !compact;
+        let this_sidebar = this.clone();
+        let sidebar_toggle = IconButton::new("titlebar-sidebar", IconName::PanelLeft)
+            .size(ControlSize::Sm)
+            .tooltip(crate::localization::t(cx, "app.cmd.toggle_sidebar"))
+            .on_click(move |_, _, cx| {
+                let _ = this_sidebar.update(cx, |app, cx| {
+                    app.set_show_sidebar(!app.show_sidebar, cx);
+                });
+            });
         let mut left = div()
             .flex_none()
             .min_w(px(0.))
             .flex()
             .items_center()
-            .gap(px(8.));
+            .gap(px(8.))
+            .child(sidebar_toggle);
         if show_brand {
             left = left.child(
                 div()
@@ -4803,6 +5162,38 @@ impl KanalibApp {
         if library {
             controls = controls.children(sort).children(view).children(export);
         }
+        if library && self.view_mode.is_grid() {
+            let this_out = this.clone();
+            let this_in = this.clone();
+            let this_tidy = this.clone();
+            controls = controls
+                .child(
+                    IconButton::new("titlebar-grid-out", IconName::ZoomOut)
+                        .size(ControlSize::Sm)
+                        .tooltip(crate::localization::t(cx, "titlebar.grid_smaller"))
+                        .disabled(self.grid_zoom <= GRID_ZOOM_MIN + 0.001)
+                        .on_click(move |_, _, cx| {
+                            let _ = this_out.update(cx, |app, cx| app.zoom_grid_by(1. / 1.15, cx));
+                        }),
+                )
+                .child(
+                    IconButton::new("titlebar-grid-in", IconName::ZoomIn)
+                        .size(ControlSize::Sm)
+                        .tooltip(crate::localization::t(cx, "titlebar.grid_larger"))
+                        .disabled(self.grid_zoom >= GRID_ZOOM_MAX - 0.001)
+                        .on_click(move |_, _, cx| {
+                            let _ = this_in.update(cx, |app, cx| app.zoom_grid_by(1.15, cx));
+                        }),
+                )
+                .child(
+                    IconButton::new("titlebar-grid-tidy", IconName::LayoutGrid)
+                        .size(ControlSize::Sm)
+                        .tooltip(crate::localization::t(cx, "titlebar.grid_tidy"))
+                        .on_click(move |_, _, cx| {
+                            let _ = this_tidy.update(cx, |app, cx| app.tidy_grid(cx));
+                        }),
+                );
+        }
         let right = div()
             .flex_none()
             .h_full()
@@ -4830,8 +5221,6 @@ impl KanalibApp {
             .justify_between()
             .gap(px(SPACE_1))
             .bg(colors.bg)
-            .border_b_1()
-            .border_color(colors.border)
             .on_mouse_down(MouseButton::Left, move |event, window, cx| {
                 if window.default_prevented() {
                     return;

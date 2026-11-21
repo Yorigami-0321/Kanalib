@@ -146,12 +146,13 @@ impl KanalibApp {
         let compact = width < px(1100.) || error.is_some();
         let library = self.screen == Screen::Library;
         // 扫描进度是核心线写入的只读快照；底栏只读不写，节流由核心负责。
-        let (progress, summary, source_aliases) = {
+        let (progress, summary, source_aliases, has_imports) = {
             let shared = self.state.shared.lock().unwrap();
             (
                 shared.scan_progress.clone(),
                 shared.scan_summary.clone(),
                 shared.source_aliases.clone(),
+                !shared.scan_imports.is_empty(),
             )
         };
         let mut left = div()
@@ -202,6 +203,21 @@ impl KanalibApp {
                 move |_, _, cx| {
                     let _ = this_stop.update(cx, |app, cx| {
                         app.state.stop();
+                        cx.notify();
+                    });
+                },
+            ));
+            // 灯箱入口：收起后仍能从底栏重新打开实时导入流。
+            let this_import_lab = this.clone();
+            left = left.child(status_bar_item(
+                "status-import-lab",
+                crate::localization::t(cx, "import_lab.open"),
+                colors.fg,
+                colors,
+                self.import_lab_open,
+                move |_, _, cx| {
+                    let _ = this_import_lab.update(cx, |app, cx| {
+                        app.import_lab_open = true;
                         cx.notify();
                     });
                 },
@@ -291,6 +307,22 @@ impl KanalibApp {
                     let _ = this_summary.update(cx, |app, cx| app.open_settings(cx));
                 },
             ));
+            if has_imports {
+                let this_import_lab = this.clone();
+                left = left.child(status_bar_item(
+                    "status-import-lab",
+                    crate::localization::t(cx, "import_lab.open"),
+                    colors.fg,
+                    colors,
+                    self.import_lab_open,
+                    move |_, _, cx| {
+                        let _ = this_import_lab.update(cx, |app, cx| {
+                            app.import_lab_open = true;
+                            cx.notify();
+                        });
+                    },
+                ));
+            }
         }
         if let Some(hint) = &self.pending_restore_hint {
             let this_pending = this.clone();

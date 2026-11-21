@@ -21,10 +21,80 @@ use self::list::list_row_content;
 
 pub(crate) use self::grouped::{GroupCache, initial_group_mode};
 
-pub(crate) const GRID_GAP: f32 = 12.;
-pub(crate) const GRID_PADDING: f32 = 16.;
-pub(crate) const ROW_PADDING: f32 = 12.;
+pub(crate) const GRID_GAP: f32 = 14.;
+pub(crate) const GRID_PADDING: f32 = 18.;
+pub(crate) const ROW_PADDING: f32 = 8.;
 pub(crate) const GRID_CONTEXT: &str = "KanalibGrid";
+
+/// 撤回 uniform_list 已消费的滚轮位移，得到缩放前应恢复的偏移。
+///
+/// 列表在顶部/底部时会把这次滚轮钳住；此时不能按 delta 反推，
+/// 否则锚点会从边界被反向推开一截。
+fn pre_zoom_scroll_y(current: Pixels, delta: Pixels, max: Pixels) -> Pixels {
+    let at_top = current >= px(0.) && delta > px(0.);
+    let at_bottom = current <= -max && delta < px(0.);
+    if at_top || at_bottom {
+        current
+    } else {
+        (current - delta).clamp(-max, px(0.))
+    }
+}
+
+/// 把窗口坐标里的框选矩形映射到平铺网格的可见序号。
+///
+/// 只处理无分组的图标网格；矩形先夹到列表视口，再按行/列几何求交。
+pub(crate) fn marquee_tile_positions(
+    start: gpui::Point<Pixels>,
+    current: gpui::Point<Pixels>,
+    bounds: gpui::Bounds<Pixels>,
+    offset: gpui::Point<Pixels>,
+    columns: usize,
+    row_height: f32,
+    tile_width: f32,
+    row_count: usize,
+    visible_len: usize,
+) -> Vec<usize> {
+    if columns == 0 || row_height <= 0. || tile_width <= 0. || row_count == 0 || visible_len == 0 {
+        return Vec::new();
+    }
+    let min_x = start.x.min(current.x).max(bounds.left());
+    let max_x = start.x.max(current.x).min(bounds.right());
+    let min_y = start.y.min(current.y).max(bounds.top());
+    let max_y = start.y.max(current.y).min(bounds.bottom());
+    if max_x <= min_x || max_y <= min_y {
+        return Vec::new();
+    }
+    let content_left = (min_x - bounds.left() - px(GRID_PADDING)).as_f32();
+    let content_right = (max_x - bounds.left() - px(GRID_PADDING)).as_f32();
+    let content_top = (min_y - bounds.top() - offset.y - px(ROW_PADDING)).as_f32();
+    let content_bottom = (max_y - bounds.top() - offset.y - px(ROW_PADDING)).as_f32();
+    let first_row = ((content_top / row_height).floor() as isize).max(0) as usize;
+    let last_row = ((content_bottom / row_height).ceil() as isize)
+        .max(0)
+        .min(row_count as isize) as usize;
+    let tile_height = (row_height - ROW_PADDING * 2.).max(1.);
+    let step_x = tile_width + GRID_GAP;
+    let mut positions = Vec::new();
+    for row in first_row..last_row {
+        let top = row as f32 * row_height;
+        let bottom = top + tile_height;
+        if bottom <= content_top || top >= content_bottom {
+            continue;
+        }
+        for column in 0..columns {
+            let left = column as f32 * step_x;
+            let right = left + tile_width;
+            if right <= content_left || left >= content_right {
+                continue;
+            }
+            let position = row * columns + column;
+            if position < visible_len {
+                positions.push(position);
+            }
+        }
+    }
+    positions
+}
 
 pub(crate) fn grid_columns(available: f32, min_width: f32) -> usize {
     let usable = (available - GRID_PADDING * 2.0 + GRID_GAP) / (min_width + GRID_GAP);
@@ -405,13 +475,13 @@ impl KanalibApp {
         let export_menu = self.export_menu(this, cx);
         let is_grid = self.view_mode.is_grid();
         let columns = if is_grid {
-            grid_columns(width.as_f32(), self.view_mode.min_width())
+            grid_columns(width.as_f32(), self.grid_min_width())
         } else {
             1
         };
         let tile_width = grid_tile_width(width.as_f32(), columns);
-        let image_height = self.view_mode.image_height();
-        let row_height = self.view_mode.row_height();
+        let image_height = self.grid_image_height();
+        let row_height = self.grid_row_height();
         // 分组只重排可见资产；返回的顺序同时用于渲染、框选与键盘导航。
         let visible_indices =
             self.refresh_group_view(visible_indices, columns, row_height, &assets);
@@ -618,6 +688,58 @@ impl KanalibApp {
                 list.into_any_element()
             }
         };
+        let marquee_overlay = self.grid_marquee.as_ref().and_then(|marquee| {
+            let bounds = self.grid_scroll.0.borrow().base_handle.bounds();
+            if bounds.size.width <= px(0.) || bounds.size.height <= px(0.) {
+                return None;
+            }
+            let start = marquee.start.relative_to(&bounds.origin);
+            let current = marquee.current.relative_to(&bounds.origin);
+            let left = start.x.min(current.x).clamp(px(0.), bounds.size.width);
+            let right = start.x.max(current.x).clamp(px(0.), bounds.size.width);
+            let top = start.y.min(current.y).clamp(px(0.), bounds.size.height);
+            let bottom = start.y.max(current.y).clamp(px(0.), bounds.size.height);
+            if right - left < px(3.) && bottom - top < px(3.) {
+                return None;
+            }
+            Some(
+                div()
+                    .absolute()
+                    .left(px(f32::from(left)))
+                    .top(px(f32::from(top)))
+                    .w(px(f32::from(right - left)))
+                    .h(px(f32::from(bottom - top)))
+                    .rounded(px(2.))
+                    .bg(colors.selection)
+                    .border_1()
+                    .border_color(colors.accent)
+                    .into_any_element(),
+            )
+        });
+        let grid = if is_grid && group_layout.is_none() {
+            div()
+                .relative()
+                .flex_1()
+                .min_h(px(0.))
+                .w_full()
+                .flex()
+                .flex_col()
+                .child(grid)
+                .children(marquee_overlay)
+                .into_any_element()
+        } else {
+            grid
+        };
+        let this_scroll = this.clone();
+        let this_pinch = this.clone();
+        let this_pan_down = this.clone();
+        let this_pan_move = this.clone();
+        let this_pan_up = this.clone();
+        let this_pan_out = this.clone();
+        let this_marquee_down = this.clone();
+        let this_marquee_move = this.clone();
+        let this_marquee_up = this.clone();
+        let this_marquee_out = this.clone();
         let grid_area = div()
             .id("library-grid")
             .role(Role::Grid)
@@ -630,7 +752,110 @@ impl KanalibApp {
             .key_context(GRID_CONTEXT)
             .on_mouse_down(MouseButton::Left, {
                 let focus = self.grid_focus.clone();
-                move |_, window, cx| window.focus(&focus, cx)
+                move |event, window, cx| {
+                    window.focus(&focus, cx);
+                    let position = event.position;
+                    let modifiers = event.modifiers;
+                    let _ = this_marquee_down.update(cx, |app, cx| {
+                        app.begin_grid_marquee(position, modifiers, cx);
+                    });
+                }
+            })
+            .on_scroll(move |event, window, cx| {
+                if !(event.modifiers.control || event.modifiers.platform) {
+                    return;
+                }
+                let delta = event.delta.pixel_delta(window.line_height());
+                if delta.y == px(0.) {
+                    return;
+                }
+                // 向上滚放大、向下滚缩小；指数曲线让连续滚轮手感均匀。
+                let factor = (f32::from(delta.y) * 0.002).exp();
+                let _ = this_scroll.update(cx, |app, cx| {
+                    // uniform_list 已在冒泡前吃掉同一次滚轮；先撤回这一步，
+                    // 否则缩放会顺带把画布滚走。
+                    {
+                        let state = app.grid_scroll.0.borrow();
+                        let current = state.base_handle.offset();
+                        let max = state.base_handle.max_offset();
+                        let y = pre_zoom_scroll_y(current.y, delta.y, max.y);
+                        let pre_scroll = gpui::point(current.x, y);
+                        state.base_handle.set_offset(pre_scroll);
+                    }
+                    app.zoom_grid_by(factor, cx);
+                });
+                cx.stop_propagation();
+            })
+            .on_pinch(move |event, _, cx| {
+                // Windows Direct Manipulation 的 delta 是相对变化量：0.1 表示放大 10%。
+                if event.delta == 0. {
+                    return;
+                }
+                let factor = 1.0 + event.delta;
+                let _ = this_pinch.update(cx, |app, cx| app.zoom_grid_by(factor, cx));
+            })
+            .on_mouse_down(MouseButton::Middle, move |event, _, cx| {
+                let position = event.position;
+                let _ = this_pan_down.update(cx, |app, cx| {
+                    app.grid_pan = Some(position);
+                    cx.notify();
+                });
+            })
+            .on_mouse_move(move |event, _, cx| {
+                if this_pan_move.read(cx).grid_pan.is_none() {
+                    if this_marquee_move.read(cx).grid_marquee.is_none() {
+                        return;
+                    }
+                    if event.pressed_button != Some(MouseButton::Left) {
+                        let _ = this_marquee_move.update(cx, |app, cx| app.finish_grid_marquee(cx));
+                        return;
+                    }
+                    let position = event.position;
+                    let _ = this_marquee_move
+                        .update(cx, |app, cx| app.update_grid_marquee(position, cx));
+                    return;
+                }
+                let Some(from) = this_pan_move.read(cx).grid_pan else {
+                    return;
+                };
+                // 窗口失焦等情况下可能收不到中键抬起；用按下键状态兜底复位。
+                if event.pressed_button != Some(MouseButton::Middle) {
+                    let _ = this_pan_move.update(cx, |app, cx| {
+                        if app.grid_pan.take().is_some() {
+                            cx.notify();
+                        }
+                    });
+                    return;
+                }
+                let delta = event.position.relative_to(&from);
+                if delta.x == px(0.) && delta.y == px(0.) {
+                    return;
+                }
+                let position = event.position;
+                let _ = this_pan_move.update(cx, |app, cx| {
+                    app.grid_pan = Some(position);
+                    app.pan_grid_by(f32::from(delta.x), f32::from(delta.y), cx);
+                });
+            })
+            .on_mouse_up(MouseButton::Left, move |_, _, cx| {
+                let _ = this_marquee_up.update(cx, |app, cx| app.finish_grid_marquee(cx));
+            })
+            .on_mouse_up_out(MouseButton::Left, move |_, _, cx| {
+                let _ = this_marquee_out.update(cx, |app, cx| app.finish_grid_marquee(cx));
+            })
+            .on_mouse_up(MouseButton::Middle, move |_, _, cx| {
+                let _ = this_pan_up.update(cx, |app, cx| {
+                    if app.grid_pan.take().is_some() {
+                        cx.notify();
+                    }
+                });
+            })
+            .on_mouse_up_out(MouseButton::Middle, move |_, _, cx| {
+                let _ = this_pan_out.update(cx, |app, cx| {
+                    if app.grid_pan.take().is_some() {
+                        cx.notify();
+                    }
+                });
             })
             .child(grid);
 
@@ -963,5 +1188,62 @@ impl KanalibApp {
         } else {
             list.into_any_element()
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{marquee_tile_positions, pre_zoom_scroll_y};
+    use gpui::{Bounds, Point, point, px, size};
+
+    #[test]
+    fn pre_zoom_scroll_keeps_boundaries_and_reverts_mid_list_wheel() {
+        let max = px(500.);
+        assert_eq!(pre_zoom_scroll_y(px(0.), px(40.), max), px(0.));
+        assert_eq!(pre_zoom_scroll_y(px(-500.), px(-40.), max), px(-500.));
+        assert_eq!(pre_zoom_scroll_y(px(-460.), px(40.), max), px(-500.));
+        assert_eq!(pre_zoom_scroll_y(px(-40.), px(-40.), max), px(0.));
+        assert_eq!(pre_zoom_scroll_y(px(0.), px(-40.), px(0.)), px(0.));
+    }
+
+    #[test]
+    fn marquee_maps_rectangles_to_visible_grid_positions() {
+        let bounds = Bounds::new(point(px(100.), px(50.)), size(px(500.), px(220.)));
+        let select = |start: Point<_>, current: Point<_>, offset: Point<_>| {
+            marquee_tile_positions(start, current, bounds, offset, 2, 100., 200., 4, 8)
+        };
+        assert_eq!(
+            select(
+                point(px(110.), px(60.)),
+                point(px(340.), px(140.)),
+                point(px(0.), px(0.))
+            ),
+            vec![0, 1]
+        );
+        assert_eq!(
+            select(
+                point(px(110.), px(60.)),
+                point(px(160.), px(90.)),
+                point(px(0.), px(0.))
+            ),
+            vec![0]
+        );
+        // 负偏移把第二行顶到视口附近。
+        assert_eq!(
+            select(
+                point(px(110.), px(110.)),
+                point(px(160.), px(140.)),
+                point(px(0.), px(-50.))
+            ),
+            vec![2]
+        );
+        assert!(
+            select(
+                point(px(110.), px(60.)),
+                point(px(110.), px(60.)),
+                point(px(0.), px(0.))
+            )
+            .is_empty()
+        );
     }
 }

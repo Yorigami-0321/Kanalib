@@ -41,6 +41,7 @@
 | [pending/overview.md](pending/overview.md) | 未完成项速览（缺口/优先级/依赖） |
 | [pending/browse.md](pending/browse.md) | 浏览与查看：F-003/004/005、F-069、F-070–F-074 |
 | [ui-refactor.md](ui-refactor.md) | 全局 UI 重构调研、参考层级（图片管理器为主，VS Code 仅局部参考）、设计 token、组件状态与验收基线（F-070–F-073） |
+| [desktop-photo-wall.md](desktop-photo-wall.md) | 桌面端图片墙四条换脸路线、画布手势、来源封面卡与浏览/编辑分态 |
 | [pending/search-organization.md](pending/search-organization.md) | 搜索与组织：F-012/013/014 |
 | [pending/tags.md](pending/tags.md) | 标签与打标：F-021/023/024（已归档，本域暂无未完成项） |
 | [pending/library-sources-formats.md](pending/library-sources-formats.md) | 图库/来源/格式：F-030–F-033、F-035–F-037、F-040 |

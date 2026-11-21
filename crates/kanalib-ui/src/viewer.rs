@@ -434,8 +434,12 @@ impl KanalibApp {
         this: &Entity<Self>,
         at: usize,
         colors: UiColors,
+        blocked_tags: &HashSet<String>,
     ) -> Option<AnyElement> {
         let (path, caption) = self.viewer_slides.get(at)?.clone();
+        let tag_suggestions = self.tag_suggestion_entries(blocked_tags);
+        let albums = self.asset_album_names(&path);
+        let all_albums = self.albums_snapshot();
         Some(
             ViewElement::new(ViewerPane {
                 this: this.clone(),
@@ -449,6 +453,9 @@ impl KanalibApp {
                 source_mode: self.viewer_source_mode,
                 large_override: self.viewer_large_override,
                 similar: self.screen == Screen::Similar,
+                tag_suggestions,
+                albums,
+                all_albums,
                 colors,
             })
             .into_any_element(),
@@ -470,6 +477,9 @@ struct ViewerPane {
     source_mode: ViewerSourceMode,
     large_override: bool,
     similar: bool,
+    tag_suggestions: Vec<(String, usize)>,
+    albums: Vec<kanalib_core::model::Collection>,
+    all_albums: Vec<kanalib_core::model::Collection>,
     colors: UiColors,
 }
 
@@ -491,29 +501,36 @@ impl View for ViewerPane {
             source_mode,
             large_override,
             similar,
+            tag_suggestions,
+            albums,
+            all_albums,
             colors,
         } = self;
-        let (is_video, remote, thumb, width, height, caption) = {
+        let asset = {
             let shared = state.shared.lock().unwrap();
             let assets = shared.assets.read().unwrap();
-            match assets.iter().find(|asset| asset.path == path) {
-                Some(asset) => (
-                    asset.is_video(),
-                    is_remote_asset(&asset.path),
-                    asset.thumb.clone().or_else(|| asset.tile_thumb.clone()),
-                    asset.width,
-                    asset.height,
-                    viewer_caption(cx, asset),
-                ),
-                None => (
-                    kanalib_core::model::is_video(&path),
-                    is_remote_asset(&path),
-                    None,
-                    0,
-                    0,
-                    caption,
-                ),
-            }
+            assets
+                .iter()
+                .find(|asset| asset.path == path)
+                .cloned()
+        };
+        let (is_video, remote, thumb, width, height, caption) = match &asset {
+            Some(asset) => (
+                asset.is_video(),
+                is_remote_asset(&asset.path),
+                asset.thumb.clone().or_else(|| asset.tile_thumb.clone()),
+                asset.width,
+                asset.height,
+                viewer_caption(cx, asset),
+            ),
+            None => (
+                kanalib_core::model::is_video(&path),
+                is_remote_asset(&path),
+                None,
+                0,
+                0,
+                caption,
+            ),
         };
         // 视频固定首帧；远端虚拟路径没有本地原图，只能快速预览。
         let can_original = !is_video && !remote;
@@ -631,6 +648,151 @@ impl View for ViewerPane {
             .file_name()
             .map(|name| name.to_string_lossy().to_string())
             .unwrap_or_else(|| path.display().to_string());
+        // 浏览/编辑分态：收藏、评分、手工标签与相册归属只在查看器出现。
+        let editor = asset.as_ref().map(|asset| {
+            let path = asset.path.clone();
+            let favorite = asset.favorite;
+            let favorite_state = state.clone();
+            let favorite_toaster = toaster.clone();
+            let favorite_this = this.clone();
+            let favorite_path = path.clone();
+            let mut favorite_button = Button::new(
+                SharedString::from(format!("viewer-favorite-{}", path.display())),
+                if favorite {
+                    t(cx, "inspector.favorite.marked")
+                } else {
+                    t(cx, "inspector.favorite.add")
+                },
+            )
+            .size(ControlSize::Sm)
+            .icon(IconName::Heart)
+            .on_click(move |_, _, cx| {
+                let path = favorite_path.clone();
+                let changed = match favorite_state
+                    .set_favorite(std::slice::from_ref(&path), !favorite)
+                {
+                    Ok(updated) => {
+                        let count = updated.to_string();
+                        let message = if favorite {
+                            t_args(cx, "inspector.favorite.removed", &[("n", count.as_str())])
+                        } else {
+                            t_args(cx, "inspector.favorite.added", &[("n", count.as_str())])
+                        };
+                        push_toast(&favorite_toaster, cx, message, Severity::Success);
+                        true
+                    }
+                    Err(error) => {
+                        let error_text = format!("{error:#}");
+                        let message = t_args(
+                            cx,
+                            "inspector.favorite.failed",
+                            &[("error", error_text.as_str())],
+                        );
+                        favorite_state.set_error(message.to_string());
+                        push_toast(&favorite_toaster, cx, message, Severity::Danger);
+                        false
+                    }
+                };
+                if changed {
+                    let path = path.clone();
+                    let became_favorite = !favorite;
+                    let _ = favorite_this.update(cx, |app, cx| {
+                        app.after_favorite_change(&path, became_favorite, cx)
+                    });
+                }
+            });
+            if favorite {
+                favorite_button = favorite_button.primary();
+            }
+
+            let star_state = state.clone();
+            let star_this = this.clone();
+            let star_toaster = toaster.clone();
+            let star_path = path.clone();
+            let rating = Rating::new(
+                SharedString::from(format!("viewer-star-{}", path.display())),
+                asset.star,
+            )
+            .on_change(move |value, _, cx| {
+                match star_state.set_star(std::slice::from_ref(&star_path), value) {
+                    Ok(updated) => {
+                        let count = updated.to_string();
+                        let message = if value == 0 {
+                            t_args(cx, "inspector.rating.cleared", &[("n", count.as_str())])
+                        } else {
+                            let stars = value.to_string();
+                            t_args(
+                                cx,
+                                "inspector.rating.set",
+                                &[("n", count.as_str()), ("stars", stars.as_str())],
+                            )
+                        };
+                        push_toast(&star_toaster, cx, message, Severity::Success);
+                    }
+                    Err(error) => {
+                        let error_text = format!("{error:#}");
+                        let message = t_args(
+                            cx,
+                            "inspector.rating.failed",
+                            &[("error", error_text.as_str())],
+                        );
+                        star_state.set_error(message.to_string());
+                        push_toast(&star_toaster, cx, message, Severity::Danger);
+                    }
+                }
+                let _ = star_this.update(cx, |_, cx| cx.notify());
+            });
+
+            let manual = crate::inspector::manual_tag_editor(
+                asset,
+                "viewer-manual-tags",
+                &this,
+                &state,
+                &toaster,
+                tag_suggestions,
+                cx,
+            );
+            let album =
+                crate::inspector::album_editor(&asset.path, albums, all_albums, &this, colors, cx);
+            div()
+                .flex_none()
+                .px(px(SPACE_3))
+                .py(px(SPACE_2))
+                .flex()
+                .flex_col()
+                .gap(px(SPACE_1_5))
+                .border_b_1()
+                .border_color(colors.border)
+                .child(
+                    div()
+                        .flex()
+                        .flex_wrap()
+                        .items_center()
+                        .gap(px(SPACE_2))
+                        .child(favorite_button)
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap(px(SPACE_1))
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(colors.subtle)
+                                        .child(t(cx, "inspector.rating.label")),
+                                )
+                                .child(rating),
+                        )
+                        .child(
+                            div()
+                                .w(px(240.))
+                                .min_w(px(160.))
+                                .flex_none()
+                                .child(manual),
+                        ),
+                )
+                .child(album)
+        });
         let close = this.clone();
         let prev = this.clone();
         let next = this.clone();
@@ -867,6 +1029,7 @@ impl View for ViewerPane {
                             ),
                     ),
             )
+            .children(editor)
             .children(large_notice)
             .child(
                 div()

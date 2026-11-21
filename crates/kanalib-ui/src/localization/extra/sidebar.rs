@@ -2,6 +2,7 @@
 pub(crate) const ZH: &[(&str, &str)] = &[
     ("sidebar.source.offline", "离线"),
     ("sidebar.source.error", "错误"),
+    ("sidebar.source.online", "在线"),
     ("sidebar.source.aria_error", "{path}（{text}：{error}）"),
     ("sidebar.source.aria_status", "{path}（{text}）"),
     ("sidebar.source.rescan", "重新扫描此来源"),
@@ -178,6 +179,7 @@ pub(crate) const ZH: &[(&str, &str)] = &[
 pub(crate) const EN: &[(&str, &str)] = &[
     ("sidebar.source.offline", "Offline"),
     ("sidebar.source.error", "Error"),
+    ("sidebar.source.online", "Online"),
     ("sidebar.source.aria_error", "{path} ({text}: {error})"),
     ("sidebar.source.aria_status", "{path} ({text})"),
     ("sidebar.source.rescan", "Rescan this source"),

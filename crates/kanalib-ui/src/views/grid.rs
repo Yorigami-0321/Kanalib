@@ -1,5 +1,6 @@
 use super::*;
 use crate::*;
+use ely_gpui_component::theme::Elevation;
 
 pub(crate) fn tile(
     asset: Asset,
@@ -32,15 +33,12 @@ pub(crate) fn tile(
             .flex()
             .items_center()
             .justify_center()
-            .text_xs()
-            .text_color(colors.subtle)
-            .child("…")
+            .child(
+                Icon::new(IconName::ImageOff)
+                    .size(IconSize::Lg)
+                    .color(colors.subtle),
+            )
             .into_any_element()
-    };
-    let border = if selected {
-        colors.accent
-    } else {
-        colors.border
     };
     let has_error = asset.error.is_some();
     let has_damage = asset.damage.is_some();
@@ -52,30 +50,55 @@ pub(crate) fn tile(
     let rating = asset.rating.to_uppercase();
     let favorite = asset.favorite;
     let star = asset.star;
-    let video_badge = asset.is_video().then(|| {
+    let video = asset.is_video();
+    let media_icon = if video {
+        IconName::Play
+    } else {
+        IconName::Image
+    };
+    let media_color = if video { colors.info } else { colors.muted };
+    // 卡头色码只标“非普通图片”的部分；普通图片不做装饰，让照片本身最亮。
+    let rail = if has_error {
+        Some(colors.danger)
+    } else if has_damage {
+        Some(colors.warning)
+    } else if video {
+        Some(colors.info)
+    } else {
+        None
+    };
+    let media_label = if video {
         let duration = crate::format::video_meta(&asset.metadata_json)
             .duration_secs
             .map(crate::format::format_duration);
-        let label = match duration {
+        match duration {
             Some(duration) => crate::localization::t_args(
                 cx,
                 "views.tile.video_duration",
                 &[("duration", &duration)],
-            ),
-            None => crate::localization::t(cx, "views.tile.video"),
-        };
-        div()
-            .absolute()
-            .top(px(6.))
-            .left(px(if selected { 32. } else { 6. }))
-            .px(px(6.))
-            .py(px(1.))
-            .rounded(px(4.))
-            .bg(colors.backdrop)
-            .text_xs()
-            .text_color(colors.fg)
-            .child(label)
-    });
+            )
+            .to_string(),
+            None => crate::localization::t(cx, "views.tile.video").to_string(),
+        }
+    } else if asset.width > 0 && asset.height > 0 {
+        format!("{}×{}", asset.width, asset.height)
+    } else {
+        crate::inspector::friendly_format_label(&asset.path)
+    };
+    let rating_text = if rating.is_empty() {
+        if star > 0 {
+            format!("★ {star}")
+        } else {
+            crate::localization::t(cx, "views.rating.none").to_string()
+        }
+    } else if star > 0 {
+        format!(
+            "{} · ★ {star}",
+            crate::localization::t_args(cx, "views.rating.value", &[("rating", &rating)])
+        )
+    } else {
+        crate::localization::t_args(cx, "views.rating.value", &[("rating", &rating)]).to_string()
+    };
     let menu = asset_context_menu(&asset, &this, cx);
     let this_click = this.clone();
     let path_click = path.clone();
@@ -83,17 +106,40 @@ pub(crate) fn tile(
     let this_right = this.clone();
     let path_right = path.clone();
     let focus_right = focus.clone();
+    let hover_group = SharedString::from(format!("tile-hover-{}", path.display()));
+    let hover_group_footer = hover_group.clone();
+    let raised = cx.theme().elevation(Elevation::Raised);
+    let hover_border = if selected {
+        colors.accent
+    } else {
+        colors.border_strong
+    };
 
-    let mut tile = div()
+    let tile = div()
         .id(SharedString::from(format!("tile-{}", asset.path.display())))
+        .group(hover_group)
         .role(Role::Button)
         .aria_label(title.clone())
         .w(px(width))
         .flex_none()
         .flex()
         .flex_col()
-        .gap(px(5.))
+        .rounded(px(RADIUS_CARD))
+        .overflow_hidden()
+        .bg(colors.surface)
+        .border_1()
+        .border_color(if selected {
+            colors.accent
+        } else {
+            colors.border
+        })
         .cursor_pointer()
+        .hover(move |style| {
+            style
+                .bg(colors.overlay)
+                .border_color(hover_border)
+                .shadow(raised.clone())
+        })
         .on_click(move |event, window, cx| {
             window.focus(&focus_click, cx);
             let (modifiers, click_count) = match event {
@@ -110,17 +156,24 @@ pub(crate) fn tile(
                 .relative()
                 .w_full()
                 .h(px(image_height))
-                .rounded(px(8.))
+                .flex_none()
                 .overflow_hidden()
-                .border_1()
-                .border_color(border)
                 .bg(colors.sunken)
                 .child(media)
+                .children(rail.map(|color| {
+                    div()
+                        .absolute()
+                        .top_0()
+                        .left_0()
+                        .right_0()
+                        .h(px(3.))
+                        .bg(color)
+                }))
                 .children(selected.then(|| {
                     div()
                         .absolute()
-                        .top(px(6.))
-                        .left(px(6.))
+                        .top(px(7.))
+                        .left(px(7.))
                         .size(px(20.))
                         .rounded_full()
                         .bg(colors.accent)
@@ -133,94 +186,139 @@ pub(crate) fn tile(
                                 .color(colors.bg),
                         )
                 }))
-                .children(favorite.then(|| {
+                // 右上角状态列：收藏、失败、损坏依次堆叠，避免任意两个角标互相压住。
+                .children((favorite || has_error || has_damage).then(|| {
+                    let mut badges = div()
+                        .absolute()
+                        .top(px(7.))
+                        .right(px(7.))
+                        .flex()
+                        .flex_col()
+                        .items_end()
+                        .gap(px(4.));
+                    if favorite {
+                        badges = badges.child(
+                            div()
+                                .size(px(22.))
+                                .rounded_full()
+                                .bg(colors.backdrop)
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .child(
+                                    Icon::new(IconName::Heart)
+                                        .size(IconSize::Sm)
+                                        .color(colors.danger),
+                                ),
+                        );
+                    }
+                    if has_error {
+                        badges = badges.child(
+                            div()
+                                .px(px(6.))
+                                .py(px(2.))
+                                .rounded(px(RADIUS_SM))
+                                .bg(colors.overlay)
+                                .text_xs()
+                                .text_color(colors.danger)
+                                .child(crate::localization::t(cx, "views.tile.failed")),
+                        );
+                    }
+                    if has_damage {
+                        badges = badges.child(
+                            div()
+                                .px(px(6.))
+                                .py(px(2.))
+                                .rounded(px(RADIUS_SM))
+                                .bg(colors.overlay)
+                                .text_xs()
+                                .text_color(colors.warning)
+                                .child(crate::localization::t(cx, "views.tile.damaged")),
+                        );
+                    }
+                    badges
+                }))
+                .child(
                     div()
                         .absolute()
-                        .top(px(6.))
-                        .right(px(6.))
-                        .size(px(22.))
-                        .rounded_full()
-                        .bg(colors.backdrop)
+                        .left(px(7.))
+                        .bottom(px(7.))
+                        .max_w(px(if width < 150. {
+                            width - 22.
+                        } else {
+                            width - 24.
+                        }))
                         .flex()
                         .items_center()
-                        .justify_center()
+                        .gap(px(4.))
+                        .px(px(7.))
+                        .py(px(2.))
+                        .rounded(px(RADIUS_SM))
+                        .bg(colors.overlay)
+                        .child(Icon::new(media_icon).size(IconSize::Xs).color(media_color))
                         .child(
-                            Icon::new(IconName::Heart)
-                                .size(IconSize::Sm)
-                                .color(colors.danger),
-                        )
-                }))
-                .children(video_badge)
-                .children(has_damage.then(|| {
-                    div()
-                        .absolute()
-                        .left(px(6.))
-                        .bottom(px(6.))
-                        .px(px(6.))
-                        .py(px(1.))
-                        .rounded(px(4.))
-                        .bg(colors.backdrop)
-                        .text_xs()
-                        .text_color(colors.warning)
-                        .child(crate::localization::t(cx, "views.tile.damaged"))
-                }))
-                .children(has_error.then(|| {
-                    div()
-                        .absolute()
-                        .right(px(6.))
-                        .bottom(px(6.))
-                        .px(px(6.))
-                        .py(px(1.))
-                        .rounded(px(4.))
-                        .bg(colors.backdrop)
-                        .text_xs()
-                        .text_color(colors.danger)
-                        .child(crate::localization::t(cx, "views.tile.failed"))
-                })),
+                            div()
+                                .min_w(px(0.))
+                                .truncate()
+                                .text_xs()
+                                .text_color(colors.fg)
+                                .child(media_label),
+                        ),
+                ),
         )
         .child(
             div()
-                .truncate()
-                .text_xs()
-                .font_weight(FontWeight::SEMIBOLD)
-                .text_color(colors.fg)
-                .child(title),
-        );
-    tile = tile.child(
-        div()
-            .flex()
-            .items_center()
-            .justify_between()
-            .gap(px(4.))
-            .child(div().truncate().text_xs().text_color(colors.subtle).child(
-                if rating.is_empty() {
-                    if star > 0 {
-                        format!("★ {star}")
-                    } else {
-                        crate::localization::t(cx, "views.rating.none").to_string()
-                    }
-                } else if star > 0 {
-                    format!(
-                        "{} · ★ {star}",
-                        crate::localization::t_args(
-                            cx,
-                            "views.rating.value",
-                            &[("rating", &rating)],
+                .h(px(CARD_FOOTER_HEIGHT))
+                .w_full()
+                .flex()
+                .flex_col()
+                .justify_center()
+                .gap(px(2.))
+                .px(px(10.))
+                .py(px(6.))
+                .child(
+                    div()
+                        .truncate()
+                        .text_xs()
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(colors.fg)
+                        .child(title),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(4.))
+                        .child(Icon::new(media_icon).size(IconSize::Xs).color(media_color))
+                        .child(
+                            div()
+                                .min_w(px(0.))
+                                .truncate()
+                                .text_xs()
+                                .text_color(colors.subtle)
+                                .child(rating_text),
                         )
-                    )
-                } else {
-                    crate::localization::t_args(cx, "views.rating.value", &[("rating", &rating)])
-                        .to_string()
-                },
-            ))
-            .child(div().flex_none().text_xs().text_color(colors.subtle).child(
-                crate::localization::t_args(
-                    cx,
-                    "views.tag_count",
-                    &[("n", &tag_count.to_string())],
+                        .child(div().flex_1())
+                        .child(div().flex_none().text_xs().text_color(colors.subtle).child(
+                            crate::localization::t_args(
+                                cx,
+                                "views.tag_count",
+                                &[("n", &tag_count.to_string())],
+                            ),
+                        ))
+                        .child(
+                            div()
+                                .flex_none()
+                                .invisible()
+                                .group_hover(hover_group_footer, |style| style.visible())
+                                .child(
+                                    Icon::new(IconName::Maximize2)
+                                        .size(IconSize::Xs)
+                                        .color(colors.muted),
+                                ),
+                        ),
                 ),
-            )),
-    );
+        );
 
     div()
         .flex_none()

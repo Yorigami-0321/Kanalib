@@ -390,6 +390,22 @@ impl KanalibApp {
         self.tag_suggestions = matches;
     }
 
+    /// 查看器手工标签输入的基础补全；输入中优先当前前缀结果，否则给常用标签。
+    pub(crate) fn tag_suggestion_entries(
+        &self,
+        blocked_tags: &HashSet<String>,
+    ) -> Vec<(String, usize)> {
+        if !self.tag_suggestions.is_empty() {
+            return self.tag_suggestions.clone();
+        }
+        self.tag_vocab
+            .iter()
+            .filter(|tag| tag.count > 0 && !blocked_tags.contains(&tag.name))
+            .take(40)
+            .map(|tag| (tag.name.clone(), tag.count))
+            .collect()
+    }
+
     pub(crate) fn open_tag_rename(&mut self, name: String, cx: &mut Context<Self>) {
         self.tag_rename = Some(name);
         self.tag_rename_epoch = self.tag_rename_epoch.wrapping_add(1);

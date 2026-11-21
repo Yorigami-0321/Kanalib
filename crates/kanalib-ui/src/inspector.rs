@@ -4,6 +4,7 @@ use crate::localization::{localize_group_name, t, t_args};
 use crate::sidebar::source_label;
 use crate::theme::*;
 use crate::*;
+use kanalib_core::model::Collection;
 
 /// 媒体错误的中文说明；views/content 与单元测试共用这一签名，暂不走目录。
 pub(crate) fn friendly_media_error(message: &str) -> String {
@@ -210,6 +211,219 @@ pub(crate) fn exif_panel(asset: &Asset, colors: UiColors, cx: &App) -> Option<An
             }))
             .into_any_element(),
     )
+}
+
+/// 查看器手工标签编辑器：沿用检查器原先的 `add_tags` / `remove_tags` 写库路径。
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn manual_tag_editor(
+    asset: &Asset,
+    id_prefix: &str,
+    this: &Entity<KanalibApp>,
+    state: &Arc<AppState>,
+    toaster: &Entity<Toaster>,
+    mut suggestion_entries: Vec<(String, usize)>,
+    cx: &App,
+) -> impl IntoElement {
+    let path = asset.path.clone();
+    let manual_initial = asset
+        .manual_tags
+        .iter()
+        .map(|tag| normalize_tag_name(&tag.tag))
+        .collect::<HashSet<_>>();
+    let manual_names = asset
+        .manual_tags
+        .iter()
+        .map(|tag| SharedString::from(tag.tag.clone()))
+        .collect::<Vec<_>>();
+    for tag in asset.all_tags() {
+        if !suggestion_entries
+            .iter()
+            .any(|(name, _)| name.eq_ignore_ascii_case(&tag.tag))
+        {
+            suggestion_entries.push((tag.tag.clone(), 0));
+        }
+    }
+    suggestion_entries.truncate(60);
+    let suggestions = suggestion_entries
+        .into_iter()
+        .map(|(name, _)| Choice::new(name.clone(), name))
+        .collect::<Vec<_>>();
+    let manual_state = state.clone();
+    let manual_this = this.clone();
+    let manual_toaster = toaster.clone();
+    let manual_path = path.clone();
+    let typing_this = this.clone();
+    TagInput::new(
+        SharedString::from(format!("{id_prefix}-{}", path.display())),
+        manual_names,
+    )
+    .placeholder(t(cx, "inspector.tags.placeholder"))
+    .check(|value| !normalize_tag_name(value).is_empty())
+    .suggestions(suggestions)
+    .on_typing(move |typed, _, cx| {
+        let _ = typing_this.update(cx, |app, cx| {
+            app.update_tag_suggestions(&typed);
+            cx.notify();
+        });
+    })
+    .on_change(move |next, _, cx| {
+        let next_set = next
+            .iter()
+            .map(|value| normalize_tag_name(value))
+            .filter(|value| !value.is_empty())
+            .collect::<HashSet<_>>();
+        let added = next_set
+            .difference(&manual_initial)
+            .cloned()
+            .collect::<Vec<_>>();
+        let removed = manual_initial
+            .difference(&next_set)
+            .cloned()
+            .collect::<Vec<_>>();
+        let mut changed = 0usize;
+        let mut failure = None;
+        for tag in &added {
+            match manual_state.add_tags(std::slice::from_ref(&manual_path), tag) {
+                Ok(updated) => changed += updated,
+                Err(error) => {
+                    failure = Some(format!("{error:#}"));
+                    break;
+                }
+            }
+        }
+        if failure.is_none() {
+            for tag in &removed {
+                match manual_state.remove_tags(std::slice::from_ref(&manual_path), tag) {
+                    Ok(updated) => changed += updated,
+                    Err(error) => {
+                        failure = Some(format!("{error:#}"));
+                        break;
+                    }
+                }
+            }
+        }
+        if let Some(error) = failure {
+            let message = t_args(cx, "inspector.tags.update_failed", &[("error", error.as_str())])
+                .to_string();
+            manual_state.set_error(message.clone());
+            push_toast(&manual_toaster, cx, message, Severity::Danger);
+        } else if changed > 0 {
+            let message = t(cx, "inspector.tags.updated");
+            push_toast(&manual_toaster, cx, message, Severity::Success);
+        } else if !added.is_empty() || !removed.is_empty() {
+            let message = t(cx, "inspector.tags.unchanged");
+            push_toast(&manual_toaster, cx, message, Severity::Warning);
+        }
+        let _ = manual_this.update(cx, |_, cx| cx.notify());
+    })
+}
+
+/// 查看器相册归属编辑器；仍复用检查器原先的增删入口，不新增写库路径。
+pub(crate) fn album_editor(
+    path: &Path,
+    albums: Vec<Collection>,
+    all_albums: Vec<Collection>,
+    this: &Entity<KanalibApp>,
+    colors: UiColors,
+    cx: &App,
+) -> impl IntoElement {
+    let album_path = path.to_path_buf();
+    let album_this = this.clone();
+    let mut album_section = div().flex().flex_col().gap(px(4.)).child(
+        div()
+            .flex()
+            .items_center()
+            .justify_between()
+            .child(
+                div()
+                    .text_xs()
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(colors.subtle)
+                    .child(t(cx, "inspector.album.section")),
+            )
+            .children((!all_albums.is_empty()).then(|| {
+                let mut menu = Menu::new();
+                let mut entries = all_albums.clone();
+                entries.sort_by_key(|a| a.name.to_lowercase());
+                for album in entries {
+                    let add_this = album_this.clone();
+                    let add_path = album_path.clone();
+                    menu = menu.item(
+                        MenuItem::new(album.name.clone())
+                            .icon(IconName::Folder)
+                            .on_click(move |_, cx| {
+                                let _ = add_this.update(cx, |app, cx| {
+                                    app.add_paths_to_album(
+                                        album.id,
+                                        vec![add_path.clone()],
+                                        cx,
+                                    );
+                                });
+                            }),
+                    );
+                }
+                OverflowMenu::new(
+                    SharedString::from(format!(
+                        "inspector-album-more-{}",
+                        album_path.display()
+                    )),
+                    menu,
+                )
+                .tooltip(t(cx, "inspector.album.add"))
+            })),
+    );
+    if albums.is_empty() {
+        album_section = album_section.child(
+            div()
+                .text_xs()
+                .text_color(colors.subtle)
+                .child(t(cx, "inspector.album.empty")),
+        );
+    } else {
+        let mut chips = div().flex().flex_wrap().gap(px(4.));
+        for album in albums {
+            let remove_this = this.clone();
+            let remove_id = album.id;
+            let chip_label = album.name.clone();
+            let remove_path = album_path.clone();
+            chips = chips.child(
+                div()
+                    .id(SharedString::from(format!(
+                        "inspector-album-{}-{}",
+                        album.id,
+                        album_path.display()
+                    )))
+                    .flex()
+                    .items_center()
+                    .gap(px(2.))
+                    .px(px(6.))
+                    .py(px(1.))
+                    .rounded(px(4.))
+                    .bg(colors.sunken)
+                    .child(div().text_xs().text_color(colors.fg).child(chip_label))
+                    .child(
+                        IconButton::new(
+                            SharedString::from(format!(
+                                "inspector-album-remove-{}-{}",
+                                album.id,
+                                album_path.display()
+                            )),
+                            IconName::X,
+                        )
+                        .size(ControlSize::Sm)
+                        .tooltip(t(cx, "inspector.album.remove"))
+                        .on_click(move |_, _, cx| {
+                            let path = remove_path.clone();
+                            let _ = remove_this.update(cx, |app, cx| {
+                                app.remove_path_from_album(remove_id, path.clone(), cx);
+                            });
+                        }),
+                    ),
+            );
+        }
+        album_section = album_section.child(chips);
+    }
+    album_section
 }
 
 impl KanalibApp {
@@ -429,7 +643,6 @@ impl KanalibApp {
         &self,
         this: &Entity<Self>,
         selected: Option<&Asset>,
-        blocked_tags: &HashSet<String>,
         source_aliases: &HashMap<PathBuf, String>,
         width: Pixels,
         colors: UiColors,
@@ -462,114 +675,6 @@ impl KanalibApp {
             let export_state = state.clone();
             let export_this = this.clone();
             let export_path = asset.path.clone();
-            let manual_initial = asset
-                .manual_tags
-                .iter()
-                .map(|tag| normalize_tag_name(&tag.tag))
-                .collect::<HashSet<_>>();
-            let manual_names = asset
-                .manual_tags
-                .iter()
-                .map(|tag| SharedString::from(tag.tag.clone()))
-                .collect::<Vec<_>>();
-            let mut suggestion_entries = if self.tag_suggestions.is_empty() {
-                let mut entries = self
-                    .tag_vocab
-                    .iter()
-                    .filter(|tag| tag.count > 0 && !blocked_tags.contains(&tag.name))
-                    .take(40)
-                    .map(|tag| (tag.name.clone(), tag.count))
-                    .collect::<Vec<_>>();
-                for tag in asset.all_tags() {
-                    if !entries
-                        .iter()
-                        .any(|(name, _)| name.eq_ignore_ascii_case(&tag.tag))
-                    {
-                        entries.push((tag.tag.clone(), 0));
-                    }
-                }
-                entries
-            } else {
-                self.tag_suggestions.clone()
-            };
-            suggestion_entries.truncate(60);
-            let suggestions = suggestion_entries
-                .into_iter()
-                .map(|(name, _)| Choice::new(name.clone(), name))
-                .collect::<Vec<_>>();
-            let manual_state = state.clone();
-            let manual_this = this.clone();
-            let manual_toaster = self.toaster.clone();
-            let manual_path = path.clone();
-            let typing_this = this.clone();
-            let manual_input = TagInput::new(
-                SharedString::from(format!("manual-tags-{}", path.display())),
-                manual_names,
-            )
-            .placeholder(t(cx, "inspector.tags.placeholder"))
-            .check(|value| !normalize_tag_name(value).is_empty())
-            .suggestions(suggestions)
-            .on_typing(move |typed, _, cx| {
-                let _ = typing_this.update(cx, |app, cx| {
-                    app.update_tag_suggestions(&typed);
-                    cx.notify();
-                });
-            })
-            .on_change(move |next, _, cx| {
-                let next_set = next
-                    .iter()
-                    .map(|value| normalize_tag_name(value))
-                    .filter(|value| !value.is_empty())
-                    .collect::<HashSet<_>>();
-                let added = next_set
-                    .difference(&manual_initial)
-                    .cloned()
-                    .collect::<Vec<_>>();
-                let removed = manual_initial
-                    .difference(&next_set)
-                    .cloned()
-                    .collect::<Vec<_>>();
-                let mut changed = 0usize;
-                let mut failure = None;
-                for tag in &added {
-                    match manual_state.add_tags(std::slice::from_ref(&manual_path), tag) {
-                        Ok(updated) => changed += updated,
-                        Err(error) => {
-                            failure = Some(format!("{error:#}"));
-                            break;
-                        }
-                    }
-                }
-                if failure.is_none() {
-                    for tag in &removed {
-                        match manual_state.remove_tags(std::slice::from_ref(&manual_path), tag) {
-                            Ok(updated) => changed += updated,
-                            Err(error) => {
-                                failure = Some(format!("{error:#}"));
-                                break;
-                            }
-                        }
-                    }
-                }
-                if let Some(error) = failure {
-                    let message = t_args(
-                        cx,
-                        "inspector.tags.update_failed",
-                        &[("error", error.as_str())],
-                    )
-                    .to_string();
-                    manual_state.set_error(message.clone());
-                    push_toast(&manual_toaster, cx, message, Severity::Danger);
-                } else if changed > 0 {
-                    let message = t(cx, "inspector.tags.updated");
-                    push_toast(&manual_toaster, cx, message, Severity::Success);
-                } else if !added.is_empty() || !removed.is_empty() {
-                    let message = t(cx, "inspector.tags.unchanged");
-                    push_toast(&manual_toaster, cx, message, Severity::Warning);
-                }
-                let _ = manual_this.update(cx, |_, cx| cx.notify());
-            });
-
             let mut tags = div().id("inspector-tags").flex().flex_col().gap(px(2.));
             for category in [
                 "general",
@@ -778,6 +883,17 @@ impl KanalibApp {
                 .on_click(move |_, _, cx| {
                     let _ = this_quick.update(cx, |app, cx| app.open_quick_view(cx));
                 });
+            let this_edit_in_viewer = this.clone();
+            let edit_in_viewer = Button::new(
+                "inspector-edit-in-viewer",
+                t(cx, "inspector.tags.edit_in_viewer"),
+            )
+            .size(ControlSize::Sm)
+            .variant(ButtonVariant::Ghost)
+            .icon(IconName::Maximize2)
+            .on_click(move |_, _, cx| {
+                let _ = this_edit_in_viewer.update(cx, |app, cx| app.open_quick_view(cx));
+            });
             let similar_this = this.clone();
             let similar_path = path.clone();
             let find_similar = Button::new(
@@ -798,95 +914,6 @@ impl KanalibApp {
                 .on_click(move |_, _, cx| {
                     let _ = compare_this.update(cx, |app, cx| app.open_compare_selected(cx));
                 });
-            let favorite = asset.favorite;
-            let favorite_state = state.clone();
-            let favorite_this = this.clone();
-            let favorite_toaster = self.toaster.clone();
-            let favorite_path = path.clone();
-            let mut favorite_button = Button::new(
-                SharedString::from(format!("inspector-favorite-{}", path.display())),
-                if favorite {
-                    t(cx, "inspector.favorite.marked")
-                } else {
-                    t(cx, "inspector.favorite.add")
-                },
-            )
-            .size(ControlSize::Sm)
-            .icon(IconName::Heart)
-            .on_click(move |_, _, cx| {
-                let changed = match favorite_state
-                    .set_favorite(std::slice::from_ref(&favorite_path), !favorite)
-                {
-                    Ok(updated) => {
-                        let count = updated.to_string();
-                        let message = if favorite {
-                            t_args(cx, "inspector.favorite.removed", &[("n", count.as_str())])
-                        } else {
-                            t_args(cx, "inspector.favorite.added", &[("n", count.as_str())])
-                        };
-                        push_toast(&favorite_toaster, cx, message, Severity::Success);
-                        true
-                    }
-                    Err(error) => {
-                        let error_text = format!("{error:#}");
-                        let message = t_args(
-                            cx,
-                            "inspector.favorite.failed",
-                            &[("error", error_text.as_str())],
-                        );
-                        favorite_state.set_error(message.to_string());
-                        push_toast(&favorite_toaster, cx, message, Severity::Danger);
-                        false
-                    }
-                };
-                if changed {
-                    let path = favorite_path.clone();
-                    let became_favorite = !favorite;
-                    let _ = favorite_this.update(cx, |app, cx| {
-                        app.after_favorite_change(&path, became_favorite, cx)
-                    });
-                }
-            });
-            if favorite {
-                favorite_button = favorite_button.primary();
-            }
-            let star_state = state.clone();
-            let star_this = this.clone();
-            let star_toaster = self.toaster.clone();
-            let star_path = path.clone();
-            let rating_control = Rating::new(
-                SharedString::from(format!("inspector-star-{}", path.display())),
-                asset.star,
-            )
-            .on_change(move |value, _, cx| {
-                match star_state.set_star(std::slice::from_ref(&star_path), value) {
-                    Ok(updated) => {
-                        let count = updated.to_string();
-                        let message = if value == 0 {
-                            t_args(cx, "inspector.rating.cleared", &[("n", count.as_str())])
-                        } else {
-                            let stars = value.to_string();
-                            t_args(
-                                cx,
-                                "inspector.rating.set",
-                                &[("n", count.as_str()), ("stars", stars.as_str())],
-                            )
-                        };
-                        push_toast(&star_toaster, cx, message, Severity::Success);
-                    }
-                    Err(error) => {
-                        let error_text = format!("{error:#}");
-                        let message = t_args(
-                            cx,
-                            "inspector.rating.failed",
-                            &[("error", error_text.as_str())],
-                        );
-                        star_state.set_error(message.to_string());
-                        push_toast(&star_toaster, cx, message, Severity::Danger);
-                    }
-                }
-                let _ = star_this.update(cx, |_, cx| cx.notify());
-            });
             let prompt = prompt_for(asset);
             let prompt_empty = prompt.is_empty();
             let prompt_count = asset
@@ -1043,104 +1070,6 @@ impl KanalibApp {
                     )
             });
 
-            let albums = self.asset_album_names(&asset.path);
-            let album_path = asset.path.clone();
-            let album_this = this.clone();
-            let mut album_section = div().flex().flex_col().gap(px(4.)).child(
-                div()
-                    .flex()
-                    .items_center()
-                    .justify_between()
-                    .child(
-                        div()
-                            .text_xs()
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .text_color(colors.subtle)
-                            .child(t(cx, "inspector.album.section")),
-                    )
-                    .children((!albums.is_empty()).then(|| {
-                        let mut menu = Menu::new();
-                        let mut entries = self.albums_snapshot();
-                        entries.sort_by_key(|a| a.name.to_lowercase());
-                        for album in entries {
-                            let add_this = album_this.clone();
-                            let add_path = album_path.clone();
-                            menu = menu.item(
-                                MenuItem::new(album.name.clone())
-                                    .icon(IconName::Folder)
-                                    .on_click(move |_, cx| {
-                                        let _ = add_this.update(cx, |app, cx| {
-                                            app.add_paths_to_album(
-                                                album.id,
-                                                vec![add_path.clone()],
-                                                cx,
-                                            );
-                                        });
-                                    }),
-                            );
-                        }
-                        OverflowMenu::new(
-                            SharedString::from(format!(
-                                "inspector-album-more-{}",
-                                album_path.display()
-                            )),
-                            menu,
-                        )
-                        .tooltip(t(cx, "inspector.album.add"))
-                    })),
-            );
-            if albums.is_empty() {
-                album_section = album_section.child(
-                    div()
-                        .text_xs()
-                        .text_color(colors.subtle)
-                        .child(t(cx, "inspector.album.empty")),
-                );
-            } else {
-                let mut chips = div().flex().flex_wrap().gap(px(4.));
-                for album in albums {
-                    let remove_this = this.clone();
-                    let remove_id = album.id;
-                    let chip_label = album.name.clone();
-                    let remove_path = album_path.clone();
-                    chips = chips.child(
-                        div()
-                            .id(SharedString::from(format!(
-                                "inspector-album-{}-{}",
-                                album.id,
-                                album_path.display()
-                            )))
-                            .flex()
-                            .items_center()
-                            .gap(px(2.))
-                            .px(px(6.))
-                            .py(px(1.))
-                            .rounded(px(4.))
-                            .bg(colors.sunken)
-                            .child(div().text_xs().text_color(colors.fg).child(chip_label))
-                            .child(
-                                IconButton::new(
-                                    SharedString::from(format!(
-                                        "inspector-album-remove-{}-{}",
-                                        album.id,
-                                        album_path.display()
-                                    )),
-                                    IconName::X,
-                                )
-                                .size(ControlSize::Sm)
-                                .tooltip(t(cx, "inspector.album.remove"))
-                                .on_click(move |_, _, cx| {
-                                    let path = remove_path.clone();
-                                    let _ = remove_this.update(cx, |app, cx| {
-                                        app.remove_path_from_album(remove_id, path.clone(), cx);
-                                    });
-                                }),
-                            ),
-                    );
-                }
-                album_section = album_section.child(chips);
-            }
-
             let rating_text = if asset.rating.is_empty() {
                 t(cx, "inspector.info.rating_none").to_string()
             } else {
@@ -1175,6 +1104,50 @@ impl KanalibApp {
                 }
                 _ => t(cx, "inspector.hash.none").to_string(),
             };
+            let mut manual_tags = div().flex().flex_wrap().gap(px(4.));
+            for hit in &asset.manual_tags {
+                let filter = Filter::Tag(hit.tag.clone());
+                let filter_this = this.clone();
+                let tag = hit.tag.clone();
+                manual_tags = manual_tags.child(
+                    div()
+                        .id(SharedString::from(format!("inspector-manual-tag-{tag}")))
+                        .px(px(6.))
+                        .py(px(1.))
+                        .rounded(px(4.))
+                        .bg(colors.sunken)
+                        .text_xs()
+                        .text_color(colors.fg)
+                        .cursor_pointer()
+                        .hover(move |style| style.bg(colors.hover))
+                        .on_click(move |_, _, cx| {
+                            let filter = filter.clone();
+                            let _ = filter_this.update(cx, |app, cx| {
+                                app.set_filter(filter, cx);
+                            });
+                        })
+                        .child(format!("#{tag}")),
+                );
+            }
+            let manual_tags_section = div()
+                .flex()
+                .flex_col()
+                .gap(px(4.))
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .justify_between()
+                        .child(
+                            div()
+                                .text_xs()
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .text_color(colors.subtle)
+                                .child(t(cx, "inspector.tags.manual_heading")),
+                        )
+                        .child(edit_in_viewer),
+                )
+                .children((!asset.manual_tags.is_empty()).then_some(manual_tags));
 
             div()
                 .flex()
@@ -1241,7 +1214,6 @@ impl KanalibApp {
                         .text_color(colors.muted)
                         .child(note)
                 }))
-                .child(album_section)
                 .children(exif_panel(asset, colors, cx))
                 .child(div().text_xs().text_color(colors.subtle).child(sha_line))
                 .children(issue)
@@ -1250,7 +1222,6 @@ impl KanalibApp {
                         .flex()
                         .items_center()
                         .gap(px(6.))
-                        .child(favorite_button)
                         .child(quick)
                         .child(find_similar)
                         .child(compare)
@@ -1261,33 +1232,12 @@ impl KanalibApp {
                     div()
                         .flex()
                         .items_center()
-                        .justify_between()
-                        .child(
-                            div()
-                                .text_xs()
-                                .text_color(colors.subtle)
-                                .child(t(cx, "inspector.rating.label")),
-                        )
-                        .child(rating_control),
-                )
-                .child(
-                    div()
-                        .flex()
-                        .items_center()
                         .gap(px(6.))
                         .child(copy_prompt)
                         .child(copy_path)
                         .child(copy_image),
                 )
-                .child(
-                    div()
-                        .mt(px(4.))
-                        .text_xs()
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .text_color(colors.subtle)
-                        .child(t(cx, "inspector.tags.manual_heading")),
-                )
-                .child(manual_input)
+                .child(manual_tags_section)
                 .child(
                     div()
                         .mt(px(4.))

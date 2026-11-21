@@ -1440,11 +1440,17 @@ pub struct Shared {
     pub ignore_rules: crate::scan_filter::IgnoreRules,
     /// 当前扫描的结构化进度；UI 只读。
     pub scan_progress: ScanProgress,
+    /// 本次扫描期间新加入图库的路径，按导入顺序追加；供导入灯箱展示实时缩略图流。
+    /// 只保留最近 [`SCAN_IMPORT_HISTORY`] 条，不落库，下一次扫描开始时清空。
+    pub scan_imports: Vec<PathBuf>,
     /// 最近一次扫描结束后的结构化摘要。
     pub scan_summary: Option<ScanSummary>,
     /// 磁盘上已缺失、等待用户确认是否从图库移除的批量记录。
     pub pending_cleanup: Option<PendingCleanup>,
 }
+
+/// 导入灯箱保留的最近导入条数：足够铺满一屏缩略图，又不让长扫描常驻内存。
+pub const SCAN_IMPORT_HISTORY: usize = 240;
 
 impl Shared {
     /// 结构化状态：`text` 保留中文回退，UI 按 `key` + `args` 取当前语言文案。
@@ -1531,6 +1537,7 @@ impl Shared {
             scan_filters: HashMap::new(),
             ignore_rules: Default::default(),
             scan_progress: ScanProgress::default(),
+            scan_imports: Vec::new(),
             scan_summary: None,
             pending_cleanup: None,
         }
@@ -1747,6 +1754,12 @@ impl Shared {
             self.counts.add(&asset);
             assets[index] = asset;
         } else {
+            if self.scanning {
+                self.scan_imports.push(asset.path.clone());
+                if self.scan_imports.len() > SCAN_IMPORT_HISTORY {
+                    self.scan_imports.remove(0);
+                }
+            }
             self.counts.add(&asset);
             assets.push(asset);
         }
@@ -2245,6 +2258,43 @@ mod tests {
             captured_at: None,
             metadata_json: String::new(),
         }
+    }
+
+    #[test]
+    fn scan_imports_track_only_new_assets_while_scanning() {
+        let mut shared = Shared::new(
+            Vec::new(),
+            Vec::new(),
+            std::collections::HashMap::new(),
+            90,
+            Vec::new(),
+            Vec::new(),
+        );
+        shared.upsert(asset("outside.png", false, "g", "原创", Vec::new()));
+        assert!(shared.scan_imports.is_empty(), "非扫描期间的更新不进入导入流");
+
+        shared.scanning = true;
+        shared.upsert(asset("first.png", false, "g", "原创", Vec::new()));
+        shared.upsert(asset("first.png", false, "g", "原创", Vec::new()));
+        assert_eq!(shared.scan_imports, vec![PathBuf::from("first.png")]);
+
+        for index in 0..(SCAN_IMPORT_HISTORY + 4) {
+            shared.upsert(asset(
+                &format!("bulk-{index}.png"),
+                false,
+                "g",
+                "原创",
+                Vec::new(),
+            ));
+        }
+        assert_eq!(shared.scan_imports.len(), SCAN_IMPORT_HISTORY);
+        assert!(
+            shared
+                .scan_imports
+                .last()
+                .is_some_and(|path| path.ends_with(format!("bulk-{}.png", SCAN_IMPORT_HISTORY + 3))),
+            "超过上限时应保留最近的导入"
+        );
     }
 
     #[test]

@@ -572,6 +572,7 @@ impl AppState {
         if roots.is_empty() {
             let mut shared = self.shared.lock().unwrap();
             shared.scanning = false;
+            shared.scan_imports.clear();
             set_status!(shared, "notice.library.add_folder", "请添加文件夹");
             shared.revision = shared.revision.wrapping_add(1);
             return;
@@ -579,6 +580,7 @@ impl AppState {
         {
             let mut shared = self.shared.lock().unwrap();
             shared.scanning = true;
+            shared.scan_imports.clear();
             shared.error = None;
             shared.pending_cleanup = None;
             shared.tag_status.cancelling = false;
@@ -680,12 +682,14 @@ impl AppState {
         if roots.is_empty() {
             let mut shared = self.shared.lock().unwrap();
             shared.scanning = false;
+            shared.scan_imports.clear();
             set_status!(shared, "notice.library.add_folder", "请添加文件夹");
             return Ok(());
         }
         {
             let mut shared = self.shared.lock().unwrap();
             shared.scanning = true;
+            shared.scan_imports.clear();
             shared.error = None;
             shared.pending_cleanup = None;
             shared.tag_status.cancelling = false;

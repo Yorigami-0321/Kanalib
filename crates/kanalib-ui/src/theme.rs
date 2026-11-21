@@ -20,6 +20,9 @@ pub(crate) const SPACE_6: f32 = 24.;
 pub(crate) const RADIUS_SM: f32 = 4.;
 pub(crate) const RADIUS_MD: f32 = 6.;
 pub(crate) const RADIUS_LG: f32 = 8.;
+// 图片墙卡片：更大的圆角与独立页脚，让照片本身成为卡片里最亮的部分。
+pub(crate) const RADIUS_CARD: f32 = 12.;
+pub(crate) const CARD_FOOTER_HEIGHT: f32 = 52.;
 
 pub(crate) const ROW_SM: f32 = 28.;
 pub(crate) const ROW_MD: f32 = 36.;
@@ -28,14 +31,17 @@ pub(crate) const ROW_MD: f32 = 36.;
 pub(crate) struct UiColors {
     pub(crate) bg: Hsla,
     pub(crate) surface: Hsla,
+    pub(crate) overlay: Hsla,
     pub(crate) sunken: Hsla,
     pub(crate) border: Hsla,
+    pub(crate) border_strong: Hsla,
     pub(crate) fg: Hsla,
     pub(crate) muted: Hsla,
     pub(crate) subtle: Hsla,
     pub(crate) accent: Hsla,
     pub(crate) selection: Hsla,
     pub(crate) danger: Hsla,
+    pub(crate) info: Hsla,
     pub(crate) hover: Hsla,
     pub(crate) success: Hsla,
     pub(crate) success_subtle: Hsla,
@@ -50,14 +56,17 @@ impl UiColors {
         Self {
             bg: colors.bg,
             surface: colors.surface,
+            overlay: colors.overlay,
             sunken: colors.sunken,
             border: colors.border,
+            border_strong: colors.border_strong,
             fg: colors.fg,
             muted: colors.fg_muted,
             subtle: colors.fg_subtle,
             accent: colors.accent,
             selection: colors.selection,
             danger: colors.danger,
+            info: colors.info,
             hover: colors.hover,
             success: colors.success,
             success_subtle: colors.success_subtle,

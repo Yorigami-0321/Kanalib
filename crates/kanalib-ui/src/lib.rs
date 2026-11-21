@@ -60,6 +60,7 @@ mod compare;
 mod components;
 mod dedup;
 mod format;
+mod import_lab;
 mod inspector;
 mod localization;
 mod platform;
@@ -188,6 +189,10 @@ enum ViewMode {
     Content,
 }
 
+/// 网格无级缩放的上下限；超出后卡片会失去可读性。
+pub(crate) const GRID_ZOOM_MIN: f32 = 0.6;
+pub(crate) const GRID_ZOOM_MAX: f32 = 1.8;
+
 impl ViewMode {
     const ALL: [ViewMode; 6] = [
         Self::IconsLarge,
@@ -271,6 +276,15 @@ impl ViewMode {
         }
     }
 
+    /// 网格密度缩放后的最小卡片宽度；列表/详情/内容视图不受缩放影响。
+    fn min_width_at(self, zoom: f32) -> f32 {
+        if self.is_grid() {
+            (self.min_width() * zoom).max(64.)
+        } else {
+            self.min_width()
+        }
+    }
+
     fn image_height(self) -> f32 {
         match self {
             Self::IconsLarge => 268.,
@@ -280,9 +294,23 @@ impl ViewMode {
         }
     }
 
-    fn row_height(self) -> f32 {
+    /// 网格密度缩放后的图片高度；列表/详情/内容视图不受缩放影响。
+    fn image_height_at(self, zoom: f32) -> f32 {
+        if self.is_grid() {
+            (self.image_height() * zoom).max(48.)
+        } else {
+            self.image_height()
+        }
+    }
+
+    fn row_height_at(self, zoom: f32) -> f32 {
         match self {
-            Self::IconsLarge | Self::IconsMedium | Self::IconsSmall => self.image_height() + 68.,
+            // 行高 = 图片 + 卡片页脚 + 行上下留白（见 views::ROW_PADDING）。
+            Self::IconsLarge | Self::IconsMedium | Self::IconsSmall => {
+                self.image_height_at(zoom)
+                    + crate::theme::CARD_FOOTER_HEIGHT
+                    + crate::views::ROW_PADDING * 2.
+            }
             Self::List | Self::Details => 32.,
             Self::Content => 84.,
         }
@@ -536,6 +564,40 @@ mod tests {
             assert_eq!(super::ViewMode::from_key(mode.key()), Some(mode));
         }
         assert_eq!(super::ViewMode::from_key("unknown"), None);
+    }
+
+    #[test]
+    fn grid_cards_fit_their_row_height() {
+        // 卡片页脚必须完整落在虚拟列表行内，否则缩略图会压到下一行。
+        for mode in [
+            super::ViewMode::IconsLarge,
+            super::ViewMode::IconsMedium,
+            super::ViewMode::IconsSmall,
+        ] {
+            let available = mode.row_height_at(1.) - super::views::ROW_PADDING * 2.;
+            assert!(
+                available >= mode.image_height_at(1.) + crate::theme::CARD_FOOTER_HEIGHT,
+                "{:?} 行高 {} 放不下图片 {} + 页脚 {}",
+                mode,
+                mode.row_height_at(1.),
+                mode.image_height_at(1.),
+                crate::theme::CARD_FOOTER_HEIGHT
+            );
+        }
+    }
+
+    #[test]
+    fn grid_zoom_scales_rows_and_columns() {
+        let mode = super::ViewMode::IconsMedium;
+        assert!(
+            mode.row_height_at(1.3) > mode.row_height_at(1.),
+            "放大后行高必须同步增大"
+        );
+        assert!(
+            mode.min_width_at(0.7) < mode.min_width_at(1.),
+            "缩小后列宽必须同步减小"
+        );
+        assert_eq!(mode.row_height_at(1.), 150. + crate::theme::CARD_FOOTER_HEIGHT + 16.);
     }
 
     #[test]

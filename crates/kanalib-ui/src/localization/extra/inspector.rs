@@ -54,10 +54,8 @@ pub(crate) const ZH: &[(&str, &str)] = &[
     ("inspector.tags.update_failed", "标签操作失败：{error}"),
     ("inspector.tags.updated", "标签已更新"),
     ("inspector.tags.unchanged", "标签已存在或无需变更"),
-    (
-        "inspector.tags.manual_heading",
-        "手工标签（回车添加，自动保存）",
-    ),
+    ("inspector.tags.manual_heading", "手工标签"),
+    ("inspector.tags.edit_in_viewer", "在查看器中编辑"),
     (
         "inspector.tags.auto_heading",
         "自动标签（点击筛选，× 移除）",
@@ -173,10 +171,8 @@ pub(crate) const EN: &[(&str, &str)] = &[
         "inspector.tags.unchanged",
         "Tags already present or unchanged",
     ),
-    (
-        "inspector.tags.manual_heading",
-        "Manual tags (Enter to add, saved automatically)",
-    ),
+    ("inspector.tags.manual_heading", "Manual tags"),
+    ("inspector.tags.edit_in_viewer", "Edit in viewer"),
     (
         "inspector.tags.auto_heading",
         "Auto tags (click to filter, × to remove)",

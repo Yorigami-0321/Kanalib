@@ -101,6 +101,29 @@ impl Default for AlbumCache {
     }
 }
 
+/// 侧栏来源卡片的封面与日期跨度；扫描中不计算，扫描结束后按 `shared.revision` 刷新。
+#[derive(Clone, Debug, Default)]
+pub(crate) struct SourceCard {
+    pub(crate) cover: Option<PathBuf>,
+    pub(crate) first: u64,
+    pub(crate) last: u64,
+    cover_at: u64,
+}
+
+pub(crate) struct SourceCardCache {
+    revision: u64,
+    cards: HashMap<PathBuf, SourceCard>,
+}
+
+impl Default for SourceCardCache {
+    fn default() -> Self {
+        Self {
+            revision: u64::MAX,
+            cards: HashMap::new(),
+        }
+    }
+}
+
 pub(crate) fn canonicalize_org_name(name: &str) -> String {
     name.trim().to_string()
 }
@@ -222,6 +245,8 @@ pub(crate) fn source_row(
     count: usize,
     active: bool,
     status: Option<SourceScanStatus>,
+    card: Option<SourceCard>,
+    thumb_cache: Entity<ThumbCache>,
     this: Entity<KanalibApp>,
     colors: UiColors,
     cx: &App,
@@ -231,16 +256,23 @@ pub(crate) fn source_row(
     let this_right = this.clone();
     let root_right = root.clone();
     let path = root.display().to_string();
-    let (status_text, status_color) = match &status {
+    let (status_text, status_color, show_status_text) = match &status {
         Some(status) if !status.online => (
             crate::localization::t(cx, "sidebar.source.offline"),
             colors.danger,
+            true,
         ),
         Some(status) if status.error.is_some() => (
             crate::localization::t(cx, "sidebar.source.error"),
             colors.warning,
+            true,
         ),
-        _ => (SharedString::default(), colors.subtle),
+        Some(_) => (
+            crate::localization::t(cx, "sidebar.source.online"),
+            colors.success,
+            false,
+        ),
+        None => (SharedString::default(), colors.subtle, false),
     };
     let error = status
         .as_ref()
@@ -265,6 +297,37 @@ pub(crate) fn source_row(
         )
         .to_string(),
     };
+    let aria = format!("{aria} · {count}");
+    let cover: AnyElement = match card.as_ref().and_then(|card| card.cover.clone()) {
+        Some(thumb) => img(thumb)
+            .image_cache(&thumb_cache)
+            .size_full()
+            .object_fit(ObjectFit::Cover)
+            .into_any_element(),
+        None => div()
+            .size_full()
+            .flex()
+            .items_center()
+            .justify_center()
+            .child(
+                Icon::new(IconName::ImageOff)
+                    .size(IconSize::Sm)
+                    .color(colors.subtle),
+            )
+            .into_any_element(),
+    };
+    let span = card.as_ref().and_then(|card| {
+        if card.first == 0 && card.last == 0 {
+            return None;
+        }
+        let first = crate::format::format_date(card.first);
+        let last = crate::format::format_date(card.last);
+        Some(if first == last {
+            first
+        } else {
+            format!("{first} – {last}")
+        })
+    });
     let mut row = div()
         .id(id)
         .tab_index(0)
@@ -273,9 +336,9 @@ pub(crate) fn source_row(
         .aria_label(aria)
         .flex()
         .items_center()
-        .justify_between()
+        .gap(px(8.))
         .px(px(8.))
-        .py(px(5.))
+        .py(px(6.))
         .rounded(px(RADIUS_SM))
         .cursor_pointer()
         .hover(move |style| style.bg(colors.hover));
@@ -302,41 +365,73 @@ pub(crate) fn source_row(
     })
     .child(
         div()
+            .w(px(44.))
+            .h(px(44.))
+            .flex_none()
+            .rounded(px(8.))
+            .overflow_hidden()
+            .bg(colors.sunken)
+            .child(cover),
+    )
+    .child(
+        div()
             .flex_1()
             .min_w(px(0.))
             .flex()
-            .items_center()
-            .gap(px(5.))
-            .children((!status_text.is_empty()).then(|| {
-                div()
-                    .flex_none()
-                    .flex()
-                    .items_center()
-                    .gap(px(3.))
-                    .child(div().size(px(6.)).rounded_full().bg(status_color))
-                    .child(
-                        div()
-                            .text_xs()
-                            .text_color(status_color)
-                            .child(status_text.clone()),
-                    )
-            }))
+            .flex_col()
+            .gap(px(2.))
             .child(
                 div()
                     .flex_1()
                     .min_w(px(0.))
-                    .truncate()
-                    .text_xs()
-                    .text_color(colors.fg)
-                    .child(label),
+                    .flex()
+                    .items_center()
+                    .gap(px(5.))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w(px(0.))
+                            .truncate()
+                            .text_xs()
+                            .text_color(colors.fg)
+                            .child(label),
+                    )
+                    .children((!status_text.is_empty()).then(|| {
+                        div()
+                            .flex_none()
+                            .flex()
+                            .items_center()
+                            .gap(px(3.))
+                            .child(div().size(px(6.)).rounded_full().bg(status_color))
+                            .children(show_status_text.then(|| {
+                                div()
+                                    .text_xs()
+                                    .text_color(status_color)
+                                    .child(status_text.clone())
+                            }))
+                    })),
+            )
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(4.))
+                    .child(
+                        div()
+                            .flex_none()
+                            .text_xs()
+                            .text_color(colors.subtle)
+                            .child(count.to_string()),
+                    )
+                    .children(span.map(|span| {
+                        div()
+                            .min_w(px(0.))
+                            .truncate()
+                            .text_xs()
+                            .text_color(colors.subtle)
+                            .child(format!("· {span}"))
+                    })),
             ),
-    )
-    .child(
-        div()
-            .flex_none()
-            .text_xs()
-            .text_color(colors.subtle)
-            .child(count.to_string()),
     )
 }
 
@@ -707,6 +802,11 @@ impl KanalibApp {
         cx: &App,
     ) -> impl IntoElement + use<> {
         let ctx = SidebarContext::from_screen(screen);
+        let source_cards = if ctx == SidebarContext::Library {
+            self.source_cards()
+        } else {
+            HashMap::new()
+        };
         // F-070 方案 A：资源管理器侧栏 body 独立成一段；S3/S4 为其它上下文提供各自的 body。
         let library_body = || {
             let state = self.state.clone();
@@ -760,6 +860,8 @@ impl KanalibApp {
                             count,
                             library && filter == &Filter::Source(root.clone()),
                             status,
+                            source_cards.get(root).cloned(),
+                            self.thumb_cache.clone(),
                             this.clone(),
                             colors,
                             cx,
@@ -1533,7 +1635,8 @@ impl KanalibApp {
             .h_full()
             .flex()
             .flex_col()
-            .bg(colors.surface)
+            // chrome 退后：侧栏与窗口同底，只有内容卡片使用更亮的 surface。
+            .bg(colors.bg)
             .border_r_1()
             .border_color(colors.border)
             .child(
@@ -1645,9 +1748,7 @@ impl KanalibApp {
             .items_center()
             .justify_between()
             .py(px(SPACE_1_5))
-            .bg(colors.sunken)
-            .border_r_1()
-            .border_color(colors.border)
+            .bg(colors.bg)
             .child(
                 div()
                     .w_full()
@@ -1729,6 +1830,43 @@ impl KanalibApp {
             return self.selection.len();
         }
         usize::from(self.state.shared.lock().unwrap().selected.is_some())
+    }
+
+    /// 来源封面卡片的数据：扫描中只显示数量/状态，扫描结束后按 revision 一次算全。
+    pub(crate) fn source_cards(&self) -> HashMap<PathBuf, SourceCard> {
+        let shared = self.state.shared.lock().unwrap();
+        if shared.scanning {
+            return HashMap::new();
+        }
+        let revision = shared.revision;
+        let mut cache = self.source_card_cache.borrow_mut();
+        if cache.revision != revision {
+            let mut cards: HashMap<PathBuf, SourceCard> = HashMap::new();
+            if let Ok(assets) = shared.assets.read() {
+                for asset in assets.iter() {
+                    let taken = asset.taken_or_modified();
+                    let entry = cards.entry(asset.library_root.clone()).or_default();
+                    if taken > 0 {
+                        entry.first = if entry.first == 0 {
+                            taken
+                        } else {
+                            entry.first.min(taken)
+                        };
+                        entry.last = entry.last.max(taken);
+                    }
+                    let thumb = asset.tile_thumb.clone().or_else(|| asset.thumb.clone());
+                    if let Some(thumb) = thumb
+                        && (entry.cover.is_none() || taken > entry.cover_at)
+                    {
+                        entry.cover = Some(thumb);
+                        entry.cover_at = taken;
+                    }
+                }
+            }
+            cache.cards = cards;
+            cache.revision = revision;
+        }
+        cache.cards.clone()
     }
 
     /// 相册列表快照：只在 `shared.revision` 变化时重查，避免每帧打开数据库。
