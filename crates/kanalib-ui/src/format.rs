@@ -138,11 +138,13 @@ pub(crate) fn format_duration(secs: f64) -> String {
 /// 常见视频编码的展示名；未知编码保留原名大写，空值写“未知”。
 pub(crate) fn friendly_codec_label(codec: &str) -> String {
     match codec.trim().to_ascii_lowercase().as_str() {
-        "" => if crate::localization::is_english() {
-            "Unknown".to_string()
-        } else {
-            "未知".to_string()
-        },
+        "" => {
+            if crate::localization::is_english() {
+                "Unknown".to_string()
+            } else {
+                "未知".to_string()
+            }
+        }
         "h264" | "avc" => "H.264".to_string(),
         "hevc" | "h265" => "HEVC".to_string(),
         "av1" => "AV1".to_string(),
@@ -263,26 +265,34 @@ pub(crate) fn relative_time(seconds: u64) -> String {
     }
     let diff = now - seconds;
     match diff {
-        0..=59 => if crate::localization::is_english() {
-            "Just now".to_string()
-        } else {
-            "刚刚".to_string()
-        },
-        60..=3_599 => if crate::localization::is_english() {
-            format!("{} minutes ago", diff / 60)
-        } else {
-            format!("{} 分钟前", diff / 60)
-        },
-        3_600..=86_399 => if crate::localization::is_english() {
-            format!("{} hours ago", diff / 3_600)
-        } else {
-            format!("{} 小时前", diff / 3_600)
-        },
-        86_400..=2_591_999 => if crate::localization::is_english() {
-            format!("{} days ago", diff / 86_400)
-        } else {
-            format!("{} 天前", diff / 86_400)
-        },
+        0..=59 => {
+            if crate::localization::is_english() {
+                "Just now".to_string()
+            } else {
+                "刚刚".to_string()
+            }
+        }
+        60..=3_599 => {
+            if crate::localization::is_english() {
+                format!("{} minutes ago", diff / 60)
+            } else {
+                format!("{} 分钟前", diff / 60)
+            }
+        }
+        3_600..=86_399 => {
+            if crate::localization::is_english() {
+                format!("{} hours ago", diff / 3_600)
+            } else {
+                format!("{} 小时前", diff / 3_600)
+            }
+        }
+        86_400..=2_591_999 => {
+            if crate::localization::is_english() {
+                format!("{} days ago", diff / 86_400)
+            } else {
+                format!("{} 天前", diff / 86_400)
+            }
+        }
         _ => format_date(seconds),
     }
 }

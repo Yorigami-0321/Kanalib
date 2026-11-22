@@ -142,7 +142,7 @@ const MEASURE = String.raw`
         hit: tiles.some((t) => t.rect.right > x && t.rect.left < end && t.rect.bottom > cr.top && t.rect.top < cr.bottom),
       });
     }
-    const seamEl = document.querySelector('.seam');
+    const seamEl = document.querySelector('.rail, .seam');
     const seamBox = seamEl ? seamEl.getBoundingClientRect() : null;
     const seamRight = seamBox ? seamBox.right : cr.left;
     // 取样/操作点落在缝的中心，而不是"画布左缘的一半"（画布现在从 0 开始）。
@@ -175,7 +175,7 @@ const MEASURE = String.raw`
       }
       return { x: probeX, y: cr.top + cr.height / 2 };
     })();
-    const seamRect = document.querySelector('.seam')?.getBoundingClientRect() ?? null;
+    const seamRect = document.querySelector('.rail, .seam')?.getBoundingClientRect() ?? null;
     return {
       viewport: { w: innerWidth, h: innerHeight },
       canvas: { left: cr.left, top: cr.top, w: cr.width, h: cr.height },
@@ -237,6 +237,8 @@ async function main() {
       '--no-first-run',
       '--no-default-browser-check',
       '--disable-extensions',
+      '--disable-gpu',
+      '--no-sandbox',
       '--hide-scrollbars',
       '--window-size=1440,900',
       'about:blank',
@@ -573,7 +575,7 @@ async function main() {
       d.colsMissing.length === 0 &&
       // 缝区按下/拖动/滚轮都不驱动画布；右侧滚轮照常平移与缩放。
       Math.abs(seam.canvasLeft) <= 1 &&
-      Math.abs(seam.seamWidth - 120) <= 1 &&
+      Math.abs(seam.seamWidth - 208) <= 1 &&
       seam.canvasCoversSeam === true &&
       seam.wallheadBlocksClick === false &&
       seam.moved === false &&

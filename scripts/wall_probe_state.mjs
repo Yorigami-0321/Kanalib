@@ -129,6 +129,8 @@ async function main() {
       '--no-first-run',
       '--no-default-browser-check',
       '--disable-extensions',
+      '--disable-gpu',
+      '--no-sandbox',
       '--hide-scrollbars',
       '--window-size=1440,900',
       'about:blank',

@@ -120,7 +120,13 @@ pub(crate) fn remote_kind_label(kind: SourceKind) -> &'static str {
     match kind {
         SourceKind::Immich => "Immich",
         SourceKind::WebDav => "WebDAV",
-        SourceKind::Local => if crate::localization::is_english() { "Local" } else { "本地" },
+        SourceKind::Local => {
+            if crate::localization::is_english() {
+                "Local"
+            } else {
+                "本地"
+            }
+        }
     }
 }
 
@@ -128,10 +134,18 @@ pub(crate) fn remote_kind_label(kind: SourceKind) -> &'static str {
 pub(crate) fn validate_remote_url(text: &str) -> Result<String, String> {
     let trimmed = text.trim();
     if trimmed.is_empty() {
-        return Err(if crate::localization::is_english() { "Enter a base URL".to_string() } else { "请输入 base URL".to_string() });
+        return Err(if crate::localization::is_english() {
+            "Enter a base URL".to_string()
+        } else {
+            "请输入 base URL".to_string()
+        });
     }
     if trimmed.chars().any(char::is_whitespace) {
-        return Err(if crate::localization::is_english() { "The URL cannot contain whitespace".to_string() } else { "URL 不能包含空白字符".to_string() });
+        return Err(if crate::localization::is_english() {
+            "The URL cannot contain whitespace".to_string()
+        } else {
+            "URL 不能包含空白字符".to_string()
+        });
     }
     let lower = trimmed.to_ascii_lowercase();
     let rest = if let Some(rest) = lower.strip_prefix("https://") {
@@ -139,11 +153,19 @@ pub(crate) fn validate_remote_url(text: &str) -> Result<String, String> {
     } else if let Some(rest) = lower.strip_prefix("http://") {
         rest
     } else {
-        return Err(if crate::localization::is_english() { "The URL must start with http:// or https://".to_string() } else { "URL 必须以 http:// 或 https:// 开头".to_string() });
+        return Err(if crate::localization::is_english() {
+            "The URL must start with http:// or https://".to_string()
+        } else {
+            "URL 必须以 http:// 或 https:// 开头".to_string()
+        });
     };
     let host = rest.split('/').next().unwrap_or_default();
     if host.is_empty() || host.starts_with(':') {
-        return Err(if crate::localization::is_english() { "The URL is missing a host name".to_string() } else { "URL 缺少主机名".to_string() });
+        return Err(if crate::localization::is_english() {
+            "The URL is missing a host name".to_string()
+        } else {
+            "URL 缺少主机名".to_string()
+        });
     }
     Ok(trimmed.to_string())
 }
@@ -226,12 +248,34 @@ pub(crate) fn format_tag_throughput(i18n: &I18n, rate: f32) -> String {
 pub(crate) fn format_tag_eta(eta: Option<u64>) -> String {
     match eta {
         None => "—".to_string(),
-        Some(0) => if crate::localization::is_english() { "0 s".to_string() } else { "0 秒".to_string() },
-        Some(seconds) if seconds < 60 => if crate::localization::is_english() { format!("{seconds} s") } else { format!("{seconds} 秒") },
-        Some(seconds) if seconds < 3_600 => {
-            if crate::localization::is_english() { format!("{} min {:02} s", seconds / 60, seconds % 60) } else { format!("{} 分 {:02} 秒", seconds / 60, seconds % 60) }
+        Some(0) => {
+            if crate::localization::is_english() {
+                "0 s".to_string()
+            } else {
+                "0 秒".to_string()
+            }
         }
-        Some(seconds) => if crate::localization::is_english() { format!("{} h {:02} min", seconds / 3_600, (seconds % 3_600) / 60) } else { format!("{} 小时 {:02} 分", seconds / 3_600, (seconds % 3_600) / 60) },
+        Some(seconds) if seconds < 60 => {
+            if crate::localization::is_english() {
+                format!("{seconds} s")
+            } else {
+                format!("{seconds} 秒")
+            }
+        }
+        Some(seconds) if seconds < 3_600 => {
+            if crate::localization::is_english() {
+                format!("{} min {:02} s", seconds / 60, seconds % 60)
+            } else {
+                format!("{} 分 {:02} 秒", seconds / 60, seconds % 60)
+            }
+        }
+        Some(seconds) => {
+            if crate::localization::is_english() {
+                format!("{} h {:02} min", seconds / 3_600, (seconds % 3_600) / 60)
+            } else {
+                format!("{} 小时 {:02} 分", seconds / 3_600, (seconds % 3_600) / 60)
+            }
+        }
     }
 }
 
@@ -356,23 +400,19 @@ pub(crate) fn backup_next_due_text(i18n: &I18n, status: &backup::BackupStatus) -
             .to_string();
     }
     if !status.plan.enabled {
-        return i18n
-            .text("settings.backup.next_disabled", &[])
-            .to_string();
+        return i18n.text("settings.backup.next_disabled", &[]).to_string();
     }
     match status.next_due {
-        Some(due) if due <= SystemTime::now() => i18n
-            .text("settings.backup.next_due_now", &[])
-            .to_string(),
+        Some(due) if due <= SystemTime::now() => {
+            i18n.text("settings.backup.next_due_now", &[]).to_string()
+        }
         Some(due) => i18n
             .text(
                 "settings.backup.next_due",
                 &[("time", &backup::format_utc_datetime(due))],
             )
             .to_string(),
-        None => i18n
-            .text("settings.backup.next_unknown", &[])
-            .to_string(),
+        None => i18n.text("settings.backup.next_unknown", &[]).to_string(),
     }
 }
 
@@ -455,10 +495,7 @@ impl KanalibApp {
                     t_args(
                         cx,
                         "settings.notice.tag_threshold_saved",
-                        &[
-                            ("label", label.as_ref()),
-                            ("value", &format!("{saved:.2}")),
-                        ],
+                        &[("label", label.as_ref()), ("value", &format!("{saved:.2}"))],
                     )
                     .to_string(),
                 );
@@ -467,10 +504,7 @@ impl KanalibApp {
                 let message = t_args(
                     cx,
                     "settings.notice.tag_threshold_failed",
-                    &[
-                        ("label", label.as_ref()),
-                        ("error", &format!("{error:#}")),
-                    ],
+                    &[("label", label.as_ref()), ("error", &format!("{error:#}"))],
                 )
                 .to_string();
                 self.tag_settings_notice = Some(message.clone());
@@ -495,7 +529,10 @@ impl KanalibApp {
                 t_args(
                     cx,
                     "settings.notice.tag_threshold_bound",
-                    &[("label", label.as_ref()), ("value", &format!("{current:.2}"))],
+                    &[
+                        ("label", label.as_ref()),
+                        ("value", &format!("{current:.2}")),
+                    ],
                 )
                 .to_string(),
             );
@@ -610,8 +647,7 @@ impl KanalibApp {
         let (paths, scope) = self.tag_target_paths();
         let scope_label = t(cx, scope_key(scope));
         if paths.is_empty() {
-            self.tag_settings_notice =
-                Some(t(cx, "settings.notice.recompute_empty").to_string());
+            self.tag_settings_notice = Some(t(cx, "settings.notice.recompute_empty").to_string());
             let toast = t(cx, "settings.notice.recompute_empty_toast");
             push_toast(&self.toaster, cx, toast, Severity::Warning);
             cx.notify();
@@ -709,9 +745,7 @@ impl KanalibApp {
         cx: &mut Context<Self>,
     ) {
         if self.tag_retag_running {
-            self.tag_settings_notice = Some(
-                t(cx, "settings.notice.retag_busy").to_string(),
-            );
+            self.tag_settings_notice = Some(t(cx, "settings.notice.retag_busy").to_string());
             cx.notify();
             return;
         }
@@ -821,9 +855,8 @@ impl KanalibApp {
         if paused {
             match self.state.resume_tag_queue() {
                 Ok(()) => {
-                    self.tag_settings_notice = Some(
-                        t(cx, "settings.notice.queue_resumed").to_string(),
-                    );
+                    self.tag_settings_notice =
+                        Some(t(cx, "settings.notice.queue_resumed").to_string());
                 }
                 Err(error) => {
                     let message = t_args(
@@ -837,9 +870,7 @@ impl KanalibApp {
             }
         } else {
             self.state.pause_tag_queue();
-            self.tag_settings_notice = Some(
-                t(cx, "settings.notice.queue_paused").to_string(),
-            );
+            self.tag_settings_notice = Some(t(cx, "settings.notice.queue_paused").to_string());
         }
         self.refresh_tag_settings(cx);
         cx.notify();
@@ -847,9 +878,7 @@ impl KanalibApp {
 
     pub(crate) fn cancel_tag_queue(&mut self, cx: &mut Context<Self>) {
         self.state.cancel_tag_queue();
-        self.tag_settings_notice = Some(
-            t(cx, "settings.notice.queue_cancelling").to_string(),
-        );
+        self.tag_settings_notice = Some(t(cx, "settings.notice.queue_cancelling").to_string());
         self.refresh_tag_settings(cx);
         cx.notify();
     }
@@ -1173,9 +1202,7 @@ impl KanalibApp {
                             .safety_backup
                             .as_ref()
                             .map(|path| path.display().to_string())
-                            .unwrap_or_else(|| {
-                                t(cx, "settings.backup.safety_none").to_string()
-                            });
+                            .unwrap_or_else(|| t(cx, "settings.backup.safety_none").to_string());
                         let mut summary = t_args(
                             cx,
                             "settings.backup.restore_prepared",
@@ -1187,12 +1214,8 @@ impl KanalibApp {
                         .to_string();
                         for warning in &report.warnings {
                             summary.push_str(
-                                t_args(
-                                    cx,
-                                    "settings.backup.note_suffix",
-                                    &[("warning", warning)],
-                                )
-                                .as_ref(),
+                                t_args(cx, "settings.backup.note_suffix", &[("warning", warning)])
+                                    .as_ref(),
                             );
                         }
                         app.last_backup = Some(summary);
@@ -1289,7 +1312,10 @@ impl KanalibApp {
                 let message = t_args(
                     cx,
                     "settings.notice.cache_cleaned",
-                    &[("files", &files.to_string()), ("bytes", &format_bytes(bytes))],
+                    &[
+                        ("files", &files.to_string()),
+                        ("bytes", &format_bytes(bytes)),
+                    ],
                 );
                 push_toast(&self.toaster, cx, message, Severity::Success);
                 self.refresh_cache_stats(cx);
@@ -1487,9 +1513,10 @@ impl KanalibApp {
         let backup_next_text = backup_next_due_text(cx.global::<I18n>(), &backup_status);
         let backup_pending = backup_status.pending_restore.clone();
         let backup_has_pending = backup_pending.is_some();
-        let backup_skipped = backup_status.skipped_reason.as_ref().map(|reason| {
-            t_args(cx, "settings.backup.skipped", &[("reason", reason)]).to_string()
-        });
+        let backup_skipped = backup_status
+            .skipped_reason
+            .as_ref()
+            .map(|reason| t_args(cx, "settings.backup.skipped", &[("reason", reason)]).to_string());
         let backup_error = backup_status.last_error.clone();
         let backup_last_text = if self.last_backup.is_none() {
             backup_status.last_path.as_ref().map(|path| {
@@ -1809,8 +1836,7 @@ impl KanalibApp {
                                     }
                                     cx.notify();
                                 });
-                                entry_for_clear
-                                    .update(cx, |input, cx| input.set_text("", cx));
+                                entry_for_clear.update(cx, |input, cx| input.set_text("", cx));
                             }),
                     )
                     .child(
@@ -1829,11 +1855,8 @@ impl KanalibApp {
                                         match app.state.add_protected_path(folder) {
                                             Ok(()) => {
                                                 app.settings_notice = Some(
-                                                    t(
-                                                        cx,
-                                                        "settings.notice.protected_folder_added",
-                                                    )
-                                                    .to_string(),
+                                                    t(cx, "settings.notice.protected_folder_added")
+                                                        .to_string(),
                                                 );
                                             }
                                             Err(error) => {
@@ -1864,24 +1887,23 @@ impl KanalibApp {
             true,
             colors,
         );
-        let similar_section =
-            card(colors)
-                .flex()
-                .flex_col()
-                .gap(px(SPACE_2))
-                .child(
-                    div()
-                        .text_sm()
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .child(t(cx, "settings.section.similar")),
-                )
-                .child(
-                    div()
-                        .text_xs()
-                        .text_color(colors.muted)
-                        .child(t(cx, "settings.similar.desc")),
-                )
-                .child(threshold_editor);
+        let similar_section = card(colors)
+            .flex()
+            .flex_col()
+            .gap(px(SPACE_2))
+            .child(
+                div()
+                    .text_sm()
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .child(t(cx, "settings.section.similar")),
+            )
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(colors.muted)
+                    .child(t(cx, "settings.similar.desc")),
+            )
+            .child(threshold_editor);
 
         let path_row = |label: SharedString, value: PathBuf, colors: UiColors| {
             div()
@@ -1977,10 +1999,8 @@ impl KanalibApp {
                     ],
                 )
                 .to_string();
-                let filter_summary = scan_filter_summary(
-                    cx.global::<I18n>(),
-                    &self.state.scan_filter(root),
-                );
+                let filter_summary =
+                    scan_filter_summary(cx.global::<I18n>(), &self.state.scan_filter(root));
                 let asset_count = status.asset_count;
                 let online = status.online;
                 let error = status.error.clone();
@@ -2062,16 +2082,13 @@ impl KanalibApp {
                                                     &[("time", &last_scan_text)],
                                                 )),
                                         )
-                                        .child(
-                                            div()
-                                                .text_xs()
-                                                .text_color(colors.subtle)
-                                                .child(t_args(
-                                                    cx,
-                                                    "settings.sources.asset_count",
-                                                    &[("n", &asset_count.to_string())],
-                                                )),
-                                        )
+                                        .child(div().text_xs().text_color(colors.subtle).child(
+                                            t_args(
+                                                cx,
+                                                "settings.sources.asset_count",
+                                                &[("n", &asset_count.to_string())],
+                                            ),
+                                        ))
                                         .child(
                                             div()
                                                 .text_xs()
@@ -2081,15 +2098,13 @@ impl KanalibApp {
                                 )
                                 .children(error.map(|error| {
                                     let error_text = crate::localization::core_status(cx, &error);
-                                    div()
-                                        .truncate()
-                                        .text_xs()
-                                        .text_color(colors.danger)
-                                        .child(t_args(
+                                    div().truncate().text_xs().text_color(colors.danger).child(
+                                        t_args(
                                             cx,
                                             "settings.sources.error",
                                             &[("error", error_text.as_ref())],
-                                        ))
+                                        ),
+                                    )
                                 }))
                                 .child(
                                     div()
@@ -2283,16 +2298,11 @@ impl KanalibApp {
                             });
                         }),
                     )
-                    .child(
-                        div()
-                            .text_xs()
-                            .text_color(colors.subtle)
-                            .child(t_args(
-                                cx,
-                                "settings.tag.default_value",
-                                &[("value", &format!("{default:.2}"))],
-                            )),
-                    ),
+                    .child(div().text_xs().text_color(colors.subtle).child(t_args(
+                        cx,
+                        "settings.tag.default_value",
+                        &[("value", &format!("{default:.2}"))],
+                    ))),
             );
         }
 
@@ -2344,16 +2354,11 @@ impl KanalibApp {
                 );
             }
             if override_count > 8 {
-                rows = rows.child(
-                    div()
-                        .text_xs()
-                        .text_color(colors.subtle)
-                        .child(t_args(
-                            cx,
-                            "settings.tag.overrides_more",
-                            &[("n", &(override_count - 8).to_string())],
-                        )),
-                );
+                rows = rows.child(div().text_xs().text_color(colors.subtle).child(t_args(
+                    cx,
+                    "settings.tag.overrides_more",
+                    &[("n", &(override_count - 8).to_string())],
+                )));
             }
             rows.into_any_element()
         };
@@ -2389,9 +2394,11 @@ impl KanalibApp {
                 ),
             )
             .child(
-                div()
-                    .w(px(110.))
-                    .child(Input::new(&tag_override_value).least("0.00–1.00").clearable()),
+                div().w(px(110.)).child(
+                    Input::new(&tag_override_value)
+                        .least("0.00–1.00")
+                        .clearable(),
+                ),
             )
             .child(
                 Button::new("tag-override-apply", t(cx, "settings.tag.apply_override"))
@@ -2635,13 +2642,11 @@ impl KanalibApp {
                                         ],
                                     ),
                                 ))
-                                .child(
-                                    div().truncate().text_xs().text_color(colors.danger).child(
-                                        error.last_error.clone().unwrap_or_else(|| {
-                                            t(cx, "settings.tag.error_no_detail").to_string()
-                                        }),
-                                    ),
-                                ),
+                                .child(div().truncate().text_xs().text_color(colors.danger).child(
+                                    error.last_error.clone().unwrap_or_else(|| {
+                                        t(cx, "settings.tag.error_no_detail").to_string()
+                                    }),
+                                )),
                         );
                 }
                 rows.into_any_element()
@@ -2657,25 +2662,19 @@ impl KanalibApp {
                     .font_weight(FontWeight::SEMIBOLD)
                     .child(t(cx, "settings.section.tagging")),
             )
-            .child(
-                div()
-                    .text_xs()
-                    .text_color(colors.muted)
-                    .child(t(
-                        cx,
-                        if thresholds_loaded {
-                            "settings.tag.desc_loaded"
-                        } else {
-                            "settings.tag.desc_unloaded"
-                        },
-                    )),
+            .child(div().text_xs().text_color(colors.muted).child(t(
+                cx,
+                if thresholds_loaded {
+                    "settings.tag.desc_loaded"
+                } else {
+                    "settings.tag.desc_unloaded"
+                },
+            )))
+            .children(
+                self.tag_settings_notice
+                    .clone()
+                    .map(|notice| div().text_xs().text_color(colors.accent).child(notice)),
             )
-            .children(self.tag_settings_notice.clone().map(|notice| {
-                div()
-                    .text_xs()
-                    .text_color(colors.accent)
-                    .child(notice)
-            }))
             .child(
                 div()
                     .text_xs()
@@ -2701,32 +2700,21 @@ impl KanalibApp {
                         .size(ControlSize::Sm)
                         .loading(self.tag_recompute_running)
                         .on_click(move |_, _, cx| {
-                            let _ = this_recompute.update(cx, |app, cx| {
-                                app.start_recompute_tag_thresholds(cx)
-                            });
+                            let _ = this_recompute
+                                .update(cx, |app, cx| app.start_recompute_tag_thresholds(cx));
                         }),
                     )
-                    .child(
-                        div()
-                            .text_xs()
-                            .text_color(colors.subtle)
-                            .child(t_args(
-                                cx,
-                                "settings.tag.target_count",
-                                &[("n", &target_count.to_string())],
-                            )),
-                    ),
-            )
-            .child(
-                div()
-                    .text_xs()
-                    .text_color(colors.subtle)
-                    .child(t_args(
+                    .child(div().text_xs().text_color(colors.subtle).child(t_args(
                         cx,
-                        "settings.tag.candidate_note",
-                        &[("score", &format!("{TAG_CANDIDATE_MIN_SCORE:.3}"))],
-                    )),
+                        "settings.tag.target_count",
+                        &[("n", &target_count.to_string())],
+                    ))),
             )
+            .child(div().text_xs().text_color(colors.subtle).child(t_args(
+                cx,
+                "settings.tag.candidate_note",
+                &[("score", &format!("{TAG_CANDIDATE_MIN_SCORE:.3}"))],
+            )))
             .child(
                 div()
                     .text_xs()
@@ -2783,16 +2771,11 @@ impl KanalibApp {
                     let _ = this_review_refresh.update(cx, |app, cx| app.refresh_tag_reviews(cx));
                 }),
             )
-            .child(
-                div()
-                    .text_xs()
-                    .text_color(colors.subtle)
-                    .child(t_args(
-                        cx,
-                        "settings.review.count",
-                        &[("n", &review_total.to_string())],
-                    )),
-            );
+            .child(div().text_xs().text_color(colors.subtle).child(t_args(
+                cx,
+                "settings.review.count",
+                &[("n", &review_total.to_string())],
+            )));
         let review_rows: AnyElement = if review_groups.is_empty() {
             div()
                 .text_xs()
@@ -2848,27 +2831,19 @@ impl KanalibApp {
                                             ("tag", &tag_name),
                                             (
                                                 "category",
-                                                &tag_category_label(
-                                                    cx.global::<I18n>(),
-                                                    &category,
-                                                ),
+                                                &tag_category_label(cx.global::<I18n>(), &category),
                                             ),
                                         ],
                                     )),
                             )
-                            .child(
-                                div()
-                                    .text_xs()
-                                    .text_color(colors.muted)
-                                    .child(t_args(
-                                        cx,
-                                        "settings.review.score",
-                                        &[
-                                            ("score", &format!("{score:.3}")),
-                                            ("threshold", &format!("{threshold:.3}")),
-                                        ],
-                                    )),
-                            )
+                            .child(div().text_xs().text_color(colors.muted).child(t_args(
+                                cx,
+                                "settings.review.score",
+                                &[
+                                    ("score", &format!("{score:.3}")),
+                                    ("threshold", &format!("{threshold:.3}")),
+                                ],
+                            )))
                             .child(
                                 Button::new(
                                     SharedString::from(format!(
@@ -2995,30 +2970,29 @@ impl KanalibApp {
             }
             rows.into_any_element()
         };
-        let review_section =
-            card(colors)
-                .flex()
-                .flex_col()
-                .gap(px(8.))
-                .child(
-                    div()
-                        .text_sm()
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .child(t(cx, "settings.section.review")),
-                )
-                .child(
-                    div()
-                        .text_xs()
-                        .text_color(colors.muted)
-                        .child(t(cx, "settings.review.desc")),
-                )
-                .children(
-                    self.tag_review_notice
-                        .clone()
-                        .map(|notice| div().text_xs().text_color(colors.accent).child(notice)),
-                )
-                .child(review_actions)
-                .child(review_rows);
+        let review_section = card(colors)
+            .flex()
+            .flex_col()
+            .gap(px(8.))
+            .child(
+                div()
+                    .text_sm()
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .child(t(cx, "settings.section.review")),
+            )
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(colors.muted)
+                    .child(t(cx, "settings.review.desc")),
+            )
+            .children(
+                self.tag_review_notice
+                    .clone()
+                    .map(|notice| div().text_xs().text_color(colors.accent).child(notice)),
+            )
+            .child(review_actions)
+            .child(review_rows);
 
         let data_section = card(colors)
             .flex()
@@ -3030,21 +3004,12 @@ impl KanalibApp {
                     .font_weight(FontWeight::SEMIBOLD)
                     .child(t(cx, "settings.section.data")),
             )
-            .child(path_row(
-                t(cx, "settings.data.database"),
-                db_path,
-                colors,
-            ))
-            .child(
-                div()
-                    .text_xs()
-                    .text_color(colors.subtle)
-                    .child(t_args(
-                        cx,
-                        "settings.data.db_size",
-                        &[("size", &format_bytes(db_bytes))],
-                    )),
-            )
+            .child(path_row(t(cx, "settings.data.database"), db_path, colors))
+            .child(div().text_xs().text_color(colors.subtle).child(t_args(
+                cx,
+                "settings.data.db_size",
+                &[("size", &format_bytes(db_bytes))],
+            )))
             .child(path_row(
                 t(cx, "settings.data.thumb_cache"),
                 cache_dir,
@@ -3077,10 +3042,7 @@ impl KanalibApp {
                         ),
                         colors.muted,
                     ),
-                    None => (
-                        t(cx, "settings.data.ffmpeg_missing"),
-                        colors.subtle,
-                    ),
+                    None => (t(cx, "settings.data.ffmpeg_missing"), colors.subtle),
                 };
                 div().text_xs().text_color(color).child(label)
             })
@@ -3131,37 +3093,32 @@ impl KanalibApp {
                             }),
                     )
                     .child(
-                        Button::new("thumb-budget-cleanup", t(cx, "settings.data.cleanup_budget"))
-                            .size(ControlSize::Sm)
-                            .on_click(move |_, _, cx| {
-                                let _ = this_budget_cleanup.update(cx, |app, cx| {
-                                    app.run_cache_budget_cleanup(true, cx);
-                                });
-                            }),
+                        Button::new(
+                            "thumb-budget-cleanup",
+                            t(cx, "settings.data.cleanup_budget"),
+                        )
+                        .size(ControlSize::Sm)
+                        .on_click(move |_, _, cx| {
+                            let _ = this_budget_cleanup.update(cx, |app, cx| {
+                                app.run_cache_budget_cleanup(true, cx);
+                            });
+                        }),
                     ),
             )
+            .child(div().text_xs().text_color(colors.subtle).child(t_args(
+                cx,
+                "settings.cache.hit_rate",
+                &[
+                    ("rate", &format!("{cache_hit_rate:.1}")),
+                    ("hits", &cache_hits.to_string()),
+                    ("misses", &cache_misses.to_string()),
+                ],
+            )))
             .child(
-                div()
-                    .text_xs()
-                    .text_color(colors.subtle)
-                    .child(t_args(
-                        cx,
-                        "settings.cache.hit_rate",
-                        &[
-                            ("rate", &format!("{cache_hit_rate:.1}")),
-                            ("hits", &cache_hits.to_string()),
-                            ("misses", &cache_misses.to_string()),
-                        ],
-                    )),
-            )
-            .child(
-                div()
-                    .text_xs()
-                    .text_color(colors.subtle)
-                    .child(
-                        cache_last_cleanup
-                            .unwrap_or_else(|| t(cx, "settings.cache.no_cleanup").to_string()),
-                    ),
+                div().text_xs().text_color(colors.subtle).child(
+                    cache_last_cleanup
+                        .unwrap_or_else(|| t(cx, "settings.cache.no_cleanup").to_string()),
+                ),
             )
             .child(
                 div()
@@ -3273,8 +3230,8 @@ impl KanalibApp {
                         )
                         .size(ControlSize::Sm)
                         .on_click(move |_, _, cx| {
-                            let _ = this_backup_toggle
-                                .update(cx, |app, cx| app.toggle_backup_plan(cx));
+                            let _ =
+                                this_backup_toggle.update(cx, |app, cx| app.toggle_backup_plan(cx));
                         }),
                     )
                     .child(daily_button)
@@ -3302,16 +3259,11 @@ impl KanalibApp {
                                 });
                             }),
                     )
-                    .child(
-                        div()
-                            .text_xs()
-                            .text_color(colors.fg)
-                            .child(t_args(
-                                cx,
-                                "settings.backup.keep_files_value",
-                                &[("n", &plan_keep_files.to_string())],
-                            )),
-                    )
+                    .child(div().text_xs().text_color(colors.fg).child(t_args(
+                        cx,
+                        "settings.backup.keep_files_value",
+                        &[("n", &plan_keep_files.to_string())],
+                    )))
                     .child(
                         Button::new("backup-keep-more", "+")
                             .size(ControlSize::Sm)
@@ -3363,16 +3315,11 @@ impl KanalibApp {
                                 });
                             }),
                     )
-                    .child(
-                        div()
-                            .text_xs()
-                            .text_color(colors.fg)
-                            .child(t_args(
-                                cx,
-                                "settings.backup.keep_days_value",
-                                &[("n", &days.to_string())],
-                            )),
-                    )
+                    .child(div().text_xs().text_color(colors.fg).child(t_args(
+                        cx,
+                        "settings.backup.keep_days_value",
+                        &[("n", &days.to_string())],
+                    )))
                     .child(
                         Button::new("backup-days-more", "+")
                             .size(ControlSize::Sm)
@@ -3442,12 +3389,7 @@ impl KanalibApp {
                             .text_color(colors.warning)
                             .child(t(cx, "settings.backup.pending_title")),
                     )
-                    .child(
-                        div()
-                            .text_xs()
-                            .text_color(colors.fg)
-                            .child(detail),
-                    )
+                    .child(div().text_xs().text_color(colors.fg).child(detail))
                     .child(
                         div()
                             .text_xs()
@@ -3455,12 +3397,14 @@ impl KanalibApp {
                             .child(t(cx, "settings.backup.pending_note")),
                     )
                     .child(
-                        Button::new("backup-cancel-pending", t(cx, "settings.backup.cancel_pending"))
-                            .size(ControlSize::Sm)
-                            .on_click(move |_, _, cx| {
-                                let _ = cancel
-                                    .update(cx, |app, cx| app.cancel_pending_restore(cx));
-                            }),
+                        Button::new(
+                            "backup-cancel-pending",
+                            t(cx, "settings.backup.cancel_pending"),
+                        )
+                        .size(ControlSize::Sm)
+                        .on_click(move |_, _, cx| {
+                            let _ = cancel.update(cx, |app, cx| app.cancel_pending_restore(cx));
+                        }),
                     ),
             );
         }
@@ -3471,17 +3415,15 @@ impl KanalibApp {
                     .text_color(colors.muted)
                     .child(backup_next_text),
             )
-            .children(backup_skipped.map(|text| {
-                div()
-                    .text_xs()
-                    .text_color(colors.muted)
-                    .child(text)
-            }))
+            .children(
+                backup_skipped.map(|text| div().text_xs().text_color(colors.muted).child(text)),
+            )
             .children(backup_error.map(|text| {
-                div()
-                    .text_xs()
-                    .text_color(colors.danger)
-                    .child(t_args(cx, "settings.backup.last_error", &[("error", &text)]))
+                div().text_xs().text_color(colors.danger).child(t_args(
+                    cx,
+                    "settings.backup.last_error",
+                    &[("error", &text)],
+                ))
             }))
             .child(
                 div()
@@ -3511,8 +3453,8 @@ impl KanalibApp {
                             .size(ControlSize::Sm)
                             .icon(IconName::FolderOpen)
                             .on_click(move |_, _, cx| {
-                                let _ =
-                                    this_open_backups.update(cx, |app, cx| app.open_backups_dir(cx));
+                                let _ = this_open_backups
+                                    .update(cx, |app, cx| app.open_backups_dir(cx));
                             }),
                     )
                     .child(
@@ -3520,23 +3462,19 @@ impl KanalibApp {
                             .size(ControlSize::Sm)
                             .disabled(self.backup_running || backup_has_pending)
                             .on_click(move |_, _, cx| {
-                                let _ = this_restore
-                                    .update(cx, |app, cx| app.pick_restore_backup(cx));
+                                let _ =
+                                    this_restore.update(cx, |app, cx| app.pick_restore_backup(cx));
                             }),
                     ),
             )
-            .children(backup_last_text.map(|text| {
-                div()
-                    .text_xs()
-                    .text_color(colors.muted)
-                    .child(text)
-            }))
-            .children(self.last_backup.clone().map(|summary| {
-                div()
-                    .text_xs()
-                    .text_color(colors.muted)
-                    .child(summary)
-            }))
+            .children(
+                backup_last_text.map(|text| div().text_xs().text_color(colors.muted).child(text)),
+            )
+            .children(
+                self.last_backup
+                    .clone()
+                    .map(|summary| div().text_xs().text_color(colors.muted).child(summary)),
+            )
             .child(
                 div()
                     .text_xs()
@@ -3656,12 +3594,9 @@ impl KanalibApp {
                             ("n", &source.asset_count.to_string()),
                             (
                                 "time",
-                                &source
-                                    .last_scan
-                                    .map(relative_time)
-                                    .unwrap_or_else(|| {
-                                        t(cx, "settings.diag.never_scanned").to_string()
-                                    }),
+                                &source.last_scan.map(relative_time).unwrap_or_else(|| {
+                                    t(cx, "settings.diag.never_scanned").to_string()
+                                }),
                             ),
                         ],
                     )
@@ -3759,20 +3694,15 @@ impl KanalibApp {
                     .font_weight(FontWeight::SEMIBOLD)
                     .child(t(cx, "settings.section.jobs")),
             )
-            .child(
-                div()
-                    .text_xs()
-                    .text_color(colors.muted)
-                    .child(t_args(
-                        cx,
-                        "settings.common.queue_counts",
-                        &[
-                            ("pending", &queue_pending.to_string()),
-                            ("running", &queue_running.to_string()),
-                            ("failed", &queue_error.to_string()),
-                        ],
-                    )),
-            )
+            .child(div().text_xs().text_color(colors.muted).child(t_args(
+                cx,
+                "settings.common.queue_counts",
+                &[
+                    ("pending", &queue_pending.to_string()),
+                    ("running", &queue_running.to_string()),
+                    ("failed", &queue_error.to_string()),
+                ],
+            )))
             .child(
                 div()
                     .text_xs()
@@ -3785,14 +3715,29 @@ impl KanalibApp {
         let click_keys = t(cx, "settings.keys.click").to_string();
         for (keys, description) in [
             ("Ctrl+K".to_string(), t(cx, "settings.shortcuts.palette")),
-            ("Ctrl+F".to_string(), t(cx, "settings.shortcuts.focus_search")),
-            (arrow_keys.clone(), t(cx, "settings.shortcuts.move_selection")),
-            ("Enter / Space".to_string(), t(cx, "settings.shortcuts.quick_view")),
+            (
+                "Ctrl+F".to_string(),
+                t(cx, "settings.shortcuts.focus_search"),
+            ),
+            (
+                arrow_keys.clone(),
+                t(cx, "settings.shortcuts.move_selection"),
+            ),
+            (
+                "Enter / Space".to_string(),
+                t(cx, "settings.shortcuts.quick_view"),
+            ),
             ("F".to_string(), t(cx, "settings.shortcuts.toggle_favorite")),
             ("1–5 / 0".to_string(), t(cx, "settings.shortcuts.rating")),
             ("Ctrl+A".to_string(), t(cx, "settings.shortcuts.select_all")),
-            ("Ctrl+Shift+1–8".to_string(), t(cx, "settings.shortcuts.switch_views")),
-            ("Esc".to_string(), t(cx, "settings.shortcuts.clear_selection")),
+            (
+                "Ctrl+Shift+1–8".to_string(),
+                t(cx, "settings.shortcuts.switch_views"),
+            ),
+            (
+                "Esc".to_string(),
+                t(cx, "settings.shortcuts.clear_selection"),
+            ),
             (click_keys.clone(), t(cx, "settings.shortcuts.mouse")),
         ] {
             shortcut_rows = shortcut_rows.child(
@@ -3871,10 +3816,7 @@ impl KanalibApp {
                         ("rate", rate.as_ref()),
                         (
                             "eta",
-                            &format_tag_eta_text(
-                                cx.global::<I18n>(),
-                                scan_progress.eta_secs,
-                            ),
+                            &format_tag_eta_text(cx.global::<I18n>(), scan_progress.eta_secs),
                         ),
                     ],
                 )
@@ -3975,16 +3917,12 @@ impl KanalibApp {
                 ));
             }
             if summary.sources.len() > 8 {
-                scan_rows = scan_rows.child(
-                    div()
-                        .text_xs()
-                        .text_color(colors.subtle)
-                        .child(t_args(
-                            cx,
-                            "settings.scan.sources_more",
-                            &[("n", &(summary.sources.len() - 8).to_string())],
-                        )),
-                );
+                scan_rows =
+                    scan_rows.child(div().text_xs().text_color(colors.subtle).child(t_args(
+                        cx,
+                        "settings.scan.sources_more",
+                        &[("n", &(summary.sources.len() - 8).to_string())],
+                    )));
             }
         } else {
             scan_rows = scan_rows.child(
@@ -4113,7 +4051,8 @@ impl KanalibApp {
                 cx,
                 move |window, cx| {
                     let input = cx.new(|cx| {
-                        TextInput::new(window, cx).placeholder_key("settings.filters.min_placeholder")
+                        TextInput::new(window, cx)
+                            .placeholder_key("settings.filters.min_placeholder")
                     });
                     if !min_initial.is_empty() {
                         input.update(cx, |input, cx| input.set_text(min_initial.clone(), cx));
@@ -4127,7 +4066,8 @@ impl KanalibApp {
                 cx,
                 move |window, cx| {
                     let input = cx.new(|cx| {
-                        TextInput::new(window, cx).placeholder_key("settings.filters.max_placeholder")
+                        TextInput::new(window, cx)
+                            .placeholder_key("settings.filters.max_placeholder")
                     });
                     if !max_initial.is_empty() {
                         input.update(cx, |input, cx| input.set_text(max_initial.clone(), cx));
@@ -4140,7 +4080,8 @@ impl KanalibApp {
                 SharedString::from(format!("kanalib-ignore-glob-{}", root.display())),
                 cx,
                 |window, cx| {
-                    TextInput::new(window, cx).placeholder_key("settings.filters.ignore_placeholder")
+                    TextInput::new(window, cx)
+                        .placeholder_key("settings.filters.ignore_placeholder")
                 },
             );
             let mut glob_chips = div().flex().flex_wrap().items_center().gap(px(6.));
@@ -4220,16 +4161,11 @@ impl KanalibApp {
                     );
                 }
                 if impact.excluded.len() > 5 {
-                    rows = rows.child(
-                        div()
-                            .text_xs()
-                            .text_color(colors.subtle)
-                            .child(t_args(
-                                cx,
-                                "settings.filters.impact_more",
-                                &[("n", &(impact.excluded.len() - 5).to_string())],
-                            )),
-                    );
+                    rows = rows.child(div().text_xs().text_color(colors.subtle).child(t_args(
+                        cx,
+                        "settings.filters.impact_more",
+                        &[("n", &(impact.excluded.len() - 5).to_string())],
+                    )));
                 }
                 rows
             });
@@ -4294,27 +4230,33 @@ impl KanalibApp {
                             .child(div().w(px(150.)).child(Input::new(&min_field).clearable()))
                             .child(div().w(px(150.)).child(Input::new(&max_field).clearable()))
                             .child(
-                                Button::new("filter-preview", t(cx, "settings.common.preview_hits"))
-                                    .size(ControlSize::Sm)
-                                    .icon(IconName::Eye)
-                                    .on_click(move |_, _, cx| {
-                                        let min = min_for_preview.read(cx).text().to_string();
-                                        let max = max_for_preview.read(cx).text().to_string();
-                                        let _ = this_preview.update(cx, |app, cx| {
-                                            app.preview_scan_filter_draft(&min, &max, cx);
-                                        });
-                                    }),
+                                Button::new(
+                                    "filter-preview",
+                                    t(cx, "settings.common.preview_hits"),
+                                )
+                                .size(ControlSize::Sm)
+                                .icon(IconName::Eye)
+                                .on_click(move |_, _, cx| {
+                                    let min = min_for_preview.read(cx).text().to_string();
+                                    let max = max_for_preview.read(cx).text().to_string();
+                                    let _ = this_preview.update(cx, |app, cx| {
+                                        app.preview_scan_filter_draft(&min, &max, cx);
+                                    });
+                                }),
                             )
                             .child(
-                                Button::new("filter-save-keep", t(cx, "settings.filters.save_keep"))
-                                    .size(ControlSize::Sm)
-                                    .on_click(move |_, _, cx| {
-                                        let min = min_for_keep.read(cx).text().to_string();
-                                        let max = max_for_keep.read(cx).text().to_string();
-                                        let _ = this_keep.update(cx, |app, cx| {
-                                            app.apply_scan_filter_draft(false, &min, &max, cx);
-                                        });
-                                    }),
+                                Button::new(
+                                    "filter-save-keep",
+                                    t(cx, "settings.filters.save_keep"),
+                                )
+                                .size(ControlSize::Sm)
+                                .on_click(move |_, _, cx| {
+                                    let min = min_for_keep.read(cx).text().to_string();
+                                    let max = max_for_keep.read(cx).text().to_string();
+                                    let _ = this_keep.update(cx, |app, cx| {
+                                        app.apply_scan_filter_draft(false, &min, &max, cx);
+                                    });
+                                }),
                             )
                             .child(
                                 Button::new(
@@ -4340,21 +4282,24 @@ impl KanalibApp {
                                 }),
                             )
                             .child(
-                                Button::new("filter-editor-cancel", t(cx, "settings.common.cancel"))
-                                    .size(ControlSize::Sm)
-                                    .on_click(move |_, _, cx| {
-                                        let _ = this_cancel.update(cx, |app, cx| {
-                                            if app
-                                                .scan_filter_draft
-                                                .as_ref()
-                                                .is_some_and(|draft| draft.confirm_remove)
-                                            {
-                                                app.cancel_scan_filter_remove(cx);
-                                            } else {
-                                                app.close_scan_filter_editor(cx);
-                                            }
-                                        });
-                                    }),
+                                Button::new(
+                                    "filter-editor-cancel",
+                                    t(cx, "settings.common.cancel"),
+                                )
+                                .size(ControlSize::Sm)
+                                .on_click(move |_, _, cx| {
+                                    let _ = this_cancel.update(cx, |app, cx| {
+                                        if app
+                                            .scan_filter_draft
+                                            .as_ref()
+                                            .is_some_and(|draft| draft.confirm_remove)
+                                        {
+                                            app.cancel_scan_filter_remove(cx);
+                                        } else {
+                                            app.close_scan_filter_editor(cx);
+                                        }
+                                    });
+                                }),
                             ),
                     )
                     .children(impact_rows)
@@ -4377,17 +4322,19 @@ impl KanalibApp {
                                 ),
                             )
                             .child(
-                                Button::new("ignore-glob-add", t(cx, "settings.filters.add_ignore"))
-                                    .size(ControlSize::Sm)
-                                    .on_click(move |_, _, cx| {
-                                        let text = ignore_for_add.read(cx).text().to_string();
-                                        let root = root_for_ignore.clone();
-                                        let _ = this_add_ignore.update(cx, |app, cx| {
-                                            app.add_ignored_glob(root, text, cx);
-                                        });
-                                        ignore_for_clear
-                                            .update(cx, |input, cx| input.set_text("", cx));
-                                    }),
+                                Button::new(
+                                    "ignore-glob-add",
+                                    t(cx, "settings.filters.add_ignore"),
+                                )
+                                .size(ControlSize::Sm)
+                                .on_click(move |_, _, cx| {
+                                    let text = ignore_for_add.read(cx).text().to_string();
+                                    let root = root_for_ignore.clone();
+                                    let _ = this_add_ignore.update(cx, |app, cx| {
+                                        app.add_ignored_glob(root, text, cx);
+                                    });
+                                    ignore_for_clear.update(cx, |input, cx| input.set_text("", cx));
+                                }),
                             )
                             .child(
                                 div()
@@ -4431,16 +4378,12 @@ impl KanalibApp {
             );
         } else {
             if !ignore_rules.paths.is_empty() {
-                ignore_rows = ignore_rows.child(
-                    div()
-                        .text_xs()
-                        .text_color(colors.fg)
-                        .child(t_args(
-                            cx,
-                            "settings.ignore.paths",
-                            &[("n", &ignore_rules.paths.len().to_string())],
-                        )),
-                );
+                ignore_rows =
+                    ignore_rows.child(div().text_xs().text_color(colors.fg).child(t_args(
+                        cx,
+                        "settings.ignore.paths",
+                        &[("n", &ignore_rules.paths.len().to_string())],
+                    )));
                 for (index, path) in ignore_rules.paths.iter().take(12).enumerate() {
                     let this_restore = this.clone();
                     let restore_path = PathBuf::from(path);
@@ -4480,26 +4423,20 @@ impl KanalibApp {
                 }
                 if ignore_rules.paths.len() > 12 {
                     ignore_rows =
-                        ignore_rows.child(div().text_xs().text_color(colors.subtle).child(
-                            t_args(
-                                cx,
-                                "settings.ignore.paths_more",
-                                &[("n", &(ignore_rules.paths.len() - 12).to_string())],
-                            ),
-                        ));
+                        ignore_rows.child(div().text_xs().text_color(colors.subtle).child(t_args(
+                            cx,
+                            "settings.ignore.paths_more",
+                            &[("n", &(ignore_rules.paths.len() - 12).to_string())],
+                        )));
                 }
             }
             if !ignore_rules.sha1.is_empty() {
-                ignore_rows = ignore_rows.child(
-                    div()
-                        .text_xs()
-                        .text_color(colors.fg)
-                        .child(t_args(
-                            cx,
-                            "settings.ignore.hashes",
-                            &[("n", &ignore_rules.sha1.len().to_string())],
-                        )),
-                );
+                ignore_rows =
+                    ignore_rows.child(div().text_xs().text_color(colors.fg).child(t_args(
+                        cx,
+                        "settings.ignore.hashes",
+                        &[("n", &ignore_rules.sha1.len().to_string())],
+                    )));
                 for (index, hash) in ignore_rules.sha1.iter().take(8).enumerate() {
                     let this_restore = this.clone();
                     let restore_hash = hash.clone();
@@ -4539,16 +4476,12 @@ impl KanalibApp {
                     );
                 }
                 if ignore_rules.sha1.len() > 8 {
-                    ignore_rows = ignore_rows.child(
-                        div()
-                            .text_xs()
-                            .text_color(colors.subtle)
-                            .child(t_args(
-                                cx,
-                                "settings.ignore.hashes_more",
-                                &[("n", &(ignore_rules.sha1.len() - 8).to_string())],
-                            )),
-                    );
+                    ignore_rows =
+                        ignore_rows.child(div().text_xs().text_color(colors.subtle).child(t_args(
+                            cx,
+                            "settings.ignore.hashes_more",
+                            &[("n", &(ignore_rules.sha1.len() - 8).to_string())],
+                        )));
                 }
             }
             for (root, globs) in &ignore_rules.globs {
@@ -4607,16 +4540,12 @@ impl KanalibApp {
                     );
                 }
                 if globs.len() > 12 {
-                    ignore_rows = ignore_rows.child(
-                        div()
-                            .text_xs()
-                            .text_color(colors.subtle)
-                            .child(t_args(
-                                cx,
-                                "settings.ignore.globs_more",
-                                &[("n", &(globs.len() - 12).to_string())],
-                            )),
-                    );
+                    ignore_rows =
+                        ignore_rows.child(div().text_xs().text_color(colors.subtle).child(t_args(
+                            cx,
+                            "settings.ignore.globs_more",
+                            &[("n", &(globs.len() - 12).to_string())],
+                        )));
                 }
             }
             let this_restore_all = this.clone();
@@ -4721,10 +4650,10 @@ impl KanalibApp {
                                 .on_change(move |value, _, cx| {
                                     let tag = value.to_string();
                                     let _ = this_locale.update(cx, |app, cx| {
-                                        if let Err(error) = app.state.set_setting(
-                                            crate::localization::LOCALE_SETTING,
-                                            &tag,
-                                        ) {
+                                        if let Err(error) = app
+                                            .state
+                                            .set_setting(crate::localization::LOCALE_SETTING, &tag)
+                                        {
                                             let message = t_args(
                                                 cx,
                                                 "settings.notice.language_save_failed",
@@ -4817,12 +4746,8 @@ impl KanalibApp {
                 let read_only = info.read_only || kind.is_read_only();
                 let (credentials_text, credentials_color) =
                     match self.remote_sources.credentials.get(&id) {
-                        Some(Ok(true)) => {
-                            (t(cx, "settings.remote.cred_saved"), colors.success)
-                        }
-                        Some(Ok(false)) => {
-                            (t(cx, "settings.remote.cred_unsaved"), colors.warning)
-                        }
+                        Some(Ok(true)) => (t(cx, "settings.remote.cred_saved"), colors.success),
+                        Some(Ok(false)) => (t(cx, "settings.remote.cred_unsaved"), colors.warning),
                         Some(Err(error)) => (
                             t_args(
                                 cx,
@@ -4914,16 +4839,11 @@ impl KanalibApp {
                                 .flex_wrap()
                                 .items_center()
                                 .gap(px(6.))
-                                .child(
-                                    div()
-                                        .text_xs()
-                                        .text_color(colors.subtle)
-                                        .child(t_args(
-                                            cx,
-                                            "settings.remote.last_sync",
-                                            &[("time", &last_sync)],
-                                        )),
-                                )
+                                .child(div().text_xs().text_color(colors.subtle).child(t_args(
+                                    cx,
+                                    "settings.remote.last_sync",
+                                    &[("time", &last_sync)],
+                                )))
                                 .child(
                                     div()
                                         .text_xs()
@@ -5043,10 +4963,7 @@ impl KanalibApp {
                             .child(t(cx, "settings.section.remote")),
                     )
                     .child(
-                        Button::new(
-                            "refresh-remote-sources",
-                            t(cx, "settings.common.refresh"),
-                        )
+                        Button::new("refresh-remote-sources", t(cx, "settings.common.refresh"))
                             .size(ControlSize::Sm)
                             .on_click(move |_, _, cx| {
                                 let _ = this_refresh.update(cx, |app, cx| {
@@ -5238,8 +5155,7 @@ impl KanalibApp {
     pub(crate) fn save_remote_api_key(&mut self, id: i64, api_key: &str, cx: &mut Context<Self>) {
         let key = api_key.trim();
         if key.is_empty() {
-            self.settings_notice =
-                Some(t(cx, "settings.notice.remote_key_empty").to_string());
+            self.settings_notice = Some(t(cx, "settings.notice.remote_key_empty").to_string());
             cx.notify();
             return;
         }
@@ -5255,12 +5171,8 @@ impl KanalibApp {
             .unwrap_or(fallback_name);
         match self.state.set_source_api_key(id, key) {
             Ok(()) => {
-                let message = t_args(
-                    cx,
-                    "settings.notice.remote_key_saved",
-                    &[("name", &name)],
-                )
-                .to_string();
+                let message =
+                    t_args(cx, "settings.notice.remote_key_saved", &[("name", &name)]).to_string();
                 self.settings_notice = Some(message.clone());
                 push_toast(&self.toaster, cx, message, Severity::Success);
             }
@@ -5311,8 +5223,7 @@ impl KanalibApp {
 
     pub(crate) fn open_remote_remove_confirm(&mut self, id: i64, cx: &mut Context<Self>) {
         if self.remote_sources.busy.contains_key(&id) {
-            self.settings_notice =
-                Some(t(cx, "settings.notice.remote_busy").to_string());
+            self.settings_notice = Some(t(cx, "settings.notice.remote_busy").to_string());
             cx.notify();
             return;
         }
@@ -5323,8 +5234,7 @@ impl KanalibApp {
     pub(crate) fn remove_remote_source(&mut self, id: i64, cx: &mut Context<Self>) {
         self.remote_sources.remove_confirm = None;
         if self.remote_sources.busy.contains_key(&id) {
-            self.settings_notice =
-                Some(t(cx, "settings.notice.remote_busy").to_string());
+            self.settings_notice = Some(t(cx, "settings.notice.remote_busy").to_string());
             cx.notify();
             return;
         }
@@ -5344,12 +5254,7 @@ impl KanalibApp {
                 self.remote_sources.feedback.remove(&id);
                 self.remote_sources.credentials.remove(&id);
                 self.settings_notice = Some(
-                    t_args(
-                        cx,
-                        "settings.notice.remote_removed",
-                        &[("name", &name)],
-                    )
-                    .to_string(),
+                    t_args(cx, "settings.notice.remote_removed", &[("name", &name)]).to_string(),
                 );
                 let toast = t_args(
                     cx,
@@ -5629,8 +5534,14 @@ mod tests {
 
     #[test]
     fn tag_threshold_input_rejects_invalid_values() {
-        assert_eq!(super::parse_tag_threshold_text(&test_i18n(), "0.5").unwrap(), 0.5);
-        assert_eq!(super::parse_tag_threshold_text(&test_i18n(), " 1 ").unwrap(), 1.0);
+        assert_eq!(
+            super::parse_tag_threshold_text(&test_i18n(), "0.5").unwrap(),
+            0.5
+        );
+        assert_eq!(
+            super::parse_tag_threshold_text(&test_i18n(), " 1 ").unwrap(),
+            1.0
+        );
         for bad in ["", "-0.01", "1.01", "nan", "abc"] {
             assert!(
                 super::parse_tag_threshold_text(&test_i18n(), bad).is_err(),
@@ -5648,7 +5559,10 @@ mod tests {
         assert_eq!(super::format_tag_eta(Some(3_700)), "1 小时 01 分");
         assert_eq!(super::tag_category_label(&test_i18n(), "general"), "通用");
         assert_eq!(super::tag_category_label(&test_i18n(), "rating"), "分级");
-        assert_eq!(super::tag_category_label(&test_i18n(), "unknown"), "未知类别");
+        assert_eq!(
+            super::tag_category_label(&test_i18n(), "unknown"),
+            "未知类别"
+        );
     }
 
     #[test]
@@ -5714,7 +5628,10 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_secs();
-        assert_eq!(super::remote_last_sync_text(&test_i18n(), Some(now)), "刚刚");
+        assert_eq!(
+            super::remote_last_sync_text(&test_i18n(), Some(now)),
+            "刚刚"
+        );
     }
 
     #[test]
@@ -5733,7 +5650,10 @@ mod tests {
         let mut plan = kanalib_core::backup::BackupPlan::default();
         let mut status = kanalib_core::backup::BackupStatus::default();
         assert!(super::backup_plan_summary(&test_i18n(), &plan).contains("未启用"));
-        assert_eq!(super::backup_next_due_text(&test_i18n(), &status), "自动备份未启用");
+        assert_eq!(
+            super::backup_next_due_text(&test_i18n(), &status),
+            "自动备份未启用"
+        );
 
         plan.enabled = true;
         plan.frequency = kanalib_core::backup::BackupFrequency::Weekly;

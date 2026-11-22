@@ -509,10 +509,7 @@ impl View for ViewerPane {
         let asset = {
             let shared = state.shared.lock().unwrap();
             let assets = shared.assets.read().unwrap();
-            assets
-                .iter()
-                .find(|asset| asset.path == path)
-                .cloned()
+            assets.iter().find(|asset| asset.path == path).cloned()
         };
         let (is_video, remote, thumb, width, height, caption) = match &asset {
             Some(asset) => (
@@ -668,31 +665,30 @@ impl View for ViewerPane {
             .icon(IconName::Heart)
             .on_click(move |_, _, cx| {
                 let path = favorite_path.clone();
-                let changed = match favorite_state
-                    .set_favorite(std::slice::from_ref(&path), !favorite)
-                {
-                    Ok(updated) => {
-                        let count = updated.to_string();
-                        let message = if favorite {
-                            t_args(cx, "inspector.favorite.removed", &[("n", count.as_str())])
-                        } else {
-                            t_args(cx, "inspector.favorite.added", &[("n", count.as_str())])
-                        };
-                        push_toast(&favorite_toaster, cx, message, Severity::Success);
-                        true
-                    }
-                    Err(error) => {
-                        let error_text = format!("{error:#}");
-                        let message = t_args(
-                            cx,
-                            "inspector.favorite.failed",
-                            &[("error", error_text.as_str())],
-                        );
-                        favorite_state.set_error(message.to_string());
-                        push_toast(&favorite_toaster, cx, message, Severity::Danger);
-                        false
-                    }
-                };
+                let changed =
+                    match favorite_state.set_favorite(std::slice::from_ref(&path), !favorite) {
+                        Ok(updated) => {
+                            let count = updated.to_string();
+                            let message = if favorite {
+                                t_args(cx, "inspector.favorite.removed", &[("n", count.as_str())])
+                            } else {
+                                t_args(cx, "inspector.favorite.added", &[("n", count.as_str())])
+                            };
+                            push_toast(&favorite_toaster, cx, message, Severity::Success);
+                            true
+                        }
+                        Err(error) => {
+                            let error_text = format!("{error:#}");
+                            let message = t_args(
+                                cx,
+                                "inspector.favorite.failed",
+                                &[("error", error_text.as_str())],
+                            );
+                            favorite_state.set_error(message.to_string());
+                            push_toast(&favorite_toaster, cx, message, Severity::Danger);
+                            false
+                        }
+                    };
                 if changed {
                     let path = path.clone();
                     let became_favorite = !favorite;
@@ -783,13 +779,7 @@ impl View for ViewerPane {
                                 )
                                 .child(rating),
                         )
-                        .child(
-                            div()
-                                .w(px(240.))
-                                .min_w(px(160.))
-                                .flex_none()
-                                .child(manual),
-                        ),
+                        .child(div().w(px(240.)).min_w(px(160.)).flex_none().child(manual)),
                 )
                 .child(album)
         });
@@ -928,10 +918,12 @@ impl View for ViewerPane {
                                     .icon(IconName::ChevronLeft)
                                     .size(ControlSize::Sm)
                                     .variant(ButtonVariant::Ghost)
-                                    .on_click(move |_, _, cx| {
-                                        let _ =
-                                            back_button.update(cx, |app, cx| app.close_viewer(cx));
-                                    }),
+                                    .on_click(
+                                        move |_, _, cx| {
+                                            let _ = back_button
+                                                .update(cx, |app, cx| app.close_viewer(cx));
+                                        },
+                                    ),
                                 ),
                             )
                             .child(

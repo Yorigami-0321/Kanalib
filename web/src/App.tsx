@@ -26,12 +26,12 @@ import {
   useUiParamsSync,
   wallHref,
   writeUiParams,
+  type Route,
   type UiParams,
 } from './lib/router';
 import { INSPECTOR_WIDTH, readLayoutMetrics } from './lib/layout';
 import { appendShuffled, hashString } from './lib/shuffle';
-import { DATA_ROOT } from './source/config';
-import { StaticSource, type SearchRecord } from './source/StaticSource';
+import { createSource } from './source';
 import {
   EMPTY_FILTERS,
   filterItems,
@@ -41,7 +41,7 @@ import {
   type SearchIndexPhase,
 } from './state/filters';
 import { useWall } from './state/useWall';
-import type { TagFacet, WallItem } from './source/types';
+import type { SearchRecord, TagFacet, WallItem, WallQuery } from './source/types';
 
 const EMPTY_TAGS: TagFacet[] = [];
 const RATING_ORDER = ['G', 'S', 'Q', 'E'];
@@ -90,13 +90,61 @@ function sortItems(items: readonly WallItem[], mode: SortMode): WallItem[] {
 }
 
 /**
+ * 把当前路由 + 搜索框 + 排序映射成服务端查询。
+ * 详情/缺失页不重置列表：详情只单条补取，前后翻页沿用进入前的列表。
+ */
+function serverQueryFor(
+  route: Route,
+  filters: FilterState,
+  sort: SortMode,
+  seed: number,
+): WallQuery | null {
+  if (route.view === 'detail' || route.view === 'notfound') return null;
+  const query: WallQuery = {};
+  switch (route.view) {
+    case 'tag':
+      query.tag = route.tag;
+      break;
+    case 'fav':
+      query.fav = true;
+      break;
+    case 'rating':
+      query.rating = route.rating;
+      break;
+    case 'group':
+      query.group = route.group;
+      break;
+    default:
+      break;
+  }
+  const text = filters.query.trim();
+  if (text.length > 0) query.q = text;
+  if (sort === 'name') {
+    query.sort = 'name';
+    query.order = 'asc';
+  } else if (sort === 'stars') {
+    query.sort = 'star';
+    query.order = 'desc';
+  } else if (sort === 'time') {
+    query.sort = 'updated';
+    query.order = 'desc';
+  } else {
+    query.sort = 'random';
+    query.seed = seed;
+  }
+  return query;
+}
+
+/**
  * 应用外壳：左侧黑白"缝" + 一张可以拖拽平移的图片空间。
  * 页面：首页随机墙；标签/收藏/分级/分组四套「封面总览 → 二级墙」；详情。
  */
 export function App() {
-  const [source] = useState(() => new StaticSource(DATA_ROOT));
+  const [source] = useState(() => createSource());
   const wall = useWall(source);
   const route = useRoute();
+  /** 服务端筛选/计数可用；静态源没有 capabilities，永远走内存逻辑。 */
+  const serverMode = Boolean(source.capabilities?.server_filter);
 
   const [filters, setFilters] = useState<FilterState>(() => ({
     query: parseUiParams(window.location.hash).q,
@@ -182,6 +230,11 @@ export function App() {
   const requestSearchIndex = useCallback(() => {
     if (searchRequested.current) return;
     searchRequested.current = true;
+    // API 源由服务端搜索；没有静态搜索索引可拉。
+    if (!source.loadSearchIndex) {
+      setSearchPhase(source.capabilities?.server_search ? 'ready' : 'unavailable');
+      return;
+    }
     setSearchPhase('loading');
     void source.loadSearchIndex().then((data) => {
       if (!data) {
@@ -211,11 +264,32 @@ export function App() {
   }, []);
   useUiParamsSync(applyUiParams);
 
+  // API 模式：路由/搜索/排序变化先 setQuery，再由 useWall.reset 清空并拉第一页。
+  // 详情页不重置（只看 fetchItem 与进入前的列表）。
+  const serverQuery = useMemo(
+    () => (serverMode ? serverQueryFor(route, filters, sort, orderSeed) : null),
+    [serverMode, route, filters, sort, orderSeed],
+  );
+  const serverQueryKey = serverQuery ? JSON.stringify(serverQuery) : '';
+  const appliedServerQuery = useRef('');
+  useEffect(() => {
+    if (!serverQuery || serverQueryKey === appliedServerQuery.current) return;
+    appliedServerQuery.current = serverQueryKey;
+    void wall.reset(serverQuery);
+  }, [serverQuery, serverQueryKey, wall.reset]);
+
+  // 服务端搜索就绪：搜索面板不再提示“索引不可用”。
+  useEffect(() => {
+    if (serverMode) setSearchPhase('ready');
+  }, [serverMode]);
+
   const detailId = route.view === 'detail' ? route.id : null;
   const queryActive = isFilterActive(filters);
   const routeFiltered = WALL_VIEWS.has(route.view);
 
   const orderedItems = useMemo(() => {
+    // API 模式的服务端排序已经生效，只对 random 做一次稳定的视觉洗牌。
+    if (serverMode && sort !== 'random') return wall.items.slice();
     const cache = orderCache.current;
     if (cache.source === wall.items) return cache.list;
     const previous = cache.source;
@@ -230,10 +304,11 @@ export function App() {
     const next = appendShuffled(cache.list, incoming, orderSeed);
     orderCache.current = { source: wall.items, list: next };
     return next;
-  }, [wall.items, orderSeed]);
+  }, [wall.items, orderSeed, serverMode, sort]);
 
   /** 当前路由的第一层筛选：标签/收藏/分级/分组各自独立一条路径（Q8）。 */
   const baseItems = useMemo(() => {
+    if (serverMode) return orderedItems;
     switch (route.view) {
       case 'tag':
         return orderedItems.filter((item) => item.tags.some((tag) => tag[0] === route.tag));
@@ -246,12 +321,13 @@ export function App() {
       default:
         return orderedItems;
     }
-  }, [orderedItems, route]);
+  }, [orderedItems, route, serverMode]);
 
-  const shown = useMemo(
-    () => sortItems(filterItems(baseItems, filters, searchRecords), sort),
-    [baseItems, filters, searchRecords, sort],
-  );
+  const shown = useMemo(() => {
+    // 服务端已完成筛选/搜索/排序，不能再拿静态 search-index 语义二次过滤。
+    if (serverMode) return orderedItems;
+    return sortItems(filterItems(baseItems, filters, searchRecords), sort);
+  }, [baseItems, filters, searchRecords, sort, serverMode, orderedItems]);
 
   // 详情页的浏览序列跟用户当前看到的墙（筛后+排序后）一致。
   const detailBrowseItems = useMemo(() => {
@@ -293,6 +369,7 @@ export function App() {
         categoryKey: facet.category,
         count: facet.count,
         candidates: (byTag.get(facet.name) ?? []).map((item) => item.id).sort(),
+        fallbackCover: facet.cover,
       }))
       .sort((left, right) => right.count - left.count || left.name.localeCompare(right.name, 'zh-Hans-CN'));
 
@@ -300,7 +377,11 @@ export function App() {
     const prev = new Map<string, string>();
     const covers = new Map<string, string>();
     for (const entry of ordered) {
-      if (entry.candidates.length === 0) continue;
+      if (entry.candidates.length === 0) {
+        // API 模式 facets 自带代表图；静态模式仍等条目到达后再定封面。
+        if (entry.fallbackCover) covers.set(entry.name, entry.fallbackCover);
+        continue;
+      }
       const key = entry.categoryKey || 'other';
       let counts = used.get(key);
       if (!counts) {
@@ -330,7 +411,7 @@ export function App() {
       category: entry.category,
       categoryKey: entry.categoryKey,
       count: entry.count,
-      coverId: covers.get(entry.name),
+      coverId: covers.get(entry.name) ?? entry.fallbackCover,
     }));
   }, [wall.items, facetTags]);
 
@@ -341,12 +422,12 @@ export function App() {
       {
         key: 'fav',
         label: '收藏',
-        count: items.length,
+        count: wall.index?.stats?.favorite ?? items.length,
         coverId: items[0]?.id,
         href: favHref(),
       },
     ];
-  }, [wall.items]);
+  }, [wall.items, wall.index]);
 
   const ratingEntries = useMemo<BucketEntry[]>(
     () =>
@@ -355,16 +436,26 @@ export function App() {
         return {
           key: rating,
           label: ratingLabel(rating),
-          count: items.length,
+          count: wall.index?.stats?.ratings[rating] ?? items.length,
           coverId: items[0]?.id,
           href: ratingHref(rating),
         };
       }),
-    [wall.items],
+    [wall.items, wall.index],
   );
 
-  const groupEntries = useMemo<BucketEntry[]>(
-    () =>
+  const groupEntries = useMemo<BucketEntry[]>(() => {
+    const details = wall.index?.facets?.group_details;
+    if (details && details.length > 0) {
+      return details.map((group) => ({
+        key: group.name,
+        label: displayGroup(group.name),
+        count: group.count,
+        coverId: group.cover,
+        href: groupHref(group.name),
+      }));
+    }
+    return (
       groups.map((group) => {
         const items = wall.items.filter((item) => item.group === group);
         return {
@@ -374,9 +465,9 @@ export function App() {
           coverId: items[0]?.id,
           href: groupHref(group),
         };
-      }),
-    [groups, wall.items],
-  );
+      })
+    );
+  }, [groups, wall.items, wall.index]);
 
   /** 角标用的「标签 → 张数」：来自 index.facets；facets 没到齐时角标只显示标签名。 */
   const tagCounts = useMemo(() => {
@@ -387,20 +478,25 @@ export function App() {
 
   // 分片全部到齐（或已无下一片）：此时已加载集合即全量，可当作计数兜底。
   // 不用 allLoaded 单指标：它比快照晚一帧，会让标签模式多闪一次。
-  const dataComplete = allLoaded || (!wall.hasMore && wall.phase === 'end');
+  // API 模式没有“全量分片”概念：index 到达即视为计数/facets 完整。
+  const dataComplete = serverMode
+    ? Boolean(wall.index)
+    : allLoaded || (!wall.hasMore && wall.phase === 'end');
 
   // 标签规模决定用不用无界空间：facets 是发布时算好的全量计数，index 到达即可用；
   // facets 缺这个标签时才退回已加载集合，且等全量到位后再采用，
   // 避免把加载中途偏小的计数当成结论、让世界模式来回翻转。
   const tagItemCount =
     route.view === 'tag'
-      ? tagCounts.get(route.tag) ?? (dataComplete ? baseItems.length : null)
+      ? tagCounts.get(route.tag) ??
+        (serverMode ? total : dataComplete ? baseItems.length : null)
       : null;
 
   // 无界空间：首页随机墙 + 图片足够多的单个标签随机墙。标签页四周补图，
   // 否则点顶部一行时上方留出大片空缺；图片太少的标签回退有限世界，
   // 避免同一张图循环铺满。显式排序、搜索、收藏/分级/分组墙保持有限世界。
   const infiniteWall =
+    !serverMode &&
     (route.view === 'wall' ||
       (route.view === 'tag' &&
         (tagItemCount === null || tagItemCount >= INFINITE_MIN_TAG_ITEMS))) &&
@@ -424,17 +520,13 @@ export function App() {
     '|' +
     (infiniteWall ? 'infinite' : 'finite');
 
-  const indexPath = useMemo(
-    () => new URL('index.json', new URL(DATA_ROOT, document.baseURI)).href,
-    [],
-  );
-
   // 所有列表/总览页最终都要全量分片：搜索与封面计数必须在整库上算，
   // 不能只看已滚到的部分（之前的"筛选只过滤已加载"就是这里的缺口）。
   // 但"要全量"不等于"首屏等全量"：无限墙首片到达就铺满，剩余分片在空闲时补；
   // 搜索/有限墙仍按序立刻补拉，避免搜索结果和排序长时间停在半库上。
   // 未知路由只渲染缺失页，不需要拉数据。
-  const needAll = route.view !== 'detail' && route.view !== 'notfound';
+  // API 模式按游标翻页，不再后台拉全库；筛选/计数由服务端完成。
+  const needAll = !serverMode && route.view !== 'detail' && route.view !== 'notfound';
   useEffect(() => {
     if (!needAll || allLoaded) return;
     if (wall.phase === 'boot' || wall.phase === 'loading' || wall.phase === 'error') return;
@@ -458,6 +550,7 @@ export function App() {
     wall.loadMore,
     infiniteWall,
     route.view,
+    serverMode,
   ]);
 
   useEffect(() => {
@@ -880,19 +973,21 @@ export function App() {
   );
 
   const wallHead = useMemo(() => {
+    // 服务端模式下 index.count 就是当前路由/筛选的总数，不是已加载页数。
+    const count = serverMode ? total : shown.length;
     switch (route.view) {
       case 'tag':
-        return { title: displayTag(route.tag), count: shown.length };
+        return { title: displayTag(route.tag), count };
       case 'fav':
-        return { title: '收藏', count: shown.length };
+        return { title: '收藏', count };
       case 'rating':
-        return { title: ratingLabel(route.rating), count: shown.length };
+        return { title: ratingLabel(route.rating), count };
       case 'group':
-        return { title: displayGroup(route.group), count: shown.length };
+        return { title: displayGroup(route.group), count };
       default:
         return null;
     }
-  }, [route, shown.length]);
+  }, [route, shown.length, serverMode, total]);
 
   const emptyText = queryActive
     ? '没有符合条件的图片'
@@ -949,6 +1044,8 @@ export function App() {
         item: inspectorItem,
         items: detailBrowseItems,
         paths: wall.paths,
+        apiMode: wall.capabilities?.source === 'api',
+        originalProxy: wall.capabilities?.original_proxy === true,
         onClose: handleCloseInspector,
         onBack: handleBack,
         onTagClick: handleOpenTag,
@@ -971,8 +1068,8 @@ export function App() {
         onSearchIntent={requestSearchIndex}
         loaded={wall.items.length}
         total={total}
-        shown={shown.length}
-        filtered={filtered}
+        shown={serverMode ? total : shown.length}
+        filtered={serverMode ? false : filtered}
         sort={sort}
         onSort={setSort}
         focusItem={focusItems[0] ?? null}
@@ -993,6 +1090,8 @@ export function App() {
               items={detailBrowseItems}
               paths={wall.paths}
               infoOpen={!detailInfoHidden}
+              apiMode={wall.capabilities?.source === 'api'}
+              originalProxy={wall.capabilities?.original_proxy === true}
               playing={playing}
               matte={matte}
               onBack={handleBack}
@@ -1100,7 +1199,7 @@ export function App() {
               resetKey={signature}
               filtered={filtered}
               infinite={infiniteWall}
-              ready={allLoaded}
+              ready={serverMode || allLoaded}
               worldSeed={orderSeed}
               stableAppend={route.view === 'wall' && sort === 'random' && !queryActive}
               tagCounts={tagCounts}
@@ -1125,7 +1224,7 @@ export function App() {
 
         {wall.error ? (
           <p className="app__error">
-            数据源错误：{wall.error}（数据根 {indexPath}）
+            数据源错误：{wall.error}（数据根 {source.dataRoot}）
           </p>
         ) : null}
       </main>

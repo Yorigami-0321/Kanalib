@@ -84,6 +84,10 @@ export interface DetailProps {
   paths: TierPaths;
   /** 信息检查器是否展开（桌面会让出 300px，窄屏是底部 sheet）。 */
   infoOpen: boolean;
+  /** API 模式：原图不能走静态 `data/o/`。 */
+  apiMode?: boolean;
+  /** API 模式且服务端开启签名回源时，原图入口指向 `/api/items/{id}/original`。 */
+  originalProxy?: boolean;
   /** 自动放映中：每张停留 4.2s，侧栏 ▶ 切成 ❚❚。 */
   playing: boolean;
   /** 留白视图：图片收进画框，环境层压暗；收起信息时底部出现极简图注。 */
@@ -98,6 +102,8 @@ export interface DetailProps {
 interface PaneProps {
   item: WallItem;
   paths: TierPaths;
+  apiMode: boolean;
+  originalProxy: boolean;
   /** 只有正中那一屏接手势；左右邻屏只是滑动时的视觉副本。 */
   active: boolean;
   onNavigate: (direction: -1 | 1) => void;
@@ -107,7 +113,7 @@ interface PaneProps {
  * 一屏 = 一张图。信息不在这里——标题/元数据/标签/相似条在左侧检查器。
  * 图片自己支持：双指/Ctrl+滚轮缩放、放大后拖拽平移、双击复位；未放大时左右拖拽换图。
  */
-function Pane({ item, paths, active, onNavigate }: PaneProps) {
+function Pane({ item, paths, apiMode, originalProxy, active, onNavigate }: PaneProps) {
   // 底色永远是 t512：邻屏只拉这一档做占位，居中后才沿锐利档升档。
   // 环境层用的也是同一个 t512 URL，缓存里只有一份。
   const preview = tierUrl(paths, 't512', item.id);
@@ -161,7 +167,7 @@ function Pane({ item, paths, active, onNavigate }: PaneProps) {
 
   // 只有底色和锐利档都失败才是真的看不到图；锐利档失败还有 t512 兜底。
   const failed = active && base.failed && (sharpLadder.length === 0 || sharp.failed);
-  const original = originalUrl(paths, item);
+  const original = originalUrl(paths, item, apiMode, originalProxy);
 
   const retry = () => {
     setBaseState({ id: item.id, loaded: false, failed: false });
@@ -428,6 +434,8 @@ export function Detail({
   items,
   paths,
   infoOpen,
+  apiMode = false,
+  originalProxy = false,
   playing,
   matte,
   onBack,
@@ -616,6 +624,8 @@ export function Detail({
                 key={pane.id}
                 item={pane}
                 paths={paths}
+                apiMode={apiMode}
+                originalProxy={originalProxy}
                 active={pane.id === item.id && !slide}
                 onNavigate={navigateDir}
               />

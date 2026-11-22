@@ -833,11 +833,7 @@ pub(crate) fn dedup_asset_card(
                         } else if is_suggested {
                             {
                                 let reason = localize_dedup_reason(cx, &group.suggested_reason);
-                                t_args(
-                                    cx,
-                                    "dedup.card.recommended_reason",
-                                    &[("reason", &reason)],
-                                )
+                                t_args(cx, "dedup.card.recommended_reason", &[("reason", &reason)])
                             }
                             .to_string()
                         } else if editable {
@@ -1962,12 +1958,9 @@ impl KanalibApp {
                 .on_click(move |_, _, cx| {
                     if let Err(error) = open_asset_with_system(&path) {
                         // F-073 6.2：去重页 banner 会把 shared.error 优先显示为 danger 就地说明。
-                        let message = t_args(
-                            cx,
-                            "dedup.open_failed",
-                            &[("error", &error.to_string())],
-                        )
-                        .to_string();
+                        let message =
+                            t_args(cx, "dedup.open_failed", &[("error", &error.to_string())])
+                                .to_string();
                         let retry_path = path.clone();
                         let _ = this_open.update(cx, |app, cx| {
                             app.set_ui_error_with_retry(

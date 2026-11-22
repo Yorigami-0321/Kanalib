@@ -22,7 +22,10 @@ pub(crate) const ZH_CN: &[(&str, &str)] = &[
     ("page.duplicates", "重复项"),
     ("page.similar", "查找相似"),
     ("page.compare", "图片对比"),
-    ("titlebar.search_placeholder", "搜索 / tag: / character: / size:>10mb"),
+    (
+        "titlebar.search_placeholder",
+        "搜索 / tag: / character: / size:>10mb",
+    ),
     ("titlebar.sort", "排序"),
     ("titlebar.view", "查看"),
     ("titlebar.export", "导出"),
@@ -57,7 +60,10 @@ pub(crate) const ZH_CN: &[(&str, &str)] = &[
     ("sidebar.tags.sort_usage", "按使用次数排序"),
     ("sidebar.tags.sort_name", "按名称排序"),
     ("sidebar.tags.manage", "标签管理"),
-    ("sidebar.tags.summary", "有使用 {used} / 共 {total} / 已屏蔽 {blocked}"),
+    (
+        "sidebar.tags.summary",
+        "有使用 {used} / 共 {total} / 已屏蔽 {blocked}",
+    ),
     ("sidebar.tags.search_placeholder", "筛选标签（有使用）"),
     ("sidebar.tags.category.general", "通用"),
     ("sidebar.tags.category.character", "角色"),
@@ -81,7 +87,10 @@ pub(crate) const ZH_CN: &[(&str, &str)] = &[
     ("status.failed", "失败 {n}"),
     ("status.damaged", "损坏 {n}"),
     ("status.queue_idle", "队列空闲"),
-    ("status.queue", "队列 等待 {waiting} · 运行 {running} · 失败 {failed}"),
+    (
+        "status.queue",
+        "队列 等待 {waiting} · 运行 {running} · 失败 {failed}",
+    ),
     ("status.device_missing", "推理设备 · 未加载"),
     ("status.palette", "命令面板"),
     ("status.palette_shortcut", "命令面板 (Ctrl+K)"),
@@ -95,14 +104,20 @@ pub(crate) const ZH_CN: &[(&str, &str)] = &[
     ("scan.phase.failed", "失败"),
     ("scan.progress", "{phase} {done}/{total}"),
     ("scan.summary_compact", "上次扫描 · 新增 {n}"),
-    ("scan.summary", "上次扫描 · 新增 {imported} · 更新 {updated} · 跳过 {skipped} · 移除 {removed} · 失败 {failed} · {elapsed}{stopped}"),
+    (
+        "scan.summary",
+        "上次扫描 · 新增 {imported} · 更新 {updated} · 跳过 {skipped} · 移除 {removed} · 失败 {failed} · {elapsed}{stopped}",
+    ),
     ("scan.stopped", " · 已停止"),
     ("scan.throughput", "{rate} 张/秒"),
     ("scan.eta", "剩余 {eta}"),
     ("scan.source_multi", "来源 {index}/{total} · {source}"),
     ("scan.source", "来源 · {source}"),
     ("scan.idle_recent", "空闲 · 最近阶段 {phase}"),
-    ("scan.current_scanning", "扫描中 · {progress} · 吞吐 {rate} · ETA {eta}"),
+    (
+        "scan.current_scanning",
+        "扫描中 · {progress} · 吞吐 {rate} · ETA {eta}",
+    ),
     ("import_lab.title", "导入灯箱"),
     ("import_lab.open", "导入灯箱"),
     ("import_lab.background", "后台继续"),
@@ -117,7 +132,10 @@ pub(crate) const ZH_CN: &[(&str, &str)] = &[
     ("import_lab.idle_detail", "等待下一次导入"),
     ("status.undo", "可撤销 {n}"),
     ("status.undo_empty", "没有可撤销的操作"),
-    ("status.undo_aria_labeled", "撤销「{label}」· {base} · Ctrl+Z"),
+    (
+        "status.undo_aria_labeled",
+        "撤销「{label}」· {base} · Ctrl+Z",
+    ),
     ("status.undo_aria", "{base} · Ctrl+Z"),
     ("status.undo_done", "已撤销 · {label}"),
     ("status.undo_failed", "撤销失败：{error}"),
@@ -147,13 +165,19 @@ pub(crate) const EN_US: &[(&str, &str)] = &[
     ("page.duplicates", "Duplicates"),
     ("page.similar", "Find similar"),
     ("page.compare", "Compare"),
-    ("titlebar.search_placeholder", "Search / tag: / character: / size:>10mb"),
+    (
+        "titlebar.search_placeholder",
+        "Search / tag: / character: / size:>10mb",
+    ),
     ("titlebar.sort", "Sort"),
     ("titlebar.view", "View"),
     ("titlebar.export", "Export"),
     ("titlebar.grid_smaller", "Smaller grid"),
     ("titlebar.grid_larger", "Larger grid"),
-    ("titlebar.grid_tidy", "Auto-arrange and reset to medium density"),
+    (
+        "titlebar.grid_tidy",
+        "Auto-arrange and reset to medium density",
+    ),
     ("titlebar.history", "Recent searches {n}"),
     ("titlebar.history_empty", "No recent searches"),
     ("titlebar.history_clear", "Clear recent searches"),
@@ -182,7 +206,10 @@ pub(crate) const EN_US: &[(&str, &str)] = &[
     ("sidebar.tags.sort_usage", "Sort by usage"),
     ("sidebar.tags.sort_name", "Sort by name"),
     ("sidebar.tags.manage", "Manage tags"),
-    ("sidebar.tags.summary", "Used {used} / Total {total} / Blocked {blocked}"),
+    (
+        "sidebar.tags.summary",
+        "Used {used} / Total {total} / Blocked {blocked}",
+    ),
     ("sidebar.tags.search_placeholder", "Filter tags (used)"),
     ("sidebar.tags.category.general", "General"),
     ("sidebar.tags.category.character", "Character"),
@@ -199,14 +226,20 @@ pub(crate) const EN_US: &[(&str, &str)] = &[
     ("status.retry_failed", "Retry failed: {error}"),
     ("status.scanning_stop", "Scanning · click to stop"),
     ("status.searching", "Searching…"),
-    ("status.pending_restore", "Backup restore pending · takes effect after restart"),
+    (
+        "status.pending_restore",
+        "Backup restore pending · takes effect after restart",
+    ),
     ("status.total", "{n} images"),
     ("status.tagged", "Tagged {n}"),
     ("status.untagged", "Untagged {n}"),
     ("status.failed", "Failed {n}"),
     ("status.damaged", "Damaged {n}"),
     ("status.queue_idle", "Queue idle"),
-    ("status.queue", "Queue waiting {waiting} · running {running} · failed {failed}"),
+    (
+        "status.queue",
+        "Queue waiting {waiting} · running {running} · failed {failed}",
+    ),
     ("status.device_missing", "Inference device · not loaded"),
     ("status.palette", "Command palette"),
     ("status.palette_shortcut", "Command palette (Ctrl+K)"),
@@ -220,14 +253,20 @@ pub(crate) const EN_US: &[(&str, &str)] = &[
     ("scan.phase.failed", "Failed"),
     ("scan.progress", "{phase} {done}/{total}"),
     ("scan.summary_compact", "Last scan · added {n}"),
-    ("scan.summary", "Last scan · added {imported} · updated {updated} · skipped {skipped} · removed {removed} · failed {failed} · {elapsed}{stopped}"),
+    (
+        "scan.summary",
+        "Last scan · added {imported} · updated {updated} · skipped {skipped} · removed {removed} · failed {failed} · {elapsed}{stopped}",
+    ),
     ("scan.stopped", " · stopped"),
     ("scan.throughput", "{rate} images/s"),
     ("scan.eta", "ETA {eta}"),
     ("scan.source_multi", "Source {index}/{total} · {source}"),
     ("scan.source", "Source · {source}"),
     ("scan.idle_recent", "Idle · last phase {phase}"),
-    ("scan.current_scanning", "Scanning · {progress} · {rate} · ETA {eta}"),
+    (
+        "scan.current_scanning",
+        "Scanning · {progress} · {rate} · ETA {eta}",
+    ),
     ("import_lab.title", "Import lightbox"),
     ("import_lab.open", "Import lightbox"),
     ("import_lab.background", "Keep importing in background"),
@@ -237,16 +276,25 @@ pub(crate) const EN_US: &[(&str, &str)] = &[
     ("import_lab.rate", "Rating"),
     ("import_lab.reveal", "Show in library"),
     ("import_lab.new_count", "This import · latest {n}"),
-    ("import_lab.waiting", "Finding images — thumbnails will appear here as they arrive"),
+    (
+        "import_lab.waiting",
+        "Finding images — thumbnails will appear here as they arrive",
+    ),
     ("import_lab.empty_done", "This scan added no new images"),
     ("import_lab.idle_detail", "Waiting for the next import"),
     ("status.undo", "Undo {n}"),
     ("status.undo_empty", "Nothing to undo"),
-    ("status.undo_aria_labeled", "Undo “{label}” · {base} · Ctrl+Z"),
+    (
+        "status.undo_aria_labeled",
+        "Undo “{label}” · {base} · Ctrl+Z",
+    ),
     ("status.undo_aria", "{base} · Ctrl+Z"),
     ("status.undo_done", "Undone · {label}"),
     ("status.undo_failed", "Undo failed: {error}"),
-    ("status.undo_status", "Undone “{label}” · {n} items affected"),
+    (
+        "status.undo_status",
+        "Undone “{label}” · {n} items affected",
+    ),
     ("undo.favorite", "Favorite"),
     ("undo.unfavorite", "Unfavorite"),
     ("undo.clear_stars", "Clear rating"),
@@ -331,7 +379,9 @@ pub(crate) fn install(cx: &mut App) {
 }
 
 pub(crate) fn is_supported(tag: &str) -> bool {
-    SUPPORTED_LOCALES.iter().any(|(supported, _)| *supported == tag)
+    SUPPORTED_LOCALES
+        .iter()
+        .any(|(supported, _)| *supported == tag)
 }
 
 pub(crate) fn set_locale(tag: &str, cx: &mut App) {
@@ -358,7 +408,6 @@ pub(crate) fn t(cx: &App, key: &str) -> SharedString {
     finish_text(i18n::text(cx, key, &[]))
 }
 
-
 /// 核心 `Filter::label` 是中文数据；UI 渲染时用目录映射，数据值保留原文。
 pub(crate) fn filter_label(cx: &App, filter: &kanalib_core::model::Filter) -> String {
     use kanalib_core::model::Filter;
@@ -368,7 +417,9 @@ pub(crate) fn filter_label(cx: &App, filter: &kanalib_core::model::Filter) -> St
         Filter::Failed => t(cx, "sidebar.filter.failed").to_string(),
         Filter::Damaged => t(cx, "sidebar.filter.damaged").to_string(),
         Filter::Favorites => t(cx, "sidebar.filter.favorites").to_string(),
-        Filter::Rating(rating) => t_args(cx, "sidebar.filter.rating", &[("rating", rating)]).to_string(),
+        Filter::Rating(rating) => {
+            t_args(cx, "sidebar.filter.rating", &[("rating", rating)]).to_string()
+        }
         Filter::Group(group) => localize_group_name(cx, group),
         Filter::Tag(tag) => format!("#{tag}"),
         Filter::Source(path) => path

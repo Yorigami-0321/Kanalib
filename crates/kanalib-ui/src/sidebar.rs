@@ -1928,7 +1928,11 @@ impl KanalibApp {
         let detail = if saved.query.is_empty() {
             crate::localization::filter_label(cx, &saved.filter)
         } else {
-            format!("{} · {}", crate::localization::filter_label(cx, &saved.filter), saved.query)
+            format!(
+                "{} · {}",
+                crate::localization::filter_label(cx, &saved.filter),
+                saved.query
+            )
         };
         let saved_for_apply = saved.clone();
         let search_for_apply = search.clone();

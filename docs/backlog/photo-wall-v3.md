@@ -1,12 +1,12 @@
 # 图片墙 v3：方向与验收标准（草案，待你确认后动手）
 
-> 上级：[cloud-photo-wall.md](cloud-photo-wall.md) · 视觉基线：[photo-wall-design.md](../archive/2026-11/photo-wall-design.md) · 契约：[photo-wall-contract.md](photo-wall-contract.md)
+> 上级：[cloud-photo-wall.md](cloud-photo-wall.md) · 视觉基线：本文（v2 稿已删除） · 契约：[photo-wall-contract.md](photo-wall-contract.md)
 >
 > 2026-11-09 起。**本文件只定标准，不含实现**；问题清单在 §6，确认前不动代码。
 >
 > **2026-11-09 晚已按本标准实施完毕**，落地状态与复验数据见 [photo-wall-status.md](photo-wall-status.md)。
 > **2026-11-10 复查补齐**：Q8 四入口、详情触摸横滑/缩放平移、标签按类别分组折叠、Q7a 强调色分层已落地；以代码 + 浏览器实测为准，见 status §4.9。
-> **2026-11-10 v4**：单击=原位聚焦（不跳详情）、双击=详情；详情底部信息层删除，标题/元数据/标签/相似搬进 300px 左侧检查器；触控板 deltaX/详情横向 wheel 见 [photo-wall-focus-mode.md](../archive/2026-11/photo-wall-focus-mode.md)。
+> **2026-11-10 v4**：单击=原位聚焦（不跳详情）、双击=详情；详情底部信息层删除，标题/元数据/标签/相似搬进 300px 左侧检查器；触控板 deltaX/详情横向 wheel 已落地，调研稿于 2026-11-22 删除。
 > **2026-11-21 导航规格更新**：本文的「120px 竖排缝 / 竖排文字」是 v3 历史基线，**已被 [web-rail-horizontal.md](web-rail-horizontal.md)（F-087）取代**。现行目标为 208px 横排文字导航、60px 折叠、≤760 底部横向条；画布/详情/检查器与硬规则 1–11 仍有效。
 >
 > 参考材料：Folia 源码规格（`.kanalib/folia-ui-spec.md`，36KB，从 `.kanalib/refs/folia` 实测）+ 用户 2026-11-09 给的四类"无界"站点清单。

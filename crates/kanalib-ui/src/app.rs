@@ -887,10 +887,9 @@ impl Render for KanalibApp {
         });
         let tag_query = tag_search.read(cx).text().to_string();
         // F-070 方案 A：标签管理搜索只创建一份，侧栏导航与标签页共用，避免两套状态。
-        let tag_manager_search =
-            window.use_keyed_state("tag-manager-search", cx, |window, cx| {
-                TextInput::new(window, cx).placeholder_key("app.tags.manager_search_placeholder")
-            });
+        let tag_manager_search = window.use_keyed_state("tag-manager-search", cx, |window, cx| {
+            TextInput::new(window, cx).placeholder_key("app.tags.manager_search_placeholder")
+        });
         let sidebar: AnyElement = if self.show_sidebar {
             self.render_sidebar(
                 &this,
@@ -1057,11 +1056,8 @@ impl Render for KanalibApp {
             .group(
                 crate::localization::t(cx, "app.palette.group.goto"),
                 [
-                    Command::new(
-                        "goto:all",
-                        crate::localization::t(cx, "app.cmd.goto_all"),
-                    )
-                    .icon(IconName::Image),
+                    Command::new("goto:all", crate::localization::t(cx, "app.cmd.goto_all"))
+                        .icon(IconName::Image),
                     Command::new(
                         "goto:untagged",
                         crate::localization::t(cx, "app.cmd.goto_untagged"),
@@ -1092,11 +1088,8 @@ impl Render for KanalibApp {
                         crate::localization::t(cx, "app.cmd.goto_duplicates_similar"),
                     )
                     .icon(IconName::LayoutGrid),
-                    Command::new(
-                        "goto:tags",
-                        crate::localization::t(cx, "app.cmd.goto_tags"),
-                    )
-                    .icon(IconName::Tag),
+                    Command::new("goto:tags", crate::localization::t(cx, "app.cmd.goto_tags"))
+                        .icon(IconName::Tag),
                     Command::new(
                         "goto:settings",
                         crate::localization::t(cx, "app.cmd.goto_settings"),
@@ -1148,12 +1141,9 @@ impl Render for KanalibApp {
                     )
                     .icon(IconName::Columns3)
                     .keys("ctrl-shift-4"),
-                    Command::new(
-                        "view:list",
-                        crate::localization::t(cx, "app.cmd.view_list"),
-                    )
-                    .icon(IconName::List)
-                    .keys("ctrl-shift-5"),
+                    Command::new("view:list", crate::localization::t(cx, "app.cmd.view_list"))
+                        .icon(IconName::List)
+                        .keys("ctrl-shift-5"),
                     Command::new(
                         "view:details",
                         crate::localization::t(cx, "app.cmd.view_details"),
@@ -1258,11 +1248,8 @@ impl Render for KanalibApp {
                         crate::localization::t(cx, "app.cmd.copy_paths"),
                     )
                     .icon(IconName::Copy),
-                    Command::new(
-                        "tag:add",
-                        crate::localization::t(cx, "app.cmd.add_tag"),
-                    )
-                    .icon(IconName::Tag),
+                    Command::new("tag:add", crate::localization::t(cx, "app.cmd.add_tag"))
+                        .icon(IconName::Tag),
                     Command::new(
                         "tag:remove",
                         crate::localization::t(cx, "app.cmd.remove_tag"),
@@ -1278,12 +1265,9 @@ impl Render for KanalibApp {
                         crate::localization::t(cx, "app.cmd.compare_selected"),
                     )
                     .icon(IconName::Columns2),
-                    Command::new(
-                        "act:undo",
-                        crate::localization::t(cx, "app.cmd.undo"),
-                    )
-                    .icon(IconName::Undo2)
-                    .keys("ctrl-z"),
+                    Command::new("act:undo", crate::localization::t(cx, "app.cmd.undo"))
+                        .icon(IconName::Undo2)
+                        .keys("ctrl-z"),
                 ],
             )
             .group(
@@ -1314,11 +1298,8 @@ impl Render for KanalibApp {
             .group(
                 crate::localization::t(cx, "app.palette.group.sort"),
                 [
-                    Command::new(
-                        "sort:name",
-                        crate::localization::t(cx, "app.cmd.sort_name"),
-                    )
-                    .icon(IconName::ArrowDownUp),
+                    Command::new("sort:name", crate::localization::t(cx, "app.cmd.sort_name"))
+                        .icon(IconName::ArrowDownUp),
                     Command::new(
                         "sort:modified",
                         crate::localization::t(cx, "app.cmd.sort_modified"),
@@ -1329,21 +1310,15 @@ impl Render for KanalibApp {
                         crate::localization::t(cx, "app.cmd.sort_captured"),
                     )
                     .icon(IconName::Camera),
-                    Command::new(
-                        "sort:size",
-                        crate::localization::t(cx, "app.cmd.sort_size"),
-                    )
-                    .icon(IconName::FileImage),
+                    Command::new("sort:size", crate::localization::t(cx, "app.cmd.sort_size"))
+                        .icon(IconName::FileImage),
                     Command::new(
                         "sort:resolution",
                         crate::localization::t(cx, "app.cmd.sort_resolution"),
                     )
                     .icon(IconName::Maximize2),
-                    Command::new(
-                        "sort:star",
-                        crate::localization::t(cx, "app.cmd.sort_star"),
-                    )
-                    .icon(IconName::Star),
+                    Command::new("sort:star", crate::localization::t(cx, "app.cmd.sort_star"))
+                        .icon(IconName::Star),
                     Command::new(
                         "sort:fav",
                         crate::localization::t(cx, "app.cmd.sort_favorite"),
@@ -1384,11 +1359,8 @@ impl Render for KanalibApp {
             .group(
                 crate::localization::t(cx, "app.palette.group.library"),
                 [
-                    Command::new(
-                        "scan:rescan",
-                        crate::localization::t(cx, "app.cmd.rescan"),
-                    )
-                    .icon(IconName::RefreshCw),
+                    Command::new("scan:rescan", crate::localization::t(cx, "app.cmd.rescan"))
+                        .icon(IconName::RefreshCw),
                     Command::new(
                         "scan:retry",
                         crate::localization::t(cx, "app.cmd.retry_tagging"),
@@ -1535,7 +1507,9 @@ impl Render for KanalibApp {
             let field = window.use_keyed_state(
                 SharedString::from(format!("kanalib-tag-field-{epoch}")),
                 cx,
-                |window, cx| TextInput::new(window, cx).placeholder_key("app.tag_dialog.placeholder"),
+                |window, cx| {
+                    TextInput::new(window, cx).placeholder_key("app.tag_dialog.placeholder")
+                },
             );
             let close = this.clone();
             let submit = this.clone();
@@ -1601,8 +1575,9 @@ impl Render for KanalibApp {
                 SharedString::from(format!("kanalib-tag-rename-{epoch}")),
                 cx,
                 move |window, cx| {
-                    let input = cx
-                        .new(|cx| TextInput::new(window, cx).placeholder_key("app.tag_rename.placeholder"));
+                    let input = cx.new(|cx| {
+                        TextInput::new(window, cx).placeholder_key("app.tag_rename.placeholder")
+                    });
                     let value = initial.clone();
                     input.update(cx, |input, cx| input.set_text(value, cx));
                     input
@@ -1901,13 +1876,13 @@ impl Render for KanalibApp {
                 SharedString::from(format!("remote-api-key-{epoch}")),
                 cx,
                 move |window, cx| match hint {
-                    Some(RemoteAddKind::Immich) => {
-                        TextInput::new(window, cx).placeholder_key("app.remote_key.immich_placeholder")
+                    Some(RemoteAddKind::Immich) => TextInput::new(window, cx)
+                        .placeholder_key("app.remote_key.immich_placeholder"),
+                    Some(RemoteAddKind::WebDav) => TextInput::new(window, cx)
+                        .placeholder_key("app.remote_key.webdav_placeholder"),
+                    None => {
+                        TextInput::new(window, cx).placeholder_key("app.remote_key.placeholder")
                     }
-                    Some(RemoteAddKind::WebDav) => {
-                        TextInput::new(window, cx).placeholder_key("app.remote_key.webdav_placeholder")
-                    }
-                    None => TextInput::new(window, cx).placeholder_key("app.remote_key.placeholder"),
                 },
             );
             let close = this.clone();
@@ -1968,11 +1943,8 @@ impl Render for KanalibApp {
                 });
             let close = this.clone();
             let confirm = this.clone();
-            let body = crate::localization::t_args(
-                cx,
-                "app.remote_remove.body",
-                &[("name", &name)],
-            );
+            let body =
+                crate::localization::t_args(cx, "app.remote_remove.body", &[("name", &name)]);
             ConfirmDialog::new(
                 "remove-remote-source-dialog",
                 crate::localization::t(cx, "app.remote_remove.title"),
@@ -2261,41 +2233,40 @@ impl Render for KanalibApp {
             })
             .into_any_element()
         });
-        let drop_overlay =
-            self.drop_highlight.then(|| {
-                div()
-                    .absolute()
-                    .top(px(0.))
-                    .left(px(0.))
-                    .size_full()
-                    .bg(colors.accent.opacity(0.10))
-                    .border_2()
-                    .border_color(colors.accent)
-                    .flex()
-                    .flex_col()
-                    .items_center()
-                    .justify_center()
-                    .gap(px(6.))
-                    .child(
-                        Icon::new(IconName::FolderPlus)
-                            .size(IconSize::Lg)
-                            .color(colors.accent),
-                    )
-                    .child(
-                        div()
-                            .text_lg()
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .text_color(colors.fg)
-                            .child(crate::localization::t(cx, "app.drop.overlay_title")),
-                    )
-                    .child(
-                        div()
-                            .text_xs()
-                            .text_color(colors.muted)
-                            .child(crate::localization::t(cx, "app.drop.overlay_hint")),
-                    )
-                    .into_any_element()
-            });
+        let drop_overlay = self.drop_highlight.then(|| {
+            div()
+                .absolute()
+                .top(px(0.))
+                .left(px(0.))
+                .size_full()
+                .bg(colors.accent.opacity(0.10))
+                .border_2()
+                .border_color(colors.accent)
+                .flex()
+                .flex_col()
+                .items_center()
+                .justify_center()
+                .gap(px(6.))
+                .child(
+                    Icon::new(IconName::FolderPlus)
+                        .size(IconSize::Lg)
+                        .color(colors.accent),
+                )
+                .child(
+                    div()
+                        .text_lg()
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(colors.fg)
+                        .child(crate::localization::t(cx, "app.drop.overlay_title")),
+                )
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(colors.muted)
+                        .child(crate::localization::t(cx, "app.drop.overlay_hint")),
+                )
+                .into_any_element()
+        });
         let source_context_menu = self.source_menu.as_ref().map(|state| {
             ContextMenu::new(
                 "source-context-global",
@@ -2534,15 +2505,13 @@ impl Render for KanalibApp {
             });
         }
         // 整棵树共用一个有界图片缓存：子树里所有 img 都走它，不再进无上限的全局 asset cache。
-        image_cache(self.thumb_cache.clone())
-            .size_full()
-            .child(
-                FocusScope::new(&self.root_focus)
-                    .root()
-                    .node("kanalib-root-focus", Role::Group, "Kanalib", None)
-                    .size_full()
-                    .child(shell),
-            )
+        image_cache(self.thumb_cache.clone()).size_full().child(
+            FocusScope::new(&self.root_focus)
+                .root()
+                .node("kanalib-root-focus", Role::Group, "Kanalib", None)
+                .size_full()
+                .child(shell),
+        )
     }
 }
 
@@ -3511,14 +3480,20 @@ impl KanalibApp {
             let _ = weak.update(cx, |app, cx| {
                 match app.state.add_roots(folders) {
                     Ok(0) => {
-                        { let __i18n_toast = crate::localization::t(cx, "app.folder.already"); push_toast(&app.toaster, cx, __i18n_toast, Severity::Warning); }
+                        {
+                            let __i18n_toast = crate::localization::t(cx, "app.folder.already");
+                            push_toast(&app.toaster, cx, __i18n_toast, Severity::Warning);
+                        }
                         return;
                     }
-                    Ok(added) => { let __i18n_toast_0 = crate::localization::t_args(
+                    Ok(added) => {
+                        let __i18n_toast_0 = crate::localization::t_args(
                             cx,
                             "app.folder.added",
                             &[("n", &added.to_string())],
-                        ); push_toast(&app.toaster, cx, __i18n_toast_0, Severity::Success) },
+                        );
+                        push_toast(&app.toaster, cx, __i18n_toast_0, Severity::Success)
+                    }
                     Err(error) => {
                         let message = crate::localization::t_args(
                             cx,
@@ -3654,7 +3629,10 @@ impl KanalibApp {
                 self.pending_restore_hint = Some(message.clone());
                 if changed {
                     self.settings_notice = Some(message.clone());
-                    { let __i18n_toast = crate::localization::t(cx, "app.restore_pending.toast"); push_toast(&self.toaster, cx, __i18n_toast, Severity::Warning); }
+                    {
+                        let __i18n_toast = crate::localization::t(cx, "app.restore_pending.toast");
+                        push_toast(&self.toaster, cx, __i18n_toast, Severity::Warning);
+                    }
                 }
             }
             None => self.pending_restore_hint = None,
@@ -3896,11 +3874,15 @@ impl KanalibApp {
     pub(crate) fn apply_favorite(&mut self, favorite: bool, cx: &mut Context<Self>) {
         let paths = self.selected_paths();
         if paths.is_empty() {
-            { let __i18n_toast_1 = crate::localization::t(cx, "app.common.no_selection"); push_toast(&self.toaster, cx, __i18n_toast_1, Severity::Warning) };
+            {
+                let __i18n_toast_1 = crate::localization::t(cx, "app.common.no_selection");
+                push_toast(&self.toaster, cx, __i18n_toast_1, Severity::Warning)
+            };
             return;
         }
         match self.state.set_favorite(&paths, favorite) {
-            Ok(updated) => { let __i18n_toast_2 = crate::localization::t_args(
+            Ok(updated) => {
+                let __i18n_toast_2 = crate::localization::t_args(
                     cx,
                     if favorite {
                         "app.favorite.added"
@@ -3908,7 +3890,9 @@ impl KanalibApp {
                         "app.favorite.removed"
                     },
                     &[("n", &updated.to_string())],
-                ); push_toast(&self.toaster, cx, __i18n_toast_2, Severity::Success) },
+                );
+                push_toast(&self.toaster, cx, __i18n_toast_2, Severity::Success)
+            }
             Err(error) => {
                 let message = crate::localization::t_args(
                     cx,
@@ -3966,11 +3950,15 @@ impl KanalibApp {
     pub(crate) fn apply_star(&mut self, star: u8, cx: &mut Context<Self>) {
         let paths = self.selected_paths();
         if paths.is_empty() {
-            { let __i18n_toast = crate::localization::t(cx, "app.common.no_selection"); push_toast(&self.toaster, cx, __i18n_toast, Severity::Warning); }
+            {
+                let __i18n_toast = crate::localization::t(cx, "app.common.no_selection");
+                push_toast(&self.toaster, cx, __i18n_toast, Severity::Warning);
+            }
             return;
         }
         match self.state.set_star(&paths, star) {
-            Ok(updated) => { let __i18n_toast_3 = if star == 0 {
+            Ok(updated) => {
+                let __i18n_toast_3 = if star == 0 {
                     crate::localization::t_args(
                         cx,
                         "app.star.cleared",
@@ -3982,7 +3970,9 @@ impl KanalibApp {
                         "app.star.set",
                         &[("n", &updated.to_string()), ("star", &star.to_string())],
                     )
-                }; push_toast(&self.toaster, cx, __i18n_toast_3, Severity::Success) },
+                };
+                push_toast(&self.toaster, cx, __i18n_toast_3, Severity::Success)
+            }
             Err(error) => {
                 let message = crate::localization::t_args(
                     cx,
@@ -4055,19 +4045,13 @@ impl KanalibApp {
                     self.auto_select_pending = true;
                 }
                 let action = crate::localization::undo_action_label(cx, &outcome.label);
-                let message = crate::localization::t_args(
-                    cx,
-                    "status.undo_done",
-                    &[("label", &action)],
-                );
+                let message =
+                    crate::localization::t_args(cx, "status.undo_done", &[("label", &action)]);
                 push_toast(&self.toaster, cx, message, Severity::Success);
                 let status = crate::localization::t_args(
                     cx,
                     "status.undo_status",
-                    &[
-                        ("label", &action),
-                        ("n", &outcome.affected.to_string()),
-                    ],
+                    &[("label", &action), ("n", &outcome.affected.to_string())],
                 )
                 .to_string();
                 self.state.set_status(status);
@@ -4100,7 +4084,10 @@ impl KanalibApp {
             paths.dedup();
         }
         if paths.is_empty() {
-            { let __i18n_toast = crate::localization::t(cx, "app.export.empty"); push_toast(&self.toaster, cx, __i18n_toast, Severity::Warning); }
+            {
+                let __i18n_toast = crate::localization::t(cx, "app.export.empty");
+                push_toast(&self.toaster, cx, __i18n_toast, Severity::Warning);
+            }
             return;
         }
         let assets = {
@@ -4116,7 +4103,10 @@ impl KanalibApp {
                 .collect::<Vec<_>>()
         };
         if assets.is_empty() {
-            { let __i18n_toast_4 = crate::localization::t(cx, "app.export.empty"); push_toast(&self.toaster, cx, __i18n_toast_4, Severity::Warning) };
+            {
+                let __i18n_toast_4 = crate::localization::t(cx, "app.export.empty");
+                push_toast(&self.toaster, cx, __i18n_toast_4, Severity::Warning)
+            };
             return;
         }
         let content = match export_format {
@@ -4124,11 +4114,14 @@ impl KanalibApp {
             ExportFormat::Json => match export::to_json(&assets) {
                 Ok(content) => content,
                 Err(error) => {
-                    { let __i18n_toast_5 = crate::localization::t_args(
+                    {
+                        let __i18n_toast_5 = crate::localization::t_args(
                             cx,
                             "app.export.json_failed",
                             &[("error", &format!("{error:#}"))],
-                        ); push_toast(&self.toaster, cx, __i18n_toast_5, Severity::Danger) };
+                        );
+                        push_toast(&self.toaster, cx, __i18n_toast_5, Severity::Danger)
+                    };
                     return;
                 }
             },
@@ -4150,16 +4143,22 @@ impl KanalibApp {
             let result = std::fs::write(&path, content);
             let _ = weak.update(cx, |_, cx| {
                 match result {
-                    Ok(()) => { let __i18n_toast_6 = crate::localization::t_args(
+                    Ok(()) => {
+                        let __i18n_toast_6 = crate::localization::t_args(
                             cx,
                             "app.export.done",
                             &[("n", &count.to_string()), ("size", &format_bytes(bytes))],
-                        ); push_toast(&toaster, cx, __i18n_toast_6, Severity::Success) },
-                    Err(error) => { let __i18n_toast_7 = crate::localization::t_args(
+                        );
+                        push_toast(&toaster, cx, __i18n_toast_6, Severity::Success)
+                    }
+                    Err(error) => {
+                        let __i18n_toast_7 = crate::localization::t_args(
                             cx,
                             "app.export.failed",
                             &[("error", &format!("{error:#}"))],
-                        ); push_toast(&toaster, cx, __i18n_toast_7, Severity::Danger) },
+                        );
+                        push_toast(&toaster, cx, __i18n_toast_7, Severity::Danger)
+                    }
                 }
                 cx.notify();
             });
@@ -4170,7 +4169,10 @@ impl KanalibApp {
     pub(crate) fn copy_selected_prompt(&mut self, cx: &mut Context<Self>) {
         let paths = self.selected_paths();
         if paths.is_empty() {
-            { let __i18n_toast_8 = crate::localization::t(cx, "app.common.no_selection"); push_toast(&self.toaster, cx, __i18n_toast_8, Severity::Warning) };
+            {
+                let __i18n_toast_8 = crate::localization::t(cx, "app.common.no_selection");
+                push_toast(&self.toaster, cx, __i18n_toast_8, Severity::Warning)
+            };
             return;
         }
         let targets = paths.iter().map(PathBuf::as_path).collect::<HashSet<_>>();
@@ -4189,21 +4191,30 @@ impl KanalibApp {
             prompts
         };
         if prompts.is_empty() {
-            { let __i18n_toast_9 = crate::localization::t(cx, "app.copy.prompt_empty"); push_toast(&self.toaster, cx, __i18n_toast_9, Severity::Warning) };
+            {
+                let __i18n_toast_9 = crate::localization::t(cx, "app.copy.prompt_empty");
+                push_toast(&self.toaster, cx, __i18n_toast_9, Severity::Warning)
+            };
             return;
         }
         cx.write_to_clipboard(ClipboardItem::new_string(prompts.join("\n\n")));
-        { let __i18n_toast_10 = crate::localization::t_args(
+        {
+            let __i18n_toast_10 = crate::localization::t_args(
                 cx,
                 "app.copy.prompt_done",
                 &[("n", &prompts.len().to_string())],
-            ); push_toast(&self.toaster, cx, __i18n_toast_10, Severity::Success) };
+            );
+            push_toast(&self.toaster, cx, __i18n_toast_10, Severity::Success)
+        };
     }
 
     pub(crate) fn copy_selected_paths(&mut self, cx: &mut Context<Self>) {
         let mut paths = self.selected_paths();
         if paths.is_empty() {
-            { let __i18n_toast_11 = crate::localization::t(cx, "app.common.no_selection"); push_toast(&self.toaster, cx, __i18n_toast_11, Severity::Warning) };
+            {
+                let __i18n_toast_11 = crate::localization::t(cx, "app.common.no_selection");
+                push_toast(&self.toaster, cx, __i18n_toast_11, Severity::Warning)
+            };
             return;
         }
         paths.sort();
@@ -4213,17 +4224,23 @@ impl KanalibApp {
             .collect::<Vec<_>>()
             .join("\n");
         cx.write_to_clipboard(ClipboardItem::new_string(text));
-        { let __i18n_toast_12 = crate::localization::t_args(
+        {
+            let __i18n_toast_12 = crate::localization::t_args(
                 cx,
                 "app.copy.paths_done",
                 &[("n", &paths.len().to_string())],
-            ); push_toast(&self.toaster, cx, __i18n_toast_12, Severity::Success) };
+            );
+            push_toast(&self.toaster, cx, __i18n_toast_12, Severity::Success)
+        };
     }
 
     /// F-068：把单张图片写入剪贴板（PNG + CF_DIB）；失败回退复制路径。
     pub(crate) fn copy_image_path(&mut self, path: PathBuf, cx: &mut Context<Self>) {
         match crate::platform::copy_image_to_clipboard(&path) {
-            Ok(()) => { let __i18n_toast_13 = crate::localization::t(cx, "app.copy.image_done"); push_toast(&self.toaster, cx, __i18n_toast_13, Severity::Success) },
+            Ok(()) => {
+                let __i18n_toast_13 = crate::localization::t(cx, "app.copy.image_done");
+                push_toast(&self.toaster, cx, __i18n_toast_13, Severity::Success)
+            }
             Err(error) => {
                 let message = crate::platform::image_copy_fallback_message(&path, &error);
                 cx.write_to_clipboard(ClipboardItem::new_string(path.display().to_string()));
@@ -4248,11 +4265,14 @@ impl KanalibApp {
     ) {
         if let Err(error) = self.state.set_setting(key, value.as_ref()) {
             log::warn!("save setting {key}: {error:#}");
-            { let __i18n_toast_14 = crate::localization::t_args(
+            {
+                let __i18n_toast_14 = crate::localization::t_args(
                     cx,
                     "app.settings.save_failed",
                     &[("error", &format!("{error:#}"))],
-                ); push_toast(&self.toaster, cx, __i18n_toast_14, Severity::Danger) };
+                );
+                push_toast(&self.toaster, cx, __i18n_toast_14, Severity::Danger)
+            };
         }
     }
 
@@ -4350,10 +4370,7 @@ impl KanalibApp {
         }
         let (current, max) = {
             let state = self.grid_scroll.0.borrow();
-            (
-                state.base_handle.offset(),
-                state.base_handle.max_offset(),
-            )
+            (state.base_handle.offset(), state.base_handle.max_offset())
         };
         let target = gpui::point(
             (current.x + px(dx)).clamp(-max.x, px(0.)),
@@ -4362,11 +4379,7 @@ impl KanalibApp {
         if target == current {
             return;
         }
-        self.grid_scroll
-            .0
-            .borrow()
-            .base_handle
-            .set_offset(target);
+        self.grid_scroll.0.borrow().base_handle.set_offset(target);
         cx.notify();
     }
 
@@ -4777,8 +4790,8 @@ impl KanalibApp {
                 )
                 .icon(IconName::PanelLeft)
                 .on_click(move |_, cx| {
-                    let _ = sidebar
-                        .update(cx, |app, cx| app.set_show_sidebar(!app.show_sidebar, cx));
+                    let _ =
+                        sidebar.update(cx, |app, cx| app.set_show_sidebar(!app.show_sidebar, cx));
                 }),
             )
             .item(
@@ -4824,8 +4837,8 @@ impl KanalibApp {
                 )
                 .icon(IconName::PanelRight)
                 .on_click(move |_, cx| {
-                    let _ = details
-                        .update(cx, |app, cx| app.toggle_pane_mode(PaneMode::Details, cx));
+                    let _ =
+                        details.update(cx, |app, cx| app.toggle_pane_mode(PaneMode::Details, cx));
                 }),
             )
             .item(
@@ -4835,8 +4848,8 @@ impl KanalibApp {
                 )
                 .icon(IconName::Image)
                 .on_click(move |_, cx| {
-                    let _ = preview
-                        .update(cx, |app, cx| app.toggle_pane_mode(PaneMode::Preview, cx));
+                    let _ =
+                        preview.update(cx, |app, cx| app.toggle_pane_mode(PaneMode::Preview, cx));
                 }),
             )
             .separator()
@@ -4930,8 +4943,8 @@ impl KanalibApp {
                 crate::localization::t(cx, "titlebar.sort"),
                 self.sort_menu(this, cx),
             )
-                .icon(IconName::ArrowDownUp)
-                .variant(ButtonVariant::Ghost)
+            .icon(IconName::ArrowDownUp)
+            .variant(ButtonVariant::Ghost)
         });
         let view = library.then(|| {
             DropdownMenu::new(
@@ -4939,8 +4952,8 @@ impl KanalibApp {
                 crate::localization::t(cx, "titlebar.view"),
                 self.view_menu(this, cx),
             )
-                .icon(IconName::LayoutGrid)
-                .variant(ButtonVariant::Ghost)
+            .icon(IconName::LayoutGrid)
+            .variant(ButtonVariant::Ghost)
         });
         let export = library.then(|| {
             DropdownMenu::new(
@@ -4948,8 +4961,8 @@ impl KanalibApp {
                 crate::localization::t(cx, "titlebar.export"),
                 self.export_menu(this, cx),
             )
-                .icon(IconName::Download)
-                .variant(ButtonVariant::Ghost)
+            .icon(IconName::Download)
+            .variant(ButtonVariant::Ghost)
         });
         // F-015：最近查询下拉与语法帮助浮层都挂在搜索框右侧，只影响标题栏布局。
         let history_menu = {
@@ -4994,9 +5007,7 @@ impl KanalibApp {
                 &[("n", &history_count)],
             ));
         let syntax_menu = Menu::new()
-            .item(
-                MenuItem::new(crate::localization::t(cx, "app.syntax.free_text")).disabled(true),
-            )
+            .item(MenuItem::new(crate::localization::t(cx, "app.syntax.free_text")).disabled(true))
             .item(MenuItem::new(crate::localization::t(cx, "app.syntax.tag")).disabled(true))
             .item(MenuItem::new(crate::localization::t(cx, "app.syntax.style")).disabled(true))
             .item(MenuItem::new(crate::localization::t(cx, "app.syntax.name")).disabled(true))
@@ -5044,10 +5055,7 @@ impl KanalibApp {
                     div().flex_1().min_w(px(0.)).child(
                         Input::new(search)
                             .clearable()
-                            .least(crate::localization::t(
-                                cx,
-                                "titlebar.search_placeholder",
-                            )),
+                            .least(crate::localization::t(cx, "titlebar.search_placeholder")),
                     ),
                 )
                 .child(history)
@@ -5292,18 +5300,24 @@ impl KanalibApp {
             }
         }
         if existing > 0 {
-            { let __i18n_toast_15 = crate::localization::t_args(
+            {
+                let __i18n_toast_15 = crate::localization::t_args(
                     cx,
                     "app.drop.existing",
                     &[("n", &existing.to_string())],
-                ); push_toast(&self.toaster, cx, __i18n_toast_15, Severity::Warning) };
+                );
+                push_toast(&self.toaster, cx, __i18n_toast_15, Severity::Warning)
+            };
         }
         if unsupported > 0 {
-            { let __i18n_toast_16 = crate::localization::t_args(
+            {
+                let __i18n_toast_16 = crate::localization::t_args(
                     cx,
                     "app.drop.unsupported",
                     &[("n", &unsupported.to_string())],
-                ); push_toast(&self.toaster, cx, __i18n_toast_16, Severity::Warning) };
+                );
+                push_toast(&self.toaster, cx, __i18n_toast_16, Severity::Warning)
+            };
         }
         if !dirs.is_empty() || !parents.is_empty() {
             self.drop_prompt = Some(DropPrompt::AddSources { dirs, parents });
@@ -5336,13 +5350,16 @@ impl KanalibApp {
             Ok(0) => {
                 let __i18n_toast = crate::localization::t(cx, "app.folder.already");
                 push_toast(&self.toaster, cx, __i18n_toast, Severity::Warning)
-            },
+            }
             Ok(added) => {
-                { let __i18n_toast_17 = crate::localization::t_args(
+                {
+                    let __i18n_toast_17 = crate::localization::t_args(
                         cx,
                         "app.drop.added_and_scanning",
                         &[("n", &added.to_string())],
-                    ); push_toast(&self.toaster, cx, __i18n_toast_17, Severity::Success) };
+                    );
+                    push_toast(&self.toaster, cx, __i18n_toast_17, Severity::Success)
+                };
                 if let Some(search) = &self.search_input {
                     search.update(cx, |input, cx| input.set_text("", cx));
                 }
@@ -5396,7 +5413,10 @@ impl KanalibApp {
                 .collect::<Vec<_>>()
         };
         if found.is_empty() {
-            { let __i18n_toast = crate::localization::t(cx, "app.locate.not_indexed"); push_toast(&self.toaster, cx, __i18n_toast, Severity::Warning); }
+            {
+                let __i18n_toast = crate::localization::t(cx, "app.locate.not_indexed");
+                push_toast(&self.toaster, cx, __i18n_toast, Severity::Warning);
+            }
             cx.notify();
             return;
         }
@@ -5420,17 +5440,23 @@ impl KanalibApp {
             });
         })
         .detach();
-        { let __i18n_toast_18 = crate::localization::t_args(
+        {
+            let __i18n_toast_18 = crate::localization::t_args(
                 cx,
                 "app.locate.done",
                 &[("n", &found.len().to_string())],
-            ); push_toast(&self.toaster, cx, __i18n_toast_18, Severity::Success) };
+            );
+            push_toast(&self.toaster, cx, __i18n_toast_18, Severity::Success)
+        };
         if missing > 0 {
-            { let __i18n_toast_19 = crate::localization::t_args(
+            {
+                let __i18n_toast_19 = crate::localization::t_args(
                     cx,
                     "app.locate.missing",
                     &[("n", &missing.to_string())],
-                ); push_toast(&self.toaster, cx, __i18n_toast_19, Severity::Warning) };
+                );
+                push_toast(&self.toaster, cx, __i18n_toast_19, Severity::Warning)
+            };
         }
         cx.notify();
     }
@@ -5444,7 +5470,10 @@ impl KanalibApp {
     ) {
         let mut paths = self.selected_paths();
         if paths.is_empty() {
-            { let __i18n_toast_20 = crate::localization::t(cx, "app.common.no_selection"); push_toast(&self.toaster, cx, __i18n_toast_20, Severity::Warning) };
+            {
+                let __i18n_toast_20 = crate::localization::t(cx, "app.common.no_selection");
+                push_toast(&self.toaster, cx, __i18n_toast_20, Severity::Warning)
+            };
             return;
         }
         paths.sort();
@@ -5476,11 +5505,14 @@ impl KanalibApp {
                 self.clear_multi_selection();
                 self.state.select(None);
                 self.auto_select_pending = true;
-                { let __i18n_toast_21 = crate::localization::t_args(
+                {
+                    let __i18n_toast_21 = crate::localization::t_args(
                         cx,
                         "app.remove_assets.removed",
                         &[("n", &removed.to_string())],
-                    ); push_toast(&self.toaster, cx, __i18n_toast_21, Severity::Success) };
+                    );
+                    push_toast(&self.toaster, cx, __i18n_toast_21, Severity::Success)
+                };
             }
             Err(error) => {
                 let message = crate::localization::t_args(
@@ -5537,8 +5569,7 @@ impl KanalibApp {
             draft.config.exclude_globs.push(glob.to_string());
             draft.impact = None;
             draft.confirm_remove = false;
-            draft.notice =
-                Some(crate::localization::t(cx, "app.filter.draft_added").to_string());
+            draft.notice = Some(crate::localization::t(cx, "app.filter.draft_added").to_string());
         }
         cx.notify();
     }
@@ -5551,8 +5582,7 @@ impl KanalibApp {
             draft.config.exclude_globs.remove(index);
             draft.impact = None;
             draft.confirm_remove = false;
-            draft.notice =
-                Some(crate::localization::t(cx, "app.filter.draft_removed").to_string());
+            draft.notice = Some(crate::localization::t(cx, "app.filter.draft_removed").to_string());
         }
         cx.notify();
     }
@@ -5718,7 +5748,8 @@ impl KanalibApp {
                         .to_string()
                     });
                 }
-                { let __i18n_toast_22 = if remove {
+                {
+                    let __i18n_toast_22 = if remove {
                         crate::localization::t_args(
                             cx,
                             "app.filter.toast_removed",
@@ -5726,7 +5757,9 @@ impl KanalibApp {
                         )
                     } else {
                         crate::localization::t(cx, "app.filter.toast_kept")
-                    }; push_toast(&self.toaster, cx, __i18n_toast_22, Severity::Success) };
+                    };
+                    push_toast(&self.toaster, cx, __i18n_toast_22, Severity::Success)
+                };
             }
             Err(error) => {
                 if let Some(draft) = self.scan_filter_draft.as_mut() {
@@ -5740,11 +5773,14 @@ impl KanalibApp {
                     );
                     draft.confirm_remove = false;
                 }
-                { let __i18n_toast_23 = crate::localization::t_args(
+                {
+                    let __i18n_toast_23 = crate::localization::t_args(
                         cx,
                         "app.filter.save_failed",
                         &[("error", &format!("{error:#}"))],
-                    ); push_toast(&self.toaster, cx, __i18n_toast_23, Severity::Danger) };
+                    );
+                    push_toast(&self.toaster, cx, __i18n_toast_23, Severity::Danger)
+                };
             }
         }
         cx.notify();
@@ -5775,23 +5811,20 @@ impl KanalibApp {
     ) {
         match self.state.add_ignored_glob(&root, &pattern) {
             Ok(true) => {
-                let message = crate::localization::t_args(
-                    cx,
-                    "app.ignore.added",
-                    &[("pattern", &pattern)],
-                )
-                .to_string();
+                let message =
+                    crate::localization::t_args(cx, "app.ignore.added", &[("pattern", &pattern)])
+                        .to_string();
                 self.draft_notice(message.clone());
                 self.settings_notice = Some(message);
-                { let __i18n_toast = crate::localization::t(cx, "app.ignore.added_toast"); push_toast(&self.toaster, cx, __i18n_toast, Severity::Success); }
+                {
+                    let __i18n_toast = crate::localization::t(cx, "app.ignore.added_toast");
+                    push_toast(&self.toaster, cx, __i18n_toast, Severity::Success);
+                }
             }
             Ok(false) => {
-                let message = crate::localization::t_args(
-                    cx,
-                    "app.ignore.exists",
-                    &[("pattern", &pattern)],
-                )
-                .to_string();
+                let message =
+                    crate::localization::t_args(cx, "app.ignore.exists", &[("pattern", &pattern)])
+                        .to_string();
                 self.draft_notice(message.clone());
                 self.settings_notice = Some(message);
             }
@@ -5880,12 +5913,8 @@ impl KanalibApp {
             }
             Ok(false) => {
                 self.settings_notice = Some(
-                    crate::localization::t_args(
-                        cx,
-                        "app.ignore.missing",
-                        &[("pattern", &pattern)],
-                    )
-                    .to_string(),
+                    crate::localization::t_args(cx, "app.ignore.missing", &[("pattern", &pattern)])
+                        .to_string(),
                 );
             }
             Err(error) => {

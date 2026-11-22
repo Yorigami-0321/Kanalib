@@ -56,10 +56,22 @@ pub(crate) const ZH: &[(&str, &str)] = &[
     ("views.tile.failed", "失败"),
     ("views.group.count", "{n} 张"),
     ("views.group.aria", "{title}，{n} 张"),
-    ("views.empty.no_results.description", "清除筛选或调整搜索条件后再试。"),
-    ("views.empty.no_roots.description", "点击侧栏「添加文件夹」或拖入文件夹开始。"),
-    ("views.empty.scanning.description", "扫描完成后缩略图会出现在这里。"),
-    ("views.menu.remote_readonly", "远端只读来源没有本地文件，无法访问本地路径"),
+    (
+        "views.empty.no_results.description",
+        "清除筛选或调整搜索条件后再试。",
+    ),
+    (
+        "views.empty.no_roots.description",
+        "点击侧栏「添加文件夹」或拖入文件夹开始。",
+    ),
+    (
+        "views.empty.scanning.description",
+        "扫描完成后缩略图会出现在这里。",
+    ),
+    (
+        "views.menu.remote_readonly",
+        "远端只读来源没有本地文件，无法访问本地路径",
+    ),
 ];
 
 /// 主图库英文目录；键与中文一一对应。
@@ -120,8 +132,20 @@ pub(crate) const EN: &[(&str, &str)] = &[
     ("views.tile.failed", "Failed"),
     ("views.group.count", "{n} images"),
     ("views.group.aria", "{title}, {n} images"),
-    ("views.empty.no_results.description", "Clear filters or adjust the search and try again."),
-    ("views.empty.no_roots.description", "Click “Add folder” in the sidebar or drop a folder to start."),
-    ("views.empty.scanning.description", "Thumbnails appear here when scanning finishes."),
-    ("views.menu.remote_readonly", "Remote read-only sources have no local files."),
+    (
+        "views.empty.no_results.description",
+        "Clear filters or adjust the search and try again.",
+    ),
+    (
+        "views.empty.no_roots.description",
+        "Click “Add folder” in the sidebar or drop a folder to start.",
+    ),
+    (
+        "views.empty.scanning.description",
+        "Thumbnails appear here when scanning finishes.",
+    ),
+    (
+        "views.menu.remote_readonly",
+        "Remote read-only sources have no local files.",
+    ),
 ];

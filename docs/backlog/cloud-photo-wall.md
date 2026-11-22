@@ -6,7 +6,7 @@
 >
 > 2026-11-08 用户指示改为**在本分支直接开发代码**（原「本分支只写文档」红线作废，见 §8）。接口契约冻结在 [photo-wall-contract.md](photo-wall-contract.md)，实施状态见 §9。
 >
-> 参考截图（音乐应用的不规则拼贴墙，仅作交互参照）：当时存于本机临时目录（`<临时目录>/images/<uuid>.png`，未入库）；构图要点（v2 时期）已归档在 [archive/2026-11/photo-wall-design.md](../archive/2026-11/photo-wall-design.md)，现行视觉规格见 [photo-wall-v3.md](photo-wall-v3.md)。
+> 参考截图（音乐应用的不规则拼贴墙，仅作交互参照）：当时存于本机临时目录（`<临时目录>/images/<uuid>.png`，未入库）；v2 时期的构图要点已于 2026-11-22 随归档清理删除，现行视觉规格见 [photo-wall-v3.md](photo-wall-v3.md)。
 
 ## 1. 产品形态与边界
 
@@ -192,7 +192,7 @@ manifest 契约要点（F-080 首产物）：分片按排序键切（每片 ≤5
 | F-080 发布器 | `crates/kanalib-publish/`（新 workspace 成员，仅依赖 core） | 实现中 | 只读导出：manifest 分片 + t256/t512/t1024/t2048 + 可选原图 + ledger 增量 + `--dry-run`/`--no-tiers`；item 写 `sharp` 声明最高档；导出侧裁剪源图纯白底带、透明图 alpha 合成白底、GIF 取首帧；账本记录渲染版本。rclone 仍未接入 |
 | F-081 墙前端 | `web/`（Vite + React + TS，包名 kanalib-wall） | 实现中 | v3 空间画布 + v4 单击聚焦/检查器已落地并复验；功能面、验证基线与已知问题统一记在 [photo-wall-status.md](photo-wall-status.md)，本文不再重复 |
 | 验收脚手架 | `scripts/wall_manifest_check.py`、`scripts/wall_verify.ps1`、`scripts/wall_shots.mjs`、`wall_visual_probe.mjs`、`wall_perf.mjs`、`wall_probe_wheel.mjs` | 已提交 | 契约不变量校验 + 四页/交互/390 窄屏/聚焦/滚轮手感闸门（零依赖 CDP） |
-| 视觉改版 v2 | [archive/2026-11/photo-wall-design.md](../archive/2026-11/photo-wall-design.md) | **已被 v3 取代（归档）** | 珊瑚红 + 光晕/噪点、左侧 76/232px 边栏、6px 密集拼贴、展示型详情页；历史记录，不再执行 |
+| 视觉改版 v2 | 已删除（2026-11-22 归档清理） | **已被 v3 取代** | 珊瑚红 + 光晕/噪点、左侧 76/232px 边栏、6px 密集拼贴、展示型详情页；历史记录，不再执行 |
 | 视觉改版 v3 | [photo-wall-v3.md](photo-wall-v3.md) | **已实施** | 空间画布 + 黑白竖排缝 + 动态强调色 + 两级入口 + 全屏详情；硬规则 1–11 全部通过。**导航层由 F-087 改为 208px 横排（[web-rail-horizontal.md](web-rail-horizontal.md)）** |
 
 - 当前实现状态、数据规模、性能与已知问题：见 [photo-wall-status.md](photo-wall-status.md)。

@@ -1,4 +1,4 @@
-import { dataUrl } from '../source/config';
+import { apiUrl, dataUrl } from '../source/config';
 import type { TierPaths, WallItem } from '../source/types';
 
 /** 档位前缀 + id + 扩展名 → 可 fetch 的 URL（相对数据根，不拼主机名）。 */
@@ -10,9 +10,24 @@ export function tierUrl(
   return dataUrl(`${paths[tier]}${id}.jpg`);
 }
 
-/** 原图 URL；`orig` 或原图目录缺失时返回 null（契约 §4：缺省表示该条无原图）。 */
-export function originalUrl(paths: TierPaths, item: WallItem): string | null {
-  if (!item.orig || !paths.original) return null;
+/**
+ * 原图 URL；`orig` 缺失时返回 null（契约 §4：缺省表示该条无原图）。
+ * API 模式只有服务端声明 `original_proxy` 时才走签名回源端点；
+ * 公网部署不开原图，调用方应隐藏入口。
+ */
+export function originalUrl(
+  paths: TierPaths,
+  item: WallItem,
+  apiMode = false,
+  originalProxy = false,
+): string | null {
+  if (!item.orig) return null;
+  // API 模式公网 index 不提供原图；只有服务端显式声明代理时才给入口，
+  // 否则不能退回静态 `data/o/`（那条路径在动态后端根本不存在）。
+  if (apiMode) {
+    return originalProxy ? apiUrl(`items/${item.id}/original`) : null;
+  }
+  if (!paths.original) return null;
   return dataUrl(`${paths.original}${item.id}.${item.orig}`);
 }
 

@@ -56,7 +56,10 @@
 > 设计全文：[../web-dynamic-backend.md](../web-dynamic-backend.md)。本节只保留登记与边界。
 
 - **形态**：独立 `crates/kanalib-web`（axum + tower-http + tokio + rusqlite），部署在 2c2g 轻量云；**不读桌面 DB、不做统一后端**，使用自己的 SQLite（WAL）。
+- **网络**：public listener 只读（绑回环给 Nginx）；private listener 绑 EasyTier 虚拟 IP，暴露写接口/桌面桥接/原图；公网写路由 404。
 - **数据来源**：只接收 box 入库过滤服务（F-089）推送的 `decision=allow` 批次；不持有 Pixiv 令牌、不直连来源。内部写入接口用 HMAC + 时间戳 + 幂等键；非 allow 批次整批 400。
+- **过滤口径**：box 侧是**黑名单制**——用户黑名单 + 标签黑名单 + R-18G 硬拦；**R-18 与 AI 生成放行**；内容标签不足 5 个时先由打标模型补标再判。网页后端只认结果，不重复判。
+- **规则来源**：box 上的独立 `rules.toml` 是唯一权威；DB 只有只读 `rule_snapshots` 与待应用 `rule_proposals`，没有可写规则表。管理页拉黑走「草稿 → 人工确认 → 原子改写 + 版本自增」。
 - **网页**：`WallSource` 增加 `ApiSource`，`VITE_WALL_SOURCE=api|static` 切换；默认 static，现有部署不变；静态导出与 `StaticSource` 保留为兜底。现有 `App.tsx` 直接 `new StaticSource`，W3 必须引入 `createSource()`；API 模式的搜索/筛选/排序/计数走服务端 `setQuery`，不能继续只过滤已加载页。
 - **接口**：`/api/health`、`/api/index`、`/api/items`、`/api/items/{id}`、`/api/works`、`/api/authors`、`/api/collections`、`/api/tags`、`/media/{tier}/{file}`；keyset 游标；服务端搜索。
 - **媒体**：缩略图 t256/t512 存云（t1024/t2048 可选）；原图默认不落云，`GET /api/items/{id}/original` 302 到 box 的短期签名 URL。
@@ -64,4 +67,25 @@
 - **边界**：不做账号/多用户、不做 SSR、不引入 ORM；`search-index.json` 在 api 模式不再使用。
 - **依赖**：F-089 的 item DTO 先行；F-080 静态契约保持兼容（新增字段全部可选）；动态 `/api/index` 的 `schema` 仍为 1，用 `api_version` + `capabilities` 区分，不升 2。
 - **容量**：2c2g 上内存目标 <150MB，只存缩略图；压测不达标时先降 `limit` 上限与并发，不引入重型缓存。
-- **验收**：`kanalib-web` 集成测试；`wall_api_check.mjs`；静态/动态同形状；`npm run typecheck && npm run build` 两种模式各一次；2c2g 上 32 并发读无 5xx。
+- **验收**：`kanalib-web` 集成测试；`wall_api_check.mjs`；静态/动态同形状；`npm run typecheck && npm run build` 两种模式各一次；2c2g 上 32 并发读无 5xx；公网写路由 404、EasyTier 私网内可用。
+
+## F-090 三端互联与 EasyTier（2026-11-22 登记）
+
+> 设计全文：[../easytier-connectivity.md](../easytier-connectivity.md)。本节只保留登记与边界。
+
+- **拓扑**：浏览器 → 公网 HTTPS → web 只读；桌面/box/网页之间走 EasyTier 虚拟网（`10.126.126.0/24`）；桌面 P2P 直连 box 拉原图。
+- **边界**：不要求访客装客户端；公网不暴露写接口；box 默认零公网入站；共享节点只做发现/兜底。
+- **迁移**：配置只写魔法 DNS 名字（`*.et.net`），不写 `10.126.126.x`；入口用 `peers.txt` 发现地址。
+- **回退**：EasyTier 不稳定时，公网只读不受影响；私网同步可退回 frp/公网 HMAC。
+- **验收**：公网写路由 404；桌面/box 私网可用；`easytier-cli route` 为 `DIRECT` 且云出口接近 0。
+
+## F-091 私网组网备选方案（2026-11-22 登记）
+
+> 调研全文：[../private-networking-options.md](../private-networking-options.md)。本节只保留登记与边界。
+
+- **背景**：用户要求对比 Tailscale 之外的私网方案，并最终拍板换用 EasyTier。
+- **候选**：Headscale、EasyTier、NetBird、Nebula、ZeroTier、Cloudflare Mesh/Tunnel、frp、原生 WireGuard。
+- **结论**：**EasyTier + 自建共享节点为主方案**（无账号、无控制面、Apache-2.0、TCP/WSS 回退）；Tailscale/Headscale 降为次选；最小回退 frp（只承载控制/元数据）。
+- **不推荐主选**：ZeroTier（根服务器可达性）、Nebula（UDP 4242 + 手工 PKI）、NetBird（三节点过重）、Cloudflare Mesh（非自托管）、纯 WireGuard（无 NAT 穿透）。
+- **边界**：不改业务代码；配置只写稳定服务名 + 端口，由部署层决定底层组网产品；原图仍应桌面直连 box，中继只兜底；公网访客不装客户端。
+- **验收**：三端私网链路可达；公网写路由 404；桌面 ↔ box 为 `DIRECT` 时 2c2g 出口接近 0；UDP 不可用时 TCP 11010 可回退；替换共享节点只改 `peers.txt`。

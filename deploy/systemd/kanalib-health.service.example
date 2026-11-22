@@ -1,0 +1,9 @@
+[Unit]
+Description=Kanalib health check
+After=kanalib-web.service kanalib-ingest.service
+
+[Service]
+Type=oneshot
+User=kanalib
+EnvironmentFile=-/etc/kanalib/health.env
+ExecStart=/usr/local/sbin/kanalib-health.sh

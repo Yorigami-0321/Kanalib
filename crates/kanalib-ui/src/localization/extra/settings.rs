@@ -18,7 +18,10 @@ pub(crate) const ZH: &[(&str, &str)] = &[
     ("settings.common.cancel", "取消"),
     ("settings.common.never", "从未"),
     ("settings.common.preview_hits", "预览命中"),
-    ("settings.common.queue_counts", "等待 {pending} · 运行 {running} · 失败 {failed}"),
+    (
+        "settings.common.queue_counts",
+        "等待 {pending} · 运行 {running} · 失败 {failed}",
+    ),
     ("settings.common.refresh", "刷新"),
     ("settings.common.remove", "移除"),
     ("settings.common.restore", "恢复"),
@@ -36,7 +39,10 @@ pub(crate) const ZH: &[(&str, &str)] = &[
     ("settings.eta.seconds", "{n} 秒"),
     ("settings.eta.minutes", "{m} 分 {s} 秒"),
     ("settings.eta.hours", "{h} 小时 {m} 分"),
-    ("settings.tag.desc_loaded", "阈值改动只持久化设置；点击“重算”才按已存候选更新标签。"),
+    (
+        "settings.tag.desc_loaded",
+        "阈值改动只持久化设置；点击“重算”才按已存候选更新标签。",
+    ),
     (
         "settings.tag.desc_unloaded",
         "尚未读取到阈值，当前显示模型默认值；点击“刷新队列”重试。",
@@ -46,10 +52,16 @@ pub(crate) const ZH: &[(&str, &str)] = &[
     ("settings.tag.threshold_aria", "{label}类别阈值 {value}"),
     ("settings.tag.reset", "重置"),
     ("settings.tag.default_value", "默认 {value}"),
-    ("settings.tag.no_overrides", "暂无单标签覆盖；所有标签使用类别阈值。"),
+    (
+        "settings.tag.no_overrides",
+        "暂无单标签覆盖；所有标签使用类别阈值。",
+    ),
     ("settings.tag.clear_override", "清除"),
     ("settings.tag.overrides_more", "另有 {n} 条覆盖未展开"),
-    ("settings.tag.override_name_placeholder", "标签名，如 long_hair"),
+    (
+        "settings.tag.override_name_placeholder",
+        "标签名，如 long_hair",
+    ),
     ("settings.tag.apply_override", "应用覆盖"),
     ("settings.tag.clear_override_by_name", "按标签名清除"),
     ("settings.tag.overrides", "单标签覆盖（{n}）"),
@@ -91,7 +103,10 @@ pub(crate) const ZH: &[(&str, &str)] = &[
     ("settings.tag.retag_selected", "重打标选中"),
     ("settings.tag.retag_view", "重打标当前视图"),
     ("settings.tag.no_errors", "最近失败：无"),
-    ("settings.tag.error_row", "#{id} · 尝试 {attempts} 次 · {name}"),
+    (
+        "settings.tag.error_row",
+        "#{id} · 尝试 {attempts} 次 · {name}",
+    ),
     ("settings.tag.error_no_detail", "没有错误详情"),
     (
         "settings.tag.queue_note",
@@ -115,7 +130,10 @@ pub(crate) const ZH: &[(&str, &str)] = &[
     ("settings.review.loading", "读取中…"),
     ("settings.review.count", "待审候选 {n} 条"),
     ("settings.review.loading_rows", "正在读取待审候选…"),
-    ("settings.review.empty", "没有待审候选：所有低于阈值的候选都已处理。"),
+    (
+        "settings.review.empty",
+        "没有待审候选：所有低于阈值的候选都已处理。",
+    ),
     ("settings.review.tag_row", "#{tag} · {category}"),
     ("settings.review.score", "分数 {score} / 阈值 {threshold}"),
     ("settings.review.accept", "接受"),
@@ -123,7 +141,10 @@ pub(crate) const ZH: &[(&str, &str)] = &[
     ("settings.review.asset_row", "{name} · {n} 条"),
     ("settings.review.accept_all", "整张接受"),
     ("settings.review.ignore_all", "整张忽略"),
-    ("settings.sources.empty", "还没有图库文件夹，添加后开始扫描。"),
+    (
+        "settings.sources.empty",
+        "还没有图库文件夹，添加后开始扫描。",
+    ),
     (
         "settings.sources.last_counts",
         "最近 新增 {imported} · 更新 {updated} · 移除 {removed} · 失败 {failed}",
@@ -135,7 +156,10 @@ pub(crate) const ZH: &[(&str, &str)] = &[
     ("settings.sources.rescan", "重扫"),
     ("settings.sources.rename", "重命名"),
     ("settings.sources.add_folder", "添加文件夹"),
-    ("settings.sources.footnote", "移除来源只影响图库视图，不会删除磁盘文件。"),
+    (
+        "settings.sources.footnote",
+        "移除来源只影响图库视图，不会删除磁盘文件。",
+    ),
     (
         "settings.remote.empty",
         "尚未添加网络来源。Immich 与 WebDAV 均为只读；断线不会阻塞本地图库。",
@@ -147,7 +171,10 @@ pub(crate) const ZH: &[(&str, &str)] = &[
     ("settings.remote.never", "从未"),
     ("settings.remote.cred_saved", "凭据已保存"),
     ("settings.remote.cred_unsaved", "凭据未保存"),
-    ("settings.remote.cred_unknown_error", "凭据状态未知：{error}"),
+    (
+        "settings.remote.cred_unknown_error",
+        "凭据状态未知：{error}",
+    ),
     ("settings.remote.cred_unknown", "凭据状态未知"),
     ("settings.remote.idle", "空闲"),
     ("settings.remote.read_only", "只读"),
@@ -240,7 +267,10 @@ pub(crate) const ZH: &[(&str, &str)] = &[
     ("settings.backup.pending_candidate", "候选：{path}"),
     ("settings.backup.pending_safety", "当前库安全备份：{path}"),
     ("settings.backup.pending_created", "请求时间：{time}"),
-    ("settings.backup.pending_version", "备份 schema 版本：{version}"),
+    (
+        "settings.backup.pending_version",
+        "备份 schema 版本：{version}",
+    ),
     (
         "settings.backup.pending_note",
         "取消只删除暂存请求与标记，当前数据库立即保持不变；不会删除候选文件或安全备份。",
@@ -266,7 +296,10 @@ pub(crate) const ZH: &[(&str, &str)] = &[
         "自动备份已启用：{frequency} · 保留最近 {keep} 份",
     ),
     ("settings.backup.summary_keep_days", "· 仅保留 {days} 天内"),
-    ("settings.backup.next_pending", "已安排恢复：{path} · 重启 Kanalib 后应用"),
+    (
+        "settings.backup.next_pending",
+        "已安排恢复：{path} · 重启 Kanalib 后应用",
+    ),
     ("settings.backup.next_disabled", "自动备份未启用"),
     (
         "settings.backup.next_due_now",
@@ -372,10 +405,16 @@ pub(crate) const ZH: &[(&str, &str)] = &[
     ),
     ("settings.filters.collapse", "收起"),
     ("settings.filters.edit", "编辑排除规则"),
-    ("settings.filters.glob_placeholder", "排除 glob，如 **/cache/**"),
+    (
+        "settings.filters.glob_placeholder",
+        "排除 glob，如 **/cache/**",
+    ),
     ("settings.filters.min_placeholder", "最小字节，空=不限"),
     ("settings.filters.max_placeholder", "最大字节，空=不限"),
-    ("settings.filters.ignore_placeholder", "忽略 glob，如 *_tmp.png"),
+    (
+        "settings.filters.ignore_placeholder",
+        "忽略 glob，如 *_tmp.png",
+    ),
     ("settings.filters.no_globs", "还没有排除 glob"),
     (
         "settings.filters.impact",
@@ -425,11 +464,20 @@ pub(crate) const ZH: &[(&str, &str)] = &[
         "路径 / 内容哈希 / glob 三种粒度持久化在 settings JSON；恢复后需重扫才会重新导入，磁盘文件从未被删除。",
     ),
     ("settings.notice.add_failed", "添加失败：{error}"),
-    ("settings.notice.backup_busy", "已有备份或恢复任务在进行，请稍候"),
+    (
+        "settings.notice.backup_busy",
+        "已有备份或恢复任务在进行，请稍候",
+    ),
     ("settings.notice.backup_done", "备份完成：{path}"),
     ("settings.notice.backup_failed", "最近备份失败：{error}"),
-    ("settings.notice.backup_open_failed", "打开备份目录失败：{error}"),
-    ("settings.notice.backup_plan_failed", "保存备份计划失败：{error}"),
+    (
+        "settings.notice.backup_open_failed",
+        "打开备份目录失败：{error}",
+    ),
+    (
+        "settings.notice.backup_plan_failed",
+        "保存备份计划失败：{error}",
+    ),
     ("settings.notice.backup_running", "正在备份数据库…"),
     (
         "settings.notice.backup_scanning",
@@ -443,10 +491,22 @@ pub(crate) const ZH: &[(&str, &str)] = &[
         "settings.notice.cache_cleaned",
         "已清理 {files} 个孤儿缩略图 · {bytes}",
     ),
-    ("settings.notice.cache_cleanup_failed", "清理缓存失败：{error}"),
-    ("settings.notice.cache_evicted", "已淘汰 {files} 个缩略图 · {bytes}"),
-    ("settings.notice.cache_scanning", "扫描进行中，完成后再清理缓存"),
-    ("settings.notice.cache_stats_failed", "读取缓存统计失败：{error}"),
+    (
+        "settings.notice.cache_cleanup_failed",
+        "清理缓存失败：{error}",
+    ),
+    (
+        "settings.notice.cache_evicted",
+        "已淘汰 {files} 个缩略图 · {bytes}",
+    ),
+    (
+        "settings.notice.cache_scanning",
+        "扫描进行中，完成后再清理缓存",
+    ),
+    (
+        "settings.notice.cache_stats_failed",
+        "读取缓存统计失败：{error}",
+    ),
     (
         "settings.notice.cache_within_budget",
         "缓存未超预算 · {after} / {budget}",
@@ -459,7 +519,10 @@ pub(crate) const ZH: &[(&str, &str)] = &[
         "settings.notice.cpu_off",
         "已关闭 CPU 慢速打标；GPU 不可用时队列会暂停",
     ),
-    ("settings.notice.cpu_on", "已允许 CPU 慢速打标；继续队列后生效"),
+    (
+        "settings.notice.cpu_on",
+        "已允许 CPU 慢速打标；继续队列后生效",
+    ),
     (
         "settings.notice.diagnostics_copied",
         "诊断信息已复制到剪贴板",
@@ -472,7 +535,10 @@ pub(crate) const ZH: &[(&str, &str)] = &[
         "settings.notice.language_save_failed",
         "语言设置保存失败：{error}",
     ),
-    ("settings.notice.prioritize_done", "已把 {n} 个打标任务提升到高优先级"),
+    (
+        "settings.notice.prioritize_done",
+        "已把 {n} 个打标任务提升到高优先级",
+    ),
     (
         "settings.notice.prioritize_failed",
         "提升打标优先级失败：{error}",
@@ -489,10 +555,7 @@ pub(crate) const ZH: &[(&str, &str)] = &[
         "settings.notice.protected_added",
         "已添加保护项：{name}（命中 {matched} / {total} 张）",
     ),
-    (
-        "settings.notice.protected_folder_added",
-        "已添加保护路径",
-    ),
+    ("settings.notice.protected_folder_added", "已添加保护路径"),
     (
         "settings.notice.protected_preview",
         "「{name}」命中 {matched} / {total} 张资产",
@@ -509,7 +572,10 @@ pub(crate) const ZH: &[(&str, &str)] = &[
         "settings.notice.protected_removed",
         "已移除保护路径：{path}",
     ),
-    ("settings.notice.queue_cancelling", "正在取消打标；已完成的结果会保留"),
+    (
+        "settings.notice.queue_cancelling",
+        "正在取消打标；已完成的结果会保留",
+    ),
     (
         "settings.notice.queue_paused",
         "已暂停打标；当前批完成后不再认领新任务",
@@ -519,8 +585,14 @@ pub(crate) const ZH: &[(&str, &str)] = &[
         "继续打标失败：{error}",
     ),
     ("settings.notice.queue_resumed", "已继续打标队列"),
-    ("settings.notice.recompute_done", "阈值重算完成（{scope}）：更新 {updated} 张 · 跳过 {skipped} 张；跳过项可能缺候选或超出已存 top-K，需要重打标"),
-    ("settings.notice.recompute_empty", "没有可重算的图片：先选择图片或打开有内容的视图"),
+    (
+        "settings.notice.recompute_done",
+        "阈值重算完成（{scope}）：更新 {updated} 张 · 跳过 {skipped} 张；跳过项可能缺候选或超出已存 top-K，需要重打标",
+    ),
+    (
+        "settings.notice.recompute_empty",
+        "没有可重算的图片：先选择图片或打开有内容的视图",
+    ),
     ("settings.notice.recompute_empty_toast", "没有可重算的图片"),
     ("settings.notice.recompute_failed", "阈值重算失败：{error}"),
     (
@@ -528,18 +600,27 @@ pub(crate) const ZH: &[(&str, &str)] = &[
         "正在按候选重算{scope} {count} 张的阈值…",
     ),
     ("settings.notice.remote_add_failed", "添加来源失败：{error}"),
-    ("settings.notice.remote_added", "已添加 {kind} 来源「{name}」"),
+    (
+        "settings.notice.remote_added",
+        "已添加 {kind} 来源「{name}」",
+    ),
     (
         "settings.notice.remote_added_hint",
         "{message}；远端来源只读，建议先测试连接再同步",
     ),
-    ("settings.notice.remote_busy", "该来源正在测试或同步，完成后才能移除"),
+    (
+        "settings.notice.remote_busy",
+        "该来源正在测试或同步，完成后才能移除",
+    ),
     (
         "settings.notice.remote_credentials_failed",
         "读取凭据状态失败：{error}",
     ),
     ("settings.notice.remote_feedback", "{name}：{message}"),
-    ("settings.notice.remote_key_clear_failed", "清除凭据失败：{error}"),
+    (
+        "settings.notice.remote_key_clear_failed",
+        "清除凭据失败：{error}",
+    ),
     ("settings.notice.remote_key_cleared", "已清除该来源的凭据"),
     (
         "settings.notice.remote_key_empty",
@@ -557,7 +638,10 @@ pub(crate) const ZH: &[(&str, &str)] = &[
         "settings.notice.remote_key_saved",
         "已保存 {name} 的凭据（系统凭据库）",
     ),
-    ("settings.notice.remote_remove_failed", "移除来源失败：{error}"),
+    (
+        "settings.notice.remote_remove_failed",
+        "移除来源失败：{error}",
+    ),
     (
         "settings.notice.remote_removed",
         "已移除来源「{name}」；远端服务器文件未受影响",
@@ -575,7 +659,10 @@ pub(crate) const ZH: &[(&str, &str)] = &[
         "尚未保存凭据；若服务器要求认证，同步会失败",
     ),
     ("settings.notice.remote_syncing", "正在同步 {name}…"),
-    ("settings.notice.remote_test_failed_toast", "{name} 连接失败"),
+    (
+        "settings.notice.remote_test_failed_toast",
+        "{name} 连接失败",
+    ),
     (
         "settings.notice.remote_test_no_key",
         "尚未保存凭据；若服务器要求认证，测试会失败",
@@ -604,31 +691,37 @@ pub(crate) const ZH: &[(&str, &str)] = &[
         "备份校验通过：重启 Kanalib 后应用恢复",
     ),
     ("settings.notice.retag_busy", "已有重打标任务在运行，请稍候"),
-    ("settings.notice.retag_done", "重打标完成（{scope}）：按候选重算 {recomputed} 张 · 入队 {queued} 张 · 缺失 {missing} 张；手工标签已保留"),
+    (
+        "settings.notice.retag_done",
+        "重打标完成（{scope}）：按候选重算 {recomputed} 张 · 入队 {queued} 张 · 缺失 {missing} 张；手工标签已保留",
+    ),
     ("settings.notice.retag_failed", "重打标失败：{error}"),
     (
         "settings.notice.retag_running",
         "正在重打标{scope} {count} 张；已有候选的按阈值重算，缺候选的入队…",
     ),
+    ("settings.notice.retag_select_first", "先选择要重打标的图片"),
     (
-        "settings.notice.retag_select_first",
-        "先选择要重打标的图片",
+        "settings.notice.retag_view_empty",
+        "当前视图没有可重打标的图片",
     ),
-    ("settings.notice.retag_view_empty", "当前视图没有可重打标的图片"),
-    ("settings.notice.tag_override_clear_failed", "清除标签 #{tag} 覆盖失败：{error}"),
+    (
+        "settings.notice.tag_override_clear_failed",
+        "清除标签 #{tag} 覆盖失败：{error}",
+    ),
     (
         "settings.notice.tag_override_cleared",
         "标签 #{tag} 已恢复类别阈值；重算后生效",
     ),
-    ("settings.notice.tag_override_failed", "设置标签 #{tag} 阈值失败：{error}"),
+    (
+        "settings.notice.tag_override_failed",
+        "设置标签 #{tag} 阈值失败：{error}",
+    ),
     (
         "settings.notice.tag_override_invalid",
         "单标签阈值无效：{error}",
     ),
-    (
-        "settings.notice.tag_override_name",
-        "请输入要覆盖的标签名",
-    ),
+    ("settings.notice.tag_override_name", "请输入要覆盖的标签名"),
     (
         "settings.notice.tag_override_saved",
         "标签 #{tag} 阈值已设为 {value}；重算后生效",
@@ -653,7 +746,10 @@ pub(crate) const ZH: &[(&str, &str)] = &[
         "settings.notice.tag_unknown_category",
         "未知标签类别：{category}",
     ),
-    ("settings.protected.entry_placeholder", "glob 或文件夹路径，如 **/原图/**"),
+    (
+        "settings.protected.entry_placeholder",
+        "glob 或文件夹路径，如 **/原图/**",
+    ),
 ];
 
 pub(crate) const EN: &[(&str, &str)] = &[
@@ -706,7 +802,10 @@ pub(crate) const EN: &[(&str, &str)] = &[
     ),
     ("settings.tag.categories", "Category thresholds"),
     ("settings.tag.thresholds_aria", "Tag category thresholds"),
-    ("settings.tag.threshold_aria", "{label} category threshold {value}"),
+    (
+        "settings.tag.threshold_aria",
+        "{label} category threshold {value}",
+    ),
     ("settings.tag.reset", "Reset"),
     ("settings.tag.default_value", "Default {value}"),
     (
@@ -718,7 +817,10 @@ pub(crate) const EN: &[(&str, &str)] = &[
         "settings.tag.overrides_more",
         "{n} more overrides not shown",
     ),
-    ("settings.tag.override_name_placeholder", "Tag name, e.g. long_hair"),
+    (
+        "settings.tag.override_name_placeholder",
+        "Tag name, e.g. long_hair",
+    ),
     ("settings.tag.apply_override", "Apply override"),
     ("settings.tag.clear_override_by_name", "Clear by tag name"),
     ("settings.tag.overrides", "Per-tag overrides ({n})"),
@@ -728,7 +830,10 @@ pub(crate) const EN: &[(&str, &str)] = &[
     ),
     ("settings.tag.recompute", "Recompute view/selection"),
     ("settings.tag.recomputing", "Recomputing…"),
-    ("settings.tag.target_count", "Target {n} images (selection first)"),
+    (
+        "settings.tag.target_count",
+        "Target {n} images (selection first)",
+    ),
     ("settings.tag.queue", "Tagging queue"),
     ("settings.tag.queue_aria", "Tagging queue status"),
     ("settings.tag.queue_status_label", "Status"),
@@ -760,7 +865,10 @@ pub(crate) const EN: &[(&str, &str)] = &[
     ("settings.tag.retag_selected", "Retag selection"),
     ("settings.tag.retag_view", "Retag current view"),
     ("settings.tag.no_errors", "Latest failures: none"),
-    ("settings.tag.error_row", "#{id} · {attempts} attempts · {name}"),
+    (
+        "settings.tag.error_row",
+        "#{id} · {attempts} attempts · {name}",
+    ),
     ("settings.tag.error_no_detail", "No error detail"),
     (
         "settings.tag.queue_note",
@@ -770,9 +878,18 @@ pub(crate) const EN: &[(&str, &str)] = &[
         "settings.tag.threshold_empty",
         "Enter a threshold between 0–1",
     ),
-    ("settings.tag.threshold_finite", "Threshold must be a finite number"),
-    ("settings.tag.threshold_number", "Threshold must be a number"),
-    ("settings.tag.threshold_range", "Threshold must be between 0–1"),
+    (
+        "settings.tag.threshold_finite",
+        "Threshold must be a finite number",
+    ),
+    (
+        "settings.tag.threshold_number",
+        "Threshold must be a number",
+    ),
+    (
+        "settings.tag.threshold_range",
+        "Threshold must be between 0–1",
+    ),
     ("settings.tag.phase.cancelling", "Cancelling"),
     ("settings.tag.phase.paused", "Paused"),
     ("settings.tag.phase.running", "Running"),
@@ -786,13 +903,19 @@ pub(crate) const EN: &[(&str, &str)] = &[
     ("settings.review.refresh", "Refresh pending candidates"),
     ("settings.review.loading", "Loading…"),
     ("settings.review.count", "{n} pending candidates"),
-    ("settings.review.loading_rows", "Loading pending candidates…"),
+    (
+        "settings.review.loading_rows",
+        "Loading pending candidates…",
+    ),
     (
         "settings.review.empty",
         "No pending candidates: every candidate below its threshold has been reviewed.",
     ),
     ("settings.review.tag_row", "#{tag} · {category}"),
-    ("settings.review.score", "score {score} / threshold {threshold}"),
+    (
+        "settings.review.score",
+        "score {score} / threshold {threshold}",
+    ),
     ("settings.review.accept", "Accept"),
     ("settings.review.ignore", "Ignore"),
     ("settings.review.asset_row", "{name} · {n} candidates"),
@@ -990,7 +1113,10 @@ pub(crate) const EN: &[(&str, &str)] = &[
     ),
     ("settings.backup.warning_suffix", "· warnings: {warnings}"),
     ("settings.backup.note_suffix", "· note: {warning}"),
-    ("settings.backup.safety_none", "not created (no database yet)"),
+    (
+        "settings.backup.safety_none",
+        "not created (no database yet)",
+    ),
     (
         "settings.backup.restore_prepared",
         "Restore prepared: {path} · safety backup: {safety} · takes effect after restart",
@@ -1042,12 +1168,12 @@ pub(crate) const EN: &[(&str, &str)] = &[
     ("settings.shortcuts.toggle_favorite", "Toggle favorite"),
     ("settings.shortcuts.rating", "Set / clear rating"),
     ("settings.shortcuts.select_all", "Select all visible"),
-    ("settings.shortcuts.switch_views", "Switch among 8 view modes"),
-    ("settings.shortcuts.clear_selection", "Clear the selection"),
     (
-        "settings.shortcuts.mouse",
-        "Quick view / context menu",
+        "settings.shortcuts.switch_views",
+        "Switch among 8 view modes",
     ),
+    ("settings.shortcuts.clear_selection", "Clear the selection"),
+    ("settings.shortcuts.mouse", "Quick view / context menu"),
     (
         "settings.shortcuts.note",
         "Shortcuts are bound; arrows and quick actions work while the grid has focus.",
@@ -1086,10 +1212,22 @@ pub(crate) const EN: &[(&str, &str)] = &[
     ),
     ("settings.filters.collapse", "Collapse"),
     ("settings.filters.edit", "Edit exclusion rules"),
-    ("settings.filters.glob_placeholder", "Exclude glob, e.g. **/cache/**"),
-    ("settings.filters.min_placeholder", "Min bytes, empty = unlimited"),
-    ("settings.filters.max_placeholder", "Max bytes, empty = unlimited"),
-    ("settings.filters.ignore_placeholder", "Ignore glob, e.g. *_tmp.png"),
+    (
+        "settings.filters.glob_placeholder",
+        "Exclude glob, e.g. **/cache/**",
+    ),
+    (
+        "settings.filters.min_placeholder",
+        "Min bytes, empty = unlimited",
+    ),
+    (
+        "settings.filters.max_placeholder",
+        "Max bytes, empty = unlimited",
+    ),
+    (
+        "settings.filters.ignore_placeholder",
+        "Ignore glob, e.g. *_tmp.png",
+    ),
     ("settings.filters.no_globs", "No exclude globs yet"),
     (
         "settings.filters.impact",
@@ -1147,7 +1285,10 @@ pub(crate) const EN: &[(&str, &str)] = &[
         "A backup or restore is already running; please wait",
     ),
     ("settings.notice.backup_done", "Backup finished: {path}"),
-    ("settings.notice.backup_failed", "Last backup failed: {error}"),
+    (
+        "settings.notice.backup_failed",
+        "Last backup failed: {error}",
+    ),
     (
         "settings.notice.backup_open_failed",
         "Failed to open the backup folder: {error}",
@@ -1245,7 +1386,10 @@ pub(crate) const EN: &[(&str, &str)] = &[
         "settings.notice.protected_preview_failed",
         "Preview failed: {error}",
     ),
-    ("settings.notice.protected_remove_failed", "Remove failed: {error}"),
+    (
+        "settings.notice.protected_remove_failed",
+        "Remove failed: {error}",
+    ),
     (
         "settings.notice.protected_removed",
         "Protected path removed: {path}",
@@ -1263,7 +1407,10 @@ pub(crate) const EN: &[(&str, &str)] = &[
         "Failed to resume tagging: {error}",
     ),
     ("settings.notice.queue_resumed", "Tagging queue resumed"),
-    ("settings.notice.recompute_done", "Thresholds recomputed ({scope}): {updated} updated · {skipped} skipped; skipped ones may lack candidates or exceed the stored top-K and need retagging"),
+    (
+        "settings.notice.recompute_done",
+        "Thresholds recomputed ({scope}): {updated} updated · {skipped} skipped; skipped ones may lack candidates or exceed the stored top-K and need retagging",
+    ),
     (
         "settings.notice.recompute_empty",
         "Nothing to recompute: select images or open a view with content",
@@ -1284,7 +1431,10 @@ pub(crate) const EN: &[(&str, &str)] = &[
         "settings.notice.remote_add_failed",
         "Failed to add the source: {error}",
     ),
-    ("settings.notice.remote_added", "Added the {kind} source “{name}”"),
+    (
+        "settings.notice.remote_added",
+        "Added the {kind} source “{name}”",
+    ),
     (
         "settings.notice.remote_added_hint",
         "{message}; remote sources are read-only, so test the connection before syncing",
@@ -1334,7 +1484,10 @@ pub(crate) const EN: &[(&str, &str)] = &[
         "settings.notice.remote_removed_toast",
         "Remote source “{name}” removed",
     ),
-    ("settings.notice.remote_sync_failed_toast", "{name} sync failed"),
+    (
+        "settings.notice.remote_sync_failed_toast",
+        "{name} sync failed",
+    ),
     (
         "settings.notice.remote_sync_no_key",
         "No credentials saved; syncing fails if the server requires authentication",
@@ -1348,7 +1501,10 @@ pub(crate) const EN: &[(&str, &str)] = &[
         "settings.notice.remote_test_no_key",
         "No credentials saved; the test fails if the server requires authentication",
     ),
-    ("settings.notice.remote_testing", "Testing the {name} connection…"),
+    (
+        "settings.notice.remote_testing",
+        "Testing the {name} connection…",
+    ),
     (
         "settings.notice.restore_cancel_failed",
         "Failed to cancel the pending restore: {error}",
@@ -1375,7 +1531,10 @@ pub(crate) const EN: &[(&str, &str)] = &[
         "settings.notice.retag_busy",
         "A retag job is already running; please wait",
     ),
-    ("settings.notice.retag_done", "Retag finished ({scope}): {recomputed} recomputed · {queued} queued · {missing} missing; manual tags kept"),
+    (
+        "settings.notice.retag_done",
+        "Retag finished ({scope}): {recomputed} recomputed · {queued} queued · {missing} missing; manual tags kept",
+    ),
     ("settings.notice.retag_failed", "Retag failed: {error}"),
     (
         "settings.notice.retag_running",
@@ -1433,5 +1592,8 @@ pub(crate) const EN: &[(&str, &str)] = &[
         "settings.notice.tag_unknown_category",
         "Unknown tag category: {category}",
     ),
-    ("settings.protected.entry_placeholder", "Glob or folder path, e.g. **/originals/**"),
+    (
+        "settings.protected.entry_placeholder",
+        "Glob or folder path, e.g. **/originals/**",
+    ),
 ];

@@ -8,6 +8,8 @@
 |---|---|
 | [backlog/README.md](backlog/README.md) | 调研准则、状态定义、文档地图、推荐顺序、使用约定 |
 | [TESTING-PROCESS.md](TESTING-PROCESS.md) | 轻量测试流程：测试分层、风险定档、改动类型矩阵、门禁与反过度测试约束 |
+| [PLAN.md](PLAN.md) | 项目总体调研与实施方案：模型事实、架构、数据模型、索引/缩略图/去重、sidecar、来源接入、阶段与基准 |
+| [FFMPEG.md](FFMPEG.md) | FFmpeg 许可与进程模型（F-040）：LGPL/GPL 边界、二进制发现、批处理进程池与冷导入基准 |
 | [backlog/registry.md](backlog/registry.md) | 全量 F-xxx 登记表 |
 | [backlog/implemented.md](backlog/implemented.md) | 已实现归档与验证 |
 | [backlog/pending/overview.md](backlog/pending/overview.md) | 未完成项速览 |
@@ -31,7 +33,11 @@
 | [backlog/pixiv-integration.md](backlog/pixiv-integration.md) | Pixiv 归档能力合并总计划（F-084–F-086、F-089）：box 入库过滤 → 网页轻量后端 → 桌面工作台；不含数据迁移 |
 | [backlog/web-rail-horizontal.md](backlog/web-rail-horizontal.md) | 网页导航横向化规格（F-087）：208px 横排文字、折叠、窄屏底部条 |
 | [backlog/web-dynamic-backend.md](backlog/web-dynamic-backend.md) | 网页轻量后端与动态化设计（F-088）：独立 `kanalib-web`、SQLite、API、媒体、`ApiSource`、安全与阶段 |
-| [backlog/ingest-service.md](backlog/ingest-service.md) | 入库过滤服务设计（F-089）：box 上的来源适配、下载、打标、规则、审核、HMAC 推送与签名回源 |
+| [backlog/ingest-service.md](backlog/ingest-service.md) | 入库过滤服务设计（F-089）：box 上的来源适配、下载、打标、配置化黑名单（用户+标签）、R-18G 三路判定、标签不足补标、审核、HMAC 推送与签名回源 |
+| [backlog/easytier-connectivity.md](backlog/easytier-connectivity.md) | 三端互联与 EasyTier 方案（F-090）：公网只读、私网写入、双 listener、魔法 DNS、ACL、secure mode、流量账、迁移与回退 |
+| [backlog/private-networking-options.md](backlog/private-networking-options.md) | 私网组网备选对比（F-091）：EasyTier 主方案；Tailscale/Headscale/NetBird/Nebula/ZeroTier/Cloudflare/frp/WireGuard |
+| [backlog/execution-workstreams.md](backlog/execution-workstreams.md) | 并行执行工作流：P0 契约闸门、P1–P5 车道、文件所有权、派发顺序与最低验收 |
+| [backlog/p2-reuse-research.md](backlog/p2-reuse-research.md) | P2 之后可复用组件调研：Pixiv 客户端、axum/tower-http、打标 sidecar 复用、签名/队列选型、许可与版本冲突 |
 
 ## 使用约定（摘要）
 

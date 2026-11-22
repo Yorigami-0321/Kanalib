@@ -83,10 +83,7 @@ pub(crate) const ZH: &[(&str, &str)] = &[
         "待打标 {pending} 张 · 队列已恢复",
     ),
     ("notice.source.offline", "来源离线 · {path}"),
-    (
-        "notice.source.unreachable",
-        "来源不可访问：{path}",
-    ),
+    ("notice.source.unreachable", "来源不可访问：{path}"),
     (
         "notice.source.unreachable_kept",
         "来源不可访问，已保留图库记录：{path}",
@@ -450,10 +447,7 @@ pub(crate) const EN: &[(&str, &str)] = &[
         "{pending} images pending tagging · queue restored",
     ),
     ("notice.source.offline", "Source offline · {path}"),
-    (
-        "notice.source.unreachable",
-        "Source unreachable: {path}",
-    ),
+    ("notice.source.unreachable", "Source unreachable: {path}"),
     (
         "notice.source.unreachable_kept",
         "Source unreachable; library records kept: {path}",

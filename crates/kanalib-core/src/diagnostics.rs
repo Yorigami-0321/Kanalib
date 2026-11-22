@@ -456,7 +456,11 @@ mod tests {
             last_scan: Some(1_700_000_000),
             asset_count: 3,
             counts: Default::default(),
-            error: Some("sync failed for https://user:hunter2@example.com/dav".to_string().into()),
+            error: Some(
+                "sync failed for https://user:hunter2@example.com/dav"
+                    .to_string()
+                    .into(),
+            ),
             online: true,
             watch_retry: false,
         }];

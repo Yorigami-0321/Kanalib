@@ -1,0 +1,9 @@
+[Unit]
+Description=Kanalib web SQLite backup
+After=kanalib-web.service
+
+[Service]
+Type=oneshot
+User=kanalib
+EnvironmentFile=-/etc/kanalib/backup.env
+ExecStart=/usr/local/sbin/kanalib-web-backup.sh

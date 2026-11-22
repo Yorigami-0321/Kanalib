@@ -128,13 +128,25 @@ fn window_control_button(
     let group = SharedString::from(format!("{id}-hover"));
     let label = match action {
         WindowButtonAction::Minimize => {
-            if crate::localization::is_english() { "Minimize" } else { "最小化" }
+            if crate::localization::is_english() {
+                "Minimize"
+            } else {
+                "最小化"
+            }
         }
         WindowButtonAction::Maximize => {
-            if crate::localization::is_english() { "Maximize / restore" } else { "最大化/还原" }
+            if crate::localization::is_english() {
+                "Maximize / restore"
+            } else {
+                "最大化/还原"
+            }
         }
         WindowButtonAction::Close => {
-            if crate::localization::is_english() { "Close" } else { "关闭" }
+            if crate::localization::is_english() {
+                "Close"
+            } else {
+                "关闭"
+            }
         }
     };
     div()

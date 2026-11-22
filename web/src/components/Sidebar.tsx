@@ -4,10 +4,39 @@ import './sidebar.css';
 import { Inspector, type InspectorProps } from './Inspector';
 import { EMPTY_FILTERS, type FilterState, type SearchIndexPhase } from '../state/filters';
 import type { WallItem } from '../source/types';
+import { NARROW_BREAKPOINT } from '../lib/layout';
 
 export type SortMode = 'random' | 'time' | 'name' | 'stars';
 
 type PanelId = 'search' | 'sort' | 'about';
+const RAIL_COLLAPSED_KEY = 'kanalib.rail.collapsed';
+const ICON_WORKS = (
+  <Icon>
+    <rect x="3.5" y="4.5" width="17" height="15" rx="1.5" />
+    <path d="M3.5 9.5h17" />
+  </Icon>
+);
+
+const ICON_AUTHOR = (
+  <Icon>
+    <circle cx="12" cy="8" r="3.5" />
+    <path d="M5 20a7 7 0 0 1 14 0" />
+  </Icon>
+);
+
+const ICON_COLLECTION = (
+  <Icon>
+    <path d="M4 7.5h6l1.5 2H20v9.5a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V9.5a2 2 0 0 1 2-2z" />
+    <path d="M4 12h16" />
+  </Icon>
+);
+
+const ICON_SUBSCRIPTION = (
+  <Icon>
+    <circle cx="12" cy="12" r="8.5" />
+    <path d="M12 7v5l3.5 2" />
+  </Icon>
+);
 
 function Icon({ children, size = 15 }: { children: ReactNode; size?: number }) {
   return (
@@ -235,9 +264,8 @@ export interface SidebarProps {
 }
 
 /**
- * 左侧的"缝"：120px 黑白竖排页签。纸面常驻 76% 半透明 + blur（Q6=C′），
- * 悬停只加深模糊、不改变底色。标签/收藏/分级/分组是四个入口页，
- * 搜索/排序/关于是浮层面板（Q8）。
+ * 横向文字导航：宽屏 208px 展开 / 60px 折叠，≤760px 退化为底部条。
+ * 导航是浮层，不推挤画布；`.seam` 作为兼容类保留给现有外部点击判断和探针。
  */
 export function Sidebar({
   view,
@@ -266,6 +294,13 @@ export function Sidebar({
   onToggleMono,
 }: SidebarProps) {
   const [panel, setPanel] = useState<PanelId | null>(null);
+  const [railCollapsed, setRailCollapsed] = useState(() => {
+    try {
+      return localStorage.getItem(RAIL_COLLAPSED_KEY) === 'true';
+    } catch {
+      return false;
+    }
+  });
   const panelRef = useRef<HTMLDivElement | null>(null);
   /** 打开面板的按钮：关闭后把焦点还回去（P2-2）。 */
   const panelTriggerRef = useRef<HTMLElement | null>(null);
@@ -314,6 +349,28 @@ export function Sidebar({
     setPanel(null);
   }, [view]);
 
+  useEffect(() => {
+    document.documentElement.classList.toggle('rail-is-collapsed', railCollapsed);
+    try {
+      localStorage.setItem(RAIL_COLLAPSED_KEY, String(railCollapsed));
+    } catch {
+      /* localStorage 不可用时只保留本次会话状态 */
+    }
+  }, [railCollapsed]);
+
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.altKey || event.ctrlKey || event.metaKey || event.shiftKey) return;
+      if (event.key !== '[' && event.key !== ']') return;
+      const target = event.target as HTMLElement | null;
+      if (target?.closest('input, textarea, select, [contenteditable="true"]')) return;
+      if (window.innerWidth <= NARROW_BREAKPOINT) return;
+      setRailCollapsed(event.key === '[');
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, []);
+
   // P2-2：role="dialog" 要配焦点管理——打开时把焦点送进面板（搜索框自己 autoFocus），
   // 关闭/切换后还给触发按钮，而不是只挂一个 aria-expanded 就完事。
   useEffect(() => {
@@ -343,13 +400,38 @@ export function Sidebar({
 
   return (
     <>
-      <nav className="seam" aria-label="图片墙导航">
-        <span className="seam__dot" />
-        <span className="seam__word" aria-hidden="true">
-          Kanalib
-        </span>
+      <nav className={'seam rail' + (railCollapsed ? ' rail--collapsed' : '')} aria-label="图片墙导航">
+        <div className="rail__head">
+          <span className="seam__dot" />
+          <span className="seam__word" aria-hidden="true">
+            Kanalib
+          </span>
+          {railCollapsed ? null : (
+            <button
+              type="button"
+              className="seam__tab seam__tab--icon rail__toggle"
+              onClick={() => setRailCollapsed(true)}
+              aria-expanded="true"
+              title="折叠导航（[）"
+              aria-label="折叠导航"
+            >
+              {ICON_PREV}
+            </button>
+          )}
+          <button
+            type="button"
+            className="seam__tab seam__tab--icon rail__toggle rail__toggle--expand"
+            onClick={() => setRailCollapsed(false)}
+            aria-expanded="false"
+            title="展开导航（]）"
+            aria-label="展开导航"
+          >
+            {ICON_NEXT}
+          </button>
+        </div>
 
         <div className="seam__nav">
+          <p className="rail__group">浏览</p>
           <button
             type="button"
             className={'seam__tab' + (view === 'home' ? ' is-on' : '')}
@@ -401,6 +483,27 @@ export function Sidebar({
             <span className="seam__label">分组</span>
           </button>
 
+          <p className="rail__group rail__group--deferred" hidden>
+            整理
+          </p>
+          <button type="button" className="seam__tab rail__entry--deferred" hidden title="作品">
+            {ICON_WORKS}
+            <span className="seam__label">作品</span>
+          </button>
+          <button type="button" className="seam__tab rail__entry--deferred" hidden title="作者">
+            {ICON_AUTHOR}
+            <span className="seam__label">作者</span>
+          </button>
+          <button type="button" className="seam__tab rail__entry--deferred" hidden title="收藏夹">
+            {ICON_COLLECTION}
+            <span className="seam__label">收藏夹</span>
+          </button>
+          <button type="button" className="seam__tab rail__entry--deferred" hidden title="订阅">
+            {ICON_SUBSCRIPTION}
+            <span className="seam__label">订阅</span>
+          </button>
+
+          <p className="rail__group">工具</p>
           <button
             type="button"
             className={'seam__tab' + (panel === 'search' || filters.query.trim() ? ' is-on' : '')}
@@ -503,7 +606,7 @@ export function Sidebar({
           </div>
         ) : null}
 
-        <div className="seam__foot">
+        <div className="seam__foot rail__foot">
           <span className="seam__count">
             {formatCount(loaded)} / {formatCount(total)}
           </span>

@@ -262,12 +262,8 @@ impl KanalibApp {
                     )
                     .to_string()
                 } else {
-                    crate::localization::t_args(
-                        cx,
-                        "scan.source",
-                        &[("source", &source_name)],
-                    )
-                    .to_string()
+                    crate::localization::t_args(cx, "scan.source", &[("source", &source_name)])
+                        .to_string()
                 };
                 left = left.child(
                     div()
@@ -355,12 +351,9 @@ impl KanalibApp {
         // F-067：有可撤销项时显示条数并可点击撤销；空栈不占位。
         if undo_depth > 0 {
             let this_undo = this.clone();
-            let label = crate::localization::t_args(
-                cx,
-                "status.undo",
-                &[("n", &undo_depth.to_string())],
-            )
-            .to_string();
+            let label =
+                crate::localization::t_args(cx, "status.undo", &[("n", &undo_depth.to_string())])
+                    .to_string();
             let action = undo_label.map(|label| crate::localization::undo_action_label(cx, label));
             let aria = match action {
                 Some(action) => crate::localization::t_args(
@@ -369,12 +362,8 @@ impl KanalibApp {
                     &[("label", &action), ("base", &label)],
                 )
                 .to_string(),
-                None => crate::localization::t_args(
-                    cx,
-                    "status.undo_aria",
-                    &[("base", &label)],
-                )
-                .to_string(),
+                None => crate::localization::t_args(cx, "status.undo_aria", &[("base", &label)])
+                    .to_string(),
             };
             left = left.child(
                 div()
@@ -423,17 +412,13 @@ impl KanalibApp {
             },
         ));
         left = left
-            .child(
-                div()
-                    .px(px(6.))
-                    .text_xs()
-                    .text_color(colors.subtle)
-                    .child(crate::localization::t_args(
-                        cx,
-                        "status.tagged",
-                        &[("n", &counts.tagged.to_string())],
-                    )),
-            )
+            .child(div().px(px(6.)).text_xs().text_color(colors.subtle).child(
+                crate::localization::t_args(
+                    cx,
+                    "status.tagged",
+                    &[("n", &counts.tagged.to_string())],
+                ),
+            ))
             .child({
                 let this_untagged = this.clone();
                 status_bar_item(
@@ -521,13 +506,9 @@ impl KanalibApp {
             let this_device = this.clone();
             right = right.child(status_bar_item(
                 "status-device",
-                SharedString::from(
-                    device
-                        .map(str::to_string)
-                        .unwrap_or_else(|| {
-                            crate::localization::t(cx, "status.device_missing").to_string()
-                        }),
-                ),
+                SharedString::from(device.map(str::to_string).unwrap_or_else(|| {
+                    crate::localization::t(cx, "status.device_missing").to_string()
+                })),
                 colors.subtle,
                 colors,
                 false,
@@ -562,14 +543,12 @@ impl KanalibApp {
                     .size(IconSize::Xs)
                     .color(colors.muted),
             )
-            .children(
-                (!compact).then(|| {
-                    div()
-                        .text_xs()
-                        .text_color(colors.muted)
-                        .child(crate::localization::t(cx, "status.palette"))
-                }),
-            )
+            .children((!compact).then(|| {
+                div()
+                    .text_xs()
+                    .text_color(colors.muted)
+                    .child(crate::localization::t(cx, "status.palette"))
+            }))
             .children(
                 (!compact).then(|| div().text_xs().text_color(colors.subtle).child("Ctrl+K")),
             );

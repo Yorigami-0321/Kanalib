@@ -154,25 +154,64 @@ pub(crate) const ZH: &[(&str, &str)] = &[
     ("sidebar.more.tooltip", "侧栏操作"),
     ("sidebar.resize", "调整侧栏宽度"),
     ("sidebar.activity", "活动栏"),
-    ("sidebar.albums.add_none", "没有新增：{wanted} 张已在相册中或不在图库"),
-    ("sidebar.albums.added", "已加入相册 {added} 张（选中 {wanted} 张）"),
+    (
+        "sidebar.albums.add_none",
+        "没有新增：{wanted} 张已在相册中或不在图库",
+    ),
+    (
+        "sidebar.albums.added",
+        "已加入相册 {added} 张（选中 {wanted} 张）",
+    ),
     ("sidebar.albums.deleted", "相册「{name}」已删除"),
     ("sidebar.albums.empty", "还没有相册"),
-    ("sidebar.albums.remove_none", "没有移出：{wanted} 张不在该相册中"),
-    ("sidebar.albums.remove_selection", "从相册移出选中（{count} 张）"),
-    ("sidebar.albums.removed", "已从相册移出 {removed} 张（选中 {wanted} 张）"),
+    (
+        "sidebar.albums.remove_none",
+        "没有移出：{wanted} 张不在该相册中",
+    ),
+    (
+        "sidebar.albums.remove_selection",
+        "从相册移出选中（{count} 张）",
+    ),
+    (
+        "sidebar.albums.removed",
+        "已从相册移出 {removed} 张（选中 {wanted} 张）",
+    ),
     ("sidebar.albums.renamed", "相册已重命名为 {name}"),
     ("sidebar.collections.empty", "还没有智能集合"),
-    ("sidebar.dedup.pending", "待审 {n} 组；切图与评审在内容区完成"),
-    ("sidebar.org.delete_message", "将删除相册「{name}」与它的归属关系（{count} 张）。\n图片仍保留在图库和磁盘上，不会被删除。"),
+    (
+        "sidebar.dedup.pending",
+        "待审 {n} 组；切图与评审在内容区完成",
+    ),
+    (
+        "sidebar.org.delete_message",
+        "将删除相册「{name}」与它的归属关系（{count} 张）。\n图片仍保留在图库和磁盘上，不会被删除。",
+    ),
     ("sidebar.org.name_taken", "名称「{name}」已存在"),
-    ("sidebar.org.new_album_note", "相册只记录图片归属，不移动、不复制磁盘文件"),
-    ("sidebar.org.rename_album_note", "重命名不改相册 ID，已归入的图片保持不变"),
-    ("sidebar.org.rename_saved_note", "重命名不改集合 ID，图标与排序保持不变"),
+    (
+        "sidebar.org.new_album_note",
+        "相册只记录图片归属，不移动、不复制磁盘文件",
+    ),
+    (
+        "sidebar.org.rename_album_note",
+        "重命名不改相册 ID，已归入的图片保持不变",
+    ),
+    (
+        "sidebar.org.rename_saved_note",
+        "重命名不改集合 ID，图标与排序保持不变",
+    ),
     ("sidebar.saved.renamed", "智能集合已重命名为 {name}"),
-    ("sidebar.source.removed", "已移除来源，磁盘文件未删除（{removed} 张资产移出视图）"),
-    ("sidebar.source.reveal_remote", "远端只读来源没有本地文件，无法访问本地路径"),
-    ("sidebar.tags_nav.summary", "共 {total} 个标签 · 0 使用 {unused} · 低频 {low_frequency} · 仅自动 {auto_only} · 已屏蔽 {blocked}"),
+    (
+        "sidebar.source.removed",
+        "已移除来源，磁盘文件未删除（{removed} 张资产移出视图）",
+    ),
+    (
+        "sidebar.source.reveal_remote",
+        "远端只读来源没有本地文件，无法访问本地路径",
+    ),
+    (
+        "sidebar.tags_nav.summary",
+        "共 {total} 个标签 · 0 使用 {unused} · 低频 {low_frequency} · 仅自动 {auto_only} · 已屏蔽 {blocked}",
+    ),
 ];
 
 /// 侧栏英文目录；键与中文一一对应。
@@ -379,23 +418,65 @@ pub(crate) const EN: &[(&str, &str)] = &[
     ("sidebar.more.tooltip", "Sidebar actions"),
     ("sidebar.resize", "Resize sidebar"),
     ("sidebar.activity", "Activity bar"),
-    ("sidebar.albums.add_none", "No additions: {wanted} already in the album or not in the library"),
-    ("sidebar.albums.added", "Added {added} to album ({wanted} selected)"),
+    (
+        "sidebar.albums.add_none",
+        "No additions: {wanted} already in the album or not in the library",
+    ),
+    (
+        "sidebar.albums.added",
+        "Added {added} to album ({wanted} selected)",
+    ),
     ("sidebar.albums.deleted", "Album “{name}” deleted"),
     ("sidebar.albums.empty", "No albums yet"),
-    ("sidebar.albums.remove_none", "Nothing removed: {wanted} were not in the album"),
-    ("sidebar.albums.remove_selection", "Remove selection from album ({count})"),
-    ("sidebar.albums.removed", "Removed {removed} from album ({wanted} selected)"),
+    (
+        "sidebar.albums.remove_none",
+        "Nothing removed: {wanted} were not in the album",
+    ),
+    (
+        "sidebar.albums.remove_selection",
+        "Remove selection from album ({count})",
+    ),
+    (
+        "sidebar.albums.removed",
+        "Removed {removed} from album ({wanted} selected)",
+    ),
     ("sidebar.albums.renamed", "Album renamed to {name}"),
     ("sidebar.collections.empty", "No smart collections yet"),
-    ("sidebar.dedup.pending", "{n} groups pending review; review in the content area"),
-    ("sidebar.org.delete_message", "This deletes album “{name}” and its membership ({count} items).\nFiles stay in the library and on disk."),
+    (
+        "sidebar.dedup.pending",
+        "{n} groups pending review; review in the content area",
+    ),
+    (
+        "sidebar.org.delete_message",
+        "This deletes album “{name}” and its membership ({count} items).\nFiles stay in the library and on disk.",
+    ),
     ("sidebar.org.name_taken", "The name “{name}” already exists"),
-    ("sidebar.org.new_album_note", "Albums only record membership; files are not moved or copied."),
-    ("sidebar.org.rename_album_note", "Renaming keeps the album ID; existing items stay."),
-    ("sidebar.org.rename_saved_note", "Renaming keeps the collection ID, icon and order."),
-    ("sidebar.saved.renamed", "Smart collection renamed to {name}"),
-    ("sidebar.source.removed", "Source removed; files kept ({removed} assets left the view)"),
-    ("sidebar.source.reveal_remote", "Remote read-only sources have no local files."),
-    ("sidebar.tags_nav.summary", "Total {total} tags · unused {unused} · low-frequency {low_frequency} · auto-only {auto_only} · blocked {blocked}"),
+    (
+        "sidebar.org.new_album_note",
+        "Albums only record membership; files are not moved or copied.",
+    ),
+    (
+        "sidebar.org.rename_album_note",
+        "Renaming keeps the album ID; existing items stay.",
+    ),
+    (
+        "sidebar.org.rename_saved_note",
+        "Renaming keeps the collection ID, icon and order.",
+    ),
+    (
+        "sidebar.saved.renamed",
+        "Smart collection renamed to {name}",
+    ),
+    (
+        "sidebar.source.removed",
+        "Source removed; files kept ({removed} assets left the view)",
+    ),
+    (
+        "sidebar.source.reveal_remote",
+        "Remote read-only sources have no local files.",
+    ),
+    (
+        "sidebar.tags_nav.summary",
+        "Total {total} tags · unused {unused} · low-frequency {low_frequency} · auto-only {auto_only} · blocked {blocked}",
+    ),
 ];

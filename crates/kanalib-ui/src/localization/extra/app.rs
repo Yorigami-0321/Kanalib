@@ -6,8 +6,14 @@ pub(crate) const ZH: &[(&str, &str)] = &[
     ("app.common.remove_source", "移除来源"),
     ("app.common.no_selection", "先选择图片"),
     ("app.common.list_separator", "、"),
-    ("app.similar.filter_placeholder", "筛选相似结果（名称/标签/路径）"),
-    ("app.tags.manager_search_placeholder", "搜索全部标签（含 0 使用/已屏蔽）"),
+    (
+        "app.similar.filter_placeholder",
+        "筛选相似结果（名称/标签/路径）",
+    ),
+    (
+        "app.tags.manager_search_placeholder",
+        "搜索全部标签（含 0 使用/已屏蔽）",
+    ),
     ("app.palette.group.goto", "跳转"),
     ("app.palette.group.view", "视图"),
     ("app.palette.group.actions", "图片操作"),
@@ -75,7 +81,10 @@ pub(crate) const ZH: &[(&str, &str)] = &[
     ("app.cmd.retry_tagging", "重试失败的打标"),
     ("app.cmd.add_folder", "添加文件夹"),
     ("app.cmd.remove_selected", "从图库移除选中（不删磁盘）"),
-    ("app.cmd.remove_selected_hash", "从图库移除选中并忽略内容哈希"),
+    (
+        "app.cmd.remove_selected_hash",
+        "从图库移除选中并忽略内容哈希",
+    ),
     ("app.cmd.open_ignores", "查看忽略列表"),
     ("app.cmd.backup_now", "立即备份数据库"),
     ("app.cmd.backup_restore", "恢复数据库备份…"),
@@ -89,33 +98,57 @@ pub(crate) const ZH: &[(&str, &str)] = &[
     ("app.cmd.group_rating", "分组 · 评级"),
     ("app.save_search.placeholder", "智能集合名称"),
     ("app.save_search.title", "保存为智能集合"),
-    ("app.save_search.label", "当前筛选：{filter}；搜索词会一起保存"),
+    (
+        "app.save_search.label",
+        "当前筛选：{filter}；搜索词会一起保存",
+    ),
     ("app.save_search.name_required", "名称不能为空"),
     ("app.tag_dialog.placeholder", "标签名"),
     ("app.tag_dialog.add_title", "添加标签"),
     ("app.tag_dialog.remove_title", "移除标签"),
-    ("app.tag_dialog.add_label", "作用于 {n} 张图片；空格会转为下划线"),
-    ("app.tag_dialog.remove_label", "作用于 {n} 张图片；自动与手工标签都会移除"),
+    (
+        "app.tag_dialog.add_label",
+        "作用于 {n} 张图片；空格会转为下划线",
+    ),
+    (
+        "app.tag_dialog.remove_label",
+        "作用于 {n} 张图片；自动与手工标签都会移除",
+    ),
     ("app.tag_dialog.name_required", "标签名不能为空"),
     ("app.tag_rename.placeholder", "新标签名"),
     ("app.tag_rename.title", "重命名标签"),
-    ("app.tag_rename.label", "#{name} 影响 {n} 张图片；旧名会保留为别名，仍可搜索。"),
+    (
+        "app.tag_rename.label",
+        "#{name} 影响 {n} 张图片；旧名会保留为别名，仍可搜索。",
+    ),
     ("app.tag_rename.submit", "重命名"),
     ("app.tag_merge.placeholder", "目标标签名（已有或新建）"),
     ("app.tag_merge.title", "合并标签"),
-    ("app.tag_merge.label", "将 #{source}（{n} 张）合并到目标标签；来源名会保留为别名，手工/自动标记一并合并。"),
+    (
+        "app.tag_merge.label",
+        "将 #{source}（{n} 张）合并到目标标签；来源名会保留为别名，手工/自动标记一并合并。",
+    ),
     ("app.tag_merge.submit", "合并"),
     ("app.tag_merge.target_required", "目标标签名不能为空"),
     ("app.tag_merge.same_name", "目标和来源相同"),
     ("app.source_remove.title", "移除来源？"),
-    ("app.source_remove.body", "只会从图库移除，磁盘文件不会删除：\n{path}"),
+    (
+        "app.source_remove.body",
+        "只会从图库移除，磁盘文件不会删除：\n{path}",
+    ),
     ("app.source_rename.title", "重命名来源"),
     (
         "app.source_rename.label",
         "只改图库内显示名，不改磁盘文件夹；留空恢复文件夹名",
     ),
-    ("app.remote_add.name_placeholder", "名称（可留空，默认使用 URL）"),
-    ("app.remote_add.detail", "远端来源只读；添加后可先测试连接。"),
+    (
+        "app.remote_add.name_placeholder",
+        "名称（可留空，默认使用 URL）",
+    ),
+    (
+        "app.remote_add.detail",
+        "远端来源只读；添加后可先测试连接。",
+    ),
     ("app.remote_add.name_label", "名称（可留空）"),
     ("app.remote_add.url_label", "Base URL（http/https）"),
     ("app.remote_add.title_immich", "添加 Immich 来源"),
@@ -124,8 +157,14 @@ pub(crate) const ZH: &[(&str, &str)] = &[
     ("app.remote_key.title", "设置网络来源凭据"),
     ("app.remote_key.immich_label", "Immich API key"),
     ("app.remote_key.webdav_label", "WebDAV 凭据（用户名:密码）"),
-    ("app.remote_key.immich_placeholder", "粘贴 API key；已保存值不会回显"),
-    ("app.remote_key.webdav_placeholder", "用户名:密码；已保存值不会回显"),
+    (
+        "app.remote_key.immich_placeholder",
+        "粘贴 API key；已保存值不会回显",
+    ),
+    (
+        "app.remote_key.webdav_placeholder",
+        "用户名:密码；已保存值不会回显",
+    ),
     (
         "app.remote_key.label",
         "{kind}「{name}」；留空保存表示不修改，已保存值不会回显；凭据存入系统凭据库。",
@@ -183,13 +222,22 @@ pub(crate) const ZH: &[(&str, &str)] = &[
         "\n\n同时忽略这些路径：重扫不会重新导入；可在设置页的忽略列表恢复。",
     ),
     ("app.remove_assets.confirm", "从图库移除"),
-    ("app.remove_assets.removed", "已从图库移除 {n} 张 · 磁盘文件未删除"),
+    (
+        "app.remove_assets.removed",
+        "已从图库移除 {n} 张 · 磁盘文件未删除",
+    ),
     ("app.remove_assets.failed", "从图库移除失败：{error}"),
     ("app.drop.title", "拖拽导入？"),
     ("app.drop.add_dirs", "添加 {n} 个文件夹为来源："),
-    ("app.drop.add_parents", "为来源外的 {n} 张图片添加所在文件夹："),
+    (
+        "app.drop.add_parents",
+        "为来源外的 {n} 张图片添加所在文件夹：",
+    ),
     ("app.drop.more", "· …另有 {n} 个"),
-    ("app.drop.index_note", "只建立索引，不复制、不移动磁盘文件。"),
+    (
+        "app.drop.index_note",
+        "只建立索引，不复制、不移动磁盘文件。",
+    ),
     ("app.drop.confirm", "添加为来源"),
     ("app.drop.overlay_title", "松开以导入到图库"),
     (
@@ -214,7 +262,10 @@ pub(crate) const ZH: &[(&str, &str)] = &[
         "app.saved_search.updated",
         "已用当前视图更新「{name}」（筛选/搜索/排序/视图/窗格）",
     ),
-    ("app.saved_search.update_failed", "更新智能集合失败：{error}"),
+    (
+        "app.saved_search.update_failed",
+        "更新智能集合失败：{error}",
+    ),
     ("app.saved_search.pinned", "已置顶「{name}」，重启后保持"),
     ("app.saved_search.unpinned", "已取消置顶「{name}」"),
     ("app.saved_search.pin_failed", "置顶失败：{error}"),
@@ -272,10 +323,7 @@ pub(crate) const ZH: &[(&str, &str)] = &[
     ("app.export_menu.view_json", "当前视图 · JSON"),
     ("app.titlebar.back_to_tags", "标签管理"),
     ("app.titlebar.visible_count", "{n} 张"),
-    (
-        "app.syntax.free_text",
-        "自由文本：空格分隔，全部满足",
-    ),
+    ("app.syntax.free_text", "自由文本：空格分隔，全部满足"),
     (
         "app.syntax.tag",
         "tag:风景 / #风景 · character: · copyright:",
@@ -292,10 +340,7 @@ pub(crate) const ZH: &[(&str, &str)] = &[
         "star:>=3 · is:fav · is:failed · is:damaged",
     ),
     ("app.syntax.is", "is:tagged / is:untagged · dup:true"),
-    (
-        "app.syntax.exclude",
-        "-tag:草图 排除 · 回车记录最近查询",
-    ),
+    ("app.syntax.exclude", "-tag:草图 排除 · 回车记录最近查询"),
     ("app.filter.empty_rule", "排除规则不能为空"),
     ("app.filter.exists", "规则已存在：{glob}"),
     (
@@ -320,7 +365,10 @@ pub(crate) const ZH: &[(&str, &str)] = &[
         "app.filter.saved_kept",
         "已保存规则；已入库命中 {n} 张保留记录，后续扫描会跳过。",
     ),
-    ("app.filter.toast_removed", "排除规则已保存 · 移出 {n} 张记录"),
+    (
+        "app.filter.toast_removed",
+        "排除规则已保存 · 移出 {n} 张记录",
+    ),
     ("app.filter.toast_kept", "排除规则已保存 · 保留命中记录"),
     ("app.filter.save_failed", "保存排除规则失败：{error}"),
     ("app.filter.save_notice_failed", "保存失败：{error}"),
@@ -346,18 +394,27 @@ pub(crate) const ZH: &[(&str, &str)] = &[
         "app.ignore.restored_paths",
         "已恢复 {n} 条路径忽略项 · 重扫后重新导入",
     ),
-    ("app.ignore.restore_paths_failed", "恢复忽略路径失败：{error}"),
+    (
+        "app.ignore.restore_paths_failed",
+        "恢复忽略路径失败：{error}",
+    ),
     (
         "app.ignore.restored_hashes",
         "已恢复 {n} 条哈希忽略项 · 重扫后重新导入",
     ),
-    ("app.ignore.restore_hashes_failed", "恢复哈希忽略项失败：{error}"),
+    (
+        "app.ignore.restore_hashes_failed",
+        "恢复哈希忽略项失败：{error}",
+    ),
     (
         "app.ignore.restored_glob",
         "已恢复忽略规则 · {pattern} · 重扫后重新导入",
     ),
     ("app.ignore.missing", "忽略规则不存在：{pattern}"),
-    ("app.ignore.restore_glob_failed", "恢复忽略规则失败：{error}"),
+    (
+        "app.ignore.restore_glob_failed",
+        "恢复忽略规则失败：{error}",
+    ),
     (
         "app.ignore.restored_all",
         "已恢复 {n} 条忽略项 · 重扫后重新导入",
@@ -404,7 +461,10 @@ pub(crate) const EN: &[(&str, &str)] = &[
     ("app.cmd.view_quick", "Quick look"),
     ("app.cmd.select_all_visible", "Select all visible"),
     ("app.cmd.clear_selection", "Clear selection"),
-    ("app.cmd.save_view_as_collection", "Save current view as smart collection"),
+    (
+        "app.cmd.save_view_as_collection",
+        "Save current view as smart collection",
+    ),
     ("app.cmd.view_icons_large", "View · Large icons"),
     ("app.cmd.view_icons_medium", "View · Medium icons"),
     ("app.cmd.view_icons_small", "View · Small icons"),
@@ -447,8 +507,14 @@ pub(crate) const EN: &[(&str, &str)] = &[
     ("app.cmd.rescan", "Rescan library"),
     ("app.cmd.retry_tagging", "Retry failed tagging"),
     ("app.cmd.add_folder", "Add folder"),
-    ("app.cmd.remove_selected", "Remove selection from library (keep files)"),
-    ("app.cmd.remove_selected_hash", "Remove selection and ignore content hashes"),
+    (
+        "app.cmd.remove_selected",
+        "Remove selection from library (keep files)",
+    ),
+    (
+        "app.cmd.remove_selected_hash",
+        "Remove selection and ignore content hashes",
+    ),
     ("app.cmd.open_ignores", "Open ignore list"),
     ("app.cmd.backup_now", "Back up database now"),
     ("app.cmd.backup_restore", "Restore database backup…"),
@@ -496,7 +562,10 @@ pub(crate) const EN: &[(&str, &str)] = &[
         "Merges #{source} ({n} images) into the target tag; the source name stays an alias and manual and automatic marks merge too.",
     ),
     ("app.tag_merge.submit", "Merge"),
-    ("app.tag_merge.target_required", "A target tag name is required"),
+    (
+        "app.tag_merge.target_required",
+        "A target tag name is required",
+    ),
     ("app.tag_merge.same_name", "Target and source are the same"),
     ("app.source_remove.title", "Remove source?"),
     (
@@ -520,7 +589,10 @@ pub(crate) const EN: &[(&str, &str)] = &[
     ("app.remote_add.url_label", "Base URL (http/https)"),
     ("app.remote_add.title_immich", "Add Immich source"),
     ("app.remote_add.title_webdav", "Add WebDAV source"),
-    ("app.remote_key.placeholder", "Credential; a saved value is never shown"),
+    (
+        "app.remote_key.placeholder",
+        "Credential; a saved value is never shown",
+    ),
     ("app.remote_key.title", "Set network source credential"),
     ("app.remote_key.immich_label", "Immich API key"),
     (
@@ -571,7 +643,10 @@ pub(crate) const EN: &[(&str, &str)] = &[
         "{n} images are retagged for {scope}: existing candidates are recomputed with the current threshold, missing ones are queued; manual tags stay.",
     ),
     ("app.retag.confirm", "Start retagging"),
-    ("app.cleanup_missing.title", "Remove records of missing images?"),
+    (
+        "app.cleanup_missing.title",
+        "Remove records of missing images?",
+    ),
     (
         "app.cleanup_missing.body",
         "The last full scan did not find {n} images on disk.\nSources: {roots}\n\nConfirming removes these records from the library only; files on disk stay.\nIf a source is a removable or network drive, cancel first and restore the connection.",
@@ -599,7 +674,10 @@ pub(crate) const EN: &[(&str, &str)] = &[
         "app.remove_assets.removed",
         "Removed {n} images from the library · files on disk stay",
     ),
-    ("app.remove_assets.failed", "Failed to remove from the library: {error}"),
+    (
+        "app.remove_assets.failed",
+        "Failed to remove from the library: {error}",
+    ),
     ("app.drop.title", "Import dropped items?"),
     ("app.drop.add_dirs", "Add {n} folders as sources:"),
     (
@@ -618,8 +696,14 @@ pub(crate) const EN: &[(&str, &str)] = &[
         "Folder → add as source · Image inside a source → select it · Other image → ask about its folder",
     ),
     ("app.drop.existing", "{n} paths are already library sources"),
-    ("app.drop.unsupported", "{n} paths are not supported image formats"),
-    ("app.drop.added_and_scanning", "Added {n} sources and started scanning"),
+    (
+        "app.drop.unsupported",
+        "{n} paths are not supported image formats",
+    ),
+    (
+        "app.drop.added_and_scanning",
+        "Added {n} sources and started scanning",
+    ),
     ("app.drop.failed", "Failed to add sources: {error}"),
     ("app.folder.add_title", "Add library folder"),
     (
@@ -645,15 +729,24 @@ pub(crate) const EN: &[(&str, &str)] = &[
         "app.saved_search.update_failed",
         "Failed to update the smart collection: {error}",
     ),
-    ("app.saved_search.pinned", "Pinned “{name}”, kept after a restart"),
+    (
+        "app.saved_search.pinned",
+        "Pinned “{name}”, kept after a restart",
+    ),
     ("app.saved_search.unpinned", "Unpinned “{name}”"),
     ("app.saved_search.pin_failed", "Failed to pin: {error}"),
     (
         "app.saved_search.cross_pinned",
         "Pinned and ordinary collections cannot pass each other; unpin before moving",
     ),
-    ("app.saved_search.reordered", "Smart collection order changed"),
-    ("app.saved_search.reorder_failed", "Failed to reorder: {error}"),
+    (
+        "app.saved_search.reordered",
+        "Smart collection order changed",
+    ),
+    (
+        "app.saved_search.reorder_failed",
+        "Failed to reorder: {error}",
+    ),
     ("app.saved_search.saved", "Saved smart collection “{name}”"),
     ("app.saved_search.save_failed", "Failed to save: {error}"),
     ("app.retry.failed", "Failed to retry: {error}"),
@@ -672,14 +765,26 @@ pub(crate) const EN: &[(&str, &str)] = &[
     ("app.star.set", "Set {n} images to {star} stars"),
     ("app.star.failed", "Failed to set the rating: {error}"),
     ("app.export.empty", "No images to export"),
-    ("app.export.json_failed", "Failed to build the JSON: {error}"),
+    (
+        "app.export.json_failed",
+        "Failed to build the JSON: {error}",
+    ),
     ("app.export.done", "Exported {n} images · {size}"),
     ("app.export.failed", "Export failed: {error}"),
-    ("app.copy.prompt_empty", "The selected images have no tags to copy"),
+    (
+        "app.copy.prompt_empty",
+        "The selected images have no tags to copy",
+    ),
     ("app.copy.prompt_done", "Copied the prompt of {n} images"),
     ("app.copy.paths_done", "Copied {n} paths"),
-    ("app.copy.image_done", "Copied the image to the clipboard (PNG / DIB)"),
-    ("app.settings.save_failed", "Failed to save the setting: {error}"),
+    (
+        "app.copy.image_done",
+        "Copied the image to the clipboard (PNG / DIB)",
+    ),
+    (
+        "app.settings.save_failed",
+        "Failed to save the setting: {error}",
+    ),
     (
         "app.notice.ignores_location",
         "The ignore list is at the bottom of the settings page, under “Ignore list”",
@@ -761,7 +866,10 @@ pub(crate) const EN: &[(&str, &str)] = &[
         "app.filter.toast_kept",
         "Exclude rule saved · matched records kept",
     ),
-    ("app.filter.save_failed", "Failed to save the exclude rule: {error}"),
+    (
+        "app.filter.save_failed",
+        "Failed to save the exclude rule: {error}",
+    ),
     ("app.filter.save_notice_failed", "Failed to save: {error}"),
     (
         "app.filter.remove_cancelled",
@@ -782,7 +890,10 @@ pub(crate) const EN: &[(&str, &str)] = &[
         "Ignore rule added · {pattern} (later scans only; no file is deleted)",
     ),
     ("app.ignore.added_toast", "Ignore rule added"),
-    ("app.ignore.exists", "The ignore rule exists already: {pattern}"),
+    (
+        "app.ignore.exists",
+        "The ignore rule exists already: {pattern}",
+    ),
     ("app.ignore.invalid", "Invalid ignore rule: {error}"),
     (
         "app.ignore.restored_paths",

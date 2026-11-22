@@ -1,30 +1,90 @@
-/* nav-detail · 导航缝：状态通道收敛（photo-wall-v3 §3 规则 3 / 6，Folia 指标见 §5）
+/* nav-detail · 横向文字导航：状态通道收敛（photo-wall-v3 §3 规则 3 / 6）。
 
-   选中项只保留一条通道：左侧 2px 动态强调色竖线 + 文字提亮，去掉整块底色。
-   hover 走 ::before 的 currentColor 填充（底 16%）+ 26% 内描边，160ms。
-   Folia 里"高亮 ::before 填 currentColor 14% / 180ms"是给选中项的底色块用的，
-   与"选中去底色"冲突，故不再叠加；只把文字提亮的过渡对齐到 180ms。
+   选中保持左侧 2px 强调竖线 + 提亮；hover 用 ::before 做 16% 底 + 26% 内描边。
+   styles.css 在 main.tsx 里后加载，所以这里统一用 .app .seam/.app .rail 前缀覆盖。 */
 
-   注意：styles.css 在本模块之后加载（main.tsx 先 import App 再 import styles.css），
-   所有覆盖都必须靠特异性取胜，故统一用 .app .seam 前缀。 */
-
-.app .seam {
-  /* Folia 实测：padding 16px 10px 0，段间距 18px */
+.app .seam.rail {
   gap: 12px;
-  padding: 16px 10px 0;
+  padding: 16px 12px 12px;
+  overflow-x: hidden;
+  overflow-y: auto;
+  transition:
+    width 200ms var(--ease),
+    background-color 240ms var(--ease),
+    backdrop-filter 240ms var(--ease);
 }
 
-.app .seam__tab {
-  padding: 9px 4px;
-  border-radius: 10px;
-  /* 状态只改颜色/伪元素，不改字号与位移（规则 3） */
+.app .seam.rail .rail__head {
+  display: flex;
+  width: 100%;
+  height: 20px;
+  flex: none;
+  align-items: center;
+  gap: 8px;
+}
+
+.app .seam.rail .seam__dot {
+  margin: 0;
+}
+
+.app .seam.rail .seam__word {
+  margin: 0;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.18em;
+  writing-mode: horizontal-tb;
+  text-orientation: mixed;
+}
+
+.app .seam.rail .seam__nav {
+  align-items: stretch;
+  gap: 4px;
+  padding-top: 0;
+}
+
+.app .seam.rail .seam__tab[hidden],
+.app .seam.rail .rail__group[hidden] {
+  display: none;
+}
+
+.app .seam.rail .rail__group {
+  margin: 10px 0 2px;
+  color: color-mix(in srgb, #f7f4ee 62%, transparent);
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: 0.14em;
+  line-height: 1.4;
+}
+
+.app .seam.rail .seam__tab {
+  min-height: 34px;
+  flex-direction: row;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 10px;
+  padding: 6px 8px;
+  border-radius: 8px;
+  text-align: left;
   transition:
     color 180ms var(--ease),
     box-shadow 160ms var(--ease);
 }
 
-/* hover：16% 底 + 26% 边（160ms）——用伪元素承载，元素本身始终无底色 */
-.app .seam .seam__tab::before {
+.app .seam.rail .seam__tab svg {
+  flex: none;
+  opacity: 0.85;
+}
+
+.app .seam.rail .seam__label {
+  font-size: 13px;
+  font-weight: 500;
+  letter-spacing: 0;
+  line-height: 1.4;
+  white-space: nowrap;
+  writing-mode: horizontal-tb;
+}
+
+.app .seam.rail .seam__tab::before {
   content: '';
   position: absolute;
   inset: 0;
@@ -36,38 +96,35 @@
   transition: opacity 160ms var(--ease);
 }
 
-.app .seam .seam__tab:hover::before {
+.app .seam.rail .seam__tab:hover::before {
   opacity: 0.16;
 }
 
-.app .seam .seam__tab:hover {
+.app .seam.rail .seam__tab:hover {
   background: none;
 }
 
-/* 选中：竖线 + 提亮，没有底色块；hover 也不再追加填充（两套不叠加） */
-.app .seam .seam__tab.is-on,
-.app .seam .seam__tab.is-on:hover {
+.app .seam.rail .seam__tab.is-on,
+.app .seam.rail .seam__tab.is-on:hover {
   color: var(--ink);
-  background: none;
+  background: color-mix(in srgb, var(--ink) 9%, transparent);
 }
 
-.app .seam .seam__tab.is-on::before {
+.app .seam.rail .seam__tab.is-on::before {
   opacity: 0;
 }
 
-/* 焦点用内描边，不用外发光（规则 6） */
-.app .seam .seam__tab:focus-visible {
+.app .seam.rail .seam__tab:focus-visible {
   outline: none;
-  box-shadow: inset 0 0 0 1px var(--accent);
+  box-shadow: inset 0 0 0 2px var(--accent);
 }
 
-/* 选中竖线：3px 内缩 + 2px 宽，颜色跟 --accent 一起过渡 */
-.app .seam .seam__tab.is-on::after {
+.app .seam.rail .seam__tab.is-on::after {
   content: '';
   position: absolute;
-  top: 9px;
-  bottom: 9px;
-  left: -7px;
+  top: 8px;
+  bottom: 8px;
+  left: 0;
   width: 2px;
   border-radius: 1px;
   background: var(--accent);
@@ -76,88 +133,290 @@
   transition: background-color 600ms var(--ease);
 }
 
-/* §5：Folia 导航项 14px / 700 / letter-spacing .18em */
-.app .seam__label {
-  font-size: 14px;
-  letter-spacing: 0.18em;
+.app .seam.rail .rail__toggle {
+  justify-content: center;
+  width: 26px;
+  min-height: 26px;
+  flex: none;
+  margin-left: auto;
+  padding: 0;
+  color: var(--ink-soft);
 }
 
-.app .seam__foot {
-  padding-bottom: 16px;
+.app .seam.rail .rail__toggle:hover {
+  color: var(--ink);
 }
 
-/* ===== 功能键组（2026-11-09 用户指令）：画布与详情页的操作钮统一收进缝 =====
-   墙页给缩放/回到起点（2×2 网格），详情页给返回/翻页（一行三钮 + 竖排序号），
-   两组互斥渲染。竖排一列会把底部计数挤出视口（实测 900 高放不下），必须压扁；
-   宽度不变（规则 2：导航一条、固定宽、不推挤）。 */
-.app .seam__ops {
+.app .seam.rail .rail__toggle--expand {
+  display: none;
+}
+
+.app .seam.rail .seam__ops {
   display: grid;
   width: 100%;
   flex: none;
-  grid-template-columns: repeat(2, 32px);
-  justify-content: center;
+  grid-template-columns: repeat(4, 1fr);
+  justify-content: stretch;
   gap: 6px;
   padding-top: 8px;
   border-top: 1px solid var(--hairline);
 }
 
-.app .seam__ops--detail {
-  grid-template-columns: repeat(3, 30px);
+.app .seam.rail .seam__ops--detail {
+  grid-template-columns: repeat(3, 1fr);
   gap: 6px 4px;
 }
 
-.app .seam__ops .seam__tab--icon {
-  width: 32px;
+.app .seam.rail .seam__ops .seam__tab--icon,
+.app .seam.rail .seam__ops--detail .seam__tab--icon {
+  width: 100%;
+  min-width: 0;
   height: 32px;
+  justify-content: center;
+  padding: 0;
 }
 
-.app .seam__ops--detail .seam__tab--icon {
-  width: 30px;
-  height: 30px;
-}
-
-/* 序号占满整行（竖排文字，跟底部计数同款）。 */
-.app .seam__ops .seam__count {
+.app .seam.rail .seam__ops .seam__count {
   grid-column: 1 / -1;
+  text-align: center;
 }
 
-/* 翻页到头时置灰：只降透明度，不换状态通道（规则 3）。 */
-.app .seam .seam__tab:disabled {
+.app .seam.rail .rail__foot {
+  align-items: stretch;
+  gap: 8px;
+  margin-top: auto;
+  padding-bottom: 0;
+}
+
+.app .seam.rail .seam__count {
+  writing-mode: horizontal-tb;
+  text-orientation: mixed;
+  white-space: nowrap;
+}
+
+.app .seam.rail .seam__foot-actions {
+  display: grid;
+  width: 100%;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 6px;
+}
+
+.app .seam.rail .seam__foot-actions .seam__tab--icon {
+  width: 100%;
+  min-width: 0;
+}
+
+.app .seam.rail .seam__tab:disabled {
   color: var(--ink-soft);
   opacity: 0.4;
   cursor: default;
 }
 
-.app .seam .seam__tab:disabled::before {
+.app .seam.rail .seam__tab:disabled::before {
   opacity: 0;
 }
 
-/* ===== Q6 = C′（2026-11-09 用户改判）：常驻半透明 =====
-   默认 76% 纸 + blur(10) 一直开；悬停升到 88% + blur(14)。
-   以前是"实色纸面，hover 才切玻璃"，用户报"只有悬停才透明"。
-   特异性：.app .seam 胜过 .seam；悬停用 .app .seam:hover（多一个类）压过 .seam:hover。 */
-.app .seam {
+.app .seam.rail {
   background: color-mix(in srgb, var(--surface) 76%, transparent);
   border-right-color: color-mix(in srgb, var(--ink) 10%, transparent);
   backdrop-filter: blur(10px) saturate(1.08);
   -webkit-backdrop-filter: blur(10px) saturate(1.08);
-  /* 底下的图透上来之后，次级文字要提一档才够读（§2.4）。 */
   --ink-soft: color-mix(in srgb, #f7f4ee 72%, transparent);
 }
 
-/* 悬停**不改**透明度：76% 的深色纸叠在亮图上，提到 88% 等于整条变暗，
-   鼠标扫过就像闪一下（2026-11-09 用户报）。这里只把模糊加深一档，
-   真正的 hover 反馈交给页签自己的底/描边。 */
-.app .seam:hover {
+.app .seam.rail:hover {
   background: color-mix(in srgb, var(--surface) 76%, transparent);
   backdrop-filter: blur(12px) saturate(1.1);
   -webkit-backdrop-filter: blur(12px) saturate(1.1);
 }
 
-/* 不支持 backdrop-filter 时退回 88% 实色，别让图片直接糊在文字底下。 */
 @supports not ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
-  .app .seam,
-  .app .seam:hover {
+  .app .seam.rail,
+  .app .seam.rail:hover {
     background: color-mix(in srgb, var(--surface) 88%, transparent);
+  }
+}
+
+html.rail-is-collapsed,
+html.rail-is-collapsed .stage {
+  --rail-w: 60px;
+}
+
+@media (min-width: 901px) {
+  .app .seam.rail.rail--collapsed .seam__word,
+  .app .seam.rail.rail--collapsed .rail__group,
+  .app .seam.rail.rail--collapsed .seam__label,
+  .app .seam.rail.rail--collapsed .seam__count,
+  .app .seam.rail.rail--collapsed .rail__toggle:not(.rail__toggle--expand) {
+    display: none;
+  }
+
+  .app .seam.rail.rail--collapsed {
+    padding-right: 0;
+    padding-left: 0;
+    overflow-x: hidden;
+  }
+
+  .app .seam.rail.rail--collapsed .rail__head {
+    justify-content: center;
+  }
+
+  .app .seam.rail.rail--collapsed .rail__toggle--expand {
+    display: flex;
+    margin-left: 0;
+  }
+
+  .app .seam.rail.rail--collapsed .seam__nav,
+  .app .seam.rail.rail--collapsed .seam__ops,
+  .app .seam.rail.rail--collapsed .seam__foot-actions {
+    grid-template-columns: 1fr;
+  }
+
+  .app .seam.rail.rail--collapsed .seam__tab {
+    justify-content: center;
+    padding: 6px 0;
+  }
+
+  .app .seam.rail.rail--collapsed .seam__nav .seam__tab::after {
+    left: 0;
+  }
+
+  .app .seam.rail.rail--collapsed .seam__tab::before {
+    right: 4px;
+    left: 4px;
+  }
+}
+
+@media (max-width: 900px) {
+  html.rail-is-collapsed,
+  html.rail-is-collapsed .stage {
+    --rail-w: 60px;
+  }
+
+  .app .seam.rail .rail__toggle {
+    display: none;
+  }
+
+  .app .seam.rail,
+  .app .seam.rail.rail--collapsed {
+    padding-right: 0;
+    padding-left: 0;
+  }
+
+  .app .seam.rail .seam__tab {
+    justify-content: center;
+    padding-right: 0;
+    padding-left: 0;
+  }
+
+  .app .seam.rail .rail__head {
+    justify-content: center;
+  }
+
+  .app .seam.rail .rail__head .seam__dot {
+    display: none;
+  }
+}
+
+@media (max-width: 760px) {
+  /* ≤760 导航是底部 tab，不再占侧向宽度。若沿用桌面折叠值，
+     `.wallhead` / `.panel` 的 `--seam-w` 会把标题推到屏幕中间。 */
+  :root:root,
+  html.rail-is-collapsed,
+  html.rail-is-collapsed .stage {
+    --rail-w: 0px;
+  }
+
+  .app .seam.rail {
+    gap: 6px;
+    padding: 8px 10px;
+    overflow-x: auto;
+    overflow-y: hidden;
+  }
+
+  .app .seam.rail .rail__head {
+    display: none;
+  }
+
+  .app .seam.rail .seam__nav {
+    flex-direction: row;
+    align-items: center;
+    gap: 4px;
+  }
+
+  .app .seam.rail .rail__group {
+    display: none;
+  }
+
+  .app .seam.rail .seam__tab {
+    min-height: 34px;
+    flex: none;
+    gap: 3px;
+    padding: 5px 8px;
+  }
+
+  .app .seam.rail .seam__label {
+    font-size: 10px;
+    letter-spacing: 0.08em;
+  }
+
+  .app .seam.rail .seam__tab.is-on::after {
+    top: auto;
+    right: 8px;
+    bottom: 0;
+    left: 8px;
+    width: auto;
+    height: 2px;
+  }
+
+  .app .seam.rail .seam__ops,
+  .app .seam.rail .seam__ops--detail {
+    display: flex;
+    width: auto;
+    gap: 4px;
+    padding-top: 0;
+    border-top: 0;
+  }
+
+  .app .seam.rail .seam__ops .seam__tab--icon,
+  .app .seam.rail .seam__ops--detail .seam__tab--icon {
+    width: 30px;
+    height: 30px;
+  }
+
+  .app .seam.rail .seam__ops .seam__count {
+    white-space: nowrap;
+  }
+
+  .app .seam.rail .seam__foot {
+    flex-direction: row;
+    align-items: center;
+    width: auto;
+    gap: 6px;
+    margin-top: 0;
+    margin-left: auto;
+  }
+
+  .app .seam.rail .seam__foot-actions {
+    display: flex;
+    width: auto;
+    gap: 4px;
+  }
+
+  .app .seam.rail .seam__foot-actions .seam__tab--icon {
+    width: 30px;
+    height: 30px;
+  }
+}
+
+@media (max-width: 560px) {
+  .app .seam.rail .seam__nav .seam__label {
+    display: none;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .app .seam.rail {
+    transition: none;
   }
 }

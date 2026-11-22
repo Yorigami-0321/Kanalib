@@ -22,6 +22,10 @@ export interface InspectorProps {
   item: WallItem;
   items: readonly WallItem[];
   paths: TierPaths;
+  /** API 模式：原图不能走静态 `data/o/`。 */
+  apiMode?: boolean;
+  /** API 模式且服务端开启签名回源时，原图入口指向 `/api/items/{id}/original`。 */
+  originalProxy?: boolean;
   onClose: () => void;
   onBack?: () => void;
   onTagClick: (tag: string) => void;
@@ -38,6 +42,8 @@ export function Inspector({
   item,
   items,
   paths,
+  apiMode = false,
+  originalProxy = false,
   onClose,
   onBack,
   onTagClick,
@@ -83,7 +89,7 @@ export function Inspector({
       : related.kind === 'group'
         ? '同分组'
         : '相似';
-  const original = originalUrl(paths, item);
+  const original = originalUrl(paths, item, apiMode, originalProxy);
   const totalTags = groups.reduce((sum, group) => sum + group.tags.length, 0);
 
   let remaining = COLLAPSED_TAGS;

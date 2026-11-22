@@ -94,9 +94,7 @@ impl Ledger {
                 ledger
             }
             Err(error) => {
-                eprintln!(
-                    "[kanalib-publish] 警告：账本解析失败（{error}），本次按全量发布"
-                );
+                eprintln!("[kanalib-publish] 警告：账本解析失败（{error}），本次按全量发布");
                 Self::default()
             }
         }

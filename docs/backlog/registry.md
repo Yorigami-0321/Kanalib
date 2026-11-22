@@ -73,6 +73,8 @@
 | F-086 | Pixiv 收藏订阅与可靠下载（订阅增量、队列续传、多页并发、动图 GIF、并行任务；只在 box） | 用户 2026-11-21 截图；Pixiv-Archive 调研 | 待确认（F-089 的子项；设计见 [ingest-service.md](ingest-service.md) §4.2/§5） | 中 |
 | F-087 | 网页横向导航改版（120px 竖排缝 → 208px 横排文字导航，可折叠/窄屏底部条） | 用户 2026-11-21 指示；Pixiv-Archive 侧栏参考 | 待确认（规格见 [web-rail-horizontal.md](web-rail-horizontal.md)） | 高 |
 | F-088 | 网页轻量后端与动态化（独立 `kanalib-web` + 独立 SQLite + HMAC 入库 + 原图签名回源 + `ApiSource`，静态保留兜底） | 用户 2026-11-21 指示；[cloud-photo-wall.md](cloud-photo-wall.md) §4.1 迁移纪律 | 待确认（设计见 [web-dynamic-backend.md](web-dynamic-backend.md)） | 高 |
-| F-089 | 入库过滤服务（box：来源→下载→打标→黑名单/规则→review→HMAC 推送；外部来源唯一入口） | 用户 2026-11-21 指示；Pixiv-Archive 调研（GPL-3.0，仅借鉴设计） | 待确认（设计见 [ingest-service.md](ingest-service.md)） | 高 |
+| F-089 | 入库过滤服务（box：来源→下载→打标→**配置化黑名单**→review→HMAC 推送；外部来源唯一入口） | 用户 2026-11-21 指示；2026-11-22 定调：纯黑名单制、用户+标签两类、R-18/AI 放行、只拦 R-18G、标签<5 补标；规则存独立 `rules.toml`（不建可写规则表，管理页走草稿→原子改写）；Pixiv-Archive 调研（GPL-3.0，仅借鉴设计） | 待确认（设计见 [ingest-service.md](ingest-service.md)，规则见 §7，配置见 §10，**代码待改动清单见 §17**） | 高 |
+| F-090 | 三端互联与 EasyTier（公网只读 HTTPS；写接口/同步/原图走 EasyTier 虚拟网；桌面 P2P 直连 box） | 用户 2026-11-22 指示；EasyTier 魔法 DNS/ACL/安全模式/共享节点/发现地址调研 | 待确认（设计见 [easytier-connectivity.md](easytier-connectivity.md)） | 高 |
+| F-091 | 私网组网备选方案对比（EasyTier/Headscale/Tailscale/NetBird/Nebula/ZeroTier/Cloudflare/frp/WireGuard） | 用户 2026-11-22 指示；open_websearch 官方文档调研 | 待确认（调研见 [private-networking-options.md](private-networking-options.md)；结论：EasyTier 主方案，Tailscale/Headscale 次选，最小回退 frp） | 中 |
 
 > 新增条目在对应类别段内递增；实现后移入 [implemented.md](implemented.md)，未完成项见 [pending/overview.md](pending/overview.md) 与对应职责文件。

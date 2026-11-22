@@ -14,7 +14,8 @@
   --ink-soft: color-mix(in srgb, #f7f4ee 55%, transparent);
   --hairline: rgba(247, 244, 238, 0.08);
   --accent: #8f8f92;
-  --seam-w: 120px;
+  --rail-w: 208px;
+  --seam-w: var(--rail-w);
   --seam-h: 0px;
   --panel: 300px;
   --gap: 8px;
@@ -1585,21 +1586,7 @@ a {
 
 @media (max-width: 900px) {
   :root {
-    --seam-w: 64px;
-  }
-
-  .seam__word,
-  .seam__label {
-    display: none;
-  }
-
-  .seam__tab {
-    gap: 0;
-    padding: 11px 0;
-  }
-
-  .seam__count {
-    display: none;
+    --rail-w: 60px;
   }
 
   .tags {
@@ -1675,7 +1662,7 @@ a {
     padding-bottom: var(--seam-h);
   }
 
-  .seam {
+  .seam.rail {
     top: auto;
     right: 0;
     bottom: 0;
@@ -1691,12 +1678,12 @@ a {
     border-top: 1px solid var(--hairline);
   }
 
-  .seam__dot,
-  .seam__word {
+  .seam.rail .seam__dot,
+  .seam.rail .seam__word {
     display: none;
   }
 
-  .seam__nav {
+  .seam.rail .seam__nav {
     flex-direction: row;
     width: auto;
     flex: none;
@@ -1704,21 +1691,21 @@ a {
     border-top: 0;
   }
 
-  .seam__tab {
+  .seam.rail .seam__tab {
     width: auto;
     flex: none;
     gap: 3px;
     padding: 5px 8px;
   }
 
-  .seam__label {
+  .seam.rail .seam__label {
     display: block;
     font-size: 10px;
     letter-spacing: 0.08em;
     writing-mode: horizontal-tb;
   }
 
-  .seam__tab.is-on::after {
+  .seam.rail .seam__tab.is-on::after {
     top: auto;
     right: 8px;
     bottom: 0;
@@ -1727,7 +1714,7 @@ a {
     height: 2px;
   }
 
-  .seam__ops {
+  .seam.rail .seam__ops {
     display: flex;
     width: auto;
     flex: none;
@@ -1735,15 +1722,15 @@ a {
     padding-top: 0;
   }
 
-  .seam__ops--detail {
+  .seam.rail .seam__ops--detail {
     gap: 4px;
   }
 
-  .seam__ops .seam__count {
+  .seam.rail .seam__ops .seam__count {
     grid-column: auto;
   }
 
-  .seam__foot {
+  .seam.rail .seam__foot {
     flex-direction: row;
     width: auto;
     flex: none;
@@ -1753,17 +1740,17 @@ a {
     padding-top: 0;
   }
 
-  .seam__count {
+  .seam.rail .seam__count {
     display: block;
     writing-mode: horizontal-tb;
   }
 
-  .seam__foot-actions {
+  .seam.rail .seam__foot-actions {
     gap: 4px;
   }
 
   /* ≤560px 一行放不下七个带字的 tab：收成纯图标，横向可滚作为兜底。 */
-  .seam__nav .seam__label {
+  .seam.rail .seam__nav .seam__label {
     display: none;
   }
 }

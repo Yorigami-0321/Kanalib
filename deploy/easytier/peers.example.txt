@@ -1,0 +1,5 @@
+# Replace this file on the public relay/web host with the live EasyTier discovery peers.
+# Keep one URI per line. Do not commit hostnames, addresses, credentials, or network secrets.
+# Example shape:
+# tcp://relay.example.com:11010
+# wss://relay.example.com:11012

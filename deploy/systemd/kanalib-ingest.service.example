@@ -1,0 +1,25 @@
+[Unit]
+Description=Kanalib ingest service
+After=network-online.target easytier.service
+Wants=network-online.target
+Wants=easytier.service
+
+[Service]
+Type=simple
+EnvironmentFile=-/etc/kanalib/ingest.env
+StateDirectory=kanalib-ingest
+UMask=0077
+ExecStart=/usr/local/bin/kanalib-ingest \
+  --db /var/lib/kanalib-ingest/ingest.db \
+  --media-dir /var/lib/kanalib-ingest/media \
+  --source mock
+Restart=always
+RestartSec=5
+User=kanalib
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+
+[Install]
+WantedBy=multi-user.target

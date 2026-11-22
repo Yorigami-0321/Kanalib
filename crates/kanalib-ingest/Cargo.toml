@@ -1,0 +1,42 @@
+[package]
+name = "kanalib-ingest"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[[bin]]
+name = "kanalib-ingest"
+path = "src/main.rs"
+
+[[test]]
+name = "ingest_flow"
+path = "tests/ingest_flow.rs"
+
+[[test]]
+name = "push_flow"
+path = "tests/push_flow.rs"
+
+[dependencies]
+anyhow = { workspace = true }
+clap = { workspace = true }
+futures = { workspace = true }
+hmac = { workspace = true }
+image = { workspace = true, features = ["jpeg", "png", "gif"] }
+kanalib-wall-model = { workspace = true }
+reqwest = { workspace = true }
+rusqlite = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sha1 = { workspace = true }
+sha2 = { workspace = true }
+tokio = { workspace = true, features = ["sync", "time"] }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"
+
+[lints]
+workspace = true

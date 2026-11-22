@@ -16,9 +16,17 @@ pub(crate) fn friendly_media_error(message: &str) -> String {
             || text.contains("decoder")
             || text.contains("not supported"))
     {
-        if crate::localization::is_english() { "PSD requires FFmpeg; without it only the hash and dimensions are available, so no thumbnail can be generated".to_string() } else { "PSD 需要 FFmpeg 解码；未检测到 FFmpeg 时只有哈希与尺寸，无法生成缩略图".to_string() }
+        if crate::localization::is_english() {
+            "PSD requires FFmpeg; without it only the hash and dimensions are available, so no thumbnail can be generated".to_string()
+        } else {
+            "PSD 需要 FFmpeg 解码；未检测到 FFmpeg 时只有哈希与尺寸，无法生成缩略图".to_string()
+        }
     } else if text.contains("heic") || text.contains("heif") || text.contains("libheif") {
-        if crate::localization::is_english() { "HEIC/HEIF is not supported in this version".to_string() } else { "HEIC/HEIF 未接入，当前版本不支持该格式".to_string() }
+        if crate::localization::is_english() {
+            "HEIC/HEIF is not supported in this version".to_string()
+        } else {
+            "HEIC/HEIF 未接入，当前版本不支持该格式".to_string()
+        }
     } else if text.contains("avif")
         && (text.contains("unsupported")
             || text.contains("unknown format")
@@ -26,18 +34,42 @@ pub(crate) fn friendly_media_error(message: &str) -> String {
             || text.contains("decoder")
             || text.contains("cannot identify"))
     {
-        if crate::localization::is_english() { "AVIF requires FFmpeg; without it no thumbnail can be generated".to_string() } else { "AVIF 需要 FFmpeg 解码；未检测到 FFmpeg 时无法生成缩略图".to_string() }
+        if crate::localization::is_english() {
+            "AVIF requires FFmpeg; without it no thumbnail can be generated".to_string()
+        } else {
+            "AVIF 需要 FFmpeg 解码；未检测到 FFmpeg 时无法生成缩略图".to_string()
+        }
     } else if text.contains("ffmpeg") || text.contains("dav1d") {
-        if crate::localization::is_english() { "FFmpeg decoding failed; thumbnails and tagging may be unavailable".to_string() } else { "FFmpeg 解码失败，缩略图与打标可能不可用".to_string() }
+        if crate::localization::is_english() {
+            "FFmpeg decoding failed; thumbnails and tagging may be unavailable".to_string()
+        } else {
+            "FFmpeg 解码失败，缩略图与打标可能不可用".to_string()
+        }
     } else if text.contains("truncated") || text.contains("unexpected end of file") {
-        if crate::localization::is_english() { "The file is incomplete (image data is truncated)".to_string() } else { "文件不完整（图片数据被截断）".to_string() }
+        if crate::localization::is_english() {
+            "The file is incomplete (image data is truncated)".to_string()
+        } else {
+            "文件不完整（图片数据被截断）".to_string()
+        }
     } else if text.contains("cannot identify image file") || text.contains("unidentifiedimageerror")
     {
-        if crate::localization::is_english() { "Unrecognized image; the file may be damaged".to_string() } else { "无法识别的图片，文件可能已损坏".to_string() }
+        if crate::localization::is_english() {
+            "Unrecognized image; the file may be damaged".to_string()
+        } else {
+            "无法识别的图片，文件可能已损坏".to_string()
+        }
     } else if text.contains("decompression bomb") {
-        if crate::localization::is_english() { "The image exceeds the safe size limit".to_string() } else { "图片尺寸超出安全上限".to_string() }
+        if crate::localization::is_english() {
+            "The image exceeds the safe size limit".to_string()
+        } else {
+            "图片尺寸超出安全上限".to_string()
+        }
     } else if text.contains("unsupported") || text.contains("unknown format") {
-        if crate::localization::is_english() { "Unsupported image codec".to_string() } else { "不支持的图片编码".to_string() }
+        if crate::localization::is_english() {
+            "Unsupported image codec".to_string()
+        } else {
+            "不支持的图片编码".to_string()
+        }
     } else {
         message.to_string()
     }
@@ -80,7 +112,13 @@ pub(crate) fn friendly_format_label(path: &Path) -> String {
         "dng" | "cr2" | "cr3" | "nef" | "arw" | "raf" | "orf" | "rw2" | "pef" | "srw" | "x3f" => {
             "RAW".to_string()
         }
-        "" => if crate::localization::is_english() { "Unknown format".to_string() } else { "未知格式".to_string() },
+        "" => {
+            if crate::localization::is_english() {
+                "Unknown format".to_string()
+            } else {
+                "未知格式".to_string()
+            }
+        }
         other => other.to_uppercase(),
     }
 }
@@ -89,10 +127,18 @@ pub(crate) fn friendly_format_label(path: &Path) -> String {
 /// HEIC/RAW 明确未接入，不写成“内置解码”。测试固定了这一签名与中文断言。
 pub(crate) fn format_capability_note(path: &Path) -> String {
     if crate::format::unsupported_format_note(path).is_some() {
-        return if crate::localization::is_english() { "Not supported (this version cannot scan/decode it)".to_string() } else { "未接入（当前版本不支持扫描/解码）".to_string() };
+        return if crate::localization::is_english() {
+            "Not supported (this version cannot scan/decode it)".to_string()
+        } else {
+            "未接入（当前版本不支持扫描/解码）".to_string()
+        };
     }
     if kanalib_core::model::is_video(path) {
-        return if crate::localization::is_english() { "First-frame thumbnail · system player".to_string() } else { "首帧缩略图 · 系统播放器".to_string() };
+        return if crate::localization::is_english() {
+            "First-frame thumbnail · system player".to_string()
+        } else {
+            "首帧缩略图 · 系统播放器".to_string()
+        };
     }
     let ext = path
         .extension()
@@ -101,18 +147,38 @@ pub(crate) fn format_capability_note(path: &Path) -> String {
     if is_ffmpeg_only(path) {
         let available = kanalib_core::ffmpeg::available();
         let mut note = if available {
-            if crate::localization::is_english() { "Requires FFmpeg".to_string() } else { "需要 FFmpeg 解码".to_string() }
+            if crate::localization::is_english() {
+                "Requires FFmpeg".to_string()
+            } else {
+                "需要 FFmpeg 解码".to_string()
+            }
         } else {
-            if crate::localization::is_english() { "Requires FFmpeg · FFmpeg not detected".to_string() } else { "需要 FFmpeg 解码 · 当前未检测到 FFmpeg".to_string() }
+            if crate::localization::is_english() {
+                "Requires FFmpeg · FFmpeg not detected".to_string()
+            } else {
+                "需要 FFmpeg 解码 · 当前未检测到 FFmpeg".to_string()
+            }
         };
         if ext == "psd" {
-            note.push_str(if crate::localization::is_english() { " · composite only" } else { " · 仅合成图" });
+            note.push_str(if crate::localization::is_english() {
+                " · composite only"
+            } else {
+                " · 仅合成图"
+            });
         }
         note
     } else if crate::format::is_animation_container(path) {
-        if crate::localization::is_english() { "Built-in decoder · first frame only".to_string() } else { "内置解码 · 动画仅首帧".to_string() }
+        if crate::localization::is_english() {
+            "Built-in decoder · first frame only".to_string()
+        } else {
+            "内置解码 · 动画仅首帧".to_string()
+        }
     } else {
-        if crate::localization::is_english() { "Built-in decoder".to_string() } else { "内置解码".to_string() }
+        if crate::localization::is_english() {
+            "Built-in decoder".to_string()
+        } else {
+            "内置解码".to_string()
+        }
     }
 }
 
@@ -303,8 +369,12 @@ pub(crate) fn manual_tag_editor(
             }
         }
         if let Some(error) = failure {
-            let message = t_args(cx, "inspector.tags.update_failed", &[("error", error.as_str())])
-                .to_string();
+            let message = t_args(
+                cx,
+                "inspector.tags.update_failed",
+                &[("error", error.as_str())],
+            )
+            .to_string();
             manual_state.set_error(message.clone());
             push_toast(&manual_toaster, cx, message, Severity::Danger);
         } else if changed > 0 {
@@ -353,20 +423,13 @@ pub(crate) fn album_editor(
                             .icon(IconName::Folder)
                             .on_click(move |_, cx| {
                                 let _ = add_this.update(cx, |app, cx| {
-                                    app.add_paths_to_album(
-                                        album.id,
-                                        vec![add_path.clone()],
-                                        cx,
-                                    );
+                                    app.add_paths_to_album(album.id, vec![add_path.clone()], cx);
                                 });
                             }),
                     );
                 }
                 OverflowMenu::new(
-                    SharedString::from(format!(
-                        "inspector-album-more-{}",
-                        album_path.display()
-                    )),
+                    SharedString::from(format!("inspector-album-more-{}", album_path.display())),
                     menu,
                 )
                 .tooltip(t(cx, "inspector.album.add"))
@@ -827,12 +890,9 @@ impl KanalibApp {
                 .on_click(move |_, _, cx| {
                     if let Err(error) = open_asset_with_system(&path_for_open) {
                         // F-073 6.2：toast 之外还要有常驻的就地说明与重试。
-                        let message = t_args(
-                            cx,
-                            "inspector.open.failed",
-                            &[("error", error.as_str())],
-                        )
-                        .to_string();
+                        let message =
+                            t_args(cx, "inspector.open.failed", &[("error", error.as_str())])
+                                .to_string();
                         let retry_path = path_for_open.clone();
                         let _ = this_open_file.update(cx, |app, cx| {
                             app.set_ui_error_with_retry(
@@ -1327,7 +1387,11 @@ mod tests {
     fn format_capability_note_marks_ffmpeg_only_formats() {
         assert_eq!(
             super::format_capability_note(Path::new("a.png")),
-            if crate::localization::is_english() { "Built-in decoder".to_string() } else { "内置解码".to_string() }
+            if crate::localization::is_english() {
+                "Built-in decoder".to_string()
+            } else {
+                "内置解码".to_string()
+            }
         );
         assert!(super::format_capability_note(Path::new("a.avif")).contains("需要 FFmpeg 解码"));
         let psd = super::format_capability_note(Path::new("a.PSD"));

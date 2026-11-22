@@ -64,6 +64,20 @@ export interface TagFacet {
   name: string;
   category: string;
   count: number;
+  /** API 模式下的代表图 id；静态索引可能没有。 */
+  cover?: string;
+}
+
+export interface FacetGroup {
+  name: string;
+  count: number;
+  cover?: string;
+}
+
+export interface IndexStats {
+  favorite: number;
+  /** 分级 → 张数；缺键按 0 处理。 */
+  ratings: Record<string, number>;
 }
 
 export interface WallIndex {
@@ -75,7 +89,10 @@ export interface WallIndex {
   facets?: {
     tags?: TagFacet[];
     groups?: string[];
+    /** API 模式附带分组计数与封面；静态索引没有。 */
+    group_details?: FacetGroup[];
   };
+  stats?: IndexStats;
   paths?: Partial<TierPaths>;
 }
 
@@ -83,6 +100,63 @@ export interface ShardFile {
   schema?: number;
   index?: number;
   items: WallItem[];
+}
+
+/** 服务端声明的能力；静态源也可以给出同样形状的默认值。 */
+export interface SourceCapabilities {
+  source: string;
+  server_search: boolean;
+  server_filter: boolean;
+  can_write: boolean;
+  has_works: boolean;
+  has_authors: boolean;
+  has_collections: boolean;
+  media_tiers: string[];
+  original_proxy: boolean;
+  generated_at?: string | null;
+}
+
+/** `/api/items` 支持的排序键；与后端 `SortKind` 对齐。 */
+export type WallSort =
+  | 'updated'
+  | 'posted'
+  | 'name'
+  | 'star'
+  | 'favorite'
+  | 'rating'
+  | 'random';
+
+/** 服务端筛选/排序参数；静态源忽略它（仍用内存筛选）。 */
+export interface WallQuery {
+  q?: string;
+  tag?: string;
+  group?: string;
+  rating?: string;
+  fav?: boolean;
+  sort?: WallSort;
+  order?: 'asc' | 'desc';
+  seed?: number;
+}
+
+/**
+ * search-index.json 的一条记录：字段全部折叠成小写、`_` 转空格，
+ * 过滤时不再重复规整。`hay` 是名称/标签/分组/分级的合并草堆，普通词只扫它。
+ */
+export interface SearchRecord {
+  id: string;
+  name: string;
+  tags: string[];
+  group: string;
+  rating: string;
+  hay: string;
+}
+
+export interface SearchIndexData {
+  version: number;
+  count: number;
+  tagTable: string[];
+  groupTable: string[];
+  records: Map<string, SearchRecord>;
 }
 
 /**
@@ -93,6 +167,8 @@ export interface ShardFile {
 export interface WallSource {
   /** 数据根（相对站点根或绝对 URL），用于提示与错误信息。 */
   readonly dataRoot: string;
+  /** 服务端能力；`init()` 后可用。静态源固定 `server_search: false`。 */
+  readonly capabilities?: SourceCapabilities;
   /** 拉 `index.json`，重置已加载集合与分片游标。 */
   init(): Promise<WallIndex>;
   /** 顺序追加下一片；没有更多时返回空数组。并发调用合并为同一个请求。 */
@@ -108,4 +184,10 @@ export interface WallSource {
   hasMore(): boolean;
   /** `index.paths` 合并默认值后的档位前缀。 */
   paths(): TierPaths;
+  /** 单条补齐；API 源直接取 `/api/items/{id}`，静态源不实现。 */
+  fetchItem?(id: string): Promise<WallItem | undefined>;
+  /** 设置服务端查询并清空已加载集合；静态源不实现。 */
+  setQuery?(query: WallQuery): void;
+  /** 按需加载静态搜索索引；API 源不实现（服务端已搜索）。 */
+  loadSearchIndex?(): Promise<SearchIndexData | null>;
 }

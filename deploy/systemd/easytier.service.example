@@ -1,0 +1,26 @@
+[Unit]
+Description=EasyTier shared node
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# 网络密钥只放在受保护的 env 文件里，不写进 unit：
+#   /etc/kanalib/easytier.env  ->  ET_NETWORK_SECRET=...
+EnvironmentFile=/etc/kanalib/easytier.env
+ExecStart=/usr/local/bin/easytier-core \
+  --hostname <HOSTNAME> \
+  --network-name kanalib \
+  --private-mode true \
+  --secure-mode true \
+  --listeners tcp://0.0.0.0:11010 wss://0.0.0.0:11012 \
+  --rpc-portal 127.0.0.1:15888
+Restart=always
+RestartSec=5
+User=kanalib
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+
+[Install]
+WantedBy=multi-user.target

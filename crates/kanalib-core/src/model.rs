@@ -2271,7 +2271,10 @@ mod tests {
             Vec::new(),
         );
         shared.upsert(asset("outside.png", false, "g", "原创", Vec::new()));
-        assert!(shared.scan_imports.is_empty(), "非扫描期间的更新不进入导入流");
+        assert!(
+            shared.scan_imports.is_empty(),
+            "非扫描期间的更新不进入导入流"
+        );
 
         shared.scanning = true;
         shared.upsert(asset("first.png", false, "g", "原创", Vec::new()));

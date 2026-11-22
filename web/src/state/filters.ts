@@ -1,5 +1,5 @@
 import { RATING_LABELS } from '../lib/format';
-import type { SearchRecord } from '../source/StaticSource';
+import type { SearchRecord } from '../source/types';
 import type { WallItem } from '../source/types';
 
 /**

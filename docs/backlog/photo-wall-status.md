@@ -2,7 +2,7 @@
 
 > 分支 `feature/cloud-photo-wall` · 计划 [cloud-photo-wall.md](cloud-photo-wall.md) · 契约 [photo-wall-contract.md](photo-wall-contract.md) · 视觉规格 [photo-wall-v3.md](photo-wall-v3.md)
 >
-> **口径：代码是事实来源。** 本文只写当前可验证的功能、基线、已知问题与下一批任务；历史过程与已关闭议题在 [archive/2026-11/](../archive/2026-11/)（非权威）。产品上线不属于当前目标，先把手感和完整度做扎实。
+> **口径：代码是事实来源。** 本文只写当前可验证的功能、基线、已知问题与下一批任务；仍被引用的历史证据在 [archive/2026-11/](../archive/2026-11/)（非权威），其余过时稿件已于 2026-11-22 删除。产品上线不属于当前目标，先把手感和完整度做扎实。
 
 ## 1. 功能面（2026-11-11 代码核对）
 
@@ -212,5 +212,5 @@ cargo test -p kanalib-publish         # 25 单元 + 23 集成契约测试
 | 2026-11-11 功能与旅程审计、失败路径、第二批 A 明细 | [archive/2026-11/photo-wall-audit-2026-11-11.md](../archive/2026-11/photo-wall-audit-2026-11-11.md) |
 | 2026-11-10 21:00 前的完整开发日志（v3/v4/v5 逐轮实测） | [archive/2026-11/photo-wall-status-2026-11-10.md](../archive/2026-11/photo-wall-status-2026-11-10.md) |
 | 两轮实机反馈根因与修复明细 | [archive/2026-11/photo-wall-feedback-2026-11-10.md](../archive/2026-11/photo-wall-feedback-2026-11-10.md) |
-| v4 聚焦与手势调研推演 | [archive/2026-11/photo-wall-focus-mode.md](../archive/2026-11/photo-wall-focus-mode.md) |
-| v2 视觉设计（已被 v3 取代） | [archive/2026-11/photo-wall-design.md](../archive/2026-11/photo-wall-design.md) |
+| v4 聚焦与手势 | 已落地；调研稿 2026-11-22 删除 |
+| v2 视觉设计 | 已被 v3 取代；稿件 2026-11-22 删除 |

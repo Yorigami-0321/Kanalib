@@ -15,6 +15,24 @@ const RAW = (import.meta.env.VITE_WALL_DATA as string | undefined) ?? '';
 
 export const DATA_ROOT = normalizeRoot(RAW.trim().length > 0 ? RAW : './data/');
 
+/**
+ * 动态后端根：默认 `/api/`，可由 `VITE_WALL_API` 覆盖（反代子路径或完整 URL）。
+ */
+const RAW_API = (import.meta.env.VITE_WALL_API as string | undefined) ?? '';
+
+export const API_ROOT = normalizeRoot(RAW_API.trim().length > 0 ? RAW_API : '/api/');
+
+/** 构建期数据源选择：`static`（默认）或 `api`。 */
+export type SourceKind = 'static' | 'api';
+
+export const SOURCE_KIND: SourceKind =
+  ((import.meta.env.VITE_WALL_SOURCE as string | undefined) ?? '').trim().toLowerCase() === 'api'
+    ? 'api'
+    : 'static';
+
+/** 服务端分页大小；与 `kanalib-web` 的默认 limit 对齐。 */
+export const API_PAGE_SIZE = 60;
+
 /** 把数据根下的相对路径解析成可 fetch 的 URL（相对 `document.baseURI`，hash 路由不干扰）。 */
 export function dataUrl(rel: string): string {
   const base = typeof document !== 'undefined' ? document.baseURI : 'http://localhost/';
@@ -22,6 +40,15 @@ export function dataUrl(rel: string): string {
     return new URL(rel, new URL(DATA_ROOT, base)).href;
   } catch {
     return `${DATA_ROOT}${rel}`;
+  }
+}
+
+export function apiUrl(rel: string): string {
+  const base = typeof document !== 'undefined' ? document.baseURI : 'http://localhost/';
+  try {
+    return new URL(rel, new URL(API_ROOT, base)).href;
+  } catch {
+    return `${API_ROOT}${rel}`;
   }
 }
 

@@ -158,7 +158,11 @@ impl fmt::Display for Stats {
             )?;
         }
         if self.trimmed > 0 {
-            writeln!(f, "其中 {} 条裁掉了源图纯白底带（全档重编码）", self.trimmed)?;
+            writeln!(
+                f,
+                "其中 {} 条裁掉了源图纯白底带（全档重编码）",
+                self.trimmed
+            )?;
         }
         writeln!(
             f,
@@ -904,16 +908,13 @@ impl<'a> Publisher<'a> {
 
     /// 白底带裁剪路径：源解码一次、裁掉底带，从裁剪图写 t256/t512/t1024/t2048。
     /// Ok(None) = 源不可解码或裁完为空，调用方回退常规路径。
-    fn write_trimmed_tiers(
-        &mut self,
-        id: &str,
-        asset: &Asset,
-        band: u32,
-    ) -> Result<Option<u16>> {
+    fn write_trimmed_tiers(&mut self, id: &str, asset: &Asset, band: u32) -> Result<Option<u16>> {
         let decoded = match color::decode(&asset.path) {
             Ok(value) => value,
             Err(error) => {
-                eprintln!("[kanalib-publish] 警告：白底带裁剪解码失败，回退常规路径 {id}（{error}）");
+                eprintln!(
+                    "[kanalib-publish] 警告：白底带裁剪解码失败，回退常规路径 {id}（{error}）"
+                );
                 return Ok(None);
             }
         };
@@ -929,7 +930,12 @@ impl<'a> Publisher<'a> {
         let cropped = source.crop_imm(0, 0, source.width(), height);
         let long_edge = cropped.width().max(cropped.height());
         let mut available = 0u16;
-        for (tier, edge) in [("t256", 256u32), ("t512", 512), ("t1024", 1024), ("t2048", 2048)] {
+        for (tier, edge) in [
+            ("t256", 256u32),
+            ("t512", 512),
+            ("t1024", 1024),
+            ("t2048", 2048),
+        ] {
             let sharp = edge >= 1024;
             if sharp && long_edge <= edge {
                 self.stats.tiers.not_needed += 1;
@@ -1327,17 +1333,26 @@ mod tests {
 
     #[test]
     fn detects_trailing_white_band() {
-        assert_eq!(white_bottom_band(&image_with_band(40, 200, 40), 0.04, 8), Some(40));
+        assert_eq!(
+            white_bottom_band(&image_with_band(40, 200, 40), 0.04, 8),
+            Some(40)
+        );
     }
 
     #[test]
     fn ignores_clean_image() {
-        assert_eq!(white_bottom_band(&image_with_band(40, 200, 0), 0.04, 8), None);
+        assert_eq!(
+            white_bottom_band(&image_with_band(40, 200, 0), 0.04, 8),
+            None
+        );
     }
 
     #[test]
     fn ignores_band_below_threshold() {
-        assert_eq!(white_bottom_band(&image_with_band(40, 200, 4), 0.04, 8), None);
+        assert_eq!(
+            white_bottom_band(&image_with_band(40, 200, 4), 0.04, 8),
+            None
+        );
     }
 
     #[test]
@@ -1385,13 +1400,22 @@ mod tests {
 
     #[test]
     fn ignores_all_white_image() {
-        assert_eq!(white_bottom_band(&image_with_band(40, 200, 200), 0.04, 8), None);
+        assert_eq!(
+            white_bottom_band(&image_with_band(40, 200, 200), 0.04, 8),
+            None
+        );
     }
 
     #[test]
     fn candidate_threshold_is_looser() {
-        assert_eq!(white_bottom_band(&image_with_band(40, 200, 7), 0.03, 3), Some(7));
-        assert_eq!(white_bottom_band(&image_with_band(40, 200, 7), 0.04, 8), None);
+        assert_eq!(
+            white_bottom_band(&image_with_band(40, 200, 7), 0.03, 3),
+            Some(7)
+        );
+        assert_eq!(
+            white_bottom_band(&image_with_band(40, 200, 7), 0.04, 8),
+            None
+        );
     }
 
     #[test]

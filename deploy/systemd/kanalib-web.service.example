@@ -1,0 +1,28 @@
+[Unit]
+Description=Kanalib web backend
+After=network-online.target easytier.service
+Wants=network-online.target
+Wants=easytier.service
+
+[Service]
+Type=simple
+EnvironmentFile=-/etc/kanalib/web.env
+StateDirectory=kanalib-web
+UMask=0077
+ExecStart=/usr/local/bin/kanalib-web \
+  --db /var/lib/kanalib-web/kanalib-web.db \
+  --media /var/lib/kanalib-web/media \
+  --web /var/lib/kanalib-web/dist \
+  --bind-public 127.0.0.1:8787 \
+  --bind-private <WEB_PRIVATE_LISTEN_ADDRESS> \
+  --upload-limit-mb 32
+Restart=always
+RestartSec=5
+User=kanalib
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,620 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Kanalib · 桌面客户端设计参考板</title>
+<style>
+  :root{
+    --bg:#0e1013; --bg2:#12151a; --surface:#181c22; --surface2:#1e232b;
+    --overlay:#242a33; --line:#2c333d; --line2:#3a424e;
+    --ink:#eceae4; --ink2:#c6c9cd; --muted:#8f97a1; --faint:#6b727c;
+    --amber:#ffb454; --amber2:#ff8a3d; --red:#ff5c47; --cyan:#4cc9f0;
+    --green:#7ee081; --magenta:#f065c0; --violet:#9d7bff; --teal:#39d0c3;
+    --warm:#2a2521; --cool:#20262e;
+    --card-min:340px;
+    --r:14px; --r-sm:9px;
+    --shadow:0 10px 30px rgba(0,0,0,.45), 0 2px 8px rgba(0,0,0,.35);
+    --font:"Inter","Segoe UI","PingFang SC","Microsoft YaHei",system-ui,sans-serif;
+    --mono:ui-monospace,"Cascadia Code","JetBrains Mono","Consolas",monospace;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  html{scroll-behavior:smooth}
+  body{
+    background:var(--bg); color:var(--ink); font-family:var(--font);
+    font-size:15px; line-height:1.6; overflow-x:hidden;
+    -webkit-font-smoothing:antialiased;
+  }
+  ::selection{background:rgba(255,180,84,.32)}
+  /* ---- custom scrollbars ---- */
+  *{scrollbar-width:thin;scrollbar-color:var(--line2) transparent}
+  *::-webkit-scrollbar{width:10px;height:10px}
+  *::-webkit-scrollbar-track{background:var(--bg2)}
+  *::-webkit-scrollbar-thumb{background:var(--line2);border-radius:8px;border:2px solid var(--bg2)}
+  *::-webkit-scrollbar-thumb:hover{background:var(--amber2)}
+  a{color:var(--cyan);text-decoration:none}
+  a:hover{text-decoration:underline}
+  button{font-family:inherit;cursor:pointer}
+  img{display:block;max-width:100%}
+
+  /* ---- ambient background ---- */
+  .ambient{position:fixed;inset:0;z-index:-2;overflow:hidden;pointer-events:none}
+  .ambient .glow{position:absolute;border-radius:50%;filter:blur(90px);opacity:.5;mix-blend-mode:screen}
+  .g1{width:52vw;height:52vw;left:-14vw;top:-18vw;background:radial-gradient(circle at 40% 40%,rgba(255,138,61,.5),rgba(255,92,71,.16) 55%,transparent 72%);animation:drift1 26s ease-in-out infinite alternate}
+  .g2{width:46vw;height:46vw;right:-12vw;top:6vh;background:radial-gradient(circle at 60% 40%,rgba(76,201,240,.4),rgba(157,123,255,.14) 55%,transparent 72%);animation:drift2 32s ease-in-out infinite alternate}
+  .g3{width:40vw;height:40vw;left:24vw;bottom:-22vw;background:radial-gradient(circle at 50% 50%,rgba(240,101,192,.28),rgba(57,208,195,.12) 55%,transparent 72%);animation:drift1 38s ease-in-out infinite alternate-reverse}
+  @keyframes drift1{from{transform:translate3d(0,0,0) scale(1)}to{transform:translate3d(6vw,4vh,0) scale(1.12)}}
+  @keyframes drift2{from{transform:translate3d(0,0,0) scale(1.05)}to{transform:translate3d(-5vw,6vh,0) scale(.94)}}
+  .grain{position:fixed;inset:0;z-index:-1;pointer-events:none;opacity:.05;
+    background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='160'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2'/%3E%3C/filter%3E%3Crect width='160' height='160' filter='url(%23n)'/%3E%3C/svg%3E")}
+
+  /* ---- top control bar ---- */
+  .topbar{
+    position:fixed;top:0;left:0;right:0;z-index:60;
+    background:rgba(14,16,19,.82);backdrop-filter:blur(16px);
+    border-bottom:1px solid var(--line);
+  }
+  .topbar-inner{max-width:1560px;margin:0 auto;padding:10px 22px;display:flex;align-items:center;gap:14px;flex-wrap:wrap}
+  .brand{display:flex;align-items:center;gap:10px;font-weight:800;letter-spacing:-.02em;font-size:16px;white-space:nowrap}
+  .brand .dot{width:26px;height:26px;border-radius:8px;background:conic-gradient(from 210deg,var(--amber),var(--red),var(--magenta),var(--violet),var(--cyan),var(--amber));box-shadow:0 0 14px rgba(255,138,61,.5)}
+  .brand small{display:block;font-weight:500;color:var(--muted);font-size:10.5px;letter-spacing:.14em;text-transform:uppercase;font-family:var(--mono)}
+  .chips{display:flex;gap:6px;flex-wrap:wrap}
+  .chip{
+    border:1px solid var(--line2);background:var(--surface);color:var(--ink2);
+    padding:5px 12px;border-radius:999px;font-size:12.5px;font-weight:600;
+    transition:all .18s ease;
+  }
+  .chip:hover{border-color:var(--amber2);color:var(--ink)}
+  .chip.on{background:linear-gradient(120deg,var(--amber),var(--amber2));color:#20140a;border-color:transparent;box-shadow:0 2px 12px rgba(255,138,61,.35)}
+  .deck{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-left:auto}
+  .search{position:relative}
+  .search input{
+    background:var(--surface);border:1px solid var(--line2);color:var(--ink);
+    border-radius:999px;padding:6px 12px 6px 30px;font-size:12.5px;width:170px;outline:none;
+    transition:border-color .18s, width .2s;
+  }
+  .search input:focus{border-color:var(--cyan);width:210px}
+  .search svg{position:absolute;left:10px;top:50%;transform:translateY(-50%);width:13px;height:13px;stroke:var(--muted)}
+  .tgl{display:flex;align-items:center;gap:6px;font-size:12px;color:var(--ink2);cursor:pointer;user-select:none}
+  .tgl input{display:none}
+  .tgl .box{width:30px;height:17px;border-radius:999px;background:var(--overlay);border:1px solid var(--line2);position:relative;transition:background .18s}
+  .tgl .box::after{content:"";position:absolute;left:2px;top:2px;width:11px;height:11px;border-radius:50%;background:var(--muted);transition:all .18s}
+  .tgl input:checked + .box{background:rgba(126,224,129,.25);border-color:var(--green)}
+  .tgl input:checked + .box::after{left:15px;background:var(--green)}
+  .ctl{display:flex;align-items:center;gap:6px;font-size:11.5px;color:var(--muted)}
+  .ctl select{
+    background:var(--surface);border:1px solid var(--line2);color:var(--ink2);
+    border-radius:8px;padding:4px 6px;font-size:12px;outline:none;
+  }
+  .ctl input[type=range]{width:86px;accent-color:var(--amber)}
+  .reset{
+    background:var(--surface);border:1px solid var(--line2);color:var(--ink2);
+    border-radius:8px;padding:5px 10px;font-size:12px;font-weight:600;transition:all .18s;
+  }
+  .reset:hover{border-color:var(--red);color:var(--red)}
+  .count{font-family:var(--mono);font-size:11.5px;color:var(--amber);white-space:nowrap}
+
+  /* ---- hero ---- */
+  .hero{max-width:1560px;margin:0 auto;padding:118px 22px 34px;position:relative}
+  .eyebrow{font-family:var(--mono);font-size:11.5px;letter-spacing:.22em;color:var(--amber);text-transform:uppercase;display:flex;align-items:center;gap:10px}
+  .eyebrow::before{content:"";width:34px;height:1px;background:linear-gradient(90deg,var(--amber),transparent)}
+  h1{font-size:clamp(30px,4.4vw,54px);line-height:1.12;letter-spacing:-.03em;font-weight:800;margin:14px 0 14px;max-width:20ch}
+  h1 .hl{background:linear-gradient(100deg,var(--amber) 10%,var(--red) 45%,var(--magenta) 80%);-webkit-background-clip:text;background-clip:text;color:transparent}
+  .lead{color:var(--ink2);max-width:70ch;font-size:15.5px}
+  .lead b{color:var(--ink)}
+  .stats{display:flex;gap:10px;flex-wrap:wrap;margin-top:22px}
+  .stat{
+    background:linear-gradient(160deg,var(--surface),var(--cool));border:1px solid var(--line);
+    border-radius:var(--r-sm);padding:10px 16px;min-width:104px;
+  }
+  .stat .n{font-size:24px;font-weight:800;letter-spacing:-.02em;font-family:var(--mono)}
+  .stat:nth-child(1) .n{color:var(--amber)} .stat:nth-child(2) .n{color:var(--cyan)}
+  .stat:nth-child(3) .n{color:var(--magenta)} .stat:nth-child(4) .n{color:var(--green)}
+  .stat .l{font-size:11px;color:var(--muted);letter-spacing:.06em}
+  .rise{opacity:0;transform:translateY(18px);animation:rise .7s cubic-bezier(.2,.7,.2,1) forwards}
+  @keyframes rise{to{opacity:1;transform:none}}
+
+  /* ---- board ---- */
+  .board-wrap{max-width:1560px;margin:0 auto;padding:8px 22px 30px}
+  .board{display:grid;grid-template-columns:repeat(auto-fill,minmax(min(var(--card-min),100%),1fr));gap:18px}
+  .board.list{grid-template-columns:1fr}
+  .card{
+    background:linear-gradient(170deg,var(--surface),var(--bg2));
+    border:1px solid var(--line);border-radius:var(--r);overflow:hidden;
+    box-shadow:var(--shadow);display:flex;flex-direction:column;
+    opacity:0;transform:translateY(22px);transition:opacity .6s ease,transform .6s cubic-bezier(.2,.7,.2,1),border-color .2s;
+  }
+  .card.in{opacity:1;transform:none}
+  .card:hover{border-color:var(--line2)}
+  .board.list .card{flex-direction:row}
+  .board.list .shot{width:300px;flex:0 0 300px;border-right:1px solid var(--line);border-bottom:none}
+  .board.list .shot img.main{height:190px}
+  .shot{position:relative;border-bottom:1px solid var(--line);background:#0a0c0e}
+  .shot img.main{width:100%;height:210px;object-fit:cover;object-position:top center;cursor:zoom-in;transition:transform .5s ease,filter .3s}
+  .shot:hover img.main{transform:scale(1.03);filter:brightness(1.06)}
+  .shot .zoomb{
+    position:absolute;top:8px;right:8px;width:28px;height:28px;border-radius:8px;
+    background:rgba(10,12,14,.7);border:1px solid var(--line2);color:var(--ink);
+    display:flex;align-items:center;justify-content:center;font-size:13px;backdrop-filter:blur(6px);
+    opacity:0;transition:opacity .2s;
+  }
+  .shot:hover .zoomb{opacity:1}
+  .shot .cat{
+    position:absolute;top:8px;left:8px;font-size:10.5px;font-weight:700;letter-spacing:.08em;
+    padding:3px 9px;border-radius:999px;backdrop-filter:blur(6px);
+    background:rgba(10,12,14,.72);border:1px solid var(--line2);
+  }
+  .thumbs{display:flex;gap:5px;padding:7px 8px;background:var(--bg2);overflow-x:auto}
+  .thumbs button{
+    flex:0 0 auto;width:52px;height:34px;border-radius:6px;overflow:hidden;
+    border:1px solid var(--line);padding:0;background:none;opacity:.62;transition:all .18s;
+  }
+  .thumbs button img{width:100%;height:100%;object-fit:cover}
+  .thumbs button:hover{opacity:1}
+  .thumbs button.on{opacity:1;border-color:var(--amber);box-shadow:0 0 0 1px var(--amber)}
+  .meta{padding:14px 16px 16px;display:flex;flex-direction:column;gap:9px;flex:1}
+  .titlerow{display:flex;align-items:baseline;gap:8px;flex-wrap:wrap}
+  .titlerow h3{font-size:17.5px;font-weight:800;letter-spacing:-.02em}
+  .badge{font-family:var(--mono);font-size:10px;padding:2px 7px;border-radius:5px;border:1px solid var(--line2);color:var(--muted);letter-spacing:.04em}
+  .badge.oss{color:var(--green);border-color:rgba(126,224,129,.4)}
+  .badge.win{color:var(--cyan);border-color:rgba(76,201,240,.4)}
+  .tagline{color:var(--ink2);font-size:13px}
+  .tags{display:flex;gap:5px;flex-wrap:wrap}
+  .tag{font-size:10.5px;color:var(--muted);background:var(--overlay);border-radius:5px;padding:2px 7px}
+  .borrow{list-style:none;display:flex;flex-direction:column;gap:6px;margin-top:2px}
+  .borrow li{font-size:12.5px;color:var(--ink2);padding-left:16px;position:relative}
+  .borrow li::before{content:"";position:absolute;left:2px;top:7px;width:6px;height:6px;border-radius:2px;background:var(--amber);transform:rotate(45deg)}
+  .borrow li b{color:var(--ink)}
+  .links{display:flex;gap:12px;margin-top:auto;padding-top:8px;border-top:1px dashed var(--line);font-size:12px}
+  .links a{display:flex;align-items:center;gap:5px}
+  .empty{
+    grid-column:1/-1;text-align:center;padding:60px 20px;color:var(--muted);
+    border:1px dashed var(--line2);border-radius:var(--r);
+  }
+  .empty b{color:var(--amber)}
+
+  /* ---- directions ---- */
+  .dirs{max-width:1560px;margin:0 auto;padding:30px 22px 60px;display:grid;grid-template-columns:380px 1fr;gap:34px;align-items:start}
+  .dirs-left{position:sticky;top:86px}
+  .dirs-left h2{font-size:26px;font-weight:800;letter-spacing:-.02em;line-height:1.2;margin-bottom:12px}
+  .dirs-left p{color:var(--ink2);font-size:13.5px;margin-bottom:14px}
+  .dont{background:linear-gradient(160deg,rgba(255,92,71,.1),rgba(255,92,71,.03));border:1px solid rgba(255,92,71,.3);border-radius:var(--r-sm);padding:12px 14px}
+  .dont h4{color:var(--red);font-size:12.5px;letter-spacing:.08em;margin-bottom:6px}
+  .dont li{font-size:12.5px;color:var(--ink2);margin-left:16px}
+  .dir{
+    background:linear-gradient(170deg,var(--surface),var(--bg2));border:1px solid var(--line);
+    border-left:3px solid var(--dc,var(--amber));border-radius:var(--r);padding:18px 20px;margin-bottom:16px;
+  }
+  .dir h3{font-size:17px;font-weight:800;letter-spacing:-.01em;display:flex;align-items:center;gap:9px}
+  .dir h3 .idx{font-family:var(--mono);font-size:11px;color:var(--dc,var(--amber));border:1px solid var(--dc,var(--amber));border-radius:6px;padding:1px 6px}
+  .dir .apps{display:flex;gap:6px;flex-wrap:wrap;margin:9px 0 10px}
+  .dir .apps span{font-size:11px;font-weight:700;color:var(--dc,var(--amber));background:color-mix(in srgb,var(--dc,var(--amber)) 12%,transparent);border-radius:999px;padding:3px 10px}
+  .dir ul{list-style:none;display:flex;flex-direction:column;gap:7px}
+  .dir li{font-size:13px;color:var(--ink2);padding-left:16px;position:relative}
+  .dir li::before{content:"→";position:absolute;left:0;color:var(--dc,var(--amber));font-size:12px}
+  .dir li b{color:var(--ink)}
+
+  footer{border-top:1px solid var(--line);background:var(--bg2)}
+  .foot-inner{max-width:1560px;margin:0 auto;padding:26px 22px 40px;display:flex;flex-wrap:wrap;gap:20px;justify-content:space-between}
+  .foot-inner h5{font-size:12px;letter-spacing:.14em;color:var(--muted);text-transform:uppercase;font-family:var(--mono);margin-bottom:8px}
+  .foot-inner p,.foot-inner li{font-size:12px;color:var(--muted);max-width:60ch}
+  .foot-inner ul{list-style:none;columns:2;gap:26px}
+  .foot-inner li{margin-bottom:4px;break-inside:avoid}
+
+  /* ---- lightbox ---- */
+  .lb{position:fixed;inset:0;z-index:100;background:rgba(8,9,11,.9);backdrop-filter:blur(10px);display:none;flex-direction:column}
+  .lb.open{display:flex}
+  .lb-top{display:flex;align-items:center;gap:12px;padding:12px 18px;border-bottom:1px solid var(--line)}
+  .lb-top .t{font-weight:700;font-size:14px}
+  .lb-top .c{font-family:var(--mono);font-size:11.5px;color:var(--muted)}
+  .lb-top .x{margin-left:auto;width:32px;height:32px;border-radius:9px;background:var(--surface);border:1px solid var(--line2);color:var(--ink);font-size:15px}
+  .lb-top .x:hover{border-color:var(--red);color:var(--red)}
+  .lb-body{flex:1;display:flex;align-items:center;justify-content:center;padding:18px;min-height:0;position:relative}
+  .lb-body img{max-width:100%;max-height:100%;object-fit:contain;border-radius:10px;box-shadow:0 20px 60px rgba(0,0,0,.6)}
+  .lb-nav{position:absolute;top:50%;transform:translateY(-50%);width:42px;height:42px;border-radius:50%;background:rgba(24,28,34,.85);border:1px solid var(--line2);color:var(--ink);font-size:17px;display:flex;align-items:center;justify-content:center;transition:all .18s}
+  .lb-nav:hover{border-color:var(--amber);color:var(--amber)}
+  .lb-prev{left:16px}.lb-next{right:16px}
+  .lb-cap{padding:10px 18px 16px;text-align:center;color:var(--ink2);font-size:13px}
+  .lb-strip{display:flex;gap:6px;justify-content:center;padding:0 18px 16px;overflow-x:auto}
+  .lb-strip button{flex:0 0 auto;width:64px;height:42px;border-radius:7px;overflow:hidden;border:1px solid var(--line2);padding:0;opacity:.55;transition:all .18s;background:none}
+  .lb-strip button img{width:100%;height:100%;object-fit:cover}
+  .lb-strip button.on{opacity:1;border-color:var(--amber);box-shadow:0 0 0 1px var(--amber)}
+
+  @media (max-width:1080px){
+    .dirs{grid-template-columns:1fr}
+    .dirs-left{position:static}
+    .deck{margin-left:0}
+  }
+  @media (max-width:720px){
+    .board.list .card{flex-direction:column}
+    .board.list .shot{width:100%;flex:none;border-right:none;border-bottom:1px solid var(--line)}
+    .hero{padding-top:150px}
+    .foot-inner ul{columns:1}
+    .search input{width:130px}
+  }
+</style>
+</head>
+<body>
+<div class="ambient"><div class="glow g1"></div><div class="glow g2"></div><div class="glow g3"></div></div>
+<div class="grain"></div>
+
+<header class="topbar">
+  <div class="topbar-inner">
+    <div class="brand"><span class="dot"></span><span>Kanalib 参考板<small>desktop ui references</small></span></div>
+    <div class="chips" id="chips"></div>
+    <div class="deck">
+      <label class="search">
+        <svg viewBox="0 0 24 24" fill="none" stroke-width="2.4"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>
+        <input id="q" type="search" placeholder="搜名称 / 借鉴点…" aria-label="搜索参考">
+      </label>
+      <label class="tgl"><input type="checkbox" id="oss"><span class="box"></span>只看开源</label>
+      <label class="tgl"><input type="checkbox" id="win"><span class="box"></span>支持 Windows</label>
+      <label class="ctl">密度<input type="range" id="size" min="260" max="470" step="10" value="340" aria-label="卡片密度"></label>
+      <label class="ctl">排序<select id="sort"><option value="curated">策展序</option><option value="name">名称</option><option value="shots">截图数</option></select></label>
+      <label class="ctl">布局<select id="layout"><option value="grid">画廊</option><option value="list">清单</option></select></label>
+      <button class="reset" id="reset">重置</button>
+      <span class="count" id="count"></span>
+    </div>
+  </div>
+</header>
+
+<section class="hero">
+  <div class="eyebrow rise" style="animation-delay:.05s">Kanalib · design reference · 2026-11-16</div>
+  <h1 class="rise" style="animation-delay:.12s">把客户端从「IDE 脸」<br>换成<span class="hl">「照片墙脸」</span></h1>
+  <p class="lead rise" style="animation-delay:.2s">当前 Kanalib 沿用 VS Code 式侧栏 / 底栏 chrome，功能齐全但<b>缺少消费级图库的温度</b>。这里收录 9 个<b>非网页、非 IDE 风格</b>的桌面客户端：本地优先照片库、设计师素材墙、无界参考画布、原生质感编辑台。每张截图都来自官网 / 官方仓库 / App Store，点击可放大逐张对照，并标注了<b>可直接搬进 Kanalib 的做法</b>。</p>
+  <div class="stats rise" style="animation-delay:.28s">
+    <div class="stat"><div class="n" id="stApps">9</div><div class="l">桌面客户端</div></div>
+    <div class="stat"><div class="n" id="stShots">20</div><div class="l">界面截图</div></div>
+    <div class="stat"><div class="n">4</div><div class="l">换脸方向</div></div>
+    <div class="stat"><div class="n" id="stOss">3</div><div class="l">开源可读码</div></div>
+  </div>
+</section>
+
+<main class="board-wrap"><div class="board" id="board"></div></main>
+
+<section class="dirs">
+  <div class="dirs-left">
+    <h2>给 Kanalib 的四条换脸路线</h2>
+    <p>不必整体推翻 gpui 渲染层。chrome 与卡片语言可以按方向逐块替换：先换<b>内容墙</b>（收益最大），再换<b>侧栏与筛选</b>，最后打磨<b>空态 / 导入 / 查看器</b>。下面每条路线都对应板上的一组参考。</p>
+    <p>判断标准只有一条：<b>让「照片」成为界面里最亮、最大、最圆的元素</b>，chrome 退为暗色衬托——而不是反过来让面板和分隔线抢戏。</p>
+    <div class="dont">
+      <h4>继续避开（IDE 脸来源）</h4>
+      <ul>
+        <li>活动栏图标列 + 多面板分隔线</li>
+        <li>等宽小字号密集表格行</li>
+        <li>直角、1px 灰边、无投影的卡片</li>
+        <li>把搜索藏在菜单里而非顶部常驻</li>
+      </ul>
+    </div>
+  </div>
+  <div class="dirs-right" id="dirs"></div>
+</section>
+
+<footer>
+  <div class="foot-inner">
+    <div>
+      <h5>关于本板</h5>
+      <p>截图版权归各产品官方所有，仅作 Kanalib 内部设计参考离线存档。采集日期 2026-11-16；来源为官网、官方 GitHub README 与 Mac App Store 商品页。开源项目可直接读源码验证交互实现。</p>
+    </div>
+    <div>
+      <h5>来源</h5>
+      <ul id="srcs"></ul>
+    </div>
+  </div>
+</footer>
+
+<div class="lb" id="lb" role="dialog" aria-modal="true" aria-label="截图放大">
+  <div class="lb-top">
+    <span class="t" id="lbTitle"></span><span class="c" id="lbCount"></span>
+    <button class="x" id="lbClose" aria-label="关闭">✕</button>
+  </div>
+  <div class="lb-body">
+    <button class="lb-nav lb-prev" id="lbPrev" aria-label="上一张">‹</button>
+    <img id="lbImg" alt="">
+    <button class="lb-nav lb-next" id="lbNext" aria-label="下一张">›</button>
+  </div>
+  <div class="lb-cap" id="lbCap"></div>
+  <div class="lb-strip" id="lbStrip"></div>
+</div>
+
+<script>
+const CATS = {
+  library:{label:"照片库 · 本地优先", color:"var(--cyan)"},
+  asset:{label:"素材墙 · 设计师", color:"var(--amber)"},
+  canvas:{label:"无界画布", color:"var(--magenta)"},
+  craft:{label:"质感与 chrome", color:"var(--green)"}
+};
+const APPS = [
+  {
+    id:"peakto", name:"Peakto 3.0", cat:"library", platforms:["macOS"], license:"商业", oss:false, win:false,
+    url:"https://cyme.io/", repo:"",
+    tagline:"AI 元编目器：不搬文件，把文件夹 / NAS / Lightroom / Capture One 编目统一成一堵可语义搜索的墙。3.0 为百万级资产重写数据架构与界面。",
+    tags:["深色","语义搜索","胶片条","来源树","专业级"],
+    shots:[
+      {src:"assets/peakto-search.webp", cap:"语义搜索：顶部居中发光搜索框 + 实时结果计数，下方胶片条 + 主图双层浏览"},
+      {src:"assets/peakto-sources.webp", cap:"来源与导出： watched folders / 编目 / 卷 三类来源，绿点表示同步状态"},
+      {src:"assets/peakto-faces.webp", cap:"人脸聚类视图"},
+      {src:"assets/peakto-video.webp", cap:"视频标记点检索"}
+    ],
+    borrow:[
+      "<b>搜索框置顶居中</b>并带结果计数与发光描边——把「找图」做成第一动作，而非侧栏附属。",
+      "<b>来源树用状态点</b>（同步中 / 已索引）替代纯文字文件夹，Kanalib 多本地文件夹可直接套用。",
+      "<b>胶片条 + 主图</b>的双层浏览：选中即在上方横条定位，主区保持大图沉浸。"
+    ]
+  },
+  {
+    id:"mylio", name:"Mylio Photos", cat:"library", platforms:["Windows","macOS","iOS","Android"], license:"免费+订阅", oss:false, win:true,
+    url:"https://mylio.com/", repo:"",
+    tagline:"本地优先、跨设备不依赖云的家庭照片库。把文件夹渲染成「封面卡片」，百万张库仍秒开，主打 Life Calendar 记忆浏览。",
+    tags:["深色","消费级","封面卡片","图标轨","大圆角"],
+    shots:[
+      {src:"assets/mylio-organize.jpg", cap:"文件夹即封面卡片：缩略图 + 数量 + 日期跨度，左右仅留极简图标轨"}
+    ],
+    borrow:[
+      "<b>目录 = 记忆卡片</b>：封面图 + 张数 + 起止日期，把「浏览文件夹」变成「浏览回忆」，Kanalib 文件夹视图可整体换装。",
+      "<b>左右超窄图标轨</b>替代宽侧栏，把横向空间全部让给照片墙。",
+      "消费级深色：大圆角、充足留白、悬浮圆形操作钮，<b> chrome 几乎隐形</b>。"
+    ]
+  },
+  {
+    id:"rollfilm", name:"Rollfilm", cat:"library", platforms:["Windows","macOS","Linux"], license:"MIT", oss:true, win:true,
+    url:"https://rollfilm.org/", repo:"https://github.com/pasqualkreher/rollfilm",
+    tagline:"开源本地优先照片管理器：CLIP 语义搜索存本地 SQLite，导入「灯箱台」边拷贝边筛选，可选镜像到 Immich。Electron + Python 后端。",
+    tags:["深色","语义搜索","导入灯箱","地图","开源"],
+    shots:[
+      {src:"assets/rollfilm-library.jpg", cap:"库视图：时间线 + 网格 + 顶部筛选"},
+      {src:"assets/rollfilm-search.jpg", cap:"语义搜索：用一句话描述记忆中的画面"},
+      {src:"assets/rollfilm-import.jpg", cap:"导入灯箱台：拷贝进行中即可对比 / 挑选 / 打分"},
+      {src:"assets/rollfilm-map.jpg", cap:"地图视图：所有带地理标记的照片"}
+    ],
+    borrow:[
+      "<b>导入即筛选</b>：灯箱台让拷贝与挑选并行，Kanalib 冷导入 49min 的等待可变成可交互过程。",
+      "<b>相机参数滤镜弹层</b>（机身 / 镜头 / ISO / 光圈滑杆组）是筛选条的高级形态。",
+      "MIT 开源，<b>可直接读代码</b>验证语义搜索与去重的桌面实现。"
+    ]
+  },
+  {
+    id:"eagle", name:"Eagle 4.0", cat:"asset", platforms:["Windows","macOS"], license:"买断", oss:false, win:true,
+    url:"https://eagle.cool/", repo:"",
+    tagline:"设计师素材管理的事实标准：88 种格式、智能文件夹、颜色搜索、悬停即预览。深色侧栏衬托高饱和内容墙。",
+    tags:["深色","卡片墙","颜色搜索","智能文件夹","悬停预览"],
+    shots:[
+      {src:"assets/eagle.png", cap:"深色侧栏 + 彩色内容墙：chrome 退后、素材向前"}
+    ],
+    borrow:[
+      "<b>暗 chrome + 亮内容</b>的对比关系：侧栏越暗越安静，照片墙越饱和越跳。",
+      "<b>悬停即预览</b>（GIF / 视频 / 音频免双击）+ 空格快速查看，浏览零摩擦。",
+      "<b>颜色搜索 / 智能文件夹</b>把筛选变成可视化条件，Kanalib 标签体系可对标。"
+    ]
+  },
+  {
+    id:"billfish", name:"Billfish", cat:"asset", platforms:["Windows","macOS"], license:"免费", oss:false, win:true,
+    url:"https://www.billfish.cn/", repo:"",
+    tagline:"国产免费素材管理：文件夹树 + 标签树双面板，顶部多维筛选下拉，右侧信息面板可收起。中文语境交互可直接对标。",
+    tags:["深色","双树面板","多维筛选","中文","免费"],
+    shots:[
+      {src:"assets/billfish-1.webp", cap:"本地资源库：左文件夹树 + 标签树，顶部筛选下拉，右信息面板"},
+      {src:"assets/billfish-2.webp", cap:"双屏 / 云库视图"}
+    ],
+    borrow:[
+      "<b>顶部一排筛选下拉</b>（类型 / 形状 / 尺寸 / 评分 / 大小）比侧栏筛选更省纵向空间。",
+      "<b>文件夹树与标签树并列</b>，两种组织心智共存，Kanalib 目录 + 标签可同屏。",
+      "右侧信息面板<b>可收起</b>，需要时才占空间。"
+    ]
+  },
+  {
+    id:"pureref", name:"PureRef", cat:"canvas", platforms:["Windows","macOS","Linux"], license:"免费", oss:false, win:true,
+    url:"https://www.pureref.com/", repo:"",
+    tagline:"无限参考画布：任意拖入图片、无界缩放旋转、可置顶透明悬浮于创作软件之上。轻量到几十兆，画布即工作台面。",
+    tags:["画布","无界","置顶","透明","快捷键"],
+    shots:[
+      {src:"assets/pureref-demo.gif", cap:"拖入即排布：无限画布上的参考图墙（动图）"},
+      {src:"assets/pureref.jpg", cap:"画布全景：图片自由缩放 / 旋转 / 叠放"}
+    ],
+    borrow:[
+      "<b>无界画布交互</b>：中键平移 / 滚轮缩放 / Ctrl 旋转的肌肉记忆，Kanalib 图片墙可借鉴手势。",
+      "<b>去饱和 / 透明度 / 置顶</b>三个开关让参考墙不抢创作焦点。",
+      "自动排布（Ctrl+P）与对齐工具，<b>乱中有序</b>。"
+    ]
+  },
+  {
+    id:"beeref", name:"BeeRef", cat:"canvas", platforms:["Windows","macOS","Linux"], license:"开源", oss:true, win:true,
+    url:"https://beeref.org/", repo:"https://github.com/rbreu/beeref",
+    tagline:"开源 Qt 参考画布：.bee 项目即 SQLite，图片嵌入存储。支持旋转 / 裁剪 / 批排 / 无边框浮动窗，可直接读实现。",
+    tags:["画布","开源","Qt","SQLite","浮动窗"],
+    shots:[
+      {src:"assets/beeref.png", cap:"画布：选中框 + 自由旋转叠放的参考图"},
+      {src:"assets/beeref-float.png", cap:"无边框浮动窗模式"}
+    ],
+    borrow:[
+      "<b>项目文件 = SQLite</b> 的便携思路，与 Kanalib 本地库哲学一致。",
+      "<b>批量排列</b>（垂直 / 水平 / 自动优化空间）一键整理画布。",
+      "开源 Qt，<b>画布命中 / 变换代码可直读</b>。"
+    ]
+  },
+  {
+    id:"photomator", name:"Photomator", cat:"craft", platforms:["macOS"], license:"订阅/买断", oss:false, win:false,
+    url:"https://www.pixelmator.com/photomator/", repo:"",
+    tagline:"原生 macOS 质感标杆：照片浏览器与编辑台分离，浅色 / 深色皆精致，工具栏图标极度收敛，非破坏编辑面板组织清晰。",
+    tags:["浅色","原生","浏览器","编辑台","图标收敛"],
+    shots:[
+      {src:"assets/photomator-browser.webp", cap:"照片浏览器：干净网格 + 收敛工具栏"},
+      {src:"assets/photomator-edit.webp", cap:"非破坏编辑台：面板分组清晰"}
+    ],
+    borrow:[
+      "<b>浏览与编辑分态</b>：库视图只保留浏览控件，编辑控件进入编辑态才出现。",
+      "<b>工具栏图标收敛</b>到个位数，其余进上下文菜单——对抗 IDE 式按钮堆砌。",
+      "原生圆角 / 投影 / 半透明侧栏的<b>质感基线</b>。"
+    ]
+  },
+  {
+    id:"paste", name:"Paste", cat:"craft", platforms:["macOS","iOS"], license:"订阅", oss:false, win:false,
+    url:"https://pasteapp.io/", repo:"",
+    tagline:"把剪贴板做成可浏览的卡片墙：按类型着色卡头（Image 红 / Text 蓝 / Link 绿 / Audio 紫），浅色圆角卡片 + 时间戳角标。",
+    tags:["浅色","卡片墙","类型着色","时间戳","圆角"],
+    shots:[
+      {src:"assets/paste-cards.png", cap:"类型着色的卡片墙：卡头色条 + 图标 + 时间角标"},
+      {src:"assets/paste-card1.png", cap:"单卡特写：内容预览 + 元信息脚注"}
+    ],
+    borrow:[
+      "<b>类型着色卡头</b>：一眼区分图片 / 视频 / 文档 / 音频，Kanalib 混合库可直接套用色码。",
+      "<b>时间戳角标</b>（just now / 2 weeks ago）让墙自带时间维度。",
+      "浅色卡墙的<b>圆角 + 柔和投影</b>是「不丑」的最快路径。"
+    ]
+  }
+];
+const DIRS = [
+  {c:"var(--cyan)", t:"内容墙换装：封面卡片 + 类型色码", apps:["Mylio","Paste","Eagle"],
+   li:["文件夹视图改为<b>封面卡片</b>（缩略图 + 张数 + 日期跨度），告别文字列表。",
+       "混合资产用<b>类型着色卡头 / 角标</b>区分图片、视频、RAW、文档。",
+       "卡片统一<b>大圆角 + 柔和投影</b>，悬停微放大 + 提亮，给墙「呼吸感」。"]},
+  {c:"var(--amber)", t:"chrome 退后：窄图标轨 + 顶部常驻搜索", apps:["Peakto","Mylio","Billfish"],
+   li:["宽侧栏改为<b>超窄图标轨</b>或可收起面板，把横向空间让给照片。",
+       "<b>搜索框置顶常驻</b>（语义搜索 + 结果计数），而非藏进菜单。",
+       "筛选改为<b>顶部一排下拉 / 条件 chips</b>，纵向空间留给墙。"]},
+  {c:"var(--magenta)", t:"无界墙手势：画布级平移缩放", apps:["PureRef","BeeRef"],
+   li:["图片墙引入<b>中键平移 / 滚轮无级缩放</b>的画布手势，替代固定网格滚动。",
+       "选中 / 框选 / 批排给<b>即时视觉反馈</b>（选中框、对齐吸附）。",
+       "提供<b>自动排布</b>一键整理，乱中有序。"]},
+  {c:"var(--green)", t:"过程可见：导入灯箱 + 状态点", apps:["Rollfilm","Peakto"],
+   li:["冷导入改为<b>灯箱台</b>：拷贝进行中即可预览 / 挑选 / 打分，等待变交互。",
+       "来源 / 索引状态用<b>彩色状态点</b>而非文字日志。",
+       "浏览与编辑<b>分态</b>，库视图只留浏览控件，降低首屏噪音。"]}
+];
+
+const $ = s => document.querySelector(s);
+const state = {cat:"all", q:"", oss:false, win:false, sort:"curated", layout:"grid"};
+let lbApp = null, lbIdx = 0;
+
+function filtered(){
+  let list = APPS.filter(a=>{
+    if(state.cat!=="all" && a.cat!==state.cat) return false;
+    if(state.oss && !a.oss) return false;
+    if(state.win && !a.win) return false;
+    if(state.q){
+      const hay = (a.name+a.tagline+a.tags.join(" ")+a.borrow.join(" ")).toLowerCase();
+      if(!hay.includes(state.q.toLowerCase())) return false;
+    }
+    return true;
+  });
+  if(state.sort==="name") list = [...list].sort((a,b)=>a.name.localeCompare(b.name));
+  if(state.sort==="shots") list = [...list].sort((a,b)=>b.shots.length-a.shots.length);
+  return list;
+}
+
+function cardHTML(a){
+  const cat = CATS[a.cat];
+  const badges = a.platforms.map(p=>`<span class="badge ${p==="Windows"?"win":""}">${p}</span>`).join("")
+    + `<span class="badge ${a.oss?"oss":""}">${a.license}</span>`;
+  const thumbs = a.shots.length>1 ? `<div class="thumbs">${a.shots.map((s,i)=>
+      `<button data-i="${i}" class="${i===0?"on":""}" title="${s.cap}"><img src="${s.src}" alt="" loading="lazy"></button>`).join("")}</div>` : "";
+  return `<article class="card" data-id="${a.id}">
+    <div class="shot">
+      <img class="main" src="${a.shots[0].src}" alt="${a.name} 界面" loading="lazy" data-i="0">
+      <span class="cat" style="color:${cat.color}">${cat.label}</span>
+      <button class="zoomb" data-i="0" aria-label="放大">⤢</button>
+      ${thumbs}
+    </div>
+    <div class="meta">
+      <div class="titlerow"><h3>${a.name}</h3>${badges}</div>
+      <p class="tagline">${a.tagline}</p>
+      <div class="tags">${a.tags.map(t=>`<span class="tag">${t}</span>`).join("")}</div>
+      <ul class="borrow">${a.borrow.map(b=>`<li>${b}</li>`).join("")}</ul>
+      <div class="links">
+        <a href="${a.url}" target="_blank" rel="noopener">官网 ↗</a>
+        ${a.repo?`<a href="${a.repo}" target="_blank" rel="noopener">源码 ↗</a>`:""}
+      </div>
+    </div>
+  </article>`;
+}
+
+const io = new IntersectionObserver(es=>es.forEach(e=>{ if(e.isIntersecting){e.target.classList.add("in"); io.unobserve(e.target);} }),{threshold:.08});
+function render(){
+  const list = filtered();
+  const board = $("#board");
+  board.className = "board" + (state.layout==="list"?" list":"");
+  board.innerHTML = list.length ? list.map(cardHTML).join("")
+    : `<div class="empty">没有匹配的参考。<b>重置</b>筛选或换个关键词试试。</div>`;
+  board.querySelectorAll(".card").forEach(c=>io.observe(c));
+  $("#count").textContent = `${list.length} / ${APPS.length}`;
+  bindCards();
+}
+function bindCards(){
+  document.querySelectorAll(".card").forEach(card=>{
+    const a = APPS.find(x=>x.id===card.dataset.id);
+    const main = card.querySelector("img.main");
+    const setShot = i=>{
+      main.src = a.shots[i].src; main.dataset.i = i;
+      card.querySelectorAll(".thumbs button").forEach(b=>b.classList.toggle("on", +b.dataset.i===i));
+    };
+    card.querySelectorAll(".thumbs button").forEach(b=>b.addEventListener("click",()=>setShot(+b.dataset.i)));
+    main.addEventListener("click",()=>openLB(a, +main.dataset.i));
+    card.querySelector(".zoomb").addEventListener("click",()=>openLB(a, +main.dataset.i));
+  });
+}
+
+/* lightbox */
+function openLB(a,i){ lbApp=a; lbIdx=i; $("#lb").classList.add("open"); document.body.style.overflow="hidden"; paintLB(); }
+function closeLB(){ $("#lb").classList.remove("open"); document.body.style.overflow=""; lbApp=null; }
+function paintLB(){
+  const s = lbApp.shots[lbIdx];
+  $("#lbImg").src = s.src; $("#lbImg").alt = s.cap;
+  $("#lbTitle").textContent = lbApp.name;
+  $("#lbCount").textContent = `${lbIdx+1} / ${lbApp.shots.length}`;
+  $("#lbCap").textContent = s.cap;
+  $("#lbStrip").innerHTML = lbApp.shots.map((x,i)=>
+    `<button class="${i===lbIdx?"on":""}" data-i="${i}"><img src="${x.src}" alt=""></button>`).join("");
+  $("#lbStrip").querySelectorAll("button").forEach(b=>b.addEventListener("click",()=>{lbIdx=+b.dataset.i;paintLB();}));
+  const multi = lbApp.shots.length>1;
+  $("#lbPrev").style.display = multi?"flex":"none";
+  $("#lbNext").style.display = multi?"flex":"none";
+}
+$("#lbClose").addEventListener("click",closeLB);
+$("#lbPrev").addEventListener("click",()=>{lbIdx=(lbIdx-1+lbApp.shots.length)%lbApp.shots.length;paintLB();});
+$("#lbNext").addEventListener("click",()=>{lbIdx=(lbIdx+1)%lbApp.shots.length;paintLB();});
+$("#lb").addEventListener("click",e=>{ if(e.target===$("#lb")||e.target.classList.contains("lb-body")) closeLB(); });
+document.addEventListener("keydown",e=>{
+  if(!lbApp) return;
+  if(e.key==="Escape") closeLB();
+  if(e.key==="ArrowLeft") $("#lbPrev").click();
+  if(e.key==="ArrowRight") $("#lbNext").click();
+});
+
+/* controls */
+const chipsBox = $("#chips");
+chipsBox.innerHTML = `<button class="chip on" data-cat="all">全部</button>` +
+  Object.entries(CATS).map(([k,v])=>`<button class="chip" data-cat="${k}">${v.label}</button>`).join("");
+chipsBox.querySelectorAll(".chip").forEach(ch=>ch.addEventListener("click",()=>{
+  state.cat = ch.dataset.cat;
+  chipsBox.querySelectorAll(".chip").forEach(c=>c.classList.toggle("on",c===ch));
+  render();
+}));
+$("#q").addEventListener("input",e=>{state.q=e.target.value.trim();render();});
+$("#oss").addEventListener("change",e=>{state.oss=e.target.checked;render();});
+$("#win").addEventListener("change",e=>{state.win=e.target.checked;render();});
+$("#sort").addEventListener("change",e=>{state.sort=e.target.value;render();});
+$("#layout").addEventListener("change",e=>{state.layout=e.target.value;render();});
+$("#size").addEventListener("input",e=>document.documentElement.style.setProperty("--card-min",e.target.value+"px"));
+$("#reset").addEventListener("click",()=>{
+  Object.assign(state,{cat:"all",q:"",oss:false,win:false,sort:"curated",layout:"grid"});
+  $("#q").value=""; $("#oss").checked=false; $("#win").checked=false;
+  $("#sort").value="curated"; $("#layout").value="grid"; $("#size").value=340;
+  document.documentElement.style.setProperty("--card-min","340px");
+  chipsBox.querySelectorAll(".chip").forEach(c=>c.classList.toggle("on",c.dataset.cat==="all"));
+  render();
+});
+
+/* directions + sources + stats */
+$("#dirs").innerHTML = DIRS.map((d,i)=>`<div class="dir" style="--dc:${d.c}">
+  <h3><span class="idx">0${i+1}</span>${d.t}</h3>
+  <div class="apps">${d.apps.map(a=>`<span>${a}</span>`).join("")}</div>
+  <ul>${d.li.map(x=>`<li>${x}</li>`).join("")}</ul></div>`).join("");
+$("#srcs").innerHTML = APPS.map(a=>`<li><a href="${a.url}" target="_blank" rel="noopener">${a.name}</a>${a.repo?` · <a href="${a.repo}" target="_blank" rel="noopener">repo</a>`:""}</li>`).join("");
+$("#stApps").textContent = APPS.length;
+$("#stShots").textContent = APPS.reduce((n,a)=>n+a.shots.length,0);
+$("#stOss").textContent = APPS.filter(a=>a.oss).length;
+
+render();
+</script>
+</body>
+</html>

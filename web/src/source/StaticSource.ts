@@ -1,7 +1,10 @@
 import { RATING_LABELS } from '../lib/format';
 import { dataUrl, mergePaths } from './config';
 import {
+  type SearchIndexData,
+  type SearchRecord,
   type ShardRef,
+  type SourceCapabilities,
   type TierPaths,
   type WallIndex,
   type WallItem,
@@ -9,8 +12,14 @@ import {
   type TagTriple,
 } from './types';
 
+export type { SearchIndexData, SearchRecord } from './types';
+
 /** 契约 §5：id 只允许小写数字字母，长度 40 或 64。 */
 const ID_RE = /^(?:[0-9a-z]{40}|[0-9a-z]{64})$/;
+
+export function isValidItemId(id: string): boolean {
+  return ID_RE.test(id);
+}
 
 export class DataError extends Error {
   constructor(message: string, readonly cause_?: unknown) {
@@ -54,7 +63,7 @@ function normalizeTags(raw: unknown): TagTriple[] {
 export function normalizeItem(raw: unknown): WallItem | null {
   if (!isRecord(raw)) return null;
   const id = str(raw.id, '');
-  if (!ID_RE.test(id)) return null;
+  if (!isValidItemId(id)) return null;
   const w = num(raw.w, 0);
   const h = num(raw.h, 0);
   if (w <= 0 || h <= 0) return null;
@@ -79,27 +88,6 @@ export function normalizeItem(raw: unknown): WallItem | null {
   if (raw.sharp === 0 || raw.sharp === 1024 || raw.sharp === 2048) item.sharp = raw.sharp;
   if (typeof groupRaw === 'string' && groupRaw.length > 0) item.group = groupRaw;
   return item;
-}
-
-/**
- * search-index.json 的一条记录：字段全部折叠成小写、`_` 转空格，
- * 过滤时不再重复规整。`hay` 是名称/标签/分组/分级的合并草堆，普通词只扫它。
- */
-export interface SearchRecord {
-  id: string;
-  name: string;
-  tags: string[];
-  group: string;
-  rating: string;
-  hay: string;
-}
-
-export interface SearchIndexData {
-  version: number;
-  count: number;
-  tagTable: string[];
-  groupTable: string[];
-  records: Map<string, SearchRecord>;
 }
 
 /** 与 filters.ts 的折叠规则保持一致：小写、下划线转空格、压缩空白。 */
@@ -216,6 +204,18 @@ export function normalizeSearchIndex(raw: unknown): SearchIndexData | null {
  */
 export class StaticSource implements WallSource {
   readonly dataRoot: string;
+  readonly capabilities: SourceCapabilities = {
+    source: 'static',
+    server_search: false,
+    server_filter: false,
+    can_write: false,
+    has_works: false,
+    has_authors: false,
+    has_collections: false,
+    media_tiers: ['t256', 't512', 't1024', 't2048', 'original'],
+    original_proxy: false,
+    generated_at: null,
+  };
 
   private _index: WallIndex | null = null;
   private _items: WallItem[] = [];

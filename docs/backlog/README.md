@@ -45,7 +45,7 @@
 | [pending/search-organization.md](pending/search-organization.md) | 搜索与组织：F-012/013/014 |
 | [pending/tags.md](pending/tags.md) | 标签与打标：F-021/023/024（已归档，本域暂无未完成项） |
 | [pending/library-sources-formats.md](pending/library-sources-formats.md) | 图库/来源/格式：F-030–F-033、F-035–F-037、F-040 |
-| [pending/dedup.md](pending/dedup.md) | 去重：F-045 |
+| [pending/dedup.md](pending/dedup.md) | 去重：F-045（已实现，本域暂无未完成项） |
 | [pending/ops.md](pending/ops.md) | 性能/可靠性与交付：F-038/F-039、F-061–F-063 |
 | [candidate-pool.md](candidate-pool.md) | 低优先级/远期候选 |
 | [cloud-photo-wall.md](cloud-photo-wall.md) | 云端无界图片墙计划与决策记录（F-080–F-083）：产品边界/W1–W5/部署 |
@@ -55,13 +55,19 @@
 | [pixiv-integration.md](pixiv-integration.md) | Pixiv 归档能力合并总计划（F-084–F-086、F-089）：box 入库过滤 → 网页轻量后端 → 桌面工作台；**不做数据迁移** |
 | [web-rail-horizontal.md](web-rail-horizontal.md) | 网页导航横向化规格（F-087）：208px 横排文字 + 折叠 + 窄屏底部条 + 验收 |
 | [web-dynamic-backend.md](web-dynamic-backend.md) | 网页轻量后端与动态化设计（F-088）：独立 `kanalib-web`/SQLite/API/媒体/`ApiSource`/安全/阶段 |
-| [ingest-service.md](ingest-service.md) | 入库过滤服务设计（F-089）：box 上的来源适配/下载/打标/规则/审核/HMAC 推送/签名回源 |
+| [ingest-service.md](ingest-service.md) | 入库过滤服务设计（F-089）：box 上的来源适配/下载/打标/**配置化黑名单（用户+标签）**/R-18G 三路/标签不足补标/审核/HMAC 推送/签名回源 |
+| [easytier-connectivity.md](easytier-connectivity.md) | 三端互联与 EasyTier 方案（F-090）：公网只读/私网写入、双 listener、魔法 DNS、ACL、secure mode、流量账、迁移与回退 |
+| [private-networking-options.md](private-networking-options.md) | 私网组网备选对比（F-091）：EasyTier 主方案；Tailscale/Headscale/NetBird/Nebula/ZeroTier/Cloudflare/frp/WireGuard 对比与淘汰理由 |
+| [execution-workstreams.md](execution-workstreams.md) | 并行执行工作流：P0 契约闸门、可并行车道、文件所有权、派发顺序与最低验收 |
+| [p2-reuse-research.md](p2-reuse-research.md) | P2 之后可复用组件调研：Pixiv 客户端、axum/tower-http、sidecar 复用、签名与队列选型、许可与版本冲突 |
 | [manual-acceptance.md](manual-acceptance.md) | 手动验收总清单：前台/GUI/UIA/真实输入/长耗时项、夹具、证据与已通过项索引 |
 | [../TESTING-PROCESS.md](../TESTING-PROCESS.md) | 轻量测试流程：测试分层、风险定档、改动类型矩阵、门禁与反过度测试约束 |
+| [../PLAN.md](../PLAN.md) | 项目总体调研与实施方案：模型事实、架构、数据模型、索引/缩略图/去重、sidecar、来源接入、阶段与基准（F-012/F-021/F-023/F-024/F-045 等的依据） |
+| [../FFMPEG.md](../FFMPEG.md) | FFmpeg 许可与进程模型（F-040）：LGPL/GPL 边界、二进制发现顺序、批处理进程池、冷导入基准与阶段结论 |
 | [constraints.md](constraints.md) | 安全/性能/缓存/许可/本机脚本等全局约束 |
 | [component-research.md](component-research.md) | 非 UI 现成组件调研（可直接采用/评估/自研） |
 | [references.md](references.md) | 外部参考与本地依据 |
-| [../archive/2026-11/](../archive/2026-11/) | 历史任务包与过时设计/反馈文档（第一至七轮、v2 设计、v4 调研等），非权威，仅作追溯 |
+| [../archive/2026-11/](../archive/2026-11/) | 历史任务包与实测证据（第一至七轮、图片墙开发日志、反馈与审计），非权威，仅作追溯 |
 
 ## 推荐顺序
 
@@ -80,7 +86,7 @@
 - **新需求**：先在 [registry.md](registry.md) 加一行，再到 `pending/` 对应职责文件写需求/方案/验收/风险；调研遵循本页准则，补「调研来源/候选对比/复用结论」。
 - **实现后**：从 `pending/` 移入 [implemented.md](implemented.md)，只保留关键约束与验证。
 - **派发任务**：先看 [photo-wall-status.md](photo-wall-status.md) 的路线图与 [pending/overview.md](pending/overview.md)；UI 只有一条车道，schema/sidecar 单一负责人。
-- **历史文档**：第一至七轮任务包、v2 设计、v4 调研与反馈日志已移到 [../archive/2026-11/](../archive/2026-11/)，不再维护，不作为执行依据。
+- **历史文档**：第一至七轮任务包、图片墙开发日志与反馈/审计已移到 [../archive/2026-11/](../archive/2026-11/)，不再维护，不作为执行依据；被现行文档完全取代的稿件已于 2026-11-22 删除。
 - **验证**：按 [../TESTING-PROCESS.md](../TESTING-PROCESS.md) 的改动类型矩阵与门禁执行；默认最小验证，不做过度测试。
 - **不写工时/排期**；代码行号会漂移，按函数名搜索。
 - **文档自检**：`bash scripts/check_backlog_docs.sh` 校验 registry 的 F-xxx 不重复不丢失、implemented 与 pending 的状态不互相矛盾；每轮收口后重跑一次。
