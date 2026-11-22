@@ -7,7 +7,8 @@ use std::{fmt, future::Future, pin::Pin, time::Duration};
 use anyhow::{Context, Result, bail};
 use hmac::{Hmac, Mac};
 use kanalib_wall_model::{
-    IngestBatch, IngestBatchItem, IngestDelete, IngestItem, IngestTag, valid_item_id,
+    IngestBatch, IngestBatchItem, IngestDelete, IngestDeleteItem, IngestItem, IngestTag,
+    valid_item_id,
 };
 use rusqlite::{OptionalExtension, params};
 use sha2::{Digest, Sha256};
@@ -193,6 +194,133 @@ pub fn enqueue_delete(db: &Db, batch_id: &str, delete: &IngestDelete) -> Result<
     enqueue(db, batch_id, PushKind::Delete, &payload, delete.items.len())
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Enqueued {
+    pub allow_batches: usize,
+    pub allow_items: usize,
+    pub delete_batches: usize,
+    pub delete_items: usize,
+}
+
+/// 从库里已有的 `allow` 决策与已删除作品生成批次。
+///
+/// 这里不产生决策：规则层落地前 `items.decision` 仍是 `pending`，没有候选项可推。
+pub fn enqueue_decisions(
+    db: &Db,
+    rules_version: Option<&str>,
+    batch_size: usize,
+) -> Result<Enqueued> {
+    let batch_size = batch_size.clamp(1, 5_000);
+    let mut outcome = Enqueued::default();
+
+    for (source, ids) in allow_candidates(db)?.into_iter() {
+        for chunk in ids.chunks(batch_size) {
+            match build_allow_batch(db, chunk, rules_version) {
+                Ok(batch) => {
+                    enqueue_allow_batch(db, &batch, &mut outcome)?;
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        %source,
+                        %error,
+                        items = chunk.len(),
+                        "allow batch skipped; retrying items individually"
+                    );
+                    for id in chunk {
+                        match build_allow_batch(db, std::slice::from_ref(id), rules_version) {
+                            Ok(batch) => enqueue_allow_batch(db, &batch, &mut outcome)?,
+                            Err(error) => {
+                                tracing::warn!(%source, item = %id, %error, "allow item skipped");
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    for (source, items) in delete_candidates(db)?.into_iter() {
+        for chunk in items.chunks(batch_size) {
+            let delete = IngestDelete {
+                source: source.clone(),
+                rules_version: rules_version.map(str::to_string),
+                items: chunk.to_vec(),
+            };
+            let payload = serde_json::to_vec(&delete).context("serialize delete batch")?;
+            if enqueue_delete(db, &delete_id_for(&payload), &delete)? {
+                outcome.delete_batches += 1;
+                outcome.delete_items += delete.items.len();
+            }
+        }
+    }
+
+    Ok(outcome)
+}
+
+fn enqueue_allow_batch(db: &Db, batch: &IngestBatch, outcome: &mut Enqueued) -> Result<()> {
+    let payload = serde_json::to_vec(batch).context("serialize allow batch")?;
+    if enqueue_allow(db, &batch_id_for(&payload), batch)? {
+        outcome.allow_batches += 1;
+        outcome.allow_items += batch.items.len();
+    }
+    Ok(())
+}
+
+fn allow_candidates(db: &Db) -> Result<std::collections::BTreeMap<String, Vec<String>>> {
+    let mut statement = db.connection().prepare(
+        "SELECT i.id, i.source
+           FROM items i
+           JOIN works w ON w.id = i.work_id
+          WHERE i.decision = 'allow'
+            AND i.revision > i.pushed_revision
+            AND i.thumb_256 IS NOT NULL
+            AND w.status != 'deleted'
+            AND lower(w.rating) IN ('all', 'r18', 'g')
+            AND EXISTS (
+                SELECT 1 FROM decisions d
+                 WHERE d.item_id = i.id AND d.decision = 'allow'
+            )
+          ORDER BY i.updated_at, i.id",
+    )?;
+    let rows = statement.query_map([], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+    })?;
+    let mut grouped = std::collections::BTreeMap::<String, Vec<String>>::new();
+    for row in rows {
+        let (id, source) = row?;
+        grouped.entry(source).or_default().push(id);
+    }
+    Ok(grouped)
+}
+
+fn delete_candidates(db: &Db) -> Result<std::collections::BTreeMap<String, Vec<IngestDeleteItem>>> {
+    let mut statement = db.connection().prepare(
+        "SELECT i.id, i.revision, i.source
+           FROM items i
+           JOIN works w ON w.id = i.work_id
+          WHERE w.status = 'deleted'
+            AND i.pushed_revision > 0
+            AND i.delete_pushed = 0
+          ORDER BY i.updated_at, i.id",
+    )?;
+    let rows = statement.query_map([], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, i64>(1)?,
+            row.get::<_, String>(2)?,
+        ))
+    })?;
+    let mut grouped = std::collections::BTreeMap::<String, Vec<IngestDeleteItem>>::new();
+    for row in rows {
+        let (id, revision, source) = row?;
+        grouped.entry(source).or_default().push(IngestDeleteItem {
+            id,
+            revision: revision.max(1),
+        });
+    }
+    Ok(grouped)
+}
+
 /// 把已确认/失败的批次重置为待推送；用于备份恢复或人工重放。
 pub fn replay(db: &Db, batch_id: &str) -> Result<bool> {
     let changed = db.connection().execute(
@@ -260,7 +388,7 @@ pub async fn flush<T: PushTransport>(
         match transport.send(request).await {
             Ok(response) => match classify_status(response.status, attempts, config) {
                 Disposition::Ack => {
-                    mark_acked(db, &batch.id, now_ts)?;
+                    mark_acked(db, &batch, now_ts)?;
                     outcome.acked += 1;
                 }
                 Disposition::Reject => {
@@ -367,13 +495,45 @@ pub fn backoff(attempts: u32, base: Duration, max: Duration) -> Duration {
         .min(max)
 }
 
-fn mark_acked(db: &Db, batch_id: &str, now_ts: i64) -> Result<()> {
-    db.connection().execute(
+fn mark_acked(db: &Db, batch: &PushBatch, now_ts: i64) -> Result<()> {
+    let tx = db.connection().unchecked_transaction()?;
+    tx.execute(
         "UPDATE push_batches
             SET state = 'acked', acked_at = ?2, last_error = NULL
           WHERE id = ?1",
-        params![batch_id, now_ts],
+        params![batch.id, now_ts],
     )?;
+    match batch.kind {
+        PushKind::Allow => match serde_json::from_slice::<IngestBatch>(&batch.payload) {
+            Ok(parsed) => {
+                for entry in parsed.items {
+                    tx.execute(
+                        "UPDATE items
+                            SET pushed_revision = MAX(pushed_revision, ?2)
+                          WHERE id = ?1",
+                        params![entry.item.id, entry.revision],
+                    )?;
+                }
+            }
+            Err(error) => {
+                tracing::warn!(%error, batch = %batch.id, "acked allow batch is not parseable");
+            }
+        },
+        PushKind::Delete => match serde_json::from_slice::<IngestDelete>(&batch.payload) {
+            Ok(parsed) => {
+                for entry in parsed.items {
+                    tx.execute(
+                        "UPDATE items SET delete_pushed = 1 WHERE id = ?1",
+                        params![entry.id],
+                    )?;
+                }
+            }
+            Err(error) => {
+                tracing::warn!(%error, batch = %batch.id, "acked delete batch is not parseable");
+            }
+        },
+    }
+    tx.commit()?;
     Ok(())
 }
 

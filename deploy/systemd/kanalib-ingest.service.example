@@ -10,9 +10,7 @@ EnvironmentFile=-/etc/kanalib/ingest.env
 StateDirectory=kanalib-ingest
 UMask=0077
 ExecStart=/usr/local/bin/kanalib-ingest \
-  --db /var/lib/kanalib-ingest/ingest.db \
-  --media-dir /var/lib/kanalib-ingest/media \
-  --source mock
+  --config /etc/kanalib/ingest.toml
 Restart=always
 RestartSec=5
 User=kanalib

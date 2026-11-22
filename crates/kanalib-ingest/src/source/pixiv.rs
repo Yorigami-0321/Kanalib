@@ -1,7 +1,7 @@
 //! Pixiv 适配骨架：认证由外部注入，节流/错误分类/退避在此统一处理。
 //! 传输层通过 trait 注入，测试不发任何真实请求，也不会记录令牌。
 
-use std::{pin::Pin, sync::Arc, time::Duration};
+use std::{path::PathBuf, pin::Pin, sync::Arc, time::Duration};
 
 use reqwest::header::RETRY_AFTER;
 use serde::Deserialize;
@@ -15,6 +15,8 @@ use super::{
 use crate::ingest::backoff_delay;
 
 pub const API_BASE: &str = "https://app-api.pixiv.net";
+pub const OAUTH_TOKEN_URL: &str = "https://oauth.secure.pixiv.net/auth/token";
+pub const DEFAULT_USER_AGENT: &str = "Kanalib/0.1 (Pixiv ingest)";
 
 #[derive(Debug, Clone)]
 pub struct PixivResponse {
@@ -455,16 +457,157 @@ fn days_from_civil(year: i64, month: i64, day: i64) -> i64 {
     era * 146_097 + doe - 719_468
 }
 
-/// 访问令牌来源；真实部署可在这里接 OAuth 刷新，测试可注入固定令牌。
+/// 访问令牌来源；刷新实现需要异步，测试仍可注入固定令牌。
 pub trait PixivTokenProvider: Send + Sync {
-    fn access_token(&self) -> Option<String>;
+    fn access_token<'a>(&'a self) -> BoxFuture<'a, Option<String>>;
 }
 
 impl PixivTokenProvider for String {
-    fn access_token(&self) -> Option<String> {
-        let token = self.trim();
-        (!token.is_empty()).then(|| token.to_string())
+    fn access_token<'a>(&'a self) -> BoxFuture<'a, Option<String>> {
+        let token = self.trim().to_string();
+        Box::pin(async move { (!token.is_empty()).then_some(token) })
     }
+}
+
+#[derive(Debug)]
+struct TokenState {
+    access_token: String,
+    refresh_token: String,
+    expires_at: i64,
+}
+
+/// Pixiv OAuth refresh token 轮换：缓存 access token，过期前刷新并原子写回新 refresh token。
+pub struct RefreshingTokenProvider {
+    client: reqwest::Client,
+    client_id: String,
+    client_secret: String,
+    user_agent: String,
+    refresh_token_file: Option<PathBuf>,
+    state: Mutex<TokenState>,
+}
+
+impl RefreshingTokenProvider {
+    pub fn new(
+        client: reqwest::Client,
+        client_id: impl Into<String>,
+        client_secret: impl Into<String>,
+        refresh_token: impl Into<String>,
+        refresh_token_file: Option<PathBuf>,
+        user_agent: Option<String>,
+    ) -> Self {
+        Self {
+            client,
+            client_id: client_id.into(),
+            client_secret: client_secret.into(),
+            user_agent: user_agent.unwrap_or_else(|| DEFAULT_USER_AGENT.to_string()),
+            refresh_token_file,
+            state: Mutex::new(TokenState {
+                access_token: String::new(),
+                refresh_token: refresh_token.into(),
+                expires_at: 0,
+            }),
+        }
+    }
+
+    async fn refresh(&self, state: &mut TokenState) -> Option<String> {
+        let refresh_token = state.refresh_token.clone();
+        let form = [
+            ("client_id", self.client_id.as_str()),
+            ("client_secret", self.client_secret.as_str()),
+            ("grant_type", "refresh_token"),
+            ("refresh_token", refresh_token.as_str()),
+            ("include_policy", "true"),
+        ];
+        let response = self
+            .client
+            .post(OAUTH_TOKEN_URL)
+            .header(reqwest::header::USER_AGENT, &self.user_agent)
+            .form(&form)
+            .send()
+            .await;
+        let response = match response {
+            Ok(response) => response,
+            Err(error) => {
+                warn!(%error, "pixiv token refresh request failed");
+                return None;
+            }
+        };
+        let status = response.status();
+        let body = response.text().await.unwrap_or_default();
+        if !status.is_success() {
+            warn!(%status, "pixiv token refresh rejected");
+            return None;
+        }
+        let envelope: OAuthEnvelope = match serde_json::from_str(&body) {
+            Ok(envelope) => envelope,
+            Err(error) => {
+                warn!(%error, "pixiv token refresh returned invalid JSON");
+                return None;
+            }
+        };
+        if let Some(errors) = &envelope.errors {
+            warn!(%errors, "pixiv token refresh returned errors");
+        }
+        let Some(response) = envelope.response else {
+            warn!("pixiv token refresh response has no token payload");
+            return None;
+        };
+        if response.access_token.trim().is_empty() {
+            warn!("pixiv token refresh returned an empty access token");
+            return None;
+        }
+        let expires_in = response.expires_in.unwrap_or(3_600).max(60);
+        state.access_token = response.access_token;
+        state.expires_at = crate::db::now().saturating_add(expires_in);
+        if let Some(rotated) = response
+            .refresh_token
+            .filter(|token| !token.trim().is_empty())
+            && rotated != state.refresh_token
+        {
+            state.refresh_token.clone_from(&rotated);
+            if let Some(path) = &self.refresh_token_file
+                && let Err(error) = crate::config::write_secret(path, &rotated)
+            {
+                warn!(
+                    path = %path.display(),
+                    %error,
+                    "pixiv refresh token changed but could not be persisted"
+                );
+            }
+        }
+        Some(state.access_token.clone())
+    }
+}
+
+impl PixivTokenProvider for RefreshingTokenProvider {
+    fn access_token<'a>(&'a self) -> BoxFuture<'a, Option<String>> {
+        Box::pin(async move {
+            let now = crate::db::now();
+            let mut state = self.state.lock().await;
+            if !state.access_token.is_empty() && state.expires_at > now.saturating_add(60) {
+                return Some(state.access_token.clone());
+            }
+            self.refresh(&mut state).await
+        })
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct OAuthEnvelope {
+    #[serde(default)]
+    response: Option<OAuthResponse>,
+    #[serde(default)]
+    errors: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Deserialize)]
+struct OAuthResponse {
+    #[serde(default)]
+    access_token: String,
+    #[serde(default)]
+    refresh_token: Option<String>,
+    #[serde(default)]
+    expires_in: Option<i64>,
 }
 
 pub struct ReqwestPixivTransport {
@@ -497,6 +640,29 @@ impl ReqwestPixivTransport {
             token: Some(provider),
         }
     }
+
+    /// 用 refresh token 自动换取 access token；轮换后的令牌写回同一文件。
+    pub fn with_refresh_token(
+        client: reqwest::Client,
+        client_id: impl Into<String>,
+        client_secret: impl Into<String>,
+        refresh_token: impl Into<String>,
+        refresh_token_file: Option<PathBuf>,
+        user_agent: Option<String>,
+    ) -> Self {
+        let provider = RefreshingTokenProvider::new(
+            client.clone(),
+            client_id,
+            client_secret,
+            refresh_token,
+            refresh_token_file,
+            user_agent,
+        );
+        Self {
+            client,
+            token: Some(Arc::new(provider)),
+        }
+    }
 }
 
 impl PixivTransport for ReqwestPixivTransport {
@@ -508,24 +674,20 @@ impl PixivTransport for ReqwestPixivTransport {
     ) -> Pin<Box<dyn std::future::Future<Output = Result<PixivResponse, SourceError>> + Send + 'a>>
     {
         let client = self.client.clone();
-        let token = if auth {
-            self.token
-                .as_ref()
-                .and_then(|provider| provider.access_token())
-        } else {
-            None
-        };
-        if auth && token.is_none() {
-            return Box::pin(async {
-                Err(SourceError::auth("pixiv access token is not configured"))
-            });
-        }
+        let provider = if auth { self.token.clone() } else { None };
         let url = format!("{API_BASE}{path}");
         let params: Vec<(String, String)> = params
             .iter()
             .map(|(key, value)| ((*key).to_string(), value.clone()))
             .collect();
         Box::pin(async move {
+            let token = match provider {
+                Some(provider) => provider.access_token().await,
+                None => None,
+            };
+            if auth && token.is_none() {
+                return Err(SourceError::auth("pixiv access token is not configured"));
+            }
             let mut request = client.get(url).query(&params);
             if let Some(token) = token {
                 request = request.bearer_auth(token);

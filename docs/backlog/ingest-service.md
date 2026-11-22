@@ -715,17 +715,24 @@ easytier-core --hostname kanalib-box -i 10.126.126.3 \
 ```toml
 [service]
 bind = "10.126.126.3:8790"
-data_dir = "/var/lib/kanalib-ingest"
 db = "/var/lib/kanalib-ingest/ingest.db"
 media_dir = "/var/lib/kanalib-ingest/media"
 public_base = "http://kanalib-box.et.net:8790"
 # 规则文件与主配置分离：主配置改完要重启，规则文件支持热重载
 rules_file = "/etc/kanalib/rules.toml"
+sync_interval_secs = 60
 
 [source.pixiv]
 enabled = true
-credential_ref = "keyring:kanalib-pixiv"
 bookmark_users = []
+# 二选一：access token 直填，或 refresh token + OAuth 客户端凭据（推荐）
+# access_token_file = "/etc/kanalib/pixiv-access-token"
+refresh_token_file = "/etc/kanalib/pixiv-refresh-token"
+client_id = "pixiv-oauth-client-id"
+client_secret = "pixiv-oauth-client-secret"
+# keyring 尚未实现；填 credential_ref 会在启动时显式报错
+# credential_ref = "keyring:kanalib-pixiv"
+user_agent = "Kanalib/0.1 (Pixiv ingest)"
 
 [download]
 concurrency = 3
@@ -742,7 +749,17 @@ timeout_secs = 30
 web_base = "http://kanalib-web.et.net:8788"
 secret_file = "/etc/kanalib/ingest-hmac"
 batch_size = 100
+max_attempts = 5
+backoff_base_secs = 5
+backoff_max_secs = 600
+
+[media]
+signing_key_file = "/etc/kanalib/media-signing-key"
+# 默认复用 [service].bind；需要拆端口时才覆盖
+# bind = "10.126.126.3:8790"
 ```
+
+仓库根部的可直接复制版本见 [`deploy/ingest.toml.example`](../../deploy/ingest.toml.example)。当前版本只支持令牌文件：`credential_ref` 会显式报错，不会静默回退。
 
 ### 10.2 规则文件 `rules.toml`
 
@@ -1252,20 +1269,20 @@ watch = [
 
 | # | 文件 | 现状 | 目标 |
 |---|---|---|---|
-| B23 | `src/main.rs:16-35` | 参数全部来自 `clap`，无配置文件 | 增加 `--config ingest.toml`；`rules_file` 指向 `rules.toml`；保留 `clap` 作为覆盖项 |
-| B24 | `src/main.rs:41-44` | `source != "mock"` 直接 `bail!` | 允许 `pixiv`；真实来源只在显式开启时启动 |
+| B23 | `src/main.rs` | **已完成**：`--config ingest.toml` + `clap` 覆盖项；未知键由 `deny_unknown_fields` 拒绝 | `rules_file` 指向 `rules.toml`（规则层未落地前只告警） |
+| B24 | `src/main.rs` | **已完成**：`mock` / `pixiv` 均可启动；`--source` 缺省由 `source.pixiv.enabled` 决定 | 真实来源只在显式开启时启动 |
 | B25 | `src/main.rs` | 无 SIGHUP 处理 | 注册 `SIGHUP` → 重载 `rules.toml`；失败保持旧快照并记日志 |
-| B26 | `src/main.rs:56` | 每轮新建 `MockTransport` | 真实运行时换成 `reqwest` 传输；mock 只在 `--source mock` 下使用 |
+| B26 | `src/main.rs` | **已完成**：Pixiv 走 `reqwest` 图片传输（Range、Referer、状态/头透传）；mock 只在 `--source mock` 下使用 | 保持两者按来源选择 |
 
 ### 17.5 非阻断：推送与对外接口
 
-`src/push.rs` 已实现队列、签名、重试、删除事件与原图签名校验；尚未接进主循环（等待 P3 产生 `allow` 决策）。
+`src/push.rs` 已实现队列、签名、重试、删除事件与原图签名校验，并已接进主循环：每轮从库里挑 `decision='allow'` 且 `revision > pushed_revision` 的条目生成批次，ack 后回写追踪位；删除事件按 `works.status='deleted'` 生成。规则层（B14–B22）未落地前不会自动产生 `allow`，所以主循环不会推送任何条目。
 
 | # | 文件 | 现状 | 目标 |
 |---|---|---|---|
-| B27 | `src/push.rs` | **已实现**：`enqueue_*` / `flush` / `build_allow_batch` / `ReqwestPushTransport` | 接进主循环；批次大小与重试参数来自配置 |
+| B27 | `src/push.rs` | **已完成**：`enqueue_decisions` 从 DB 生成 allow/delete 批次；`flush` ack 后回写 `pushed_revision` / `delete_pushed` | 批次大小与重试参数来自 `[push]` |
 | B28 | 新建 `src/admin.rs` | 不存在 | 审核页 + 规则页 + 健康检查；只绑 EasyTier 虚拟 IP |
-| B29 | `src/push.rs` + 待建 `src/media.rs` | **签名/验签已实现**（`sign_original` / `verify_original`） | box 侧 HTTP 原图端点；只校验签名、过期与条目存在性 |
+| B29 | `src/media.rs` | **已完成**：`GET/HEAD /original/{id}` 校验签名/过期/条目存活，单区间 Range，流式返回；只绑配置地址 | 路径不进入响应；EasyTier 未就绪时 30s 重试绑定 |
 
 ### 17.6 已完成、不需改动
 

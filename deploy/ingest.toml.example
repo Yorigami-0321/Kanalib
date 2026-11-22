@@ -1,0 +1,54 @@
+# Kanalib 入库服务主配置。
+# 复制到 /etc/kanalib/ingest.toml（0644）；令牌与密钥只写路径，文件权限 0600。
+# 改这个文件需要重启服务；规则文件（rules.toml）才走热重载。
+
+[service]
+# 只绑 EasyTier 虚拟 IP；原图端点也复用这个地址，除非 [media].bind 覆盖。
+bind = "10.126.126.3:8790"
+db = "/var/lib/kanalib-ingest/ingest.db"
+media_dir = "/var/lib/kanalib-ingest/media"
+public_base = "http://kanalib-box.et.net:8790"
+rules_file = "/etc/kanalib/rules.toml"
+sync_interval_secs = 60
+
+[source.pixiv]
+enabled = true
+bookmark_users = ["123456"]
+
+# 二选一：
+# 1) 已有 access token（手动换取后写文件，过期需人工更新）
+# access_token_file = "/etc/kanalib/pixiv-access-token"
+# 2) OAuth refresh token（推荐；access token 过期前自动刷新，轮换后的 refresh token 原子写回）
+refresh_token_file = "/etc/kanalib/pixiv-refresh-token"
+client_id = "pixiv-oauth-client-id"
+client_secret = "pixiv-oauth-client-secret"
+# credential_ref（keyring）尚未实现，填了会在启动时显式报错。
+# credential_ref = "keyring:kanalib-pixiv"
+user_agent = "Kanalib/0.1 (Pixiv ingest)"
+
+[download]
+concurrency = 3
+retry_max = 5
+timeout_secs = 60
+
+[tagging]
+# 规则层（B14–B22）落地前不会调用打标后端；先留空。
+# backend = "http"
+# endpoint = "http://127.0.0.1:8791/tag"
+concurrency = 2
+timeout_secs = 30
+
+[push]
+web_base = "http://kanalib-web.et.net:8788"
+secret_file = "/etc/kanalib/ingest-hmac"
+batch_size = 100
+max_attempts = 5
+backoff_base_secs = 5
+backoff_max_secs = 600
+rules_version = "unversioned"
+
+[media]
+# 与 kanalib-web 的 --media-signing-key / KANALIB_MEDIA_SIGNING_KEY 相同。
+signing_key_file = "/etc/kanalib/media-signing-key"
+# 默认用 [service].bind；只有需要把原图端点放到别的地址时才覆盖。
+# bind = "10.126.126.3:8790"

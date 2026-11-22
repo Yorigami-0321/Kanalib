@@ -8,7 +8,7 @@ use sha1::Digest;
 
 use crate::source::{AiType, Rating};
 
-pub const SCHEMA_VERSION: u32 = 3;
+pub const SCHEMA_VERSION: u32 = 4;
 
 const MIGRATION_V1: &str = r#"
 CREATE TABLE IF NOT EXISTS schema_meta (
@@ -187,6 +187,16 @@ UPDATE works SET rating = lower(rating) WHERE lower(rating) IN ('all', 'r18', 'r
 UPDATE works SET ai_type = CASE WHEN ai_marked = 1 THEN 'ai' ELSE 'unknown' END;
 "#;
 
+const MIGRATION_V4: &str = r#"
+ALTER TABLE items ADD COLUMN pushed_revision INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE items ADD COLUMN delete_pushed INTEGER NOT NULL DEFAULT 0;
+
+CREATE INDEX IF NOT EXISTS idx_items_push
+    ON items(decision, pushed_revision, revision);
+CREATE INDEX IF NOT EXISTS idx_items_delete
+    ON items(delete_pushed, work_id);
+"#;
+
 #[derive(Debug)]
 pub struct Db {
     connection: Connection,
@@ -209,6 +219,17 @@ impl Db {
 
     pub fn open_in_memory() -> Result<Self> {
         Self::from_connection(Connection::open_in_memory()?)
+    }
+
+    /// 只读连接：媒体回源等热路径不跑迁移，也不拿写锁。
+    pub fn open_read(path: &Path) -> Result<Self> {
+        let connection = Connection::open_with_flags(
+            path,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )
+        .with_context(|| format!("opening database read-only {}", path.display()))?;
+        connection.pragma_update(None, "busy_timeout", "5000")?;
+        Ok(Self { connection })
     }
 
     fn from_connection(connection: Connection) -> Result<Self> {
@@ -249,6 +270,9 @@ impl Db {
         }
         if version < 3 {
             tx.execute_batch(MIGRATION_V3)?;
+        }
+        if version < 4 {
+            tx.execute_batch(MIGRATION_V4)?;
         }
         tx.execute(
             "INSERT OR IGNORE INTO schema_meta(version) VALUES (?1)",

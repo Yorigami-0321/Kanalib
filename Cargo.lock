@@ -4310,6 +4310,7 @@ name = "kanalib-ingest"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "axum",
  "clap",
  "futures",
  "hmac",
@@ -4323,6 +4324,9 @@ dependencies = [
  "sha2 0.10.9",
  "tempfile",
  "tokio",
+ "tokio-util",
+ "toml 0.8.23",
+ "tower",
  "tracing",
  "tracing-subscriber",
 ]

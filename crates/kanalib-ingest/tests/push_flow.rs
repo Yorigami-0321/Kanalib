@@ -10,8 +10,8 @@ use kanalib_ingest::{
     db::Db,
     push::{
         self, PushConfig, PushError, PushRequest, PushResponse, PushTransport, batch_id_for,
-        build_allow_batch, enqueue_allow, enqueue_delete, flush, pending, signed_original_url,
-        signed_request, verify_original,
+        build_allow_batch, enqueue_allow, enqueue_decisions, enqueue_delete, flush, pending,
+        signed_original_url, signed_request, verify_original,
     },
 };
 use kanalib_wall_model::{IngestDelete, IngestDeleteItem};
@@ -451,6 +451,90 @@ fn allow_batch_maps_ratings_and_refuses_unknown() {
             assert!(result.is_err(), "{rating} must not be pushed");
         }
     }
+}
+
+#[test]
+fn enqueue_decisions_only_picks_unpushed_allow_rows() {
+    let db = seeded_db();
+    let enqueued = enqueue_decisions(&db, Some("rules-1"), 100).expect("enqueue");
+    assert_eq!(enqueued.allow_batches, 1);
+    assert_eq!(enqueued.allow_items, 1);
+    assert_eq!(enqueued.delete_batches, 0);
+    assert_eq!(pending(&db, 0, 10).expect("pending").len(), 1);
+
+    let again = enqueue_decisions(&db, Some("rules-1"), 100).expect("enqueue");
+    assert_eq!((again.allow_batches, again.allow_items), (0, 0));
+
+    db.connection()
+        .execute(
+            "UPDATE items SET decision = 'review' WHERE id = ?1",
+            [ITEM_ID],
+        )
+        .expect("review");
+    db.connection()
+        .execute(
+            "UPDATE items SET pushed_revision = revision WHERE id = ?1",
+            [ITEM_ID],
+        )
+        .expect("mark pushed");
+    let none = enqueue_decisions(&db, None, 100).expect("enqueue");
+    assert_eq!((none.allow_batches, none.allow_items), (0, 0));
+}
+
+#[tokio::test]
+async fn ack_records_pushed_revision_and_delete_progress() {
+    let db = seeded_db();
+    let enqueued = enqueue_decisions(&db, None, 100).expect("enqueue");
+    assert_eq!(enqueued.allow_items, 1);
+    let transport = Scripted::new(Vec::new());
+    flush(&db, &config(), &transport, 1_000, 10)
+        .await
+        .expect("flush allow");
+    let pushed: i64 = db
+        .connection()
+        .query_row(
+            "SELECT pushed_revision FROM items WHERE id = ?1",
+            [ITEM_ID],
+            |row| row.get(0),
+        )
+        .expect("pushed");
+    assert_eq!(pushed, 3);
+
+    db.connection()
+        .execute(
+            "UPDATE works SET status = 'deleted' WHERE id = ?1",
+            [WORK_ID],
+        )
+        .expect("delete work");
+    let enqueued = enqueue_decisions(&db, None, 100).expect("enqueue delete");
+    assert_eq!(enqueued.delete_batches, 1);
+    assert_eq!(enqueued.delete_items, 1);
+    let delete_ids: Vec<String> = pending(&db, 2_000, 10)
+        .expect("pending")
+        .into_iter()
+        .map(|batch| batch.id)
+        .collect();
+    assert_eq!(delete_ids.len(), 1);
+    assert!(delete_ids[0].starts_with("delete-"));
+
+    flush(&db, &config(), &transport, 2_000, 10)
+        .await
+        .expect("flush delete");
+    let delete_pushed: i64 = db
+        .connection()
+        .query_row(
+            "SELECT delete_pushed FROM items WHERE id = ?1",
+            [ITEM_ID],
+            |row| row.get(0),
+        )
+        .expect("delete pushed");
+    assert_eq!(delete_pushed, 1);
+    let after = enqueue_decisions(&db, None, 100).expect("enqueue");
+    assert_eq!(
+        (after.allow_batches, after.delete_batches),
+        (0, 0),
+        "nothing should be enqueued twice"
+    );
 }
 
 #[test]
