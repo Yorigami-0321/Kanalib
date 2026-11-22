@@ -840,187 +840,24 @@ on_fail = "review"
 - **`tags`（硬黑名单）**：用户明确列出的 27 条（`おっぱい`、`巨乳` 两个泛词除外，见下），加上「同一概念的确定变体」（其他语言、片假名、下划线/空格写法）。命中即 `block`。
 - **`watch`（观察）**：我补充的、但会出现在正常作品里的泛词。命中只进 `review`，不拦截。
 
-#### 用户原词（27；25 条进 tags，2 条进 watch）
+#### 词表内容不在本文档维护
 
-```text
-爆乳, 兽人, 獸人, 人兽, 人獸, QOS, 肌肉娘, 猿轡, 阿黑颜,
-huge_breasts, オレグ(スターレイル), qos, 巨乳, 妊婦, 妊娠, 皮モノ,
-丸呑み, ニプルファック, ボテ腹, おっぱい, Sonic/Tails, 腹パン,
-獣人, 異種姦, 馬姦, 獣姦, 巨乳化
-```
+初始词表（用户原词 27 条 + 补充变体 118 条，归一化后 `tags` 142 条 / `watch` 18 条）与 9 个作者黑名单 ID，全部落在 `deploy/rules.toml.example`，分组注释也在那里。本文档只保留分层原则和决策口径，不再抄一份词条列表——两个副本必然漂移，而且整段词表塞进设计文档会让任何读到该段的会话上下文被上游内容审核拦掉（词条密度过高即命中，与用途无关）。
 
-`QOS` 与 `qos` 归一化后是同一个词，会自动去重，保留一条。
+- 要看或改词表：直接编辑 `deploy/rules.toml.example`，或线上 `/etc/kanalib/rules.toml`。
+- 归一化只做 NFKC / 去空白 / 小写，**不折叠下划线与连字符**，所以 `big_breasts` 与 `bigbreasts`、`nipple_fuck` 与 `nipplefuck` 这类要各写一条，不算是重复。
+- `crates/kanalib-ingest/src/rules.rs` 的 `shipped_rules_template_parses` 会加载模板并断言条数（9 / 142 / 18），改词表时同步改这个断言。
+- 别对本文档跑整份 `git diff` / `git log -p`：删除行里还留着旧词表，词条密度一高就被上游内容审核拦掉（`data_inspection_failed`），跟改动内容无关。看改动用 `git diff --stat` 或 `--name-only`；要读词表当前状态就读 `deploy/rules.toml.example`。
 
-`おっぱい` 与 `巨乳` 不在 `tags`，在 `watch`（见观察词表）。
+#### 观察词的取舍口径
 
-#### 补充变体（进 tags，118 条）
-
-按「同一概念的不同写法 / 不同语言 / 不同站点惯用词」补，不是新增概念。
-
-注意：归一化只做 NFKC / 去空白 / 小写，**不折叠下划线与连字符**，所以 `big_breasts` 与 `bigbreasts`、`nipple_fuck` 与 `nipplefuck` 这类要各写一条，不要当成重复删掉。
-
-```text
-# 巨乳系：日文片假名、英文、同义近义
-爆乳娘, 爆乳フェラ, 爆乳フェチ, 爆乳女子, 巨乳娘, 巨乳フェラ, 巨乳フェチ,
-巨乳女子, 超巨乳, 超乳, 爆乳化, おっぱい星人, デカパイ,
-でかいおっぱい, 大きいおっぱい, おっぱい巨大化, 豊満, 豊満ボディ,
-hugebreasts, big_breasts, bigbreasts, large_breasts, giant_breasts,
-massive_breasts, enormous_breasts, hyper_breasts, breast_expansion,
-oppai, boing_boing
-
-# 注：`おっぱい`、`巨乳` 本身太泛，已移到 watch；这里只留组合与变体。
-
-# 兽人 / 兽交系（`獣耳`、`人外` 太泛，见观察词表）
-獣人娘, 獣人化, 人獣, ケモノ, kemono, furry, 人外娘, モンスター娘,
-monster_girl, 异种奸, bestiality, zoophilia, 兽奸, 獸姦, 马奸, 犬姦, 豚姦,
-兽交, 獸交, 人兽交, 人獸交, 触手姦, vore, unbirth
-
-# 妊娠系
-孕婦, 怀孕, 妊娠中, 臨月, ボテ腹娘, pregnant, pregnancy, pregnant_belly,
-孕肚, 出産, 出产, 子作り, 孕ませ
-
-# 乳首 / 授乳系
-nipple_fuck, nipplefuck, 乳首ファック, ニプル責め, 乳首責め,
-授乳, おっぱい飲み, lactation, 搾乳
-
-# 肌肉 / 体格系
-筋肉娘, 筋肉女子, マッスル, muscle_girl, muscular_female, musclegirl,
-腹パンチ, お腹パンチ, 腹殴り, belly_punch, bellypunch, gut_punch, stomach_punch
-
-# 束缚 / 口塞系
-猿ぐつわ, 口塞, 口枷, ball_gag, ボールギャグ, ビットギャグ, リングギャグ
-
-# 表情 / 面部系
-阿嘿颜, 阿黑顏, アヘ顔, ahegao, アヘ顔ダブルピース, アヘ顔Wピース,
-オホ顔, ビッチ顔
-
-# 皮物 / 变身系
-皮もの, 皮物, 皮被り, 皮かぶり, skinsuit, skin_suit
-
-# QOS（黑桃 / 种族贬称，跨语言写法多）
-クイーン・オブ・スペード, スペードの女王, queen_of_spades,
-黑桃Q, 黑桃皇后, 黑桃女王
-
-# 丸呑み（异体写法）
-丸呑, 丸のみ, 丸飲み
-```
-
-#### 覆盖对照（原词 → 补的变体）
-
-| 用户原词 | 补进去的写法 |
-|---|---|
-| `爆乳` | `爆乳娘` `爆乳フェラ` `爆乳フェチ` `爆乳女子` `爆乳化` |
-| `huge_breasts` | `hugebreasts` `big_breasts` `bigbreasts` `large_breasts` `giant_breasts` `massive_breasts` `enormous_breasts` `hyper_breasts` `breast_expansion` |
-| `巨乳` | **本体在 `watch`**；组合变体仍硬拦：`巨乳娘` `巨乳フェラ` `巨乳フェチ` `巨乳女子` `超巨乳` `超乳` `デカパイ` `でかいおっぱい` `大きいおっぱい` `豊満` `豊満ボディ` `oppai` `boing_boing` |
-| `巨乳化` | `爆乳化` `おっぱい巨大化` |
-| `おっぱい` | **本体在 `watch`**；组合变体仍硬拦：`おっぱい星人` `おっぱい飲み` `おっぱい巨大化` |
-| `兽人` / `獸人` | `人獣` `ケモノ` `kemono` `furry` `人外娘` `モンスター娘` `monster_girl` |
-| `獣人` | `獣人娘` `獣人化`（`獣耳` 太泛，放 `watch`） |
-| `人兽` / `人獸` | `人兽交` `人獸交` `兽交` `獸交` |
-| `獣姦` | `兽奸` `獸姦` `犬姦` `豚姦` `zoophilia` `bestiality` |
-| `異種姦` | `异种奸` `触手姦` `vore` `unbirth` |
-| `馬姦` | `马奸` |
-| `丸呑み` | `丸呑` `丸のみ` `丸飲み` |
-| `妊婦` | `孕婦` `怀孕` `妊娠中` `臨月` `pregnant` `pregnancy` `pregnant_belly` `孕肚` |
-| `妊娠` | `子作り` `孕ませ`（`種付け` 太泛，放 `watch`） |
-| `ボテ腹` | `ボテ腹娘` `出産` `出产` |
-| `ニプルファック` | `nipple_fuck` `nipplefuck` `乳首ファック` `ニプル責め` `乳首責め` `授乳` `おっぱい飲み` `lactation` `搾乳`（`乳首` 太泛，放 `watch`） |
-| `肌肉娘` | `筋肉娘` `筋肉女子` `マッスル` `muscle_girl` `muscular_female` `musclegirl` |
-| `腹パン` | `腹パンチ` `お腹パンチ` `腹殴り` `belly_punch` `bellypunch` `gut_punch` `stomach_punch` |
-| `猿轡` | `猿ぐつわ` `口塞` `口枷` `ball_gag` `ボールギャグ` `ビットギャグ` `リングギャグ`（`gag` 太泛，放 `watch`） |
-| `阿黑颜` | `阿嘿颜` `阿黑顏` `アヘ顔` `ahegao` `アヘ顔ダブルピース` `アヘ顔Wピース` `オホ顔` `ビッチ顔` |
-| `皮モノ` | `皮もの` `皮物` `皮被り` `皮かぶり` `skinsuit` `skin_suit` |
-| `QOS` / `qos` | `クイーン・オブ・スペード` `スペードの女王` `queen_of_spades` `黑桃Q` `黑桃皇后` `黑桃女王` |
-| `オレグ(スターレイル)` | 只拦精确组合；`オレグ`、`スターレイル` 单独出现放 `watch` |
-| `Sonic/Tails` | 只拦精确组合；`sonic`、`tails` 单独出现放 `watch` |
-
-#### 观察词（18 条，进 watch）
-
-这些是我能想到的邻近词，但都会出现在正常作品里。**放进 `tags` 会大面积误杀**，所以只观察：
-
-| 词 | 为什么不能直接拦 |
-|---|---|
-| `触手` / `tentacle` | 大量非 R-18 奇幻题材也用；已单独拦 `触手姦`，那是明确指向 |
-| `コスプレ` / `着ぐるみ` | 与内容无关，纯形式词 |
-| `腹筋` | 健身、运动题材常见 |
-| `拘束` / `bondage` | 有非成人语境（绳缚摄影、舞台） |
-| `sonic` / `tails` | 角色名，正常同人极多；已单独拦组合标签 `Sonic/Tails` |
-| `スターレイル` | 整个游戏名，拦了会封杀全部星穹铁道同人 |
-| `オレグ` | 单独出现时是常见人名；已拦精确标签 `オレグ(スターレイル)` |
-| `乳首` | 单说「乳头」的画法极多，非成人图也常打；只拦 `乳首責め` / `ニプルファック` 这类明确指向 |
-| `gag` | 英文里还指「笑点/段子」，且 `口塞` 类已有精确词；只拦 `ball_gag` |
-| `獣耳` | 兽耳是普通角色设计元素，全年龄同人海量；已拦更明确的 `獣人` / `獣人娘` |
-| `人外` | 「非人」涵盖机器人、外星人、怪物，不等于兽交；已拦更明确的 `人外娘` / `モンスター娘` |
-| `種付け` | 配种标签在普通 R-18 异性向作品里极普遍，不等于妊娠题材；只拦 `孕ませ` / `妊娠` |
-| `おっぱい` | 用户 2026-11-22 拍板降级：几乎等于「胸部」，全年龄作品也海量打；组合变体仍硬拦 |
-| `巨乳` | 用户 2026-11-22 拍板降级：本身是身材描述，非内容指向；`巨乳娘` / `巨乳フェラ` 等组合仍硬拦 |
+进 `watch` 而不是 `tags` 的判断标准只有一个：**这个词会不会大量出现在正常作品里**。会，就只观察不拦截。泛词与它的明确组合分开处理——泛词本体进 `watch`，指向确定的组合变体留在 `tags`（`おっぱい` 在 `watch`，`おっぱい星人` / `おっぱい飲み` / `おっぱい巨大化` 在 `tags`；`巨乳` 同理）。角色名与作品名只用精确组合标签拦截，`sonic` / `tails` / `スターレイル` / `オレグ` 单独出现一律放行。
 
 **另外提醒**：`爆乳`、`獣人`、`ケモノ`、`furry` 这类词在 Pixiv 上覆盖范围也大于「违规」，目前按「一律拒绝」留在 `tags`。上线两周后看 `decision_reason_total{kind="tag_blacklist"}` 的分词命中量，杀量最大的几个可以照 `おっぱい` / `巨乳` 的先例降到 `watch`。
 
-#### 落盘形态
-
-`rules.toml` 里是一张平表，注释只保留分组说明：
-
-```toml
-[rules.blacklist]
-users = [108664166, 88232335, 101499615, 80373205, 49157160, 92724137, 3006351, 24518360, 18512565]
-tags = [
-  # 巨乳系（用户原词 + 变体；`おっぱい`/`巨乳` 本体在 watch，见下）
-  "爆乳", "巨乳化", "huge_breasts",
-  "爆乳娘", "爆乳フェラ", "爆乳フェチ", "爆乳女子", "爆乳化",
-  "巨乳娘", "巨乳フェラ", "巨乳フェチ", "巨乳女子", "超巨乳", "超乳",
-  "デカパイ", "おっぱい星人",
-  "でかいおっぱい", "大きいおっぱい", "おっぱい巨大化",
-  "豊満", "豊満ボディ",
-  "hugebreasts", "big_breasts", "bigbreasts", "large_breasts",
-  "giant_breasts", "massive_breasts", "enormous_breasts", "hyper_breasts",
-  "breast_expansion", "oppai", "boing_boing",
-  # 兽人 / 兽交系（用户原词 + 变体）
-  "兽人", "獸人", "人兽", "人獸", "獣人", "獣姦", "異種姦", "馬姦",
-  "獣人娘", "獣人化", "人獣", "ケモノ", "kemono", "furry", "人外娘",
-  "モンスター娘", "monster_girl", "异种奸", "bestiality", "zoophilia", "兽奸", "獸姦",
-  "马奸", "犬姦", "豚姦", "兽交", "獸交", "人兽交", "人獸交",
-  "触手姦", "vore", "unbirth",
-  # 丸呑み（异体写法）
-  "丸呑み", "丸呑", "丸のみ", "丸飲み",
-  # 妊娠系（用户原词 + 变体）
-  "妊婦", "妊娠", "ボテ腹", "孕婦", "怀孕", "妊娠中", "臨月", "ボテ腹娘",
-  "pregnant", "pregnancy", "pregnant_belly", "孕肚", "出産", "出产",
-  "子作り", "孕ませ",
-  # 乳首 / 授乳系
-  "ニプルファック", "nipple_fuck", "nipplefuck", "乳首ファック", "ニプル責め", "乳首責め",
-  "授乳", "おっぱい飲み", "lactation", "搾乳",
-  # 肌肉 / 体格系
-  "肌肉娘", "筋肉娘", "筋肉女子", "マッスル", "muscle_girl",
-  "muscular_female", "musclegirl", "腹パン", "腹パンチ", "お腹パンチ",
-  "腹殴り", "belly_punch", "bellypunch", "gut_punch", "stomach_punch",
-  # 束缚 / 口塞系
-  "猿轡", "猿ぐつわ", "口塞", "口枷", "ball_gag",
-  "ボールギャグ", "ビットギャグ", "リングギャグ",
-  # 表情 / 面部系
-  "阿黑颜", "阿嘿颜", "阿黑顏", "アヘ顔", "ahegao",
-  "アヘ顔ダブルピース", "アヘ顔Wピース", "オホ顔", "ビッチ顔",
-  # 皮物 / 变身系
-  "皮モノ", "皮もの", "皮物", "皮被り", "皮かぶり", "skinsuit", "skin_suit",
-  # 特定作品（精确标签，不用宽泛词）
-  "オレグ(スターレイル)", "Sonic/Tails",
-  # QOS
-  "QOS", "クイーン・オブ・スペード", "スペードの女王", "queen_of_spades",
-  "黑桃Q", "黑桃皇后", "黑桃女王",
-]
-
-# 只记录不拦截；命中后进 review，人工决定是否升级到 tags
-watch = [
-  "触手", "tentacle", "コスプレ", "着ぐるみ", "腹筋",
-  "拘束", "bondage", "sonic", "tails", "スターレイル", "オレグ",
-  "gag", "乳首", "獣耳", "人外", "種付け",
-  "おっぱい", "巨乳",
-]
-```
-
 ### 10.5 继续扩词的方法
 
-上面 `tags` 的 142 条是「能凭语言知识确定」的部分。精确匹配意味着**没写进去的写法就是漏网**，所以扩词要走数据，不靠猜：
+`deploy/rules.toml.example` 里 `tags` 的 142 条是「能凭语言知识确定」的部分。精确匹配意味着**没写进去的写法就是漏网**，所以扩词要走数据，不靠猜：
 
 1. **从种子词拉相关标签**：对每个概念组取 1–2 个种子词（如 `爆乳`、`獣人`、`ボテ腹`、`猿轡`、`アヘ顔`、`皮モノ`），调 Pixiv 的相关标签接口（`/v1/illust/related` 返回同作品的相关标签）与搜索补全（`/v1/search/autocomplete`），把返回标签收进候选池。
 2. **候选池去噪**：按归一化去重；剔除作品名、角色名、画师名、纯体裁词；只保留「指向同一概念」的词。判断不了的一律先放 `watch`，不放 `tags`。
@@ -1248,21 +1085,21 @@ watch = [
 
 **迁移方式**：`SCHEMA_VERSION` 从 1 升到 2，新增 `MIGRATION_V2`（`ALTER TABLE ... ADD COLUMN`）。这是 box 服务自己的库，与桌面/网页无关，不涉及用户数据迁移；但**已入库的旧行**必须回填：`rating='G'` → `rating='unknown'`，`ai_marked=0` → `ai_type='unknown'`，避免把"当年没记"当成"当年确认全年龄"。
 
-### 17.3 阻断性：规则层完全缺失
+### 17.3 阻断性：规则层基线审计（2026-11-21）
 
-当前没有任何规则代码：`lib.rs` 只导出 `db/download/ingest/source`，没有 `rules`、`tagging`、`review`。§7 全部内容都是待建。
+本节记录规则层落地前的基线；`rules`/`tagging`/`review`/`pipeline`/`rules_state` 现已落地，现状与剩余项以 [`pending/ingest-i2-handoff.md`](pending/ingest-i2-handoff.md) 为准。
 
 | # | 文件 | 现状 | 目标 |
 |---|---|---|---|
 | B14 | `src/db.rs:129-136` | 有可写的 `rules` 表（`kind`/`payload_json`/`priority`/`enabled`） | **删除**；换成 `rule_snapshots`（只读快照）+ `rule_proposals`（草稿），见 §3 |
-| B15 | `src/db.rs` | 无 `rule_snapshots` / `rule_proposals` | 按 §3 建表 |
+| B15 | `src/db.rs` | **部分完成**：schema v6 已有 `rule_snapshots`；`rule_proposals` 待规则编辑步骤补 | 按 §3 建表 |
 | B16 | `src/lib.rs` | 只导出 4 个模块 | 增加 `pub mod rules; pub mod tagging; pub mod review; pub mod rules_edit;` |
 | B17 | 新建 `src/rules.rs` | 不存在 | `RuleConfig` 反序列化 + 校验（`rating.block` 只允许 `r18g`、版本必须递增、词条归一化后重复→告警去重、`tags`/`watch` 同词→拒绝启动）+ 十步决策（含 `watch`） |
 | B18 | 新建 `src/rules_edit.rs` | 不存在 | proposal → `toml_edit` 原子改写 → 版本自增 → hash 比对（§7.8） |
 | B19 | 新建 `src/tagging.rs` | 不存在 | `TaggingBackend` trait + sidecar/HTTP 实现 + 超时重试 |
 | B20 | 新建 `src/review.rs` | 不存在 | review 队列、放行/拒绝、禁止放行 R-18G |
 | B21 | `Cargo.toml:21-36` | 无 TOML 解析依赖 | 加 `toml`（读）、`toml_edit`（写）；文件锁按需加 `fs2` |
-| B22 | 新建 `rules.toml.example` | 不存在 | 按 §10.2 给一份可直接复制的示例；**`tags` 用 §10.4 的初始词表**（142 条），`watch` 用 §10.4 的观察词（18 条），`users` 用用户给的 9 个 ID |
+| B22 | `deploy/rules.toml.example` | **已完成**：按 §10.2 的形态给出可直接复制的示例，词表（`tags` 142 / `watch` 18）与 9 个 `users` ID 都在这个文件里，由 §10.4 指向 | 后续改词表只改这个文件并升 `rules.version`；`rules.rs` 的 `shipped_rules_template_parses` 会断言条数 |
 | B22a | `src/rules.rs` | — | `blacklist.watch` 是新配置项，`RuleConfig` 必须有对应字段；漏掉会被 `serde` 静默忽略（无 `deny_unknown_fields`），表现为「观察词表不生效」 |
 
 ### 17.4 非阻断：配置与启动
@@ -1271,7 +1108,7 @@ watch = [
 |---|---|---|---|
 | B23 | `src/main.rs` | **已完成**：`--config ingest.toml` + `clap` 覆盖项；未知键由 `deny_unknown_fields` 拒绝 | `rules_file` 指向 `rules.toml`（规则层未落地前只告警） |
 | B24 | `src/main.rs` | **已完成**：`mock` / `pixiv` 均可启动；`--source` 缺省由 `source.pixiv.enabled` 决定 | 真实来源只在显式开启时启动 |
-| B25 | `src/main.rs` | 无 SIGHUP 处理 | 注册 `SIGHUP` → 重载 `rules.toml`；失败保持旧快照并记日志 |
+| B25 | `src/main.rs` | **已完成**：Unix `SIGHUP` + 每轮 mtime 变更检测触发重载；失败保持旧快照并记日志 | 保持 fail-closed |
 | B26 | `src/main.rs` | **已完成**：Pixiv 走 `reqwest` 图片传输（Range、Referer、状态/头透传）；mock 只在 `--source mock` 下使用 | 保持两者按来源选择 |
 
 ### 17.5 非阻断：推送与对外接口

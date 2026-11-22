@@ -1,0 +1,120 @@
+# Kanalib 规则文件模板（唯一规则源）。
+# 复制到 /etc/kanalib/rules.toml（0660，属主 kanalib）；改完 SIGHUP 或管理页「重载」生效，不需要重启。
+# 校验：词条归一化后重复 -> 自动去重 + 告警；同词跨 tags/watch -> 拒绝启动；
+# version 必须比当前生效值大；rules.rating.block 只允许 r18g。
+# 词表只在本文件维护，设计文档不再内联副本（见 docs/backlog/ingest-service.md 10.4）。
+
+[rules]
+version = "2026-11-22.1"
+# 内容变了但版本没变 -> 拒绝重载并告警，防止"改了文件以为生效了"
+config_hash_check = true
+
+[rules.blacklist]
+# 作者黑名单：Pixiv user id（字符串）。命中即整作者 block。
+users = ["108664166", "88232335", "101499615", "80373205", "49157160", "92724137", "3006351", "24518360", "18512565"]
+# 标签黑名单：归一化后精确匹配 name / translated_name。
+# 服务不做隐式同义映射，同一种概念的不同写法要各列一条。
+tags = [
+  # 巨乳系（用户原词 + 变体；`おっぱい`/`巨乳` 本体在 watch，见下）
+  "爆乳", "巨乳化", "huge_breasts",
+  "爆乳娘", "爆乳フェラ", "爆乳フェチ", "爆乳女子", "爆乳化",
+  "巨乳娘", "巨乳フェラ", "巨乳フェチ", "巨乳女子", "超巨乳", "超乳",
+  "デカパイ", "おっぱい星人",
+  "でかいおっぱい", "大きいおっぱい", "おっぱい巨大化",
+  "豊満", "豊満ボディ",
+  "hugebreasts", "big_breasts", "bigbreasts", "large_breasts",
+  "giant_breasts", "massive_breasts", "enormous_breasts", "hyper_breasts",
+  "breast_expansion", "oppai", "boing_boing",
+  # 兽人 / 兽交系（用户原词 + 变体）
+  "兽人", "獸人", "人兽", "人獸", "獣人", "獣姦", "異種姦", "馬姦",
+  "獣人娘", "獣人化", "人獣", "ケモノ", "kemono", "furry", "人外娘",
+  "モンスター娘", "monster_girl", "异种奸", "bestiality", "zoophilia", "兽奸", "獸姦",
+  "马奸", "犬姦", "豚姦", "兽交", "獸交", "人兽交", "人獸交",
+  "触手姦", "vore", "unbirth",
+  # 丸呑み（异体写法）
+  "丸呑み", "丸呑", "丸のみ", "丸飲み",
+  # 妊娠系（用户原词 + 变体）
+  "妊婦", "妊娠", "ボテ腹", "孕婦", "怀孕", "妊娠中", "臨月", "ボテ腹娘",
+  "pregnant", "pregnancy", "pregnant_belly", "孕肚", "出産", "出产",
+  "子作り", "孕ませ",
+  # 乳首 / 授乳系
+  "ニプルファック", "nipple_fuck", "nipplefuck", "乳首ファック", "ニプル責め", "乳首責め",
+  "授乳", "おっぱい飲み", "lactation", "搾乳",
+  # 肌肉 / 体格系
+  "肌肉娘", "筋肉娘", "筋肉女子", "マッスル", "muscle_girl",
+  "muscular_female", "musclegirl", "腹パン", "腹パンチ", "お腹パンチ",
+  "腹殴り", "belly_punch", "bellypunch", "gut_punch", "stomach_punch",
+  # 束缚 / 口塞系
+  "猿轡", "猿ぐつわ", "口塞", "口枷", "ball_gag",
+  "ボールギャグ", "ビットギャグ", "リングギャグ",
+  # 表情 / 面部系
+  "阿黑颜", "阿嘿颜", "阿黑顏", "アヘ顔", "ahegao",
+  "アヘ顔ダブルピース", "アヘ顔Wピース", "オホ顔", "ビッチ顔",
+  # 皮物 / 变身系
+  "皮モノ", "皮もの", "皮物", "皮被り", "皮かぶり", "skinsuit", "skin_suit",
+  # 特定作品（精确标签，不用宽泛词）
+  "オレグ(スターレイル)", "Sonic/Tails",
+  # QOS
+  "QOS", "クイーン・オブ・スペード", "スペードの女王", "queen_of_spades",
+  "黑桃Q", "黑桃皇后", "黑桃女王",
+]
+
+# 只记录不拦截；命中后进 review，人工决定是否升级到 tags。
+# 入选标准只有一条：这个词会不会大量出现在正常作品里。注释说明为什么不能直接拦。
+watch = [
+  # 非 R-18 奇幻题材也用；明确指向的组合已在 tags
+  "触手", "tentacle",
+  # 纯形式词，与内容无关
+  "コスプレ", "着ぐるみ",
+  # 健身、运动题材常见
+  "腹筋",
+  # 有非成人语境（绳缚摄影、舞台）
+  "拘束", "bondage",
+  # 角色名，正常同人极多；精确组合 Sonic/Tails 已在 tags
+  "sonic", "tails",
+  # 整个游戏名，拦了会封杀全部该作品同人
+  "スターレイル",
+  # 单独出现是常见人名；精确组合已在 tags
+  "オレグ",
+  # 英文里还指「笑点/段子」；ball_gag 已在 tags
+  "gag",
+  # 非成人图也常打；乳首責め / ニプルファック 已在 tags
+  "乳首",
+  # 普通角色设计元素，全年龄同人海量；獣人 / 獣人娘 已在 tags
+  "獣耳",
+  # 涵盖机器人、外星人、怪物，不等于兽交；人外娘 / モンスター娘 已在 tags
+  "人外",
+  # 普通 R-18 异性向作品里极普遍，不等于妊娠题材；孕ませ 已在 tags
+  "種付け",
+  # 用户 2026-11-22 拍板降级：几乎等于「胸部」，全年龄作品也海量打
+  "おっぱい",
+  # 用户 2026-11-22 拍板降级：本身是身材描述，非内容指向
+  "巨乳",
+]
+
+[rules.rating]
+# 只拦 R-18G；R-18 与全年龄显式放行。
+block = ["r18g"]
+allow = ["all", "r18"]
+# 三路字段全缺且 sanity_level >= 该值时转 review，而不是 allow。
+sanity_review_threshold = 6
+
+[rules.ai]
+# AI 生成（illust_ai_type = 2）正常入库。
+allow = true
+
+[rules.tag_budget]
+# 内容标签（去重、剔除体裁词与 Nusers入り）少于该值 -> 交打标模型补标签。
+min_tags = 5
+# 剔除词：体裁/形式词与收藏数系统标签，不计入内容标签数。
+ignore = ["オリジナル", "漫画", "イラスト", "original", "manga", "illustration"]
+ignore_suffixes = ["users入り"]
+
+[rules.dedup]
+enabled = true
+on_conflict = "block"     # block | review
+
+[rules.size]
+min_width = 512
+min_height = 512
+on_fail = "review"
