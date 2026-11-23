@@ -1,13 +1,15 @@
 # 打标后端（本机 GPU，经 EasyTier 直连）
 
 box 只负责入库与规则；标签不足 `min_tags` 时通过 HTTP 调本机 GPU 打标。
-链路全部走 EasyTier，没有 SSH 隧道，也没有云端转发：
+链路全部走 EasyTier，没有 SSH 隧道。EasyTier 的 relay 在本拓扑下不转发负载，
+所以云端做一次 TCP 终结与再发起（不是 SSH 隧道，也不经过公网明文）：
 
 ```text
-kanalib-ingest (box, 10.126.126.3)
-  └─ http://10.126.126.1:8793/tag
-       └─ EasyTier 私网（kanalib 网络，wss 经 Cloudflare）
-            └─ Windows: sidecar/tagger/http_server.py，只绑 10.126.126.1（CUDA/FP16）
+kanalib-ingest (box 10.126.126.3)
+  └─ http://10.126.126.2:8793/tag      ← EasyTier 直连（box ↔ cloud）
+       └─ cloud: kanalib-tagger-proxy   监听 10.126.126.2:8793，转发到 10.126.126.1:8793
+            └─ 10.126.126.1:8793        ← EasyTier 直连（cloud ↔ 本机，wss 经 Cloudflare）
+                 └─ Windows: sidecar/tagger/http_server.py（CUDA/FP16）
 ```
 
 ## 为什么能当开关
@@ -36,7 +38,7 @@ kanalib-ingest (box, 10.126.126.3)
 ```toml
 [tagging]
 backend = "http"
-endpoint = "http://10.126.126.1:8793/tag"
+endpoint = "http://10.126.126.2:8793/tag"
 concurrency = 2
 timeout_secs = 30
 ```
@@ -52,13 +54,13 @@ curl http://10.126.126.1:8793/health
 # 云端（同网络任意节点）
 curl -s --noproxy '*' http://10.126.126.1:8793/health
 
-# box
+# box（经云端代理）
 sudo curl -s --noproxy '*' -F "image=@/var/lib/kanalib-ingest/media/originals/<id>.png" \
-  http://10.126.126.1:8793/tag
+  http://10.126.126.2:8793/tag
 ```
 
-单张推理约 1–4 秒（RTX 4060 Laptop，FP16），实际耗时主要受 EasyTier 路径影响：
-当前 wss 路径延迟约 0.4–1 秒、丢包 3%–5%，大图上传会明显慢于本地。
+单张推理约 1–4 秒（RTX 4060 Laptop，FP16）。实测 box 端到端约 7 秒（含两跳 EasyTier 传输），
+`timeout_secs = 30` 仍有富余。
 
 ## 限制
 

@@ -1,0 +1,16 @@
+[Unit]
+Description=Kanalib tagger TCP proxy (box -> EasyTier -> local GPU tagger)
+After=kanalib-easytier.service
+Wants=kanalib-easytier.service
+
+[Service]
+Environment=KANALIB_TAGGER_PROXY_BIND=10.126.126.2
+Environment=KANALIB_TAGGER_PROXY_PORT=8793
+Environment=KANALIB_TAGGER_PROXY_TARGET_HOST=10.126.126.1
+Environment=KANALIB_TAGGER_PROXY_TARGET_PORT=8793
+ExecStart=/usr/bin/python3 /usr/local/bin/kanalib-tagger-proxy.py
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

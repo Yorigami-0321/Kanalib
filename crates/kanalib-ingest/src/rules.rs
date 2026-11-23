@@ -508,11 +508,15 @@ fn policy_outcome(policy: &str, reason: &str, matched: Vec<String>) -> RuleOutco
 
 fn content_tag_count(config: &RuleConfig, subject: &RuleSubject) -> usize {
     let mut unique = HashSet::new();
-    for (name, translated) in &subject.tags {
-        for candidate in content_tag_values(name, translated.as_deref()) {
-            if is_content_tag(config, std::slice::from_ref(&candidate)) {
-                unique.insert(candidate);
-            }
+    // 一个标签算一个：译名只是同一标签的另一写法，不能再加一次计数，
+    // 否则双语标签会凭空翻倍、把 < min_tags 的条目错判为足量。
+    for (name, _translated) in &subject.tags {
+        let normalized = normalize_tag(name);
+        if normalized.is_empty() {
+            continue;
+        }
+        if is_content_tag(config, std::slice::from_ref(&normalized)) {
+            unique.insert(normalized);
         }
     }
     unique.len()
@@ -732,6 +736,49 @@ watch = ["SAME"]
         assert_eq!(outcome.decision, Decision::Block);
         assert_eq!(outcome.reason, "tag blacklist");
         assert!(!outcome.needs_tagging);
+    }
+
+    #[test]
+    fn translated_tags_do_not_double_count_toward_budget() {
+        let rules = config(&[], &[]);
+        let mut subject = subject();
+        subject.tags = vec![
+            ("オリジナル".to_string(), Some("original".to_string())),
+            ("女の子".to_string(), Some("Girl".to_string())),
+            ("百合".to_string(), Some("yuri".to_string())),
+            ("好都合セミフレンド".to_string(), None),
+            (
+                "オリジナル1000users入り".to_string(),
+                Some("original 1000+ bookmarks".to_string()),
+            ),
+        ];
+        let db = crate::db::Db::open_in_memory().unwrap();
+        let outcome = evaluate(DecisionInput {
+            db: &db,
+            config: &rules,
+            subject: &subject,
+        })
+        .unwrap();
+        assert!(outcome.needs_tagging, "3 个内容标签应触发补标");
+        assert_eq!(outcome.decision, Decision::Review);
+    }
+
+    #[test]
+    fn five_bilingual_content_tags_meet_budget() {
+        let rules = config(&[], &[]);
+        let mut subject = subject();
+        subject.tags = (0..5)
+            .map(|index| (format!("内容{index}"), Some(format!("content {index}"))))
+            .collect();
+        let db = crate::db::Db::open_in_memory().unwrap();
+        let outcome = evaluate(DecisionInput {
+            db: &db,
+            config: &rules,
+            subject: &subject,
+        })
+        .unwrap();
+        assert!(!outcome.needs_tagging);
+        assert_eq!(outcome.decision, Decision::Allow);
     }
 
     #[test]
