@@ -298,7 +298,7 @@ fn delete_candidates(db: &Db) -> Result<std::collections::BTreeMap<String, Vec<I
         "SELECT i.id, i.revision, i.source
            FROM items i
            JOIN works w ON w.id = i.work_id
-          WHERE w.status = 'deleted'
+          WHERE (w.status = 'deleted' OR i.decision = 'block')
             AND i.pushed_revision > 0
             AND i.delete_pushed = 0
           ORDER BY i.updated_at, i.id",

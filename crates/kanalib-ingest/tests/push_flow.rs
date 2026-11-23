@@ -537,6 +537,54 @@ async fn ack_records_pushed_revision_and_delete_progress() {
     );
 }
 
+#[tokio::test]
+async fn blocked_pushed_item_enqueues_delete() {
+    let db = seeded_db();
+    let enqueued = enqueue_decisions(&db, None, 100).expect("enqueue allow");
+    assert_eq!(enqueued.allow_items, 1);
+    let transport = Scripted::new(Vec::new());
+    flush(&db, &config(), &transport, 1_000, 10)
+        .await
+        .expect("flush allow");
+
+    db.connection()
+        .execute(
+            "UPDATE items SET decision = 'block', revision = 4, decision_reason = 'tag blacklist'
+              WHERE id = ?1",
+            [ITEM_ID],
+        )
+        .expect("block item");
+    let enqueued = enqueue_decisions(&db, None, 100).expect("enqueue delete");
+    assert_eq!(enqueued.delete_batches, 1);
+    assert_eq!(enqueued.delete_items, 1);
+
+    flush(&db, &config(), &transport, 2_000, 10)
+        .await
+        .expect("flush delete");
+    let delete_pushed: i64 = db
+        .connection()
+        .query_row(
+            "SELECT delete_pushed FROM items WHERE id = ?1",
+            [ITEM_ID],
+            |row| row.get(0),
+        )
+        .expect("delete pushed");
+    assert_eq!(delete_pushed, 1);
+}
+
+#[test]
+fn blocked_unpushed_item_does_not_enqueue_delete() {
+    let db = seeded_db();
+    db.connection()
+        .execute(
+            "UPDATE items SET decision = 'block', decision_reason = 'tag blacklist' WHERE id = ?1",
+            [ITEM_ID],
+        )
+        .expect("block item");
+    let enqueued = enqueue_decisions(&db, None, 100).expect("enqueue");
+    assert_eq!((enqueued.allow_batches, enqueued.delete_batches), (0, 0));
+}
+
 #[test]
 fn thumb_request_signs_path_and_body() {
     let config = config();
