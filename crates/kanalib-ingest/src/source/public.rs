@@ -388,7 +388,13 @@ impl SourceAdapter for PublicSource {
         page: u32,
     ) -> BoxFuture<'_, Result<ImageRef, SourceError>> {
         let external_id = work.external_id.clone();
+        let is_ugoira = work.is_ugoira;
         Box::pin(async move {
+            if is_ugoira {
+                return Err(SourceError::internal(
+                    "public ugoira download is not implemented",
+                ));
+            }
             let pages = self.fetch_pages(&external_id).await?;
             let Some(url) = pages.get(page as usize) else {
                 return Err(SourceError::not_found(format!(
@@ -909,5 +915,49 @@ mod tests {
         assert_eq!(parse_cursor(None).unwrap(), (0, 1));
         assert_eq!(parse_cursor(Some("1:2")).unwrap(), (1, 2));
         assert!(parse_cursor(Some("bad")).is_err());
+    }
+
+    #[tokio::test]
+    async fn ugoira_resolve_is_rejected() {
+        struct NoopTransport;
+
+        impl PublicTransport for NoopTransport {
+            fn get_json<'a>(
+                &'a self,
+                _url: &'a str,
+            ) -> BoxFuture<'a, Result<PublicResponse, SourceError>> {
+                Box::pin(async {
+                    Ok(PublicResponse {
+                        status: 200,
+                        retry_after: None,
+                        body: Value::Null,
+                    })
+                })
+            }
+        }
+
+        let source = PublicSource {
+            transport: Arc::new(NoopTransport),
+            targets: Vec::new(),
+            cache: Mutex::new(Cache::default()),
+        };
+        let work = SourceWork {
+            external_id: "1".to_string(),
+            author: None,
+            title: "ugoira".to_string(),
+            page_count: 1,
+            posted_at: None,
+            rating: rating_from_x_restrict(Some(0)),
+            x_restrict: Some(0),
+            ai: ai_from_illust_ai_type(None),
+            sanity_level: None,
+            restriction_attributes: Vec::new(),
+            tags: Vec::new(),
+            is_ugoira: true,
+        };
+
+        let error = source.resolve_image(&work, 0).await.unwrap_err();
+        assert_eq!(error.kind.as_str(), "internal");
+        assert!(error.message.contains("ugoira"));
     }
 }
