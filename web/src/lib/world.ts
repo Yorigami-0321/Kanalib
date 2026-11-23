@@ -550,9 +550,13 @@ export function layoutSpotlightCell(
   c: number,
   heroId: string,
   anchorRect?: TileRect,
+  heroIndex?: number,
 ): PlacedTile[] {
   const normal = layoutCell(spec, b, c);
-  const hero = normal.find((tile) => tile.item.id === heroId);
+  const hero =
+    heroIndex != null
+      ? normal.find((tile) => tile.index === heroIndex && tile.item.id === heroId)
+      : normal.find((tile) => tile.item.id === heroId);
   if (!hero || normal.length <= 1) return normal;
 
   const gap = spec.gap;
@@ -631,7 +635,7 @@ export function layoutSpotlightCell(
     { item: hero.item, index: hero.index, rect: { x: heroX, y: heroY, w: heroW, h: heroH }, cell },
   ];
   const rest = normal
-    .filter((tile) => tile.item.id !== heroId)
+    .filter((tile) => tile.index !== hero.index)
     .map((tile) => ({ item: tile.item, index: tile.index }));
 
   // 英雄四周全部利用（旧版只装“一侧整列 + 一带”，锚在格子中部时会留下
@@ -703,13 +707,17 @@ export function layoutFeaturedWorld(
   heroId: string,
   focus: { centerX: number; viewHeight: number; bottomInset: number },
   anchorRect?: TileRect,
+  heroIndex?: number,
 ): { tiles: LaidTile[]; height: number } {
-  const heroIndex = items.findIndex((item) => item.id === heroId);
-  if (heroIndex < 0) return layoutWorld(items, options);
-  const hero = items[heroIndex];
+  const resolvedHeroIndex =
+    heroIndex != null && items[heroIndex]?.id === heroId
+      ? heroIndex
+      : items.findIndex((item) => item.id === heroId);
+  if (resolvedHeroIndex < 0) return layoutWorld(items, options);
+  const hero = items[resolvedHeroIndex];
   const rest: GridEntry[] = items
     .map((item, index) => ({ item, index }))
-    .filter((entry) => entry.index !== heroIndex);
+    .filter((entry) => entry.index !== resolvedHeroIndex);
   const { width, gap, targetHeight } = options;
   const ratio = hero.w > 0 && hero.h > 0 ? hero.w / hero.h : 1;
 
@@ -755,7 +763,7 @@ export function layoutFeaturedWorld(
   const tiles: LaidTile[] = [
     {
       item: hero,
-      index: heroIndex,
+      index: resolvedHeroIndex,
       rect: { x: heroX, y: heroY, w: heroW, h: heroH },
     },
   ];

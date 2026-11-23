@@ -156,6 +156,8 @@ export function App() {
   const [focusItems, setFocusItems] = useState<WallItem[]>([]);
   const [summaryId, setSummaryId] = useState<string | null>(null);
   const [spotlightItem, setSpotlightItem] = useState<WallItem | null>(null);
+  /** 被点实例在 items 里的下标；同一张图出现两次时用它区分聚焦对象。 */
+  const [spotlightIndex, setSpotlightIndex] = useState<number | null>(null);
   const [spotlightAnchor, setSpotlightAnchor] = useState<{ x: number; y: number } | null>(null);
   /** 被点卡片在点击瞬间的世界矩形：聚焦重排以它为锚，图片不会被搬到固定英雄位。 */
   const [spotlightRect, setSpotlightRect] = useState<Rect | null>(null);
@@ -191,6 +193,7 @@ export function App() {
 
   useEffect(() => {
     if (!spotlightItem) {
+      setSpotlightIndex(null);
       setSpotlightAnchor(null);
       setSpotlightRect(null);
     }
@@ -843,8 +846,14 @@ export function App() {
   const handleToggleMatte = useCallback(() => setMatte((value) => !value), []);
 
   const handleSpotlight = useCallback(
-    (item: WallItem | null, anchor?: { x: number; y: number }, rect?: Rect) => {
+    (
+      item: WallItem | null,
+      anchor?: { x: number; y: number },
+      rect?: Rect,
+      index?: number,
+    ) => {
       setSpotlightItem(item);
+      setSpotlightIndex(index ?? null);
       setSpotlightAnchor(anchor ?? null);
       setSpotlightRect(rect ?? null);
     },
@@ -1207,6 +1216,7 @@ export function App() {
               emptyHint={emptyHint}
               emptyAction={emptyAction}
               spotlightId={spotlightItem?.id ?? null}
+              spotlightIndex={spotlightIndex}
               spotlightAnchor={spotlightAnchor}
               spotlightAnchorRect={spotlightRect}
               onSpotlightChange={handleSpotlight}

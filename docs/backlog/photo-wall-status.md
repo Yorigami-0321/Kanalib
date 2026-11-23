@@ -108,7 +108,7 @@ cargo test -p kanalib-publish         # 25 单元 + 23 集成契约测试
 | 9 | ~~移动端检查器为底部 sheet，遮挡较多画面~~ **已完成（2026-11-21）**：把手改成真实按钮（`aria-expanded`），收起只留 88px 标题条，再点恢复 55vh；桌面把手隐藏、300px 侧栏不变 | `Inspector.tsx`、`inspector.css` | — | 回归：`wall_probe_inspector_sheet` |
 | 10 | ~~发布非原子：中断可能留下半套产物~~ **已完成（2026-11-21）**：同级暂存目录 + 硬链接预置旧产物，成功后整体 rename 替换，失败清理暂存并保留旧目录；`fs::copy` 前先断开硬链接避免截断旧文件 | `crates/kanalib-publish` `Staging`、`sync_file` | — | 回归：`cargo test -p kanalib-publish`（49 项，含 `publish_replaces_output_atomically_and_keeps_old_on_failure`） |
 | 11 | 语义搜索缺失 | — | 只能按文件名/标签找图 | 候选：CLIP（F-016），先不做 |
-| 12 | **同一张图在无限墙中出现两次时，两张会同时被判定为聚焦/当前项并高亮。** 用户截图（2026-11-21）：id `1749606256441` 的截图卡在上下两个位置同时显示聚焦态。 | `Wall.tsx`：`current={tile.item.id === activeId}`、`spotlight={tile.item.id === spotlightId}`；`layoutSpotlightCell()` 也用 `item.id` 查找/过滤英雄卡。 | 用户无法分辨哪一张被真正选中；两处同图同时放大/高亮。 | 修复方向：选择态应改为“实例级”标识（cell 坐标 + index + id），而不是仅比较 `item.id`。 |
+| 12 | ~~同一张图在无限墙中出现两次时，两张会同时被判定为聚焦/当前项并高亮~~ **已修复（2026-11-23）**：选择态改为 `items` 实例下标；点击时 App 保存 `spotlightIndex`，Wall 用它选英雄并只高亮这一张，下标失效才回退按 id 找第一张。 | `Wall.tsx` `spotlightIndex` / `activeIndex`、`App.tsx` `spotlightIndex`、`world.ts` `layoutSpotlightCell(..., heroIndex)` / `layoutFeaturedWorld(..., heroIndex)` | — | 验证：重复 id 布局断言（有限墙选第 4 个实例并保留另一张；无限格 12 张同 id 只选指定下标且不丢图）；`tsc` / `vite build` 通过。 |
 | 13 | **单击聚焦的邻图挤压规则仍需优化。** 用户反馈（2026-11-21）：聚焦时周围卡片会被过度挤压，出现扁条状、小尺寸或布局不自然的区域；截图显示邻图被压缩成低高度横条。 | `world.ts` `layoutSpotlightCell()` / `layoutFeaturedWorld()`；列数与区域分配在 `gridColumns()` / `gridRects()`。 | 聚焦观感不稳定；邻图可读性差。 | 需要重新设计挤压规则：优先保持邻图最小可读尺寸与接近原比例，避免细条；明确英雄卡、四周区域、空隙和极端长宽比的处理。 |
 
 ### 4.1 2026-11-11 已闭环（明细归档）
@@ -189,7 +189,7 @@ cargo test -p kanalib-publish         # 25 单元 + 23 集成契约测试
 - ~~详情左右切换的预加载窗口扩大~~ **已完成并复核**：停留 800ms 后预取前后 ±2/±3 的 t512（`PRELOAD_RADIUS=3`，URL 去重、上限 120、弱网跳过）；4g 打开 7 张 t512 / 276 KB，窗口外 0；弱网预取 0、首屏体积 +0%。回归：`wall_probe_detail_preload`。
 - ~~无界标签页标题被首行卡片压住~~ **已完成并复核**：`.wallhead::before` 纸面衬底（顶部压暗 + blur 14px + 径向遮罩淡出），不拦指针，相机与 360° 补图不受影响。回归：`wall_probe_tag360`。
 - ~~概要遮罩边缘 1px 亮边~~ **已完成并复核**：遮罩外扩 2px 越出卡片裁切边界，`.tile__media` 承担圆角裁切，装饰环改为遮罩之上的 `.tile__ring`（概要态关闭/键盘焦点保留）。回归：`wall_probe_mask_edge`（zoom 1 / 1.2635 / 1.6 / DPR 2.5 四边 Δ ≤3/255）、`wall_probe_tag360`、`wall_probe_tag_threshold`、`wall_probe_edge`、`wall_probe_detail_nav`、`wall_probe_detail_preload`。明细见 §4.4。
-- **重复图同时聚焦（§4 #12）**：待修。先补一个可复现探针：同一 id 在同一/相邻格子出现两次时，仅点击位置应进入 `spotlight`，另一实例不得高亮或放大。
+- ~~重复图同时聚焦（§4 #12）~~ **已完成（2026-11-23）**：聚焦/当前态按 `items` 实例下标区分，同一 id 的多个实例只有被点的那张进入 `spotlight` 并放大；布局按实例下标选英雄，不再按 id 过滤掉另一张同图。回归：重复 id 布局断言、`tsc`、`vite build`。
 - **聚焦挤压规则重构（§4 #13）**：待设计。目标：英雄卡保持真实比例且不小于原可见面积；邻图短边不低于可读阈值；优先按原图比例分配区域；极端长图/横图宁可减少邻图数量，也不切成细条。
 - 检查器信息密度与标签分组交互（默认组、展开记忆）。
 - ~~发布器原子发布~~ **已完成（2026-11-21）**：暂存目录 + 整体替换，失败保留旧产物。

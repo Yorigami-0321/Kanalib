@@ -87,6 +87,8 @@ export interface WallViewProps {
   emptyAction?: ReactNode;
   /** 当前聚焦卡 id（受控）；单击卡片时由视图层上抛。 */
   spotlightId?: string | null;
+  /** 聚焦卡在 items 里的下标；同一 id 出现多次时用它区分被点的实例。 */
+  spotlightIndex?: number | null;
   /** 聚焦卡的世界坐标中心；从详情返回时用它恢复聚焦位置。 */
   spotlightAnchor?: { x: number; y: number } | null;
   /** 点击瞬间被点卡片的世界矩形；重排以它为锚，点哪张就放大哪张。 */
@@ -95,6 +97,7 @@ export interface WallViewProps {
     item: WallItem | null,
     anchor?: { x: number; y: number },
     rect?: Rect,
+    index?: number,
   ) => void;
   onLoadMore: () => void;
   /**
@@ -172,6 +175,7 @@ export function WallView({
   emptyHint,
   emptyAction,
   spotlightId,
+  spotlightIndex,
   spotlightAnchor,
   spotlightAnchorRect,
   onSpotlightChange,
@@ -189,6 +193,7 @@ export function WallView({
   const [camera, setCamera] = useState<Camera>({ x: 0, y: 0, zoom: 1 });
   const [dragging, setDragging] = useState(false);
   const [activeId, setActiveId] = useState<string | null>(null);
+  const [activeIndex, setActiveIndex] = useState<number | null>(null);
   /** 聚焦后仅“必要时”补一次最小平移，这一层让那次平移走 420ms。 */
   const [cameraTween, setCameraTween] = useState(false);
 
@@ -253,6 +258,16 @@ export function WallView({
   // 否则可能整页空白；数据全部到齐后再拉伸最后一行，视觉上收口。
   const includePartialRow = !(stableAppend && hasMore);
   const stretchPartialRow = !hasMore;
+  // 同一 id 可能出现多次：优先用调用方给的下标定位实例；下标失效（换筛选/换页）
+  // 才回退到按 id 找第一张，避免把两张同图一起放大。
+  const spotlightResolvedIndex = useMemo(() => {
+    if (!spotlightId) return null;
+    if (spotlightIndex != null && items[spotlightIndex]?.id === spotlightId) {
+      return spotlightIndex;
+    }
+    const index = items.findIndex((item) => item.id === spotlightId);
+    return index >= 0 ? index : null;
+  }, [items, spotlightId, spotlightIndex]);
   const layout = useMemo(() => {
     // 无限空间不排整墙：一万条跑一遍 justified rows 纯属浪费，格子按需生成就够了。
     if (infinite) return { tiles: [], height: 0 };
@@ -263,7 +278,7 @@ export function WallView({
       includePartialRow,
       stretchPartialRow,
     };
-    if (spotlightId && items.some((item) => item.id === spotlightId)) {
+    if (spotlightId && spotlightResolvedIndex != null) {
       return layoutFeaturedWorld(
         items,
         options,
@@ -274,6 +289,7 @@ export function WallView({
           bottomInset: 0,
         },
         spotlightAnchorRect ?? undefined,
+        spotlightResolvedIndex,
       );
     }
     return layoutWorld(items, options);
@@ -285,6 +301,7 @@ export function WallView({
     includePartialRow,
     stretchPartialRow,
     spotlightId,
+    spotlightResolvedIndex,
     spotlightAnchorRect,
     viewWidth,
     size.h,
@@ -332,26 +349,47 @@ export function WallView({
       b: Math.floor(spotlightAnchor.y / cellHeight),
       c: Math.floor(spotlightAnchor.x / cellWidth),
       itemId: spotlightId,
+      itemIndex: spotlightResolvedIndex,
     };
-  }, [infinite, spotlightId, spotlightAnchor, cellHeight, cellWidth]);
+  }, [infinite, spotlightId, spotlightResolvedIndex, spotlightAnchor, cellHeight, cellWidth]);
 
   /** 重排后的英雄卡 rect：只用于“必要时最小平移”的相机兜底，不参与布局计算。 */
   const spotlightHeroRect = useMemo<TileRect | null>(() => {
     if (!spotlightId) return null;
     if (infinite) {
       if (!spotlightCell) return null;
+      const tiles = layoutSpotlightCell(
+        cellSpec,
+        spotlightCell.b,
+        spotlightCell.c,
+        spotlightId,
+        spotlightAnchorRect ?? undefined,
+        spotlightResolvedIndex ?? undefined,
+      );
       return (
-        layoutSpotlightCell(
-          cellSpec,
-          spotlightCell.b,
-          spotlightCell.c,
-          spotlightId,
-          spotlightAnchorRect ?? undefined,
-        ).find((tile) => tile.item.id === spotlightId)?.rect ?? null
+        tiles.find((tile) =>
+          spotlightResolvedIndex != null
+            ? tile.index === spotlightResolvedIndex
+            : tile.item.id === spotlightId,
+        )?.rect ?? null
       );
     }
-    return layout.tiles.find((tile) => tile.item.id === spotlightId)?.rect ?? null;
-  }, [spotlightId, spotlightAnchorRect, infinite, spotlightCell, cellSpec, layout.tiles]);
+    return (
+      layout.tiles.find((tile) =>
+        spotlightResolvedIndex != null
+          ? tile.index === spotlightResolvedIndex
+          : tile.item.id === spotlightId,
+      )?.rect ?? null
+    );
+  }, [
+    spotlightId,
+    spotlightResolvedIndex,
+    spotlightAnchorRect,
+    infinite,
+    spotlightCell,
+    cellSpec,
+    layout.tiles,
+  ]);
 
   const cellTiles = useMemo(() => {
     if (!infinite) return [];
@@ -377,6 +415,7 @@ export function WallView({
         spotlightCell.c,
         spotlightCell.itemId,
         spotlightAnchorRect ?? undefined,
+        spotlightCell.itemIndex ?? undefined,
       ),
     ];
   }, [
@@ -442,6 +481,8 @@ export function WallView({
   const firstReset = useRef(true);
   const spotlightIdRef = useRef(spotlightId);
   spotlightIdRef.current = spotlightId;
+  const spotlightIndexRef = useRef(spotlightIndex);
+  spotlightIndexRef.current = spotlightIndex;
   const spotlightAnchorRef = useRef(spotlightAnchor);
   spotlightAnchorRef.current = spotlightAnchor;
   useEffect(() => {
@@ -450,6 +491,7 @@ export function WallView({
     const keepSpotlight = firstReset.current && currentSpotlight;
     firstReset.current = false;
     setActiveId(keepSpotlight ? currentSpotlight : null);
+    setActiveIndex(keepSpotlight ? spotlightIndexRef.current ?? null : null);
     if (!keepSpotlight) onSpotlightChange?.(null);
     // 上一轮的撞墙回弹不能跨筛选/换页带到新画面。
     stopBounce();
@@ -546,7 +588,7 @@ export function WallView({
   /** 触屏长按概要：500ms 内没移动、没落第二根手指才算数。 */
   const longPress = useRef<{ timer: number; id: number; fired: boolean } | null>(null);
   /** 上一次鼠标抬起命中的卡：360ms 内同一张卡再抬一次就是双击（展开全屏）。 */
-  const lastClick = useRef<{ id: string; t: number } | null>(null);
+  const lastClick = useRef<{ id: string; index: number; t: number } | null>(null);
 
   // ===== 入场动效（§2.5）=====
   // 首载只做淡入 + 上浮 12px；换页签/换筛选走对角线波次。
@@ -908,7 +950,8 @@ export function WallView({
     // 触屏没有右键：长按 500ms 出概要。移动、第二指、抬手都会取消这个计时。
     const downTile = pointer.current.downTile;
     if (event.pointerType !== 'mouse' && downTile) {
-      const item = items[Number(downTile.dataset.index)];
+      const index = Number(downTile.dataset.index);
+      const item = items[index];
       if (item) {
         const pointerId = event.pointerId;
         clearLongPress();
@@ -921,6 +964,7 @@ export function WallView({
             if (!state || state.id !== pointerId || pointer.current.moved) return;
             state.fired = true;
             setActiveId(item.id);
+            setActiveIndex(index);
             onSummary(item);
           }, 500),
         };
@@ -1032,6 +1076,7 @@ export function WallView({
       // 点空白 = 退出聚焦；同时清掉双击记忆，避免下一次点卡被误判成双击。
       lastClick.current = null;
       setActiveId(null);
+      setActiveIndex(null);
       onSpotlightChange?.(null);
       return;
     }
@@ -1042,14 +1087,16 @@ export function WallView({
     // 内的第二次抬起 = 展开全屏详情。长按概要仍是另一条路。
     const now = performance.now();
     const last = lastClick.current;
-    if (last && last.id === item.id && now - last.t < 360) {
+    if (last && last.id === item.id && last.index === index && now - last.t < 360) {
       lastClick.current = null;
       setActiveId(item.id);
+      setActiveIndex(index);
       onOpen(item, index, rectOf(tile));
       return;
     }
-    lastClick.current = { id: item.id, t: now };
+    lastClick.current = { id: item.id, index, t: now };
     setActiveId(item.id);
+    setActiveIndex(index);
     const box = tile?.getBoundingClientRect();
     const hostBox = viewportRef.current?.getBoundingClientRect();
     const cam = cameraRef.current;
@@ -1067,7 +1114,7 @@ export function WallView({
     const anchor = worldRect
       ? { x: worldRect.x + worldRect.w / 2, y: worldRect.y + worldRect.h / 2 }
       : undefined;
-    onSpotlightChange?.(item, anchor, worldRect);
+    onSpotlightChange?.(item, anchor, worldRect, index);
   };
 
   const onPointerCancel = (event: React.PointerEvent<HTMLDivElement>) => {
@@ -1338,7 +1385,10 @@ export function WallView({
 
   // 检查器关闭（spotlightId 变 null）时，选中内描边也跟着收掉。
   useEffect(() => {
-    if (!spotlightId) setActiveId(null);
+    if (!spotlightId) {
+      setActiveId(null);
+      setActiveIndex(null);
+    }
   }, [spotlightId]);
 
   // Esc 退出聚焦；侧栏面板打开的 Esc 归面板处理。
@@ -1353,6 +1403,7 @@ export function WallView({
       if (summaryId) return;
       onSpotlightChange?.(null);
       setActiveId(null);
+      setActiveIndex(null);
     };
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
@@ -1376,6 +1427,7 @@ export function WallView({
   const handleCardOpen = useCallback(
     (openedItem: WallItem, openedIndex: number, originRect?: Rect) => {
       setActiveId(openedItem.id);
+      setActiveIndex(openedIndex);
       onOpen(openedItem, openedIndex, originRect);
     },
     [onOpen],
@@ -1383,6 +1435,7 @@ export function WallView({
   const handleCardSummary = useCallback(
     (item: WallItem) => {
       setActiveId(item.id);
+      setActiveIndex(null);
       onSummary(item);
     },
     [onSummary],
@@ -1462,8 +1515,12 @@ export function WallView({
               paths={paths}
               rect={tile.rect}
               displayScale={camera.zoom}
-              current={tile.item.id === activeId}
-              spotlight={tile.item.id === spotlightId}
+              current={
+                activeIndex != null ? tile.index === activeIndex : tile.item.id === activeId
+              }
+              spotlight={
+                spotlightResolvedIndex != null && tile.index === spotlightResolvedIndex
+              }
               enter={enter.on}
               enterDelay={enterDelayOf(tile.rect)}
               tagCounts={tagCounts}
