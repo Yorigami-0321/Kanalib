@@ -1,6 +1,6 @@
 # F-089 / I2 交接文档（2026-11-23，更新）
 
-> 上级文档：[ingest-service.md](../ingest-service.md) · 登记：[registry.md](../registry.md#f-089) · 分支：`main` @ `086cfcb`（I2 已提交；领先 `origin/main` 4 个提交，未推送）
+> 上级文档：[ingest-service.md](../ingest-service.md) · 登记：[registry.md](../registry.md#f-089) · 分支：`main`（I2 与文档同步已推送 `origin/main`）
 >
 > 本文档交接 **I2 当前实现进度**，不是最终设计文档。设计仍以 [../ingest-service.md](../ingest-service.md) 为准；有冲突时先查设计，再改文档。
 
@@ -171,8 +171,8 @@ $cargo = Join-Path $env:USERPROFILE ".cargo\bin\cargo.exe"
 ## 8. 当前工作区
 
 - 分支：`main`
-- 当前 commit：`086cfcb`（`feat(monitor): 告警补上打标后端连续失败`）
-- 状态：**I2 相关改动已提交，领先 `origin/main` 4 个提交，未推送**；`781d447` 为词表移出文档那次提交
+- I2 基线 commit：`086cfcb`（`feat(monitor): 告警补上打标后端连续失败`）
+- 状态：**I2 与文档同步已推送 `origin/main`**；`781d447` 为词表移出文档那次提交
 - 工作区无已跟踪改动；仍有与本任务无关的未跟踪文件（`key-acl.txt`、`probe-rail-*.json`、`web/box-preview.html`、`web/dist-api/`、`package*.json`、`.kanalib-hook-log-check.mjs`、`SELECT COUNT( ) FROM t;`）。`key-acl.txt` 含部署 ACL，入库前要单独定夺
 - 约束：继续遵循“不推送，除非用户明确要求”。
 
