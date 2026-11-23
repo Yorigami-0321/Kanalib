@@ -7,9 +7,9 @@
 >
 > 2026-11-22 用户定调（v2）：过滤改为**纯黑名单制**，规则写在 box 的配置文件里，分「按用户屏蔽」「按作品标签屏蔽」两类；**不屏蔽 AI 生成，不屏蔽 R-18**，**含 R-18G 的作品完全屏蔽**；作品标签不足以判断类别时，交打标模型补标签，合并后再跑黑名单。§7 按此重写。
 >
-> 代码现状与本文档的差距见 **§17 待改动项**（按文件列出，含行号）；那一节是 P3 的施工清单，不要按本文档的"目标态"误以为已实现。
+> 代码现状与本文档的差距见 **§17 落地审计**（按文件列出）；已完成项已在表中标注，未完成项以 [`pending/ingest-i2-handoff.md`](pending/ingest-i2-handoff.md) 为准。
 >
-> 状态：**设计稿，未实现**。本文件只定职责、契约、数据模型与验收，不含代码。
+> 状态：**I2 代码已落地**（规则层/补标/review/决策/管理页/指标，`086cfcb`）；**I5 box 部署与网页联调待实机**。本文件定职责、契约、数据模型与验收。
 
 ## 0. 一句话
 
@@ -1107,7 +1107,7 @@ on_fail = "review"
 
 | # | 文件 | 现状 | 目标 |
 |---|---|---|---|
-| B23 | `src/main.rs` | **已完成**：`--config ingest.toml` + `clap` 覆盖项；未知键由 `deny_unknown_fields` 拒绝 | `rules_file` 指向 `rules.toml`（规则层未落地前只告警） |
+| B23 | `src/main.rs` | **已完成**：`--config ingest.toml` + `clap` 覆盖项；未知键由 `deny_unknown_fields` 拒绝；缺 `rules_file` 拒绝启动（仅 mock 来源走内置默认规则） | `rules_file` 指向 `rules.toml`；真实来源保持 fail-closed |
 | B24 | `src/main.rs` | **已完成**：`mock` / `pixiv` 均可启动；`--source` 缺省由 `source.pixiv.enabled` 决定 | 真实来源只在显式开启时启动 |
 | B25 | `src/main.rs` | **已完成**：Unix `SIGHUP` + 每轮 mtime 变更检测触发重载；失败保持旧快照并记日志 | 保持 fail-closed |
 | B26 | `src/main.rs` | **已完成**：Pixiv 走 `reqwest` 图片传输（Range、Referer、状态/头透传）；mock 只在 `--source mock` 下使用 | 保持两者按来源选择 |

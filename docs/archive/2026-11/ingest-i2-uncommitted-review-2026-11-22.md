@@ -1,10 +1,12 @@
 # F-089 / I2 未提交改动评审记录（2026-11-22）
 
-> 上级文档：[ingest-service.md](../ingest-service.md) · 交接：[ingest-i2-handoff.md](ingest-i2-handoff.md)
+> 上级文档：[ingest-service.md](../../backlog/ingest-service.md) · 交接：[ingest-i2-handoff.md](../../backlog/pending/ingest-i2-handoff.md)
+>
+> **归档（2026-11-23）**：第 4 节修复清单 1–5 项已全部闭环，本文不再更新；当前状态以交接文档与代码为准。归档后新增告警接线提交 `086cfcb`，最新基线为 78 passed（44 单元）。
 >
 > 本文记录对 `main` 工作树中未提交改动的一次代码评审。当前工作树仍在变化（评审过程中 `db.rs` 从 schema v6 升到 v7，并新增了 `rules_edit.rs` / `metrics.rs`），因此结论按当时读到的代码落笔；修复后要同步更新本文。
 >
-> **2026-11-22 状态更新**：2.2（`dedup.on_conflict`）与 2.3（`size.on_fail`）已真正分流；2.4（单条异常阻断整轮）已改为单条转 `review` 后继续；2.1 采用“空词表启动/重载告警 + 管理页提示”，仍允许启动。第 4 节修复清单 1–3 已完成，当前实现以 [ingest-i2-handoff.md](ingest-i2-handoff.md) 为准。
+> **2026-11-22 状态更新**：2.2（`dedup.on_conflict`）与 2.3（`size.on_fail`）已真正分流；2.4（单条异常阻断整轮）已改为单条转 `review` 后继续；2.1 采用“空词表启动/重载告警 + 管理页提示”，仍允许启动。第 4 节修复清单 1–3 已完成，当前实现以 [ingest-i2-handoff.md](../../backlog/pending/ingest-i2-handoff.md) 为准。
 
 ## 1. 评审范围
 
@@ -18,7 +20,7 @@
 
 `RulesState::load()` 在未配置 `service.rules_file` 时加载 `DEFAULT_RULES`，日志写的是 `using safe default rules`；但 `RulesSection::default()` 的 `Blacklist` 三个数组全空。于是除 R-18G、去重、尺寸外，所有条目都会走到 `allow`。
 
-这与 [ingest-service.md](../ingest-service.md) §7.6「不存在默认 allow 的兜底配置」相反。生产环境漏配规则文件会变成静默放行，建议缺文件时拒绝启动，或让默认规则 fail-closed。
+这与 [ingest-service.md](../../backlog/ingest-service.md) §7.6「不存在默认 allow 的兜底配置」相反。生产环境漏配规则文件会变成静默放行，建议缺文件时拒绝启动，或让默认规则 fail-closed。
 
 相关位置：`crates/kanalib-ingest/src/rules_state.rs:57`、`crates/kanalib-ingest/src/rules.rs:38`。
 

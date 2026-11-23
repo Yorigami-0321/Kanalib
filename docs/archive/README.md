@@ -26,6 +26,7 @@
 | [photo-wall-audit-2026-11-11.md](2026-11/photo-wall-audit-2026-11-11.md) | 功能与旅程审计、失败路径、第二批 A 复验 | 已闭环，细节仅作追溯 |
 | [photo-wall-work-report-2026-11-17.md](2026-11/photo-wall-work-report-2026-11-17.md) | 一次性工作汇报：移动端底栏、聚焦卡信息、探针调整 | 已完成；结论已并入 [photo-wall-status.md](../backlog/photo-wall-status.md) |
 | [photo-wall-work-report-2026-11-21.md](2026-11/photo-wall-work-report-2026-11-21.md) | 一次性工作汇报：渐进加载、深链全库探测、检查器折叠、发布器原子输出 | 已完成；结论与回归已并入 [photo-wall-status.md](../backlog/photo-wall-status.md) |
+| [ingest-i2-uncommitted-review-2026-11-22.md](2026-11/ingest-i2-uncommitted-review-2026-11-22.md) | F-089 I2 未提交改动的代码评审记录 | 修复清单 1–5 已全部闭环并入库，评审稿不再维护；当前状态见 [ingest-i2-handoff.md](../backlog/pending/ingest-i2-handoff.md) |
 
 新增归档时：把文件移入 `2026-11/`（或对应月份目录），修正相对链接，并在上表补一行。
 
@@ -38,3 +39,7 @@
 - 现行口径仍以代码与 [backlog/](../backlog/) 为准；归档不再更新。
 
 同日另删 `docs/backlog/tailscale-connectivity.md`（370 字节跳转存根，无任何入链）；EasyTier 主方案见 [easytier-connectivity.md](../backlog/easytier-connectivity.md)。
+
+## 2026-11-23 归档
+
+- 将 `docs/backlog/pending/ingest-i2-uncommitted-review.md` 移入 [2026-11/ingest-i2-uncommitted-review-2026-11-22.md](2026-11/ingest-i2-uncommitted-review-2026-11-22.md)。该评审的修复清单已全部闭环并入库，原文件不再作为现行依据；I2 当前状态见 [ingest-i2-handoff.md](../backlog/pending/ingest-i2-handoff.md)。

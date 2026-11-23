@@ -1,6 +1,6 @@
 # F-089 / I2 交接文档（2026-11-23，更新）
 
-> 上级文档：[ingest-service.md](../ingest-service.md) · 登记：[registry.md](../registry.md#f-089) · 分支：`main` @ `253fd09`（I2 已提交；未推送）
+> 上级文档：[ingest-service.md](../ingest-service.md) · 登记：[registry.md](../registry.md#f-089) · 分支：`main` @ `086cfcb`（I2 已提交；领先 `origin/main` 4 个提交，未推送）
 >
 > 本文档交接 **I2 当前实现进度**，不是最终设计文档。设计仍以 [../ingest-service.md](../ingest-service.md) 为准；有冲突时先查设计，再改文档。
 
@@ -8,7 +8,7 @@
 
 `crates/kanalib-ingest` 的 I2 主体已经闭环：下载完成后按 `rules.toml` 做黑名单/R-18G/标签预算/观察词/尺寸/去重判定；标签不足时调用 HTTP 打标后端补标一次再复判；结果写入 `items.decision` 与 `decisions` 审计表。规则加载写入只读 `rule_snapshots`，支持 mtime 变更检测与 Unix `SIGHUP` 重载；管理页提供审核、规则草稿、逐行 diff 预览、重载与指标。
 
-本轮补完了上一份交接里的 1–8 项（第 9 项 I5 仍需 box 实机）。2026-11-23 另完成三件事：I2 改动入库、评审 P1（`rules_file` 缺省策略）改为 fail-closed、告警补上打标后端连续失败（见第 6 节）。
+本轮补完了上一份交接里的 1–8 项（第 9 项 I5 仍需 box 实机）。2026-11-23 另完成三件事：I2 改动入库、评审 P1（`rules_file` 缺省策略）改为 fail-closed、告警补上打标后端连续失败（见第 6 节）。对应的未提交改动评审稿已闭环并归档到 [`../../archive/2026-11/ingest-i2-uncommitted-review-2026-11-22.md`](../../archive/2026-11/ingest-i2-uncommitted-review-2026-11-22.md)。
 
 | 范围 | 进度 | 结论 |
 |---|---:|---|
@@ -112,7 +112,7 @@ R-18、AI 生成显式放行；当前不因 AI 标记拦截。
 
 ## 5. 测试与验证
 
-最近一次本机通过（2026-11-22，本轮改动后）：
+最近一次本机通过（2026-11-23，`086cfcb`）：
 
 ```powershell
 $cargo = Join-Path $env:USERPROFILE ".cargo\bin\cargo.exe"
@@ -124,11 +124,12 @@ $cargo = Join-Path $env:USERPROFILE ".cargo\bin\cargo.exe"
 
 结果：
 
-- `kanalib-ingest` 单元测试：42 passed。
+- `kanalib-ingest` 单元测试：44 passed。
 - `tests/admin_flow.rs`：8 passed。
 - `tests/decision_flow.rs`：6 passed。
 - `tests/ingest_flow.rs`：8 passed。
 - `tests/push_flow.rs`：12 passed。
+- 合计：78 passed。
 - `cargo check` / `clippy -D warnings` / `fmt --check`：通过。
 
 覆盖重点：
@@ -150,7 +151,7 @@ $cargo = Join-Path $env:USERPROFILE ".cargo\bin\cargo.exe"
    - 审核放行/拒绝各一条，网页批次结果符合预期。
    - 断网重试、box 重启恢复、桌面拉原图走直连。
 2. **真实 Pixiv 令牌冒烟**：只在 box 手动执行，不写入仓库/CI。
-3. **告警接线**：`deploy/monitor/kanalib-health.sh` 已覆盖磁盘、推送积压、推送失败/被拒、review 积压、HTTP 健康、TLS 与**打标后端连续失败**（`model_error_streak` gauge，2026-11-23 补）。剩下的是按部署环境调阈值与 webhook，属于 I5 现场工作。
+3. **告警接线**：`deploy/monitor/kanalib-health.sh` 已覆盖磁盘、推送积压、推送失败/被拒、review 积压、HTTP 健康、TLS 与**打标后端连续失败**（`model_error_streak` gauge，2026-11-23 补，提交 `086cfcb`）。剩下的是按部署环境调阈值与 webhook，属于 I5 现场工作。
 4. **草稿类型**：当前只支持 tags/users 的增删；`watch`、rating、tag_budget 等仍走手工编辑文件。
 
 ## 7. 重要实现细节与坑
@@ -170,9 +171,9 @@ $cargo = Join-Path $env:USERPROFILE ".cargo\bin\cargo.exe"
 ## 8. 当前工作区
 
 - 分支：`main`
-- 基线 commit：`253fd09`（I2 规则层，含 `deploy/rules.toml.example` 与本次 `rules_file` 缺省策略改动）
-- 状态：**I2 相关改动已提交，未推送**；`781d447` 为词表移出文档那次提交
-- 工作区仍有与本任务无关的未跟踪文件（`key-acl.txt`、`probe-rail-*.json`、`web/box-preview.html`、`package*.json`、`.kanalib-hook-log-check.mjs`、`SELECT COUNT( ) FROM t;`）；I2 提交按路径显式暂存，未把它们纳入。`key-acl.txt` 含部署 ACL，入库前要单独定夺
+- 当前 commit：`086cfcb`（`feat(monitor): 告警补上打标后端连续失败`）
+- 状态：**I2 相关改动已提交，领先 `origin/main` 4 个提交，未推送**；`781d447` 为词表移出文档那次提交
+- 工作区无已跟踪改动；仍有与本任务无关的未跟踪文件（`key-acl.txt`、`probe-rail-*.json`、`web/box-preview.html`、`web/dist-api/`、`package*.json`、`.kanalib-hook-log-check.mjs`、`SELECT COUNT( ) FROM t;`）。`key-acl.txt` 含部署 ACL，入库前要单独定夺
 - 约束：继续遵循“不推送，除非用户明确要求”。
 
 ## 9. 快速接手命令

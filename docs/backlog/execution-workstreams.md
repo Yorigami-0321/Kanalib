@@ -2,7 +2,7 @@
 
 > 上级：[pixiv-integration.md](pixiv-integration.md) · 网页后端：[web-dynamic-backend.md](web-dynamic-backend.md) · 入库服务：[ingest-service.md](ingest-service.md) · 侧栏：[web-rail-horizontal.md](web-rail-horizontal.md) · 私网：[easytier-connectivity.md](easytier-connectivity.md) / [private-networking-options.md](private-networking-options.md)
 >
-> 状态：P0（`W0` 契约）、P1（侧栏横向化、私网部署准备）、P2（`W1` 只读后端、`I0`→`I1` 入库骨架）、P3（`W2` 搜索/游标/facets、`W3a` ApiSource、`W3b` setQuery）、P4（`W4` 私网写入/桌面桥接、`I3` 推送队列与原图签名）、P5（`W5`+`I5` 部署/备份/监控模板）已落地；2026-11-22 补齐 I1/I3 的接线缺口：真实 Pixiv 源（access/refresh token + OAuth 刷新）进入主循环、box 侧签名原图端点、decision→enqueue→push（含删除事件与 ack 追踪）。P3 打标/规则层仍未开始（`items.decision` 不会被自动置为 `allow`），P5 桌面桥接未开始，P5 实机安装与告警未验收。本文件只回答“哪些能同时做、按什么优先级做、每个工作流怎么落地”，不含工时与排期。
+> 状态：P0（`W0` 契约）、P1（侧栏横向化、私网部署准备）、P2（`W1` 只读后端、`I0`→`I1` 入库骨架）、P3（`W2` 搜索/游标/facets、`W3a` ApiSource、`W3b` setQuery、`I2` 规则/打标/审核）、P4（`W4` 私网写入/桌面桥接、`I3` 推送队列与原图签名）、P5（`W5`+`I5` 部署/备份/监控模板）已落地；2026-11-22 补齐 I1/I3 的接线缺口：真实 Pixiv 源（access/refresh token + OAuth 刷新）进入主循环、box 侧签名原图端点、decision→enqueue→push（含删除事件与 ack 追踪）。2026-11-23 完成 I2 规则层（`items.decision` 自动写 `allow/block/review`，补标、审核、规则草稿、快照/热重载与指标已接通）并把打标后端连续失败接入告警（`086cfcb`）；P5 桌面桥接未开始，`I5` box 实机部署、网页联调与告警阈值验收未完成。本文件只回答“哪些能同时做、按什么优先级做、每个工作流怎么落地”，不含工时与排期。
 >
 > 组件选型与可复用项目：[p2-reuse-research.md](p2-reuse-research.md)（P2 之后的 crate/项目、许可、版本冲突与复用级别）。
 

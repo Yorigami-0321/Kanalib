@@ -86,7 +86,7 @@
 - **新需求**：先在 [registry.md](registry.md) 加一行，再到 `pending/` 对应职责文件写需求/方案/验收/风险；调研遵循本页准则，补「调研来源/候选对比/复用结论」。
 - **实现后**：从 `pending/` 移入 [implemented.md](implemented.md)，只保留关键约束与验证。
 - **派发任务**：先看 [photo-wall-status.md](photo-wall-status.md) 的路线图与 [pending/overview.md](pending/overview.md)；UI 只有一条车道，schema/sidecar 单一负责人。
-- **历史文档**：第一至七轮任务包、图片墙开发日志与反馈/审计已移到 [../archive/2026-11/](../archive/2026-11/)，不再维护，不作为执行依据；被现行文档完全取代的稿件已于 2026-11-22 删除。
+- **历史文档**：第一至七轮任务包、图片墙开发日志与反馈/审计已移到 [../archive/2026-11/](../archive/2026-11/)，不再维护，不作为执行依据；被现行文档完全取代的稿件已于 2026-11-22 删除，2026-11-23 另将已闭环的 I2 评审稿归档。
 - **验证**：按 [../TESTING-PROCESS.md](../TESTING-PROCESS.md) 的改动类型矩阵与门禁执行；默认最小验证，不做过度测试。
 - **不写工时/排期**；代码行号会漂移，按函数名搜索。
 - **文档自检**：`bash scripts/check_backlog_docs.sh` 校验 registry 的 F-xxx 不重复不丢失、implemented 与 pending 的状态不互相矛盾；每轮收口后重跑一次。
