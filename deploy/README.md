@@ -70,6 +70,7 @@ kanalib-ingest ──HTTP──> tagger 10.126.126.1:8793（标签不足时补�
    systemctl daemon-reload
    systemctl enable --now kanalib-web kanalib-ingest
    systemctl enable --now kanalib-web-backup.timer kanalib-ingest-backup.timer kanalib-health.timer
+   systemctl enable --now kanalib-keepalive.timer   # 仅 box
    ```
 
 5. Nginx 只反代 public listener；`/internal/`、`/api/desktop/`、
@@ -91,6 +92,25 @@ kanalib-ingest ──HTTP──> tagger 10.126.126.1:8793（标签不足时补�
 - `--bind-private` 必须是 EasyTier 虚拟 IP（如 `10.126.126.2:8788`），不要绑 `0.0.0.0`。
 - 程序启动时检测到未指定地址会打 warning；生产日志里看到就说明配置错了。
 - 公网 Nginx 不反代 private listener；EasyTier ACL 只放行 box/桌面到 8788。
+
+## Box 入站防火墙
+
+box 的 `cocoonbox` nftables 默认 `policy drop`，重启后会挡掉 EasyTier 入站。持久化放行写在
+`/etc/nftables.conf` 的 `inet cocoonbox` input 链：
+
+```nft
+iif "et0" ip protocol icmp accept
+iif "et0" tcp dport { 8790, 8792 } accept
+```
+
+改完 `sudo nft -f /etc/nftables.conf`，重启后从云端验证 `ping 10.126.126.3` 与
+`curl http://10.126.126.3:8792/admin/api/health`。8790 是原图回源，8792 是管理口。
+完整模板见 `deploy/box/nftables-cocoonbox.conf.example`。
+
+## Box keepalive
+
+`kanalib-keepalive.timer` 每分钟 ping 云端 `10.126.126.2`，连续 3 次失败重启
+`kanalib-easytier`；本地 ingest 健康只记录，不触发网络重启，避免网页/代理短停误判。
 
 ## Backup / restore / rollback
 

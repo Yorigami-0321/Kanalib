@@ -1,0 +1,16 @@
+#!/usr/sbin/nft -f
+# box 平台默认规则 + Kanalib 入站放行。
+# 安装：备份 /etc/nftables.conf 后覆盖，再执行 sudo nft -f /etc/nftables.conf。
+flush ruleset
+
+table inet cocoonbox {
+	chain input {
+		type filter hook input priority filter; policy drop;
+		iif lo accept
+		ct state established,related accept
+		ct state invalid drop
+		meta l4proto ipv6-icmp accept
+		iif "et0" ip protocol icmp accept
+		iif "et0" tcp dport { 8790, 8792 } accept
+	}
+}

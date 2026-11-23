@@ -151,13 +151,34 @@ $cargo = Join-Path $env:USERPROFILE ".cargo\bin\cargo.exe"
 ## 6. 未完成 / 下一步
 
 1. **I5 剩余现场项**
-   - 复核管理口 `8792` 只绑 EasyTier 虚拟 IP、公网不可达（ACL 已配置，尚未逐条验公网路径）。
-   - 断网重试、box 重启恢复、桌面拉原图走直连仍需手动演练。
+   - **已完成**：管理口 `8792` 只绑 `10.126.126.3`；box 无公网接口/默认路由，nftables 仅放行
+     `et0` 的 8790/8792/ICMP，公网不可达。
+   - **已完成**：box 两次重启演练通过，`kanalib-easytier`/`kanalib-ingest`/三个 timer 自动恢复。
+     重启会恢复 `cocoonbox` 的 drop 策略，已在 `/etc/nftables.conf` 持久放行（备份
+     `/etc/nftables.conf.bak-20261123`）。
+   - **已完成**：推送断网重试——停云端 web 后 `push_pending=1`，恢复后 `acked=1`、
+     条目 revision 6、`push_pending=0`。
+   - **已完成**：原图回源——云端 private `/api/items/{id}/original` 跟随 302 到 box，
+     返回 200、761 KB、`image/jpeg`。
+   - **待桌面端验收**：桌面应用直连 box 拉原图的实机路径。
    - 云端只部署前端精简包（`index.html`、`favicon.svg`、`assets/*`）；不要上传 418 MB 的静态 `data/`。
 2. **打标后端**：已闭环。box → 云端代理 `10.126.126.2:8793` → 本机 EasyTier `10.126.126.1:8793`；SSH 隧道与旧转发服务已删除。`9fd683d` 标签计数修复已部署，`2087cc90…` 重跑 `tagged=1`、51 标签、已推送。当前依赖本机 Windows 与 EasyTier 服务在线；长期应迁到常驻 GPU 主机。细节见 [tagger-easytier-handoff.md](tagger-easytier-handoff.md)。
 3. **真实 Pixiv 令牌冒烟**：无登录路线已跑通；令牌路线仍只在 box 手动执行，不写入仓库/CI。
-4. **告警接线**：`deploy/monitor/kanalib-health.sh` 已覆盖磁盘、推送积压、推送失败/被拒、review 积压、HTTP 健康、TLS 与**打标后端连续失败**（`model_error_streak` gauge，2026-11-23 补，提交 `086cfcb`）。剩下的是按部署环境调阈值与 webhook，属于 I5 现场工作。
+4. **告警接线**：`kanalib-health.timer` 已在云端与 box 安装（5 分钟一次），阈值写入
+   `/etc/kanalib/health.env`；云端检查 public/private/ingest HTTP、`model_error_streak`、
+   TLS、磁盘与 web 库，box 检查 ingest 库/推送/审核/下载队列。`KANALIB_ALERT_WEBHOOK`
+   仍为空，拿到 webhook 地址后填入即可，无需改代码。
 5. **草稿类型**：当前只支持 tags/users 的增删；`watch`、rating、tag_budget 等仍走手工编辑文件。
+
+### 6.1 已部署运维
+
+| 位置 | 单元 | 周期 | 产物/动作 |
+|---|---|---|---|
+| 云端 | `kanalib-health.timer` | 5 分钟 | HTTP/TLS/磁盘/web 库/打标失败次数 |
+| 云端 | `kanalib-web-backup.timer` | 每日 03:30 | `/var/backups/kanalib/web/*.db.gz` |
+| box | `kanalib-health.timer` | 5 分钟 | ingest 库、推送积压/失败、review、下载队列 |
+| box | `kanalib-ingest-backup.timer` | 每日 04:00 | `/var/backups/kanalib/ingest/` DB + 媒体硬链接 + rules |
+| box | `kanalib-keepalive.timer` | 1 分钟 | ping 云端，连续 3 次失败重启 `kanalib-easytier` |
 
 ## 7. 重要实现细节与坑
 
