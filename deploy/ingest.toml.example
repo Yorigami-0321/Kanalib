@@ -37,17 +37,20 @@ kind = "ranking"
 mode = "daily"      # daily / weekly / monthly / rookie / original / male / female
 content = "illust"  # illust / manga
 pages = 1
+limit = 50          # 每页最多取多少条；上限 100
 
 # [[source.public.targets]]
 # kind = "tag"
 # tag = "花"
 # order = "date_d"
 # pages = 1
+# limit = 50
 
 # [[source.public.targets]]
 # kind = "author"
 # user_id = "59688623"
 # pages = 1
+# limit = 48
 
 [download]
 concurrency = 3

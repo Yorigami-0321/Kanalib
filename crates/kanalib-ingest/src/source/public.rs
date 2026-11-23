@@ -25,6 +25,8 @@ pub const DEFAULT_USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) 
 AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0 Safari/537.36";
 
 const MAX_PAGES_PER_TARGET: usize = 10;
+const MAX_ITEMS_PER_TARGET: usize = 100;
+const DEFAULT_ITEMS_PER_TARGET: usize = 50;
 const AUTHOR_PAGE_SIZE: usize = 48;
 const CACHE_MAX: usize = 1024;
 
@@ -97,15 +99,18 @@ enum Target {
         mode: String,
         content: String,
         pages: usize,
+        limit: usize,
     },
     Tag {
         tag: String,
         order: String,
         pages: usize,
+        limit: usize,
     },
     Author {
         user_id: String,
         pages: usize,
+        limit: usize,
     },
 }
 
@@ -194,21 +199,31 @@ impl PublicSource {
             return Ok(Vec::new());
         };
         match target {
-            Target::Ranking { mode, content, .. } => {
+            Target::Ranking {
+                mode,
+                content,
+                limit,
+                ..
+            } => {
                 let url = format!(
                     "{WEB_BASE}/ranking.php?mode={mode}&content={content}&p={page}&format=json"
                 );
                 let body = self.get_json(&url).await?;
-                parse_ranking(&body)
+                let mut works = parse_ranking(&body)?;
+                works.truncate(*limit);
+                Ok(works)
             }
-            Target::Tag { tag, order, .. } => {
+            Target::Tag {
+                tag, order, limit, ..
+            } => {
                 let encoded = encode_component(tag);
                 let url = format!(
                     "{WEB_BASE}/ajax/search/artworks/{encoded}?word={encoded}&p={page}\
                      &s_mode=s_tag&order={order}&lang=en"
                 );
                 let body = self.get_json(&url).await?;
-                let works = parse_search(&body);
+                let mut works = parse_search(&body);
+                works.truncate(*limit);
                 let mut cache = self.cache.lock().await;
                 for work in &works {
                     if let Some(author) = &work.author {
@@ -217,11 +232,11 @@ impl PublicSource {
                 }
                 Ok(works)
             }
-            Target::Author { user_id, .. } => {
+            Target::Author { user_id, limit, .. } => {
                 let url = format!("{WEB_BASE}/ajax/user/{user_id}/profile/all?lang=en");
                 let body = self.get_json(&url).await?;
-                let offset = page.saturating_sub(1) * AUTHOR_PAGE_SIZE;
-                let works = parse_author_works(&body, offset, AUTHOR_PAGE_SIZE);
+                let offset = page.saturating_sub(1) * *limit;
+                let works = parse_author_works(&body, offset, *limit);
                 let mut cache = self.cache.lock().await;
                 for work in &works {
                     if let Some(author) = &work.author {
@@ -395,6 +410,10 @@ fn build_target(target: &crate::config::PublicTarget) -> Result<Target> {
         bail!("source.public target pages must be >= 1");
     }
     let pages = pages.min(MAX_PAGES_PER_TARGET);
+    let limit = target
+        .limit
+        .unwrap_or(DEFAULT_ITEMS_PER_TARGET)
+        .clamp(1, MAX_ITEMS_PER_TARGET);
     match target.kind.trim().to_ascii_lowercase().as_str() {
         "ranking" => {
             let mode = target.mode.as_deref().unwrap_or("daily").trim().to_string();
@@ -417,6 +436,7 @@ fn build_target(target: &crate::config::PublicTarget) -> Result<Target> {
                 mode,
                 content,
                 pages,
+                limit,
             })
         }
         "tag" => {
@@ -434,6 +454,7 @@ fn build_target(target: &crate::config::PublicTarget) -> Result<Target> {
                 tag: tag.to_string(),
                 order,
                 pages,
+                limit,
             })
         }
         "author" => {
@@ -444,6 +465,7 @@ fn build_target(target: &crate::config::PublicTarget) -> Result<Target> {
             Ok(Target::Author {
                 user_id: user_id.to_string(),
                 pages,
+                limit,
             })
         }
         other => bail!("unsupported public target kind {other}"),

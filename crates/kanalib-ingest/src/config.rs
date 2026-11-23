@@ -88,6 +88,8 @@ pub struct PublicTarget {
     pub kind: String,
     /// 每个目标最多翻多少页；默认 1，服务端上限 10。
     pub pages: Option<usize>,
+    /// 每页最多取多少条；默认 50，服务端上限 100。
+    pub limit: Option<usize>,
     /// ranking：daily / weekly / monthly / rookie / original / male / female
     pub mode: Option<String>,
     /// ranking：illust / manga
@@ -309,6 +311,7 @@ kind = "ranking"
 mode = "weekly"
 content = "manga"
 pages = 2
+limit = 10
 
 [[source.public.targets]]
 kind = "tag"
@@ -328,6 +331,7 @@ pages = 3
             config.source.public.targets[0].mode.as_deref(),
             Some("weekly")
         );
+        assert_eq!(config.source.public.targets[0].limit, Some(10));
         assert_eq!(config.source.public.targets[1].tag.as_deref(), Some("花"));
         assert_eq!(
             config.source.public.targets[2].user_id.as_deref(),

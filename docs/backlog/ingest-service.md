@@ -772,6 +772,8 @@ signing_key_file = "/etc/kanalib/media-signing-key"
 | `tag` | `/ajax/search/artworks/<tag>` | 标签搜索；`order` 默认 `date_d` |
 | `author` | `/ajax/user/<id>/profile/all` | 指定作者的全部作品 ID |
 
+每个目标可设 `pages`（默认 1，上限 10）与 `limit`（每页条数，默认 50，上限 100）；先用小 `limit` 验证再放大。
+
 每个作品再走 `/ajax/illust/<id>` 补元数据、`/ajax/illust/<id>/pages` 取多页原图。边界：
 
 - 只覆盖全年龄公开作品；没有收藏、私密内容和 R-18/R-18G，因此不能替代 `source.pixiv` 做收藏订阅。
@@ -787,6 +789,7 @@ kind = "ranking"
 mode = "daily"
 content = "illust"
 pages = 1
+limit = 50
 ```
 
 ### 10.2 规则文件 `rules.toml`
