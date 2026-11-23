@@ -460,11 +460,16 @@ export function cellTilesInView(
   return tiles;
 }
 
-/* ===== v5.2：聚焦挤压（保留 v4 的重排语义，修正细条） =====
+/* ===== v6：聚焦挤压（保比例 + 最小短边） =====
  *
- * 英雄卡放大后，同格其余图被装进英雄四周的剩余区域（上下通宽横带 + 左右中柱）；
- * 列数不写死 1，按“区域宽高比 × 条目平均图片比例”选列，让每张卡接近原图比例，
- * 不再出现 300×90 那种横向细条；末行不满时 justified 拉平，区域内不留空槽。
+ * 英雄卡放大后，同格其余图装进英雄四周的区域。旧版为了让区域“填满”，
+ * 会把剩余图片等分进格子，宽而矮的区域就会产出 200×70 的横条、窄而高的
+ * 区域会产出 47×130 的竖条。v6 反过来：先保证每张邻图短边不低于阈值，
+ * 再按原图比例排；放不下就减少邻图数量（优先保留离英雄最近的），
+ * 而不是把图片压成不可读的条。
+ *
+ * 排法：区域内部按图片比例排序，横图一行、竖图一行；每行独立选高度，
+ * 行内按宽度居中。这样横图和竖图不会互相拖累，也不会为了填满而拉宽。
  */
 
 interface GridEntry {
@@ -476,74 +481,181 @@ function entryRatio(entry: GridEntry): number {
   return entry.item.w > 0 && entry.item.h > 0 ? entry.item.w / entry.item.h : 1;
 }
 
+/** 邻图短边下限：随格子尺寸缩放，桌面约 104px，移动端约 80px。 */
+function spotlightMinShort(innerW: number, innerH: number): number {
+  return Math.round(Math.max(80, Math.min(104, Math.min(innerW, innerH) * 0.17)));
+}
+
+interface RowGroup {
+  entries: readonly GridEntry[];
+  sumRatio: number;
+  minHeight: number;
+  widthHeight: number;
+}
+
+interface RowEvaluation {
+  groups: RowGroup[];
+  heights: number[];
+  score: number;
+}
+
+interface SpotlightRegion {
+  kind: 'top' | 'bottom' | 'left' | 'right';
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+  wide: boolean;
+  assigned: GridEntry[];
+  packed: ReturnType<typeof packSpotlightRows> | null;
+}
+
 /**
- * 在 box 里为 entries 选列数：让单元格宽高比接近平均图片比例，并惩罚过小的短边。
- * 这是“挤压但不切条”的关键——单纯一行/一列都会在某个数量下退化为细条。
+ * 给一组行计算各自高度：每行按宽度填满得到一个“宽度高度”，
+ * 再在总高度不够时按各行可压缩空间等比收缩，但绝不低于短边下限。
  */
-function gridColumns(
-  entries: readonly GridEntry[],
+function evaluateRowGroups(
+  groups: GridEntry[][],
   box: { w: number; h: number },
   gap: number,
-): number {
-  const count = entries.length;
-  if (count <= 1 || box.w <= 0 || box.h <= 0) return 1;
-  const average = entries.reduce((sum, entry) => sum + entryRatio(entry), 0) / count;
-  // 行高/列宽硬下限 70：矮横带里图多时旧评分会选两行，产出 <70px 的
-  // 细条卡（回归闸门抓到的 flake）。先算行数上限再反推列数下限。
-  const maxRows = Math.max(1, Math.floor((box.h + gap) / (70 + gap)));
-  const minCols = Math.ceil(count / maxRows);
-  const maxCols = Math.max(minCols, Math.min(count, Math.floor((box.w + gap) / (70 + gap))));
-  let best = minCols;
-  let bestScore = Infinity;
-  for (let cols = minCols; cols <= maxCols; cols += 1) {
-    const rows = Math.ceil(count / cols);
-    const cellW = (box.w - gap * (cols - 1)) / cols;
-    const cellH = (box.h - gap * (rows - 1)) / rows;
-    if (cellW <= 0 || cellH <= 0) continue;
-    const aspectDelta = Math.abs(Math.log(cellW / cellH / Math.max(0.2, average)));
-    const shortSide = Math.min(cellW, cellH);
-    const score = aspectDelta + (shortSide < 88 ? 1.6 : 0);
-    if (score < bestScore) {
-      bestScore = score;
-      best = cols;
+  minShort: number,
+): RowEvaluation | null {
+  const rowCount = groups.length;
+  let sumMin = gap * (rowCount - 1);
+  let sumWant = gap * (rowCount - 1);
+  const meta: RowGroup[] = [];
+  for (const entries of groups) {
+    let sumRatio = 0;
+    let minHeight = 0;
+    for (const entry of entries) {
+      const ratio = entryRatio(entry);
+      sumRatio += ratio;
+      minHeight = Math.max(minHeight, minShort / Math.min(1, ratio));
+    }
+    if (sumRatio <= 0) return null;
+    const widthHeight = (box.w - gap * (entries.length - 1)) / sumRatio;
+    meta.push({ entries, sumRatio, minHeight, widthHeight });
+    sumMin += minHeight;
+    sumWant += widthHeight;
+  }
+  if (sumMin > box.h + 1e-6) return null;
+  let heights: number[];
+  if (sumWant <= box.h + 1e-6) {
+    heights = meta.map((row) => row.widthHeight);
+  } else {
+    const target = box.h - gap * (rowCount - 1);
+    const excess = sumWant - target;
+    const slack = meta.reduce((sum, row) => sum + (row.widthHeight - row.minHeight), 0);
+    if (slack < excess - 1e-6) return null;
+    const scale = excess / slack;
+    heights = meta.map((row) => row.widthHeight - scale * (row.widthHeight - row.minHeight));
+  }
+  for (let index = 0; index < meta.length; index += 1) {
+    if (heights[index] + 1e-6 < meta[index].minHeight) return null;
+  }
+  return { groups: meta, heights, score: Math.min(...heights) };
+}
+
+/** 固定条目集合的行排布；行数从少到多试，第一次可行即返回。 */
+function packRowsExact(
+  entries: readonly GridEntry[],
+  box: { x: number; y: number; w: number; h: number },
+  gap: number,
+  minShort: number,
+  align: 'center' | 'start',
+): { rects: { item: WallItem; index: number; rect: TileRect }[]; rows: number } | null {
+  const total = entries.length;
+  if (total === 0 || box.w < minShort || box.h < minShort) return null;
+  const sorted = [...entries].sort((left, right) => entryRatio(right) - entryRatio(left));
+  const maxRows = Math.min(
+    total,
+    Math.max(1, Math.floor((box.h + gap) / (minShort + gap)) + 1),
+  );
+  const state: { best: RowEvaluation | null } = { best: null };
+  for (let rows = 1; rows <= maxRows; rows += 1) {
+    const consider = (groups: GridEntry[][]) => {
+      const evaluated = evaluateRowGroups(groups, box, gap, minShort);
+      if (!evaluated) return;
+      const best = state.best;
+      if (
+        !best ||
+        evaluated.score > best.score + 0.5 ||
+        (Math.abs(evaluated.score - best.score) <= 0.5 && evaluated.groups.length < best.groups.length)
+      ) {
+        state.best = evaluated;
+      }
+    };
+    const walk = (start: number, row: number, acc: GridEntry[][]) => {
+      if (row === rows - 1) {
+        const tail = sorted.slice(start);
+        if (tail.length > 0) consider([...acc, tail]);
+        return;
+      }
+      const maxEnd = total - (rows - row - 1);
+      for (let end = start + 1; end <= maxEnd; end += 1) {
+        walk(end, row + 1, [...acc, sorted.slice(start, end)]);
+      }
+    };
+    walk(0, 0, []);
+    if (state.best) break;
+  }
+  const best = state.best;
+  if (!best) return null;
+  const rects: { item: WallItem; index: number; rect: TileRect }[] = [];
+  const totalHeight = best.heights.reduce((sum, height) => sum + height, 0) + gap * (best.heights.length - 1);
+  let y = align === 'start' ? box.y : box.y + (box.h - totalHeight) / 2;
+  for (let index = 0; index < best.groups.length; index += 1) {
+    const row = best.groups[index];
+    const height = best.heights[index];
+    const widths = row.entries.map((entry) => height * entryRatio(entry));
+    const rowWidth = widths.reduce((sum, width) => sum + width, 0) + gap * (row.entries.length - 1);
+    let x = box.x + (box.w - rowWidth) / 2;
+    for (let position = 0; position < row.entries.length; position += 1) {
+      rects.push({
+        item: row.entries[position].item,
+        index: row.entries[position].index,
+        rect: { x, y, w: widths[position], h: height },
+      });
+      x += widths[position] + gap;
+    }
+    y += height + gap;
+  }
+  return { rects, rows: best.groups.length };
+}
+
+/**
+ * 在区域内尽量多放：二分找最大可保留数量（数量越少越容易放下），
+ * 返回的 entries 是实际放下的前缀数量。
+ */
+function packSpotlightRows(
+  entries: readonly GridEntry[],
+  box: { x: number; y: number; w: number; h: number },
+  gap: number,
+  minShort: number,
+  align: 'center' | 'start' = 'center',
+): { rects: { item: WallItem; index: number; rect: TileRect }[]; rows: number; entries: number } | null {
+  let low = 1;
+  let high = entries.length;
+  let best: { rects: { item: WallItem; index: number; rect: TileRect }[]; rows: number; entries: number } | null = null;
+  const cache = new Map<number, ReturnType<typeof packRowsExact>>();
+  while (low <= high) {
+    const middle = (low + high) >> 1;
+    let packed = cache.get(middle);
+    if (packed === undefined) {
+      packed = packRowsExact(entries.slice(0, middle), box, gap, minShort, align);
+      cache.set(middle, packed);
+    }
+    if (packed) {
+      best = { ...packed, entries: middle };
+      low = middle + 1;
+    } else {
+      high = middle - 1;
     }
   }
   return best;
 }
 
-function gridRects(
-  entries: readonly GridEntry[],
-  box: { x: number; y: number; w: number; h: number },
-  columns: number,
-  gap: number,
-): { item: WallItem; index: number; rect: TileRect }[] {
-  const count = entries.length;
-  if (count === 0) return [];
-  const cols = Math.max(1, Math.min(columns, count));
-  const rows = Math.ceil(count / cols);
-  const cellH = Math.max(1, (box.h - gap * (rows - 1)) / rows);
-  return entries.map((entry, position) => {
-    const row = Math.floor(position / cols);
-    const rowStart = row * cols;
-    // 末行不满时按实际张数均分整行宽（justified）：box 内不留空槽，
-    // 旧版会把第 4 格留空，聚焦时看起来就是英雄旁边的“空缺”。
-    const inRow = row === rows - 1 ? count - rowStart : cols;
-    const cellW = Math.max(1, (box.w - gap * (inRow - 1)) / inRow);
-    const col = position - rowStart;
-    return {
-      item: entry.item,
-      index: entry.index,
-      rect: {
-        x: box.x + col * (cellW + gap),
-        y: box.y + row * (cellH + gap),
-        w: cellW,
-        h: cellH,
-      },
-    };
-  });
-}
-
-/** 重排一个格子：英雄卡在原地等比放大，邻图装进四周剩余区域（上下横带 + 左右中柱）。 */
+/** 重排一个格子：英雄卡在原地等比放大，邻图按比例装进四周剩余区域。 */
 export function layoutSpotlightCell(
   spec: CellSpec,
   b: number,
@@ -565,13 +677,15 @@ export function layoutSpotlightCell(
   const originX = c * spec.cellWidth;
   const originY = b * spec.cellHeight;
   const cell = { b, c };
-  const ratio = hero.item.w > 0 && hero.item.h > 0 ? hero.item.w / hero.item.h : 1;
+  const ratio = entryRatio(hero);
   const narrow = innerW < 620;
+  const minShort = spotlightMinShort(innerW, innerH);
 
-  // 英雄卡只做等比缩放：把原图比例装进包围盒（宽支路 60% 宽×62% 高，
-  // 窄支路全宽×62% 高），碰到哪条边就以哪条边为准。不做任何单边的
-  // 最小/最大钳制——旧版 46% 宽度下限会把竖图硬拉成横框，object-fit
-  // 裁切掉头脚、挤压出周围空缺；等比后竖图就是竖框、横图就是横框。
+  // 密集格适当收小英雄：同格邻图越多，留给邻图的空间越大；面积仍由下面的
+  // 1.05 倍保底兜住，不会出现“点了反而更小”。
+  const restCount = normal.length - 1;
+  const density = Math.max(0, Math.min(1, (restCount - 2) / 14));
+  const heroScale = 1 - 0.3 * density;
   const fitHero = (maxW: number, maxH: number) => {
     let w = maxW;
     let h = maxW / ratio;
@@ -584,18 +698,18 @@ export function layoutSpotlightCell(
   let heroW: number;
   let heroH: number;
   if (narrow) {
-    ({ w: heroW, h: heroH } = fitHero(innerW, innerH * 0.62));
+    // 窄屏留一条侧柱（约 22% 宽）给竖图，避免只剩上下两条横带。
+    ({ w: heroW, h: heroH } = fitHero(innerW * 0.78 * heroScale, innerH * 0.62 * heroScale));
   } else {
-    ({ w: heroW, h: heroH } = fitHero(innerW * 0.6, innerH * 0.62));
+    ({ w: heroW, h: heroH } = fitHero(innerW * 0.6 * heroScale, innerH * 0.62 * heroScale));
   }
 
-  // 聚焦 = 放大：英雄面积不得小于被点卡片的可见面积（用户反馈“点击后
-  // 图片还没原来的大”——主图大卡被 60%×62% 包围盒收小了）。基础包围盒
-  // 不够就等比放大到 1.05 倍原面积；上限留出邻图区域：每轴至少 88px，
-  // 否则上下横带/左右中柱会被压成 <70px 的细条（v5.2 用户投诉过）。
-  // 极端比例碰顶时面积保底让位于几何必然。
-  if (anchorRect && anchorRect.w > 0 && anchorRect.h > 0) {
-    const minArea = anchorRect.w * anchorRect.h * 1.05;
+  // 聚焦 = 放大：英雄面积不得小于被点卡片的可见面积。
+  const minArea =
+    anchorRect && anchorRect.w > 0 && anchorRect.h > 0
+      ? anchorRect.w * anchorRect.h * 1.05
+      : 0;
+  if (minArea > 0) {
     const area = heroW * heroH;
     if (area < minArea) {
       const grow = Math.sqrt(minArea / area);
@@ -603,14 +717,34 @@ export function layoutSpotlightCell(
       heroH *= grow;
     }
   }
-  const maxW = narrow ? innerW : innerW - 88;
-  const maxH = innerH - 88;
+  const maxW = Math.max(1, innerW - minShort - gap);
+  const maxH = Math.max(1, innerH - minShort - gap);
   const shrink = Math.min(1, maxW / heroW, maxH / heroH);
   heroW *= shrink;
   heroH *= shrink;
+  // 满宽的卡片（移动端常见）没有空间同时留侧柱：先放弃侧柱把宽度放回整格，
+  // 面积还不够时只补高度，最多带来 5% 左右的比例偏差——也好过“点了反而变小”。
+  if (minArea > 0 && heroW * heroH < minArea - 1e-6) {
+    if (heroW < innerW) {
+      const grow = Math.min(innerW / heroW, Math.sqrt(minArea / (heroW * heroH)));
+      heroW *= grow;
+      heroH *= grow;
+    }
+    if (heroW > innerW) {
+      heroH *= innerW / heroW;
+      heroW = innerW;
+    }
+    if (heroW * heroH < minArea - 1e-6) {
+      heroH = Math.min(maxH, minArea / heroW);
+    }
+    if (heroH > innerH) {
+      heroW *= innerH / heroH;
+      heroH = innerH;
+    }
+  }
 
-  // 锚定被点图片的当前位置：点哪张，哪张就在原地放大；邻图围到它周围，
-  // 不再把新英雄搬到格子左上角、旧英雄挪到新位置（那会像“交换图片”）。
+  // 锚定被点图片的当前位置：点哪张，哪张就在原地放大；只有离边缘不足
+  // 一个短边下限时才贴边，把细缝并给另一侧。
   const anchorX = anchorRect ? anchorRect.x + anchorRect.w / 2 : hero.rect.x + hero.rect.w / 2;
   const anchorY = anchorRect ? anchorRect.y + anchorRect.h / 2 : hero.rect.y + hero.rect.h / 2;
   let heroX = Math.min(
@@ -621,81 +755,77 @@ export function layoutSpotlightCell(
     Math.max(originY, anchorY - heroH / 2),
     originY + innerH - heroH,
   );
-
-  // 贴边收缝：某一侧剩余空间不足 96px（放不下一条 usable 的邻图带/列）时
-  // 向近侧贴齐，把细缝并给另一侧。旧版 48px 只收细缝；面积保底把英雄放大后
-  // 48–96px 的剩余会排成 <70px 的细条卡，所以阈值提到 96。
-  const SNAP = 96;
+  const SNAP = minShort;
   if (heroX - originX - gap < SNAP) heroX = originX;
   else if (originX + innerW - heroX - heroW - gap < SNAP) heroX = originX + innerW - heroW;
   if (heroY - originY - gap < SNAP) heroY = originY;
   else if (originY + innerH - heroY - heroH - gap < SNAP) heroY = originY + innerH - heroH;
 
-  const out: PlacedTile[] = [
-    { item: hero.item, index: hero.index, rect: { x: heroX, y: heroY, w: heroW, h: heroH }, cell },
-  ];
+  const heroRect = { x: Math.round(heroX), y: Math.round(heroY), w: heroW, h: heroH };
   const rest = normal
     .filter((tile) => tile.index !== hero.index)
-    .map((tile) => ({ item: tile.item, index: tile.index }));
+    .map((tile) => ({ item: tile.item, index: tile.index, rect: tile.rect }));
+  // 优先保留离被点图片最近的邻图；容量不足时丢最远的，而不是随机丢。
+  rest.sort((left, right) => {
+    const leftDistance =
+      (left.rect.x + left.rect.w / 2 - anchorX) ** 2 +
+      (left.rect.y + left.rect.h / 2 - anchorY) ** 2;
+    const rightDistance =
+      (right.rect.x + right.rect.w / 2 - anchorX) ** 2 +
+      (right.rect.y + right.rect.h / 2 - anchorY) ** 2;
+    return leftDistance - rightDistance || left.index - right.index;
+  });
 
-  // 英雄四周全部利用（旧版只装“一侧整列 + 一带”，锚在格子中部时会留下
-  // L 形空白）：顶部/底部两条通宽横带 + 英雄左右两段中柱。四块互不重叠，
-  // 拼起来正好补满格子剩余空间；配合 gridRects 的末行 justified，不再有洞。
-  const MIN_REGION = 48;
-  const leftW = Math.max(0, heroX - originX - gap);
-  const rightW = Math.max(0, originX + innerW - heroX - heroW - gap);
-  const topH = Math.max(0, heroY - originY - gap);
-  const bottomH = Math.max(0, originY + innerH - heroY - heroH - gap);
-  const regions: { x: number; y: number; w: number; h: number }[] = [];
-  if (topH >= MIN_REGION) regions.push({ x: originX, y: originY, w: innerW, h: topH });
-  if (bottomH >= MIN_REGION) {
-    regions.push({ x: originX, y: heroY + heroH + gap, w: innerW, h: bottomH });
-  }
-  if (leftW >= MIN_REGION) regions.push({ x: originX, y: heroY, w: leftW, h: heroH });
-  if (rightW >= MIN_REGION) {
-    regions.push({ x: heroX + heroW + gap, y: heroY, w: rightW, h: heroH });
-  }
+  const leftW = Math.max(0, heroRect.x - originX - gap);
+  const rightW = Math.max(0, originX + innerW - heroRect.x - heroRect.w - gap);
+  const topH = Math.max(0, heroRect.y - originY - gap);
+  const bottomH = Math.max(0, originY + innerH - heroRect.y - heroRect.h - gap);
+  const regions: SpotlightRegion[] = [];
+  const addRegion = (kind: SpotlightRegion['kind'], x: number, y: number, w: number, h: number) => {
+    if (Math.min(w, h) < minShort) return;
+    regions.push({ kind, x, y, w, h, wide: w / Math.max(1, h) >= 1.4, assigned: [], packed: null });
+  };
+  addRegion('top', originX, originY, innerW, topH);
+  addRegion('bottom', originX, heroRect.y + heroRect.h + gap, innerW, bottomH);
+  addRegion('left', originX, heroRect.y, leftW, heroRect.h);
+  addRegion('right', heroRect.x + heroRect.w + gap, heroRect.y, rightW, heroRect.h);
 
-  if (rest.length > 0) {
-    if (regions.length === 0) {
-      // 防御兜底（理论上到不了：英雄高度有 62% 上限，上下带必有一条 ≥ 48px）：
-      // 退回英雄下方整宽重排，至少邻图不丢。
-      const box = {
-        x: originX,
-        y: heroY + heroH + gap,
-        w: innerW,
-        h: Math.max(2, originY + innerH - heroY - heroH - gap),
-      };
-      const cols = Math.max(1, Math.min(rest.length, gridColumns(rest, box, gap)));
-      for (const entry of gridRects(rest, box, cols, gap)) out.push({ ...entry, cell });
-    } else {
-      // 图少于区域数时丢最小的区域（只在低密度格子出现，损失一条窄带好过留洞）。
-      const kept = [...regions]
-        .sort((a, b) => b.w * b.h - a.w * a.h)
-        .slice(0, Math.min(regions.length, rest.length));
-      // 水位分配：每块至少 1 张，剩余名额反复给“单张摊到面积最大”的块，
-      // 让各区域的图密度大致均匀。
-      const areas = kept.map((region) => region.w * region.h);
-      const counts = kept.map(() => 1);
-      for (let extra = rest.length - kept.length; extra > 0; extra -= 1) {
-        let neediest = 0;
-        for (let i = 1; i < kept.length; i += 1) {
-          if (areas[i] / counts[i] > areas[neediest] / counts[neediest]) neediest = i;
-        }
-        counts[neediest] += 1;
+  const out: PlacedTile[] = [
+    { item: hero.item, index: hero.index, rect: heroRect, cell },
+  ];
+  if (regions.length === 0) return out;
+
+  // 逐张试放：按“最适合的区域”排序，放得下才保留；所有区域都放不下
+  // 就丢掉这张（最远的先丢），保证留下的每一张都达到短边下限。
+  for (const entry of rest) {
+    const entryAspect = entryRatio(entry);
+    const candidates = regions
+      .map((region) => {
+        const fitHeight = Math.min(region.h, region.w / entryAspect);
+        const fitWidth = fitHeight * entryAspect;
+        if (Math.min(fitHeight, fitWidth) + 1e-6 < minShort) return null;
+        const categoryMatch = entryAspect >= 1 ? region.wide : !region.wide;
+        return {
+          region,
+          score: fitHeight + (categoryMatch ? 24 : 0) + (region.w * region.h) / 1e6,
+        };
+      })
+      .filter((candidate): candidate is { region: SpotlightRegion; score: number } => candidate != null)
+      .sort((left, right) => right.score - left.score);
+    for (const { region } of candidates) {
+      region.assigned.push(entry);
+      const packed = packSpotlightRows(region.assigned, region, gap, minShort);
+      if (packed && packed.entries === region.assigned.length) {
+        region.packed = packed;
+        break;
       }
-      let cursor = 0;
-      for (let i = 0; i < kept.length; i += 1) {
-        const entries = rest.slice(cursor, cursor + counts[i]);
-        cursor += counts[i];
-        if (entries.length === 0) continue;
-        const box = kept[i];
-        const cols = Math.max(1, Math.min(entries.length, gridColumns(entries, box, gap)));
-        for (const entry of gridRects(entries, box, cols, gap)) {
-          out.push({ ...entry, cell });
-        }
-      }
+      region.assigned.pop();
     }
+  }
+
+  for (const region of regions) {
+    if (!region.packed) continue;
+    for (const entry of region.packed.rects) out.push({ ...entry, cell });
   }
   return out;
 }
@@ -755,10 +885,7 @@ export function layoutFeaturedWorld(
   }
   heroW = Math.min(heroW, width - heroX);
   const rightW = width - heroX - heroW - gap;
-  const useRightColumn = rightW >= 180;
-
-  const rightItems = useRightColumn ? rest.slice(0, Math.min(rest.length, 4)) : [];
-  const belowItems = rest.slice(rightItems.length);
+  const minShort = spotlightMinShort(width, targetHeight * 2.3);
 
   const tiles: LaidTile[] = [
     {
@@ -767,13 +894,32 @@ export function layoutFeaturedWorld(
       rect: { x: heroX, y: heroY, w: heroW, h: heroH },
     },
   ];
-  if (useRightColumn) {
-    const rightBox = { x: heroX + heroW + gap, y: heroY, w: Math.max(1, rightW), h: heroH };
-    const rightCols = Math.max(1, Math.min(rightItems.length, gridColumns(rightItems, rightBox, gap)));
-    for (const entry of gridRects(rightItems, rightBox, rightCols, gap)) {
-      tiles.push({ ...entry });
+
+  // 右列同样按“短边下限 + 原图比例”装：装得下几张放几张，其余顺延到下方。
+  const rightPlaced = new Set<number>();
+  if (rightW >= minShort) {
+    const rightBox = { x: heroX + heroW + gap, y: heroY, w: rightW, h: heroH };
+    // 极端竖长图单张就超过区域高度，先把这类剔掉，避免一张不可放的图
+    // 把后面所有可放的邻图一起挡在右列之外。
+    const candidates = rest.slice(0, Math.min(rest.length, 8)).filter((entry) => {
+      const entryAspect = entryRatio(entry);
+      return minShort / Math.min(1, entryAspect) <= heroH + 1e-6;
+    });
+    const packed = packSpotlightRows(
+      candidates,
+      rightBox,
+      gap,
+      minShort,
+      'start',
+    );
+    if (packed) {
+      for (const entry of packed.rects) {
+        rightPlaced.add(entry.index);
+        tiles.push({ ...entry });
+      }
     }
   }
+  const belowItems = rest.filter((entry) => !rightPlaced.has(entry.index));
 
   const belowOffset = heroY + heroH + gap;
   if (belowItems.length > 0) {
