@@ -8,12 +8,12 @@
 
 `crates/kanalib-ingest` 的 I2 主体已经闭环：下载完成后按 `rules.toml` 做黑名单/R-18G/标签预算/观察词/尺寸/去重判定；标签不足时调用 HTTP 打标后端补标一次再复判；结果写入 `items.decision` 与 `decisions` 审计表。规则加载写入只读 `rule_snapshots`，支持 mtime 变更检测与 Unix `SIGHUP` 重载；管理页提供审核、规则草稿、逐行 diff 预览、重载与指标。
 
-本轮补完了上一份交接里的 1–8 项（第 9 项 I5 仍需 box 实机）；2026-11-23 又定掉了评审清单里唯一悬着的 P1（`rules_file` 缺省策略，见第 6 节）：
+本轮补完了上一份交接里的 1–8 项（第 9 项 I5 仍需 box 实机）。2026-11-23 另完成三件事：I2 改动入库、评审 P1（`rules_file` 缺省策略）改为 fail-closed、告警补上打标后端连续失败（见第 6 节）。
 
 | 范围 | 进度 | 结论 |
 |---|---:|---|
 | I2：打标后端 + 规则加载/校验 + 决策 + 补标 + review + 快照/热重载 | 100% | 主循环、规则状态、管理页、指标、规则编辑均已接通；I2 测试全绿 |
-| F-089 整体 | ~70% | I0/I1/I2/I3 主体完成；I4 管理页与规则层代码完成（告警仍缺模型连续失败一项）；**I5 box 部署 + 网页联调未做** |
+| F-089 整体 | ~75% | I0/I1/I2/I3 主体完成；I4 管理页、规则层与告警代码完成；**I5 box 部署 + 网页联调未做** |
 
 ## 2. 本轮完成
 
@@ -150,7 +150,7 @@ $cargo = Join-Path $env:USERPROFILE ".cargo\bin\cargo.exe"
    - 审核放行/拒绝各一条，网页批次结果符合预期。
    - 断网重试、box 重启恢复、桌面拉原图走直连。
 2. **真实 Pixiv 令牌冒烟**：只在 box 手动执行，不写入仓库/CI。
-3. **告警接线**：`deploy/monitor/kanalib-health.sh` 已覆盖磁盘、推送积压、推送失败/被拒、review 积压、HTTP 健康与 TLS；仍缺**模型连续失败**——`model_errors` 计数器已在 `src/metrics.rs` 暴露，脚本没读它。
+3. **告警接线**：`deploy/monitor/kanalib-health.sh` 已覆盖磁盘、推送积压、推送失败/被拒、review 积压、HTTP 健康、TLS 与**打标后端连续失败**（`model_error_streak` gauge，2026-11-23 补）。剩下的是按部署环境调阈值与 webhook，属于 I5 现场工作。
 4. **草稿类型**：当前只支持 tags/users 的增删；`watch`、rating、tag_budget 等仍走手工编辑文件。
 
 ## 7. 重要实现细节与坑

@@ -16,6 +16,8 @@ pub struct Metrics {
     block: AtomicU64,
     review: AtomicU64,
     model_errors: AtomicU64,
+    /// 打标后端连续失败次数；任一次成功即归零。计数器只增不减，表达不了「连续」。
+    model_error_streak: AtomicU64,
     push_failures: AtomicU64,
     source_errors: AtomicU64,
     reasons: Mutex<BTreeMap<&'static str, u64>>,
@@ -47,6 +49,12 @@ impl Metrics {
 
     pub fn record_model_error(&self) {
         self.model_errors.fetch_add(1, Ordering::Relaxed);
+        self.model_error_streak.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// 打标成功：连续失败计数归零。
+    pub fn record_model_success(&self) {
+        self.model_error_streak.store(0, Ordering::Relaxed);
     }
 
     pub fn record_push_failures(&self, count: u64) {
@@ -110,9 +118,11 @@ impl Metrics {
 
         out.push_str(&format!(
             "# TYPE model_errors_total counter\nmodel_errors_total {}\n\
+             # TYPE model_error_streak gauge\nmodel_error_streak {}\n\
              # TYPE push_failures_total counter\npush_failures_total {}\n\
              # TYPE source_errors_total counter\nsource_errors_total {}\n",
             self.model_errors.load(Ordering::Relaxed),
+            self.model_error_streak.load(Ordering::Relaxed),
             self.push_failures.load(Ordering::Relaxed),
             self.source_errors.load(Ordering::Relaxed),
         ));
@@ -190,7 +200,21 @@ mod tests {
         assert!(text.contains("decision_reason_total{kind=\"watch\"} 1"));
         assert!(text.contains("tag_budget_hit_total{source=\"pixiv\"} 1"));
         assert!(text.contains("model_errors_total 1"));
+        assert!(text.contains("model_error_streak 1"));
         assert!(text.ends_with("review_age_seconds 12\n"));
+    }
+
+    #[test]
+    fn model_error_streak_resets_on_success() {
+        let metrics = Metrics::default();
+        metrics.record_model_error();
+        metrics.record_model_error();
+        metrics.record_model_success();
+        metrics.record_model_error();
+        let text = metrics.render("");
+        // 累计计数器只增不减，连续计数在成功后归零再重新起算。
+        assert!(text.contains("model_errors_total 3"), "got: {text}");
+        assert!(text.contains("model_error_streak 1"), "got: {text}");
     }
 
     #[test]

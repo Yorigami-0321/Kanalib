@@ -137,6 +137,7 @@ async fn decide_item(
             .await
         {
             Ok(tags) => {
+                metrics.record_model_success();
                 db.record_model_tags(&pending.id, &tags.tags)?;
                 subject.tags = db.item_tag_names(&pending.id)?;
                 subject.tag_count = subject.tags.len();

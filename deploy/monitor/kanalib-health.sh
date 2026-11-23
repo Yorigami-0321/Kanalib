@@ -7,6 +7,8 @@ set -uo pipefail
 PUBLIC_HEALTH="${KANALIB_PUBLIC_HEALTH:-http://127.0.0.1:8787/api/health}"
 PRIVATE_HEALTH="${KANALIB_PRIVATE_HEALTH:-}"
 INGEST_HEALTH="${KANALIB_INGEST_HEALTH:-}"
+KANALIB_INGEST_METRICS="${KANALIB_INGEST_METRICS:-}"
+MAX_MODEL_ERROR_STREAK="${KANALIB_MAX_MODEL_ERROR_STREAK:-10}"
 WEB_DB="${KANALIB_WEB_DB:-/var/lib/kanalib-web/kanalib-web.db}"
 INGEST_DB="${KANALIB_INGEST_DB:-/var/lib/kanalib-ingest/ingest.db}"
 DISK_PATH="${KANALIB_DISK_PATH:-/var/lib/kanalib-web}"
@@ -40,6 +42,27 @@ check_http() {
 check_http public "$PUBLIC_HEALTH"
 check_http private "$PRIVATE_HEALTH"
 check_http ingest "$INGEST_HEALTH"
+
+# 打标后端连续失败：model_error_streak 是 gauge，任一次成功即归零，
+# 所以超阈值说明后端持续不可用，而不是历史累计。未配 URL 时跳过。
+metrics_url="$KANALIB_INGEST_METRICS"
+if [[ -z "$metrics_url" && -n "$INGEST_HEALTH" ]]; then
+    metrics_url="${INGEST_HEALTH%/admin/api/health}/admin/api/metrics"
+fi
+if [[ -n "$metrics_url" ]]; then
+    if streak="$(curl -fsS --max-time 5 "$metrics_url" \
+            | sed -n 's/^model_error_streak \([0-9][0-9]*\)$/\1/p')"; then
+        if [[ -z "$streak" ]]; then
+            bad "model_error_streak missing from $metrics_url"
+        elif (( streak > MAX_MODEL_ERROR_STREAK )); then
+            bad "tagger consecutive failures ${streak} > ${MAX_MODEL_ERROR_STREAK}"
+        else
+            ok "tagger consecutive failures ${streak}"
+        fi
+    else
+        bad "ingest metrics fetch failed: $metrics_url"
+    fi
+fi
 
 if [[ -n "$TLS_HOST" ]]; then
     if command -v openssl >/dev/null 2>&1; then
