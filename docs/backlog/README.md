@@ -62,6 +62,7 @@
 | [p2-reuse-research.md](p2-reuse-research.md) | P2 之后可复用组件调研：Pixiv 客户端、axum/tower-http、sidecar 复用、签名与队列选型、许可与版本冲突 |
 | [manual-acceptance.md](manual-acceptance.md) | 手动验收总清单：前台/GUI/UIA/真实输入/长耗时项、夹具、证据与已通过项索引 |
 | [../TESTING-PROCESS.md](../TESTING-PROCESS.md) | 轻量测试流程：测试分层、风险定档、改动类型矩阵、门禁与反过度测试约束 |
+| [../DEVELOPMENT-SPEC.md](../DEVELOPMENT-SPEC.md) | 开发规范：角色与决策权、阶段流转、任务派发契约、写域、证据、验证门禁、PowerShell 7 与工具链、服务器/EasyTier 访问、部署、box MCP 协作、提交纪律 |
 | [../PLAN.md](../PLAN.md) | 项目总体调研与实施方案：模型事实、架构、数据模型、索引/缩略图/去重、sidecar、来源接入、阶段与基准（F-012/F-021/F-023/F-024/F-045 等的依据） |
 | [../FFMPEG.md](../FFMPEG.md) | FFmpeg 许可与进程模型（F-040）：LGPL/GPL 边界、二进制发现顺序、批处理进程池、冷导入基准与阶段结论 |
 | [constraints.md](constraints.md) | 安全/性能/缓存/许可/本机脚本等全局约束 |

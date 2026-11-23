@@ -7,6 +7,7 @@
 | 入口 | 内容 |
 |---|---|
 | [backlog/README.md](backlog/README.md) | 调研准则、状态定义、文档地图、推荐顺序、使用约定 |
+| [DEVELOPMENT-SPEC.md](DEVELOPMENT-SPEC.md) | 开发规范：角色与决策权、阶段流转、任务派发契约、写域、证据、验证门禁、PowerShell 7 与工具链、服务器/EasyTier 访问、部署、box MCP 协作、提交纪律 |
 | [TESTING-PROCESS.md](TESTING-PROCESS.md) | 轻量测试流程：测试分层、风险定档、改动类型矩阵、门禁与反过度测试约束 |
 | [PLAN.md](PLAN.md) | 项目总体调研与实施方案：模型事实、架构、数据模型、索引/缩略图/去重、sidecar、来源接入、阶段与基准 |
 | [FFMPEG.md](FFMPEG.md) | FFmpeg 许可与进程模型（F-040）：LGPL/GPL 边界、二进制发现、批处理进程池与冷导入基准 |

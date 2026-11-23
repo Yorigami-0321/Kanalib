@@ -1,0 +1,606 @@
+# Kanalib 开发规范
+
+> 上级入口：[FEATURE-BACKLOG.md](FEATURE-BACKLOG.md)
+>
+> 依据：本项目 2026-11-09 至 2026-11-23 的协作记录（`.qoder/sessions/redacted/` 共 8 个会话、32 份压缩摘要）、`docs/backlog/` 现行文档与提交历史。
+> 本文件规定**怎么协作、用什么工具、怎么改、怎么连服务器、怎么证明改对了、怎么提交**；测试分层见 [TESTING-PROCESS.md](TESTING-PROCESS.md)，硬约束见 [backlog/constraints.md](backlog/constraints.md)，视觉硬规则见 [backlog/photo-wall-v3.md](backlog/photo-wall-v3.md)，数据契约见 [backlog/photo-wall-contract.md](backlog/photo-wall-contract.md)，部署模板见 [../deploy/README.md](../deploy/README.md)。本文不重复这些内容。
+
+## 1. 效力与适用范围
+
+- 适用于 `web/`（图片墙前端）、`crates/`（core / UI / publish / ingest / web）、`scripts/`（探针与校验）与 `docs/`（文档与登记）。
+- 与既有文档冲突时：`constraints.md` 的安全/数据约束 > 契约文档 > 本文 > 会话中的临时说法。
+- 会话里的口头结论只有落到代码、契约或 `photo-wall-status.md` / `registry.md` 才算生效；**归档不等于通过验收**（[archive/README.md](archive/README.md)）。
+
+## 2. 事实来源优先级
+
+1. **代码与实测**：行号、探针输出、网络/像素/帧率数字。
+2. **契约与规格**：`photo-wall-contract.md`、`photo-wall-v3.md`、`web-rail-horizontal.md`。
+3. **现状与登记**：`photo-wall-status.md`、`registry.md`、`pending/overview.md`。
+4. **归档与历史会话**：只作追溯，不作执行依据。
+
+规则：
+
+- 不拿旧文档当需求依据；引用旧结论前先回代码或现行文档核对。
+- 行号会漂移，文档里定位优先写**函数名/选择器/常量名**，行号只作辅助。
+- 结论必须可复算：写清用的是哪份库（937 条真实库 / 合成库 / 夹具）、哪个视口、哪次提交。
+
+## 3. 角色与决策权
+
+| 角色 | 职责 | 禁止 |
+|---|---|---|
+| 人类 owner（Yorigami_Nya） | 产品口径、优先级、是否上线、是否提交/推送 | — |
+| 协调者（管理员一号） | 拆分任务、划定写域、评审、统一提交、文档收口 | **不改代码**（用户明确要求："你的职责不是修改代码"） |
+| 实现者（前端/UI/后端） | 在写域内实现、自测、出证据、报残余风险 | 越域改文件、自行提交/推送、替用户做产品决策 |
+| 审计者 | 只读走查，输出问题清单与验收标准 | 审计阶段改代码 |
+
+规则：
+
+- 产品决策（内容分级、导航形态、是否上线、是否推送）只能由人类 owner 拍板；执行者不代答、不"顺手实现"。
+- 协调者发现缺陷时派单，不自己动手；紧急修复也必须走"派单 → 实现 → 评审"。
+- 并发按 **4 条车道**估算；超过时排队，不靠加人硬塞。
+
+## 4. 阶段流转
+
+```
+审计（只读） → 合并问题清单 → 分批派单（写域+验收） → 实现（不提交）
+   → 实现者报告（证据+数字+残余风险） → 协调者复验 → 冻结该批 → 统一提交
+```
+
+硬性要求：
+
+1. **审计阶段只读**：可以起服务、跑探针、截图，不改仓库文件。
+2. **一批一冻结**：某批验收通过后即冻结，后续改动另开批次，不在已验收文件上继续叠加。
+3. **提交权单一**：实现者一律"不 commit、不 push"，由协调者评审后统一提交；用户明确说"提交"才提交，说"推送先往后放"就不推。
+4. **不推进上线**：当前阶段目标是手感与完整度，部署/发布不属于默认任务。
+
+## 5. 任务派发契约
+
+每个任务必须同时给出以下五项，缺一项就不算可执行任务：
+
+1. **目标与现状**：缺陷是什么、在哪复现、期望行为。
+2. **写域**：允许修改的文件清单（精确到文件）。
+3. **禁区**：明确不能碰的文件/目录（如 `Sidebar.tsx`、`sidebar.css`、`web/public/data`）。
+4. **验收**：可执行命令 + 可判定结果（数字、断言、截图状态）。
+5. **纪律**：是否提交、证据放哪、完成后向谁报告。
+
+派发模板：
+
+```text
+【批次/编号】
+目标：<缺陷或需求>；复现：<路由/视口/操作>；期望：<可观察结果>
+写域：<file A>、<file B>
+禁区：<file C>、<file D>、web/public/data、源图库
+验收：<命令 1>；<命令 2>；<探针> passed；<数字门槛>
+纪律：不提交、不 push；证据放 <目录>；完成后报告 <角色>
+```
+
+## 6. 写域与并行
+
+- **一人一文件集**：同一时刻一个文件只有一个写者。共享文件（`App.tsx`、`Wall.tsx`、`world.ts`、`styles.css`）默认不并行拆给两人。
+- **跨域发现只报告**：需要改别人的文件时，停下来说明"改哪里、为什么、验收是什么"，等授权；不得"先改了再说"。
+- **不覆盖他人未提交改动**：工作区里别人的未提交修改视为在途资产，禁止回退、格式化或整文件重写。
+- **契约先行**：跨端字段（`index.json`、`search-index.json`、`WallItemDto`）先改契约文档，再同步两侧；契约冻结由一个人完成，其他人只读。
+- **DOM/结构契约**：组件结构一旦被多方依赖（如 `aside.inspector > handle + scroll + actions`），先写进任务说明，CSS 与 TSX 各自按契约实现。
+
+## 7. 证据规范
+
+### 7.1 什么算证据
+
+- `文件:行号` + 代码事实；或
+- 实测数字（体积、耗时、p95、帧率、像素亮度、请求数、DOM 数）；或
+- 探针 `passed: true` 的结构化输出；或
+- 改前/改后成对截图（视觉类必须成对）。
+
+### 7.2 硬规则
+
+- **只报四类结果**：通过 / 失败 / 未跑 / 既有失败。跑了子集就写"定向通过"，不写"全部通过"。
+- **不把探针假象当产品缺陷**：合成点击失败、缓存命中导致 0 请求、headless 的 `3g` 判定等，先排除测试缺陷再上报。
+- **不过度声称**：验证了 A 就不能说验证了 A+B。会话中真实出现过"详情翻页 replace 已验证"只证明了"一次返回回到列表"，被协调者纠正——按实际断言范围写结论。
+- **证据不入库**：截图、报告、临时脚本放 `web/screenshots/`、`.kanalib/<轮次>/`、`%TEMP%` 或共享目录，均已被 `.gitignore` 覆盖；**截图含库内容时只留本地**，不上传、不入库。
+- **改前/改后成对**：缺陷修复必须能指出"改前失败、改后通过"的同一断言。
+
+### 7.3 交付报告模板
+
+一批完成后只发一条公开消息，包含：
+
+```text
+改动文件：<逐项列出，注明新增/修改>
+逐项验收：<每条需求 → 命令/探针 → 结果数字>
+证据路径：<截图目录、report.json、探针输出>
+未完成项：<没做的、做不了的、以及原因>
+残余风险：<未覆盖的场景、headless/合成输入的局限>
+状态：未提交、未 push（或按指示写明已提交的 commit）
+```
+
+不写"基本完成""应该没问题"这类无法判定的结论；不把未跑项藏在段落里。
+
+## 8. 缺陷修复流程
+
+1. **先复现**：给出路由、视口、缩放、操作序列；能写成探针就写成探针。
+2. **找最小根因**：区分几何/像素/状态/时序/缓存，不用"加个 `!important`/加个延时"掩盖。
+3. **最小改动**：只动根因所在层；不顺手重构、不夹带文案或格式变更。
+4. **固化回归**：把断言写进对应探针（`scripts/wall_probe_*.mjs`），避免同类问题复发。
+5. **报残余风险**：明确"仍未覆盖什么"，例如 headless 不代表真机手感、`:has` 的浏览器下限、缓存导致的重复下载。
+
+歧义处理：用户反馈与截图不一致、或一句话有多种解释时，**先问再做**。会话中"侧边栏不能被穿透"被误解为"侧边栏不可见"，导致返工并被用户点名——不确定就问，不要猜。
+
+## 9. 验证与门禁
+
+### 9.1 前端（`web/`）
+
+```powershell
+cd web
+npm run build                      # 已含 tsc --noEmit，无需再单独跑
+npx vite preview --port 4273 --strictPort --host 127.0.0.1
+node scripts/wall_shots.mjs --base http://127.0.0.1:4273/ --out web/screenshots/<批次>
+```
+
+- `npm run build` = `tsc --noEmit && vite build`；单独再跑 `tsc` 只用于定位类型错误，不作为额外门禁。
+- 探针一律从**仓库根**执行（`scripts/` 在根目录，不在 `web/scripts`）。
+- 探针按改动面选择，不全量重跑：
+
+| 改动面 | 必跑 |
+|---|---|
+| 任何前端改动 | `npm run build` + `wall_shots`（`failures: []`、`consoleErrors: []`） |
+| 数据加载/失败路径 | `wall_probe_recover.mjs` |
+| 搜索/URL/深链 | `wall_probe_state.mjs`、`wall_probe_cold_search.mjs` |
+| 详情/翻页/预取 | `wall_probe_detail_nav.mjs`、`wall_probe_detail_preload.mjs`（自带静态服务，用 `--serve-dist web/dist`） |
+| 标签墙/无界/阈值 | `wall_probe_tag360.mjs`、`wall_probe_tag_threshold.mjs` |
+| 边界态/空态/404 | `wall_probe_edge.mjs` |
+| 移动端检查器 | `wall_probe_inspector_sheet.mjs` |
+| 遮罩/边缘像素 | `wall_probe_mask_edge.mjs`（带 `--label before/after`） |
+
+### 9.2 Rust / 数据管线
+
+```powershell
+cargo check --workspace
+cargo test                          # default-members：. / kanalib-core / kanalib-ui
+cargo test -p kanalib-publish
+python scripts/wall_manifest_check.py web/public/data
+```
+
+- **不把 `cargo test --workspace` 当门禁**（会连带 vendor 测试的既有编译失败）。
+- 发布器改动必须验证**二跑幂等**（第二次不重编、不重写）。
+- 真实库重导（`LEDGER_VERSION` 升级、406MB 重建）属于高成本操作，需用户单独确认，不在日常批次里执行。
+
+### 9.3 视觉与真实设备
+
+- 视觉缺陷先在真实浏览器里看（用户明确要求"直接开浏览器控制，尽量减少不必要的多余测试"），再决定是否补探针。
+- headless 走 SwiftShader，**帧率与 GPU 合成成本不代表真机**；触控板/触屏手感必须标注"待实机确认"。
+- 只验改动影响的状态，不复拍未改页面；同一断言不在多层重复。
+
+## 10. 代码规范
+
+### 10.1 通用
+
+- 不引入第二套 UI 组件库；新增运行时依赖需先确认（当前前端运行时依赖只有 `react` / `react-dom`）。
+- 不新增测试框架、CI、UI 自动化依赖（见 `TESTING-PROCESS.md` §9）。
+- 不做"仅注释/仅格式"的伪改动来回应缺陷；用户明确要求过"不要做注释的改动"。
+- 不修与任务无关的既有问题；发现了就报告，不夹带。
+- 注释只解释"为什么"，不复述代码；中文注释与现有文件保持一致。
+
+### 10.2 TypeScript / React
+
+- 严格类型：不用 `as any`、`@ts-ignore`、`eslint-disable` 绕过（当前 `web/src` 为 0 命中，保持）。
+- 派生数据用 `useMemo`，回调用 `useCallback` 并给稳定依赖；不在渲染期写 `ref`（改 `useEffect`）。
+- 副作用必须可清理：`rAF`、定时器、`ResizeObserver`、事件监听、`pointercapture` 在卸载/切换时释放。
+- 请求失败要保留已加载数据，游标只在成功后推进；重试需要 cache-bust（`?r=<nonce>`），否则浏览器复用失败资源。
+- 不引入路由/状态库；hash 路由的唯一写入口保持在 `lib/router.ts`，`replaceState` 后必须通知订阅者（`ROUTE_CHANGE` 事件），不能只依赖 `hashchange`。
+- 状态写入 URL 时保持单一写者（`lastWritten` 语义），避免 React state 与 hash 事件互相触发。
+
+### 10.3 CSS
+
+- 遵守 `photo-wall-v3.md` 十一条硬规则：无首页脚手架、一状态一视觉通道、角标不 blur/圆角/渐变、焦点用内描边、列表 `cover`/详情 `contain`、背景层不拦指针、390px 单手可用。
+- 遮罩/描边类问题优先在**像素层**验证：分数缩放（1.2635/1.6）与 DPR 2.5 下四边最外 2px 亮度差 ≤3/255。
+- 装饰环画在遮罩之上（`.tile__ring`，`pointer-events:none`），不靠透光细线表达状态。
+- 断点固定为 900 / 760 / 560，新增断点需说明理由。
+- 不覆盖别人的未提交 CSS；同一选择器的修改先确认归属。
+
+### 10.4 Rust
+
+- 新代码过 `rustfmt` 与 `clippy`；不顺手格式化历史文件（避免无关 diff）。
+- 错误路径 fail-closed：缺配置、缺规则文件时拒绝启动，不静默放行。
+- 写文件用显式 UTF-8（Windows 默认 GBK 会导致校验器报"不是 UTF-8"）。
+- 发布器：先写同级暂存目录再整体替换；`fs::copy` 前断开硬链接，避免截断旧产物。
+
+## 11. 数据与安全边界
+
+- `web/public/data/` 与源图库**只读**；测试用隔离根（`KANALIB_ROOT`、临时目录），不写真实库。
+- 不把真实库导出、截图、日志提交进仓库；`web/public/data`、`web/screenshots/`、`.kanalib/` 已在 `.gitignore`。
+- 凭据（token、HMAC key、refresh token）不进日志、不进诊断快照、不进报告；诊断输出需脱敏 URL 凭据与 token 类键值。
+- 删除类操作只进回收站且仅限本地固定磁盘；保护路径永不可移入回收站（详见 `constraints.md`）。
+- 云端只读：网页端不做账号、上传、编辑、评论。
+
+## 12. 文档规范
+
+- 新需求：先在 `backlog/registry.md` 加 `F-xxx`，再写 `pending/` 对应文件；实现后移入 `implemented.md`，只留约束与验证要点。
+- 文档地图只维护入口，不在 `FEATURE-BACKLOG.md` 里堆条目。
+- 过期内容**归档或删除**，不留在现行文档里当依据；归档时修正相对链接，并在 `archive/README.md` 补一行。
+- 每轮收口跑 `bash scripts/check_backlog_docs.sh`（Git Bash），校验 registry 不重不漏、implemented 与 pending 不矛盾。
+- 不写工时与排期；写依赖顺序、写域与验收。
+- 文档里的数字必须带口径（哪份库、哪个视口、哪次提交）；数字变化时更新来源页，不在多处复写基线。
+
+## 13. 提交规范
+
+格式：`type(scope): 中文摘要`（Conventional Commits，摘要不加句号，一条提交只做一件事）。
+
+| type | 用途 |
+|---|---|
+| `feat` | 新功能/新能力 |
+| `fix` | 缺陷修复 |
+| `docs` | 文档、登记、交接 |
+| `test` | 探针、回归断言、夹具 |
+| `chore` | 构建、忽略规则、依赖清理 |
+| `style` | 纯样式/格式（不含行为变化） |
+
+常用 scope：`wall`、`publish`、`ingest`、`tagger`、`web`、`desktop`、`ui`、`monitor`、`backlog`、`cloud`、`detail`、`testing`。
+
+提交纪律：
+
+- 按写域分批暂存；仓库存在已 staged 的无关 rename 时，先 `git reset` 再按域 `git add`，避免夹带。
+- 提交前确认无凭据、无真实库内容、无截图产物。
+- 只有用户明确说"提交"才提交；说"推送先往后放"就保持本地。
+- 推送失败（网络/代理）不改写历史、不强推；记录失败原因并等指示。
+
+## 14. 开发环境与工具链
+
+### 14.1 本机实测版本（2026-11-23）
+
+| 工具 | 版本 / 位置 | 备注 |
+|---|---|---|
+| PowerShell | `pwsh` 7.6.9（WindowsApps 下的 OpenAI runtime） | **唯一默认 shell**，见 14.2 |
+| Node / npm | v26.13.0 / 11.20.0 | 探针只依赖内置 `fetch` / `WebSocket` |
+| Rust / Cargo | 1.98.1 / 1.98.1 | 在 `%USERPROFILE%\.cargo\bin\`，**非登录 shell 不在 PATH** |
+| Python | 3.14.7 | Windows CPython 无 `socket.AF_UNIX` |
+| Git | 2.55.0.windows.3 | 仓库 `origin` = `github.com/Yorigami-0321/Kanalib` |
+| OpenSSH | 9.5p2（`C:\Windows\System32\OpenSSH\`） | 有 `ssh`/`scp`/`sftp`，**无 `rsync`** |
+| 其他 | `tar`、`curl` 随系统；无 `rsync`、无 `sqlite3` CLI | 压缩/传输用 `tar` + `scp` |
+
+仓库结构：workspace 成员 `.`、`crates/kanalib-core`、`crates/kanalib-ingest`、`crates/kanalib-publish`、`crates/kanalib-ui`、`crates/kanalib-wall-model`、`crates/kanalib-web`、`vendor/ely-gpui-components`；`default-members` 不含 ingest/web/wall-model。
+
+### 14.2 PowerShell 7 强制规则
+
+1. **一律用 `pwsh`**：交互命令直接跑；脚本用 `pwsh -NoLogo -NoProfile -File <脚本>`。只有在 `pwsh` 不存在的机器上才回退 5.1，并在报告里注明。
+2. **不写 Bash heredoc**：Windows 上没有可靠的 Bash；多行脚本写成 `.ps1` 或 `.py` 文件再执行，不用 `<<'EOF'`。
+3. **显式 UTF-8**：`Get-Content -Encoding utf8`、`Set-Content -Encoding utf8`、`Out-File -Encoding utf8`；Python 侧 `encoding='utf-8'`，必要时 `$env:PYTHONIOENCODING='utf-8'`。否则中文在 GBK 控制台会乱码。
+4. **Cargo 用绝对路径**：`& "$env:USERPROFILE\.cargo\bin\cargo.exe" test`；或先 `$env:PATH = "$env:USERPROFILE\.cargo\bin;$env:PATH"`。
+5. **路径带 `[` `]` 用 `-LiteralPath`**：如 `web/screenshots/...` 里的方括号会被当通配符。
+6. **后台服务用 `Start-Process -WindowStyle Hidden`**，并重定向到日志；不要弹可见窗口。
+7. **启动端口前先探测**：`Get-NetTCPConnection -LocalPort 4273 -State Listen`；已被占用就复用并确认服务的是最新 `dist`，**不杀未知进程**。
+8. **代理变量会破坏私网访问**：访问 EasyTier 地址时先清 `HTTP_PROXY`/`HTTPS_PROXY`，或 curl 加 `--noproxy '*'`。
+9. **HTTPS 检查用 Node**：本机 Windows schannel 对 `patchouli.us.ci` 报 `SEC_E_NO_CREDENTIALS`（`Invoke-WebRequest` 与 `curl.exe` 都失败），改用 `node -e "fetch('https://patchouli.us.ci/api/health').then(r=>r.text()).then(console.log)"`。
+10. **不把密钥写进命令行**：`ssh -i` 可以，但不要把私钥内容、HMAC、token 拼进命令或日志。
+
+### 14.3 日常开发循环
+
+```powershell
+# 1. 定位：优先 rg，不用 findstr
+rg -n "cellTilesInView" web/src
+
+# 2. 改代码（只在写域内）
+# 3. 构建（前端已含类型检查）
+cd web; npm run build
+
+# 4. 起预览（后台、固定端口）
+Start-Process pwsh -WindowStyle Hidden -ArgumentList '-NoLogo','-NoProfile','-Command',
+  'cd D:\Code\Kanalib\web; npx vite preview --port 4273 --strictPort --host 127.0.0.1 *> $env:TEMP\kanalib-preview.log'
+
+# 5. 跑探针（从仓库根，不是 web/）
+cd D:\Code\Kanalib
+node scripts/wall_shots.mjs --base http://127.0.0.1:4273/ --out web/screenshots/<批次>
+
+# 6. 收尾：停自己起的进程，证据留在 gitignore 目录
+```
+
+Rust 侧：
+
+```powershell
+& "$env:USERPROFILE\.cargo\bin\cargo.exe" check --workspace
+& "$env:USERPROFILE\.cargo\bin\cargo.exe" test
+& "$env:USERPROFILE\.cargo\bin\cargo.exe" test -p kanalib-publish
+python scripts\wall_manifest_check.py web/public/data
+```
+
+### 14.4 浏览器与探针
+
+- 探针是**零依赖 CDP**（Node 原生 `fetch` + `WebSocket`），不引 Playwright/Puppeteer；Chrome/Edge 按 `scripts/*.mjs` 里的候选路径自动探测。
+- `browser-harness` 在本机不可用（依赖 Unix socket）；不要为此装 WSL，直接用 Node 脚本。
+- CDP 常见坑：
+  - 同 URL `Page.navigate` 不重载，深链/移动端场景要开新 target 或加查询串。
+  - `Network.setBlockedURLs` 拦不住图片，用 `Fetch.enable` + `Fetch.failRequest`。
+  - `Fetch.disable` 后可能残留 "Invalid InterceptionId"，过滤或等待。
+  - headless 默认上报 `effectiveType: '3g'`，测快网需覆写 `NetworkInformation`。
+  - `Emulation.setTouchEmulationEnabled({enabled:false, maxTouchPoints:0})` 非法；禁用时只传 `{enabled:false}`。
+  - 合成点击要选完全在视口内、且不在缝/标题层下的元素；详情断言限定中心 pane。
+  - 键盘激活按钮需 `Emulation.setFocusEmulationEnabled` + `keyDown`（不是 `rawKeyDown`）。
+- 端口：dev `5273`、preview `4273`（`web/vite.config.ts`）；探针文档里的 `4318` 只是历史示例。
+- Windows 路径：Git Bash 的 `/tmp` 与 Windows 临时目录不是同一位置；脚本传绝对 Windows 路径，`wall_shots --out` 用仓库相对路径。
+
+### 14.5 工具选择
+
+| 任务 | 工具 | 不要用 |
+|---|---|---|
+| 搜代码/文件 | `rg`、`rg --files` | `findstr`、递归 `Get-ChildItem` 全盘 |
+| 改文件 | `apply_patch`（精确 diff） | 整文件重写、正则批量替换未核对 |
+| 前端构建 | `npm run build` | 只跑 `vite build` 跳过类型检查 |
+| Rust 检查 | `cargo check` / `cargo test`（绝对路径） | `cargo test --workspace` 当门禁 |
+| 视觉验证 | 真实浏览器 + `scripts/wall_*.mjs` | 只读代码推断像素结果 |
+| 文档自检 | `scripts/check_backlog_docs.sh`（需 Git Bash/WSL）或等价 Python 校验 | 跳过一致性检查 |
+| 远程执行 | `ssh` / box MCP | 在本地模拟服务器状态 |
+
+## 15. 服务器访问与部署
+
+### 15.1 拓扑（实测，2026-11-23）
+
+```text
+公网浏览器 ──443──> patchouli.us.ci (128.1.132.31)
+                       └─ Nginx ──> kanalib-web 127.0.0.1:8787（只读 public）
+                                        └─ /media/ 静态媒体
+                       └─ /easytier/ ──> 127.0.0.1:11012（EasyTier WSS）
+
+EasyTier 虚拟网 10.126.126.0/24
+  ├─ 10.126.126.1  kanalib-pc（本机 Windows，打标 GPU）
+  ├─ 10.126.126.2  kanalib-web（2c2g 云，private 8788）
+  └─ 10.126.126.3  kanalib-box（入库，ingest 8790 / admin 8792）
+
+打标链路（实测）：
+box ──> 10.126.126.2:8793（云端代理）──> 10.126.126.1:8793（本机 GPU）
+```
+
+| 节点 | 地址 | 运行内容 | 实测 |
+|---|---|---|---|
+| 云端 web | `10.126.126.2`，公网 `128.1.132.31` / `patchouli.us.ci` | Nginx 443、`kanalib-web` public `127.0.0.1:8787`、private `10.126.126.2:8788` | `https://patchouli.us.ci/api/health` → `{"ok":true,"db":true,"media_root":true,"version":"0.1.0"}` |
+| box | `10.126.126.3` | `kanalib-ingest`（`--config /etc/kanalib/ingest.toml`）、`kanalib-easytier`、`kanalib-etproxy` | 服务 active；`/admin/api/health` → `schema 7`、`rules 2026-11-23.3` |
+| 本机 | `10.126.126.1` | `easytier-gui` Windows 服务、`sidecar/tagger/http_server.py`（`10.126.126.1:8793`） | `easytier-cli peer` 可见 web（p2p, 408ms）与 box（relay, 1000ms）；本机 `curl 10.126.126.1:8793/health` 返回 `{"ok":true,"device":"cuda"}` |
+
+**打标路径实测**：box 直连 `10.126.126.1:8793` 不通（`000`），但 `10.126.126.2:8793/health` 返回 200 且回包是本机模型路径——即 box 经云端代理到本机。`ingest.toml` 的 `[tagging].endpoint` 当前为 `http://10.126.126.2:8793/tag`。box 与本机之间走 EasyTier relay，实测 `rx/tx = 0 B`，不能假设两者可直连。
+
+端口约定：
+
+| 端口 | 位置 | 用途 | 暴露面 |
+|---|---|---|---|
+| 443 | web | Nginx TLS、静态站、只读 API | 公网 |
+| 8787 | web | `kanalib-web` public listener | 仅回环，Nginx 反代 |
+| 8788 | web | `kanalib-web` private listener（ingest / desktop / 原图） | 仅 EasyTier |
+| 8790 | box | `kanalib-ingest` 媒体/公开基址 | 仅 EasyTier |
+| 8792 | box | 管理页与指标 | 仅 EasyTier |
+| 8793 | 云端 `10.126.126.2` | 打标代理 → 本机 `10.126.126.1:8793` | 仅 EasyTier |
+| 8793 | 本机 `10.126.126.1` | GPU 打标 `POST /tag`、`GET /health` | 仅 EasyTier |
+| 11012 | web | EasyTier WSS 入口（`/easytier/` 反代） | 公网（协议自身鉴权） |
+
+### 15.2 访问方式
+
+**公网（只读）**
+
+```powershell
+node -e "fetch('https://patchouli.us.ci/api/health').then(r=>r.text()).then(console.log)"
+```
+
+**云端 shell（SSH）**
+
+```powershell
+$deployHost = 'yorigami@128.1.132.31'
+ssh -o BatchMode=yes -i $env:USERPROFILE\.ssh\kanalib_deploy $deployHost "hostname; systemctl is-active nginx kanalib-web"
+```
+
+- 用户名 `yorigami`，主机 `128.1.132.31`（与 EasyTier `10.126.126.2` 是同一台）。
+- 私钥 `~/.ssh/kanalib_deploy`；当前沙箱内该文件 ACL 不可读（`Permission denied`），需在有权限的终端执行，或由 owner 授权后运行。
+- 若私钥不可用，走 **box MCP 中转**：box 上 `10.126.126.2:8788`（private）可达，可在 box 执行 `curl` 做健康检查；但 box 没有 web 的 SSH 私钥，不能代替部署。
+- 首次连接会写 `known_hosts`；只接受一次，不要 `StrictHostKeyChecking=no` 长期使用。
+- 只做维护与部署，不在服务器上直接改代码。
+
+**私网（EasyTier）**
+
+```powershell
+ipconfig | Select-String 10.126.126.1
+& 'D:\APP\Easytier\easytier-cli.exe' -p 127.0.0.1:15999 peer
+curl.exe --noproxy '*' http://10.126.126.1:8793/health
+```
+
+- 业务配置只写 FQDN（`kanalib-web.et.net` / `kanalib-box.et.net`），不写 `10.126.126.x`；换 IP 只改 EasyTier 配置。
+- Linux 节点需 split DNS 或 hosts（`10.126.126.x kanalib-*.et.net`）。
+- 本机 EasyTier 由 `easytier-gui` 服务承载；**重启需要管理员权限**，非管理员会 `OpenService FAILED 5`。
+- 不要同时跑 GUI 与独立 `easytier-core`，会抢 `11010/11012`。
+- `secure_mode` 是表不是布尔；`config-dir` 实例不继承命令行 `--secure-mode`；缺私钥会一直 `Connecting`。
+
+**从 box 侧验证**
+
+box 上执行（通过 box MCP `box_shell`）：
+
+```bash
+systemctl status kanalib-ingest --no-pager -n 15
+curl -s --noproxy '*' http://10.126.126.3:8792/admin/api/health
+curl -s --noproxy '*' http://10.126.126.2:8788/api/health
+curl -s --noproxy '*' http://10.126.126.2:8793/health
+```
+
+实测：`8788`、`8792`、`8793`（代理）正常；`10.126.126.2:8787` 与 `10.126.126.1:8793` 从 box 不可达——前者是 public listener 只绑回环（正确），后者是 box↔本机无直连（走代理）。
+
+### 15.3 部署流程
+
+1. **本地构建**
+
+   ```powershell
+   cd web; npm run build
+   & "$env:USERPROFILE\.cargo\bin\cargo.exe" build --release -p kanalib-web -p kanalib-ingest
+   ```
+
+2. **发布静态数据**（发布器只读导出，不写源库）
+
+   ```powershell
+   $cargo = "$env:USERPROFILE\.cargo\bin\cargo.exe"
+   & $cargo run --release -p kanalib-publish -- --db <库文件> --root <图库根> --out web/public/data
+   # 只重建搜索索引（不读库、不重编图片）：
+   & $cargo run --release -p kanalib-publish -- --out web/public/data --index-only
+   python scripts\wall_manifest_check.py web/public/data
+   ```
+
+   `--dry-run` 只打印统计；`LEDGER_VERSION` 升级会触发全量重编（约 406MB），需 owner 确认。
+
+3. **上传**（Windows 无 `rsync`，用 `tar` + `scp` 或 box 中转）
+
+   ```powershell
+   tar -czf $env:TEMP\kanalib-dist.tgz -C web dist
+   $deployHost = 'yorigami@128.1.132.31'
+   scp -i $env:USERPROFILE\.ssh\kanalib_deploy $env:TEMP\kanalib-dist.tgz "${deployHost}:/tmp/"
+   ssh -i $env:USERPROFILE\.ssh\kanalib_deploy $deployHost `
+     "sudo tar -xzf /tmp/kanalib-dist.tgz -C /var/www/kanalib --strip-components=1"
+   ```
+
+4. **重启与健康检查**
+
+   ```bash
+   sudo systemctl restart kanalib-web
+   systemctl is-active nginx kanalib-web
+   curl -s --noproxy '*' http://127.0.0.1:8787/api/health
+   ```
+
+5. **回滚**：保留上一版 `dist` 与二进制；schema 升级后旧二进制会因 `user_version` 更高拒绝启动，回滚前先确认数据库版本。
+
+部署纪律：
+
+- **只有 owner 明确要求才部署**；默认交付到本地预览。
+- 部署前必须 `npm run build` + 对应探针通过；不在服务器上改代码、不手改 `dist`。
+- `web/public/data` 含真实库内容，上传走加密通道，不放进仓库、不贴到聊天。
+- Nginx 必须显式 404 `/internal/`、`/api/desktop/`、`/api/items/<id>/original`（模板已写）。
+
+### 15.4 密钥与配置位置
+
+| 文件 | 位置 | 权限 | 内容 |
+|---|---|---|---|
+| `web.env` | web `/etc/kanalib/` | `0600` root/kanalib | `KANALIB_INGEST_SECRET`、`KANALIB_MEDIA_SIGNING_KEY` |
+| `ingest.env` | box `/etc/kanalib/` | `0600` | 推送密钥等 |
+| `ingest.toml` | box `/etc/kanalib/` | `0640` root:kanalib | 来源、打标、推送、管理口 |
+| `rules.toml` | box `/etc/kanalib/` | `0660` root:kanalib | 规则；支持热重载 |
+| `ingest-hmac` / `media-signing-key` | box `/etc/kanalib/` | `0600` kanalib | HMAC 与原图签名 |
+| `easytier.env` | 各节点 `/etc/kanalib/` | `0600` root | `ET_NETWORK_SECRET` |
+
+规则：
+
+- 密钥只由进程环境读取，**不写进 unit 文件、不写进仓库、不进日志/报告**。
+- 轮换顺序：`new,old` → 重启 web → 切 box 到 `new` → 去掉 `old` → 再重启 web。
+- 读配置做排障时先脱敏（`sed -E 's/(secret|token|key|password)\s*=\s*".*"/\1 = "<redacted>"/I'`）。
+- 诊断快照只读，脱敏 URL 凭据与 token 类键值。
+
+### 15.5 备份、健康与常见故障
+
+```bash
+# box / web 上
+/usr/local/sbin/kanalib-web-backup.sh
+/usr/local/sbin/kanalib-ingest-backup.sh
+KANALIB_PUBLIC_HEALTH=http://127.0.0.1:8787/api/health \
+KANALIB_PRIVATE_HEALTH=http://10.126.126.2:8788/api/health \
+KANALIB_INGEST_HEALTH=http://10.126.126.3:8792/admin/api/health \
+/usr/local/sbin/kanalib-health.sh
+```
+
+| 现象 | 先查 | 处理 |
+|---|---|---|
+| 公网 502/超时 | `systemctl is-active nginx kanalib-web`、`curl 127.0.0.1:8787/api/health` | 重启 `kanalib-web`；看 `journalctl -u kanalib-web` |
+| 私网不可达 | `easytier-cli peer`、`ip -4 addr show et0` | 重启 EasyTier（需管理员）；确认 `secure_mode` 私钥存在 |
+| box 入库停滞 | `journalctl -u kanalib-ingest -n 50`、`/admin/api/health` | 看 `model_error_streak`、规则版本、队列 |
+| 打标失败 | 本机 `curl 10.126.126.1:8793/health`；box `curl 10.126.126.2:8793/health` | 本机打标服务与云端代理是否都在线；离线时条目应落 `review` |
+| 推送失败 | box `[push]` 配置、HMAC 文件权限 | 用 `--replay-push <BATCH_ID>` 重放，不改内容 |
+| 磁盘不足 | `df -h /var/lib` | 清理旧备份/parts，先确认保留策略 |
+
+实测注意：box 上 `kanalib-etproxy` 会把 `127.0.0.1:443` 桥到 `patchouli.us.ci:443`，这是出网代理；不要在 box 上把 443 当本地服务。
+
+## 16. box MCP 协作
+
+### 16.1 可用工具
+
+| 工具 | 用途 | 注意 |
+|---|---|---|
+| `box_status` | 查状态、镜像、`view_url` | 先查再操作；休眠时先 `box_ensure` |
+| `box_ensure` / `box_wake` | 启动/唤醒 | 唤醒后先复查 `kanalib-ingest` 与 EasyTier 是否随机器恢复 |
+| `box_hibernate` | 休眠 | 运行中的进程与内存保留，下次唤醒继续；**不是重启**，但长期休眠会拖慢入库 |
+| `box_shell` | 在 box 上跑 bash（默认 `/workspace`，用户 `user`） | 主入口；`sudo -n` 可用（实测免密） |
+| `box_write_file` | 写文件（自动建父目录） | 只写 box，不写本地仓库 |
+| `box_script_run` | 跑桌面自动化脚本（`/opt/desk`） | 入库/部署不需要，别滥用 |
+| `box_restore_paths` | 从快照恢复文件到 `~/Restored/<时间>` | 误删后的恢复路径 |
+| `box_create` | 新建 box | 只有需要独立环境时才建 |
+| `box_upgrade` | 升级镜像 | 保留 `/home` 与 `/workspace`，**丢弃 `/opt`、`/usr/local` 里非 apt 安装的软件**；box 上有 `/usr/local/bin/kanalib-ingest`，升级后需重装 |
+
+### 16.2 当前 box 事实（实测）
+
+| 项 | 值 |
+|---|---|
+| 名称 / ID | `main` / `cb-f83ed3cb3f08` |
+| 系统 | Ubuntu，kernel 6.8，2 vCPU / 3.9 GB / 20 GB |
+| 镜像 | `sbxdesk:v27`（有 v29 可升级，**暂不升级**） |
+| 用户 | `user`，`/workspace` 可写；`sudo -n` 免密 |
+| 网络 | `10.126.126.3/24`（`et0`），`kanalib-easytier` 常驻 |
+| 服务 | `kanalib-ingest`、`kanalib-easytier`、`kanalib-etproxy` |
+| 数据 | `/var/lib/kanalib-ingest/ingest.db`、`media/{originals,parts,thumbs}` |
+| 配置 | `/etc/kanalib/`（`ingest.toml`、`rules.toml`、密钥，权限见 15.4）；`[tagging].endpoint` 指向云端代理 `10.126.126.2:8793` |
+
+### 16.3 使用规范
+
+1. **box 是运行环境，不是代码仓库**：改代码在 Windows 本地，构建产物再上传；不要在 box 上编辑仓库副本。
+2. **先读后写**：改 `ingest.toml` / `rules.toml` 前先 `cp` 备份（现有 `*.bak-2026xxxx` 命名），改完 `systemctl restart kanalib-ingest` 并看日志。
+3. **不碰媒体与数据库**：`/var/lib/kanalib-ingest` 只读排查；删除、清空、`rm -rf` 一律不做，需要时先备份并请示。
+4. **命令要可复制**：一条命令只做一件事；长脚本先 `box_write_file` 再执行，避免转义问题。
+5. **脱敏输出**：`env`、`cat /etc/kanalib/*`、日志里的 token/HMAC 不外传；报告只写键名。
+6. **时区**：box 是 UTC，日志时间与本地（Asia/Shanghai）差 8 小时；对时间线时换算。
+7. **box 离线/鉴权过期**：MCP 返回 `HTTP 502` 或 `magpie's sign-in ... has run out` 时，先 `box_status`；仍失败就报告 owner，不要反复重试或改用 SSH 绕过。
+8. **升级前确认**：`box_upgrade` 会保留 `/home`、`/workspace`，但丢弃 `/usr/local` 里的非 apt 安装；`/usr/local/bin/kanalib-ingest` 与 `kanalib-easytier`、`kanalib-etproxy` 需重装，`/etc/kanalib` 也不在保留范围；非必要不升级。
+
+### 16.4 常用操作
+
+```bash
+# 服务与日志
+systemctl status kanalib-ingest --no-pager -n 20
+sudo journalctl -u kanalib-ingest -n 50 --no-pager
+
+# 健康与规则版本
+curl -s --noproxy '*' http://10.126.126.3:8792/admin/api/health
+sudo grep -E '^version' /etc/kanalib/rules.toml
+
+# 改配置（先备份）
+sudo cp /etc/kanalib/ingest.toml /etc/kanalib/ingest.toml.bak-$(date +%Y%m%d-%H%M)
+sudo systemctl restart kanalib-ingest
+
+# 网络
+ip -4 addr show et0
+curl -s --noproxy '*' http://10.126.126.2:8788/api/health
+```
+
+## 17. 反模式清单（来自真实返工）
+
+| 反模式 | 后果 | 正确做法 |
+|---|---|---|
+| 把"侧边栏不能被点击穿透"理解成"侧边栏不可见" | 改错层，破坏玻璃效果，被用户点名返工 | 复现 + 追问，确认是命中区还是视觉 |
+| 让画布从缝右缘开始以"避开"侧栏 | 侧栏下没有图，玻璃失效 | 画布全幅 + 指针层在缝区拦截 |
+| 越域加"重试"按钮/改错误条 | 与他人的批次冲突 | 停下报告，等授权 |
+| 只改 `replaceState` 不通知订阅者 | URL 变了、画面不变 | 统一路由事件 + 探针固化"500ms 内画面变化" |
+| 重试复用失败 URL | Chrome 直接复用失败资源 | 加 `?r=<nonce>` |
+| 用 `Network.setBlockedURLs` 测降级 | 实际没拦住，结论无效 | 用 `Fetch.failRequest` |
+| 同一探针跑出不同结论仍当结论 | 假缺陷/假通过 | 先判定 flake，再复跑并标注 |
+| 只跑子集却写"全部通过" | 交付失真 | 写"定向通过"并列出未跑项 |
+| 把截图/报告提交进仓库 | 泄露库内容、污染历史 | 放 gitignore 目录，只报路径 |
+| 用合成输入证明 GUI 可点 | 结论不成立 | 真实鼠标/键盘，或标注"待人工确认" |
+
+## 18. 检查清单
+
+派发前：
+
+- [ ] 目标、复现路径、期望行为写清
+- [ ] 写域与禁区精确到文件
+- [ ] 验收命令与数字门槛可判定
+- [ ] 说明是否提交、证据放哪、向谁报告
+
+提交前：
+
+- [ ] `npm run build` 通过（前端）或 `cargo check` / `cargo test` 通过（Rust）
+- [ ] 对应探针 `passed`，`failures: []`、`consoleErrors: []`
+- [ ] 改前/改后证据成对，数字带口径
+- [ ] 残余风险已写，未覆盖项标注"未跑/待实机"
+- [ ] 无凭据、无真实库内容、无截图产物
+- [ ] 只暂存本批写域内的文件
+
+收口时：
+
+- [ ] 批次已冻结，后续改动另开批次
+- [ ] 文档与登记同步（`registry.md` / `implemented.md` / `photo-wall-status.md`）
+- [ ] 归档链接已修正，`check_backlog_docs.sh` 无矛盾
+- [ ] 向 owner 交付：改了什么、怎么验的、还剩什么
