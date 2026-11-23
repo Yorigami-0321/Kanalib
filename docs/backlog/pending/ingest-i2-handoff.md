@@ -166,8 +166,11 @@ $cargo = Join-Path $env:USERPROFILE ".cargo\bin\cargo.exe"
 3. **真实 Pixiv 令牌冒烟**：无登录路线已跑通；令牌路线仍只在 box 手动执行，不写入仓库/CI。
 4. **告警接线**：`kanalib-health.timer` 已在云端与 box 安装（5 分钟一次），阈值写入
    `/etc/kanalib/health.env`；云端检查 public/private/ingest HTTP、`model_error_streak`、
-   TLS、磁盘与 web 库，box 检查 ingest 库/推送/审核/下载队列。`KANALIB_ALERT_WEBHOOK`
-   仍为空，拿到 webhook 地址后填入即可，无需改代码。
+   TLS、磁盘与 web 库，box 检查 ingest 库/推送/审核/下载队列。告警收件箱
+   `kanalib-alert-sink.service` 已上线：云端 POST
+   `https://patchouli.us.ci/kanalib-alert/<token>`，box POST
+   `http://10.126.126.2:8795/kanalib-alert`；JSONL 保留 500 条，GET 查看最近 50 条。
+   云端与 box 的失败注入均已验证送达。
 5. **草稿类型**：当前只支持 tags/users 的增删；`watch`、rating、tag_budget 等仍走手工编辑文件。
 
 ### 6.1 已部署运维
@@ -176,6 +179,7 @@ $cargo = Join-Path $env:USERPROFILE ".cargo\bin\cargo.exe"
 |---|---|---|---|
 | 云端 | `kanalib-health.timer` | 5 分钟 | HTTP/TLS/磁盘/web 库/打标失败次数 |
 | 云端 | `kanalib-web-backup.timer` | 每日 03:30 | `/var/backups/kanalib/web/*.db.gz` |
+| 云端 | `kanalib-alert-sink.service` | 常驻 | 公网/私网告警收件箱，JSONL 500 条 |
 | box | `kanalib-health.timer` | 5 分钟 | ingest 库、推送积压/失败、review、下载队列 |
 | box | `kanalib-ingest-backup.timer` | 每日 04:00 | `/var/backups/kanalib/ingest/` DB + 媒体硬链接 + rules |
 | box | `kanalib-keepalive.timer` | 1 分钟 | ping 云端，连续 3 次失败重启 `kanalib-easytier` |
