@@ -4326,9 +4326,11 @@ dependencies = [
  "tokio",
  "tokio-util",
  "toml 0.8.23",
+ "toml_edit 0.22.27",
  "tower",
  "tracing",
  "tracing-subscriber",
+ "unicode-normalization",
 ]
 
 [[package]]
@@ -6664,6 +6666,7 @@ dependencies = [
  "hyper-util",
  "js-sys",
  "log",
+ "mime_guess",
  "percent-encoding",
  "pin-project-lite",
  "quinn",

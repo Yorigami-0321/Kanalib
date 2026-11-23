@@ -125,7 +125,12 @@ pub fn ingest_work(db: &mut Db, adapter: &dyn SourceAdapter, work: &SourceWork) 
         tags: work
             .tags
             .iter()
-            .map(|tag| (tag.name.clone(), tag.category.clone(), tag.score))
+            .map(|tag| crate::db::TagRecord {
+                name: tag.name.clone(),
+                category: tag.category.clone(),
+                score: tag.score,
+                translated_name: tag.translated_name.clone(),
+            })
             .collect(),
         metadata_synced_at: Some(now()),
         next_retry_at: None,

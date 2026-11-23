@@ -20,6 +20,7 @@ pub struct IngestConfig {
     pub tagging: TaggingSettings,
     pub push: PushSettings,
     pub media: MediaSettings,
+    pub admin: AdminSettings,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -141,6 +142,23 @@ pub struct MediaSettings {
     pub bind: Option<SocketAddr>,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct AdminSettings {
+    /// 管理页与审核/规则 API；只应绑回环或 EasyTier 虚拟 IP。
+    pub enabled: bool,
+    pub bind: SocketAddr,
+}
+
+impl Default for AdminSettings {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            bind: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8791),
+        }
+    }
+}
+
 pub fn load(path: Option<&Path>) -> Result<IngestConfig> {
     let Some(path) = path else {
         return Ok(IngestConfig::default());
@@ -243,5 +261,7 @@ signing_key_file = "/etc/kanalib/media-key"
         assert!(!config.source.pixiv.enabled);
         assert_eq!(config.service.bind.port(), 8790);
         assert!(config.service.bind.ip().is_loopback());
+        assert!(config.admin.enabled);
+        assert_eq!(config.admin.bind.port(), 8791);
     }
 }

@@ -7,16 +7,21 @@ use axum::http::header;
 use clap::Parser;
 use image::{ImageFormat, RgbaImage};
 use kanalib_ingest::{
+    admin::{self, AdminState},
     config::{self, IngestConfig},
     db::{self, Db},
     download, ingest,
     media::{self, MediaState},
+    metrics::Metrics,
+    pipeline,
     push::{self, PushConfig, ReqwestPushTransport},
+    rules_state::{ReloadOutcome, RulesState},
     source::{
         self, SourceAdapter,
         mock::MockSource,
         pixiv::{self, PixivSource, ReqwestPixivTransport},
     },
+    tagging::{HttpTaggingBackend, TaggingBackend},
 };
 use tracing::{info, warn};
 
@@ -82,17 +87,24 @@ async fn run(args: Args, config: IngestConfig) -> Result<()> {
     if !matches!(source_id.as_str(), "mock" | "pixiv") {
         bail!("unknown source {source_id}; expected mock or pixiv");
     }
-    if config.service.rules_file.is_some() {
-        warn!(
-            "rules_file is configured but the rules layer is not implemented yet; \
-             item decisions stay pending"
-        );
-    }
     if let Some(public_base) = &config.service.public_base {
         info!(public_base, "configured public base");
     }
 
     let mut db = Db::open(&db_path)?;
+    let rules_state = Arc::new(RulesState::load(&db, config.service.rules_file.as_deref())?);
+    let metrics = Arc::new(Metrics::default());
+    let tagging_backend = match (&config.tagging.backend, &config.tagging.endpoint) {
+        (Some(backend), Some(endpoint)) if backend == "http" => {
+            Some(Arc::new(HttpTaggingBackend::new(
+                endpoint.clone(),
+                Duration::from_secs(config.tagging.timeout_secs.max(1)),
+                2,
+            )?) as Arc<dyn TaggingBackend>)
+        }
+        (Some(backend), _) => bail!("unsupported tagging backend {backend}"),
+        _ => None,
+    };
     for batch_id in &args.replay_push {
         let found = push::replay(&db, batch_id)?;
         info!(batch_id, found, "push batch replay requested");
@@ -133,13 +145,43 @@ async fn run(args: Args, config: IngestConfig) -> Result<()> {
 
     let push_config = build_push_config(&args, &config)?;
     let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
-    start_media_server(&config, &db_path, shutdown_rx).await?;
+    start_media_server(&config, &db_path, shutdown_rx.clone()).await?;
+    start_admin_server(
+        &config,
+        &db_path,
+        Arc::clone(&rules_state),
+        Arc::clone(&metrics),
+        shutdown_rx,
+    )
+    .await?;
+    let (reload_tx, mut reload_rx) = tokio::sync::mpsc::channel::<()>(4);
+    #[cfg(unix)]
+    tokio::spawn(async move {
+        use tokio::signal::unix::{SignalKind, signal};
+        match signal(SignalKind::hangup()) {
+            Ok(mut handle) => {
+                while handle.recv().await.is_some() {
+                    if reload_tx.send(()).await.is_err() {
+                        break;
+                    }
+                }
+            }
+            Err(error) => {
+                warn!(%error, "SIGHUP handler unavailable; relying on file watch");
+                std::future::pending::<()>().await;
+            }
+        }
+    });
+    #[cfg(not(unix))]
+    let _reload_tx_guard = reload_tx;
 
     let mut bookmark_users = config.source.pixiv.bookmark_users.clone();
     bookmark_users.extend(args.bookmark_user.iter().cloned());
     bookmark_users.retain(|user| !user.trim().is_empty());
 
     loop {
+        report_reload(rules_state.reload_if_changed(&db, "watch"), &rules_state);
+
         for user in &bookmark_users {
             match ingest::ingest_bookmarks(&mut db, adapter.as_ref(), user).await {
                 Ok(outcome) => info!(
@@ -150,6 +192,7 @@ async fn run(args: Args, config: IngestConfig) -> Result<()> {
                     "bookmarks synced"
                 ),
                 Err(error) => {
+                    metrics.record_source_error();
                     warn!(user, %error, "bookmark sync failed; keeping the service alive")
                 }
             }
@@ -171,10 +214,36 @@ async fn run(args: Args, config: IngestConfig) -> Result<()> {
             Err(error) => warn!(%error, "download queue failed"),
         }
 
+        let active_rules = rules_state.current();
+        match pipeline::run_decisions(
+            &db,
+            &active_rules.config,
+            tagging_backend.as_ref(),
+            metrics.as_ref(),
+        )
+        .await
+        {
+            Ok(report) => info!(
+                decided = report.decided,
+                allowed = report.allowed,
+                blocked = report.blocked,
+                reviewed = report.reviewed,
+                tagged = report.tagged,
+                version = %active_rules.version,
+                "rules applied"
+            ),
+            Err(error) => warn!(%error, "decision pass failed; keeping items pending"),
+        }
+
         if let Some(push_config) = &push_config {
+            let push_rules_version = config
+                .push
+                .rules_version
+                .as_deref()
+                .unwrap_or(active_rules.version.as_str());
             let enqueued = push::enqueue_decisions(
                 &db,
-                config.push.rules_version.as_deref(),
+                Some(push_rules_version),
                 config.push.batch_size.max(1),
             )?;
             if enqueued.allow_items > 0 || enqueued.delete_items > 0 {
@@ -195,6 +264,9 @@ async fn run(args: Args, config: IngestConfig) -> Result<()> {
                 PUSH_BATCHES_PER_ROUND,
             )
             .await?;
+            metrics.record_push_failures(
+                u64::try_from(outcome.retried + outcome.rejected).unwrap_or(u64::MAX),
+            );
             if outcome.acked + outcome.retried + outcome.rejected > 0 {
                 info!(
                     acked = outcome.acked,
@@ -216,6 +288,10 @@ async fn run(args: Args, config: IngestConfig) -> Result<()> {
                 let _ = shutdown_tx.send(true);
                 break;
             }
+            _ = reload_rx.recv() => {
+                info!("SIGHUP received; reloading rules");
+                report_reload(rules_state.reload(&db, "sighup"), &rules_state);
+            }
         }
     }
     let _ = shutdown_tx.send(true);
@@ -224,6 +300,24 @@ async fn run(args: Args, config: IngestConfig) -> Result<()> {
 }
 
 const PUSH_BATCHES_PER_ROUND: usize = 10;
+
+fn report_reload(result: Result<ReloadOutcome>, state: &RulesState) {
+    match result {
+        Ok(ReloadOutcome::Reloaded) => {
+            let active = state.current();
+            info!(
+                version = %active.version,
+                hash = %active.config_hash,
+                "rules reloaded"
+            );
+        }
+        Ok(ReloadOutcome::Unchanged) | Ok(ReloadOutcome::Skipped) => {}
+        Err(error) => warn!(
+            %error,
+            "rules reload rejected; keeping the previous snapshot"
+        ),
+    }
+}
 
 fn build_push_config(args: &Args, config: &IngestConfig) -> Result<Option<PushConfig>> {
     let Some(base_url) = args
@@ -351,6 +445,64 @@ async fn start_media_server(
                         %bind,
                         "original endpoint bind failed; retrying in 30s"
                     );
+                }
+            }
+            if *shutdown.borrow() {
+                break;
+            }
+            tokio::select! {
+                _ = tokio::time::sleep(Duration::from_secs(30)) => {}
+                _ = shutdown.changed() => {}
+            }
+            if *shutdown.borrow() {
+                break;
+            }
+        }
+    });
+    Ok(())
+}
+
+async fn start_admin_server(
+    config: &IngestConfig,
+    db_path: &std::path::Path,
+    rules: Arc<RulesState>,
+    metrics: Arc<Metrics>,
+    mut shutdown: tokio::sync::watch::Receiver<bool>,
+) -> Result<()> {
+    if !config.admin.enabled {
+        info!("admin UI disabled by config");
+        return Ok(());
+    }
+    let bind = config.admin.bind;
+    if bind.ip().is_unspecified() {
+        warn!(
+            %bind,
+            "admin UI is bound to all interfaces; bind the EasyTier virtual IP in production"
+        );
+    }
+    let state = AdminState::new(
+        db_path.to_path_buf(),
+        rules,
+        config.service.rules_file.clone(),
+        metrics,
+    );
+    let router = admin::router(state);
+    tokio::spawn(async move {
+        loop {
+            match tokio::net::TcpListener::bind(bind).await {
+                Ok(listener) => {
+                    info!(%bind, "admin UI listening");
+                    let mut serve_shutdown = shutdown.clone();
+                    let serve =
+                        axum::serve(listener, router.clone()).with_graceful_shutdown(async move {
+                            let _ = serve_shutdown.changed().await;
+                        });
+                    if let Err(error) = serve.await {
+                        warn!(%error, "admin UI stopped");
+                    }
+                }
+                Err(error) => {
+                    warn!(%error, %bind, "admin UI bind failed; retrying in 30s");
                 }
             }
             if *shutdown.borrow() {

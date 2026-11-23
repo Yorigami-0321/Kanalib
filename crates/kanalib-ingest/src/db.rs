@@ -4,11 +4,12 @@ use std::path::Path;
 
 use anyhow::{Context, Result, bail};
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
+use serde::Serialize;
 use sha1::Digest;
 
 use crate::source::{AiType, Rating};
 
-pub const SCHEMA_VERSION: u32 = 4;
+pub const SCHEMA_VERSION: u32 = 7;
 
 const MIGRATION_V1: &str = r#"
 CREATE TABLE IF NOT EXISTS schema_meta (
@@ -128,15 +129,6 @@ CREATE TABLE IF NOT EXISTS download_queue (
     UNIQUE(item_id)
 );
 
-CREATE TABLE IF NOT EXISTS rules (
-    id TEXT PRIMARY KEY,
-    kind TEXT NOT NULL,
-    payload_json TEXT NOT NULL,
-    enabled INTEGER NOT NULL DEFAULT 1,
-    priority INTEGER NOT NULL DEFAULT 0,
-    created_at INTEGER NOT NULL DEFAULT (unixepoch())
-);
-
 CREATE TABLE IF NOT EXISTS decisions (
     id INTEGER PRIMARY KEY,
     item_id TEXT NOT NULL REFERENCES items(id) ON DELETE CASCADE,
@@ -195,6 +187,43 @@ CREATE INDEX IF NOT EXISTS idx_items_push
     ON items(decision, pushed_revision, revision);
 CREATE INDEX IF NOT EXISTS idx_items_delete
     ON items(delete_pushed, work_id);
+"#;
+
+const MIGRATION_V5: &str = r#"
+DROP TABLE IF EXISTS rules;
+ALTER TABLE decisions ADD COLUMN tag_source TEXT NOT NULL DEFAULT 'source';
+ALTER TABLE decisions ADD COLUMN tag_count_used INTEGER NOT NULL DEFAULT 0;
+"#;
+
+const MIGRATION_V6: &str = r#"
+CREATE TABLE IF NOT EXISTS rule_snapshots (
+    version TEXT PRIMARY KEY,
+    config_hash TEXT NOT NULL,
+    config_json TEXT NOT NULL,
+    loaded_at INTEGER NOT NULL DEFAULT (unixepoch()),
+    loaded_by TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_rule_snapshots_loaded
+    ON rule_snapshots(loaded_at DESC);
+"#;
+
+const MIGRATION_V7: &str = r#"
+CREATE TABLE IF NOT EXISTS rule_proposals (
+    id INTEGER PRIMARY KEY,
+    kind TEXT NOT NULL,
+    payload_json TEXT NOT NULL,
+    source_item_id TEXT,
+    note TEXT NOT NULL DEFAULT '',
+    state TEXT NOT NULL DEFAULT 'pending',
+    created_at INTEGER NOT NULL DEFAULT (unixepoch()),
+    decided_at INTEGER,
+    decided_by TEXT,
+    apply_error TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_rule_proposals_state
+    ON rule_proposals(state, created_at);
 "#;
 
 #[derive(Debug)]
@@ -273,6 +302,15 @@ impl Db {
         }
         if version < 4 {
             tx.execute_batch(MIGRATION_V4)?;
+        }
+        if version < 5 {
+            tx.execute_batch(MIGRATION_V5)?;
+        }
+        if version < 6 {
+            tx.execute_batch(MIGRATION_V6)?;
+        }
+        if version < 7 {
+            tx.execute_batch(MIGRATION_V7)?;
         }
         tx.execute(
             "INSERT OR IGNORE INTO schema_meta(version) VALUES (?1)",
@@ -467,10 +505,15 @@ impl Db {
         Ok(())
     }
 
-    pub fn record_work_tags(&self, work_id: &str, tags: &[(String, String, f64)]) -> Result<()> {
+    pub fn record_work_tags(&self, work_id: &str, tags: &[TagRecord]) -> Result<()> {
         let tx = self.connection.unchecked_transaction()?;
-        for (name, category, score) in tags {
-            let tag_id = upsert_tag(&tx, name, category)?;
+        for tag in tags {
+            let tag_id = upsert_tag(
+                &tx,
+                &tag.name,
+                &tag.category,
+                tag.translated_name.as_deref(),
+            )?;
             let mut statement = tx.prepare("SELECT id FROM items WHERE work_id=?1")?;
             let item_ids = statement
                 .query_map(params![work_id], |row| row.get::<_, String>(0))?
@@ -480,9 +523,23 @@ impl Db {
                 tx.execute(
                     "INSERT OR IGNORE INTO item_tags(item_id, tag_id, score, origin)
                      VALUES (?1, ?2, ?3, 'pixiv')",
-                    params![item_id, tag_id, score],
+                    params![item_id, tag_id, tag.score],
                 )?;
             }
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn record_model_tags(&self, item_id: &str, tags: &[String]) -> Result<()> {
+        let tx = self.connection.unchecked_transaction()?;
+        for tag in tags {
+            let tag_id = upsert_tag(&tx, tag, "model", None)?;
+            tx.execute(
+                "INSERT OR IGNORE INTO item_tags(item_id, tag_id, score, origin)
+                 VALUES (?1, ?2, 1.0, 'model')",
+                params![item_id, tag_id],
+            )?;
         }
         tx.commit()?;
         Ok(())
@@ -647,6 +704,290 @@ impl Db {
             .map_err(Into::into)
     }
 
+    pub fn pending_decision_items(&self) -> Result<Vec<PendingDecisionItem>> {
+        let mut statement = self.connection.prepare(
+            "SELECT i.id, i.source, i.original_path, i.thumb_512, i.thumb_256, w.rating,
+                    w.x_restrict, w.sanity_level, w.restriction_attributes, w.ai_type,
+                    w.tag_count, i.width, i.height, i.bytes, i.sha1
+               FROM items i JOIN works w ON w.id = i.work_id
+              WHERE i.decision = 'pending'
+                AND i.original_path IS NOT NULL
+              ORDER BY i.updated_at, i.id",
+        )?;
+        let rows = statement.query_map([], |row| {
+            Ok(PendingDecisionItem {
+                id: row.get(0)?,
+                source: row.get(1)?,
+                original_path: row.get(2)?,
+                thumb_512: row.get(3)?,
+                thumb_256: row.get(4)?,
+                rating: row.get(5)?,
+                x_restrict: row.get(6)?,
+                sanity_level: row.get(7)?,
+                restriction_attributes: row.get(8)?,
+                ai_type: row.get(9)?,
+                tag_count: row.get::<_, i64>(10)?.max(0) as usize,
+                width: row.get(11)?,
+                height: row.get(12)?,
+                bytes: row.get::<_, i64>(13)?.max(0) as u64,
+                sha1: row.get(14)?,
+            })
+        })?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(Into::into)
+    }
+
+    pub fn item_tag_names(&self, item_id: &str) -> Result<Vec<(String, Option<String>)>> {
+        let mut statement = self.connection.prepare(
+            "SELECT t.name, t.translated_name
+               FROM item_tags it JOIN tags t ON t.id = it.tag_id
+              WHERE it.item_id = ?1
+              ORDER BY t.name",
+        )?;
+        let rows = statement.query_map([item_id], |row| Ok((row.get(0)?, row.get(1)?)))?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(Into::into)
+    }
+
+    pub fn item_author(&self, item_id: &str) -> Result<Option<String>> {
+        self.connection
+            .query_row(
+                "SELECT a.external_id
+                   FROM items i JOIN works w ON w.id = i.work_id
+                    LEFT JOIN authors a ON a.id = w.author_id
+                  WHERE i.id = ?1",
+                [item_id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(Into::into)
+    }
+
+    pub fn source_enabled(&self, source: &str) -> Result<bool> {
+        let enabled: Option<i64> = self
+            .connection
+            .query_row(
+                "SELECT enabled FROM sources WHERE id = ?1",
+                [source],
+                |row| row.get(0),
+            )
+            .optional()?;
+        Ok(enabled.unwrap_or(1) != 0)
+    }
+
+    /// 记录生效过的规则快照；同版本只保留最新一份副本。
+    pub fn record_rule_snapshot(
+        &self,
+        version: &str,
+        config_hash: &str,
+        config_json: &str,
+        loaded_by: &str,
+    ) -> Result<()> {
+        self.connection.execute(
+            "INSERT INTO rule_snapshots(version, config_hash, config_json, loaded_at, loaded_by)
+             VALUES (?1, ?2, ?3, ?4, ?5)
+             ON CONFLICT(version) DO UPDATE SET
+                config_hash=excluded.config_hash,
+                config_json=excluded.config_json,
+                loaded_at=excluded.loaded_at,
+                loaded_by=excluded.loaded_by",
+            params![version, config_hash, config_json, now(), loaded_by],
+        )?;
+        Ok(())
+    }
+
+    pub fn rule_snapshot(&self, version: &str) -> Result<Option<RuleSnapshot>> {
+        self.connection
+            .query_row(
+                "SELECT version, config_hash, config_json, loaded_at, loaded_by
+                   FROM rule_snapshots WHERE version=?1",
+                params![version],
+                |row| {
+                    Ok(RuleSnapshot {
+                        version: row.get(0)?,
+                        config_hash: row.get(1)?,
+                        config_json: row.get(2)?,
+                        loaded_at: row.get(3)?,
+                        loaded_by: row.get(4)?,
+                    })
+                },
+            )
+            .optional()
+            .map_err(Into::into)
+    }
+
+    pub fn latest_rule_snapshot(&self) -> Result<Option<RuleSnapshot>> {
+        self.connection
+            .query_row(
+                "SELECT version, config_hash, config_json, loaded_at, loaded_by
+                   FROM rule_snapshots
+                  ORDER BY loaded_at DESC, version DESC
+                  LIMIT 1",
+                [],
+                |row| {
+                    Ok(RuleSnapshot {
+                        version: row.get(0)?,
+                        config_hash: row.get(1)?,
+                        config_json: row.get(2)?,
+                        loaded_at: row.get(3)?,
+                        loaded_by: row.get(4)?,
+                    })
+                },
+            )
+            .optional()
+            .map_err(Into::into)
+    }
+
+    pub fn insert_rule_proposal(
+        &self,
+        kind: &str,
+        payload_json: &str,
+        source_item_id: Option<&str>,
+        note: &str,
+    ) -> Result<i64> {
+        self.connection.execute(
+            "INSERT INTO rule_proposals(kind, payload_json, source_item_id, note)
+             VALUES (?1, ?2, ?3, ?4)",
+            params![kind, payload_json, source_item_id, note],
+        )?;
+        Ok(self.connection.last_insert_rowid())
+    }
+
+    pub fn rule_proposal(&self, id: i64) -> Result<Option<RuleProposal>> {
+        self.connection
+            .query_row(
+                "SELECT id, kind, payload_json, source_item_id, note, state,
+                        created_at, decided_at, decided_by, apply_error
+                   FROM rule_proposals WHERE id=?1",
+                params![id],
+                rule_proposal_row,
+            )
+            .optional()
+            .map_err(Into::into)
+    }
+
+    pub fn rule_proposals(&self, state: Option<&str>) -> Result<Vec<RuleProposal>> {
+        let mut statement = self.connection.prepare(
+            "SELECT id, kind, payload_json, source_item_id, note, state,
+                    created_at, decided_at, decided_by, apply_error
+               FROM rule_proposals
+              WHERE (?1 IS NULL OR state = ?1)
+              ORDER BY created_at DESC, id DESC",
+        )?;
+        let rows = statement.query_map(params![state], rule_proposal_row)?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(Into::into)
+    }
+
+    pub fn set_rule_proposal_state(
+        &self,
+        id: i64,
+        state: &str,
+        decided_by: &str,
+        apply_error: Option<&str>,
+    ) -> Result<()> {
+        self.connection.execute(
+            "UPDATE rule_proposals
+                SET state=?2, decided_at=?3, decided_by=?4, apply_error=?5
+              WHERE id=?1",
+            params![id, state, now(), decided_by, apply_error],
+        )?;
+        Ok(())
+    }
+
+    pub fn pending_proposal_count(&self) -> Result<i64> {
+        Ok(self.connection.query_row(
+            "SELECT COUNT(*) FROM rule_proposals WHERE state='pending'",
+            [],
+            |row| row.get(0),
+        )?)
+    }
+
+    pub fn decision_counts(&self) -> Result<Vec<(String, i64)>> {
+        let mut statement = self
+            .connection
+            .prepare("SELECT decision, COUNT(*) FROM items GROUP BY decision")?;
+        let rows = statement.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(Into::into)
+    }
+
+    pub fn download_queue_counts(&self) -> Result<Vec<(String, i64)>> {
+        let mut statement = self
+            .connection
+            .prepare("SELECT state, COUNT(*) FROM download_queue GROUP BY state")?;
+        let rows = statement.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(Into::into)
+    }
+
+    pub fn push_pending_count(&self) -> Result<i64> {
+        Ok(self.connection.query_row(
+            "SELECT COUNT(*) FROM push_batches
+              WHERE state='pending' AND (next_retry_at IS NULL OR next_retry_at <= ?1)",
+            params![now()],
+            |row| row.get(0),
+        )?)
+    }
+
+    pub fn review_backlog(&self) -> Result<(i64, Option<i64>)> {
+        self.connection
+            .query_row(
+                "SELECT COUNT(*), MIN(updated_at) FROM items WHERE decision='review'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .map_err(Into::into)
+    }
+
+    /// 把条目放回 pending，交给下一轮决策；已 allow 的条目需要显式确认。
+    pub fn requeue_decision(&self, item_id: &str, include_allow: bool) -> Result<bool> {
+        let changed = self.connection.execute(
+            "UPDATE items SET decision='pending', decision_reason=NULL, updated_at=?1
+              WHERE id=?2
+                AND (decision='review' OR decision='block' OR (?3 AND decision='allow'))",
+            params![now(), item_id, i64::from(include_allow)],
+        )?;
+        Ok(changed == 1)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn apply_decision(
+        &self,
+        item_id: &str,
+        decision: &str,
+        reason: &str,
+        matched: &[String],
+        rules_version: &str,
+        tag_source: &str,
+        tag_count_used: usize,
+    ) -> Result<()> {
+        let matched_json = serde_json::to_string(matched)?;
+        let tx = self.connection.unchecked_transaction()?;
+        tx.execute(
+            "UPDATE items SET decision=?2, decision_reason=?3, rules_version=?4,
+                    revision=revision+1, updated_at=?5
+              WHERE id=?1",
+            params![item_id, decision, reason, rules_version, now()],
+        )?;
+        tx.execute(
+            "INSERT INTO decisions(item_id, decision, reason, rules_version,
+                                   matched_rules_json, tag_source, tag_count_used, tags_json)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, '[]')",
+            params![
+                item_id,
+                decision,
+                reason,
+                rules_version,
+                matched_json,
+                tag_source,
+                tag_count_used as i64
+            ],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
     pub fn set_download_result(&self, item_id: &str, result: &DownloadResult) -> Result<()> {
         self.connection.execute(
             "UPDATE items SET original_path=?2, ext=?3, bytes=?4, sha1=?5, width=?6, height=?7,
@@ -708,9 +1049,17 @@ pub struct SourceWorkRow {
     pub restriction_attributes: String,
     pub tag_count: i64,
     pub status: &'static str,
-    pub tags: Vec<(String, String, f64)>,
+    pub tags: Vec<TagRecord>,
     pub metadata_synced_at: Option<i64>,
     pub next_retry_at: Option<i64>,
+}
+
+#[derive(Debug, Clone)]
+pub struct TagRecord {
+    pub name: String,
+    pub category: String,
+    pub score: f64,
+    pub translated_name: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -726,8 +1075,8 @@ pub struct QueueRow {
 #[derive(Debug, Clone)]
 pub struct ItemRow {
     pub id: String,
-    pub work_id: String,
     pub source: String,
+    pub work_id: String,
     pub page: u32,
     pub original_url: Option<String>,
     pub original_path: Option<String>,
@@ -741,17 +1090,80 @@ pub struct ItemRow {
     pub decision: String,
 }
 
-fn upsert_tag(tx: &Transaction<'_>, name: &str, category: &str) -> Result<i64> {
+#[derive(Debug, Clone)]
+pub struct RuleSnapshot {
+    pub version: String,
+    pub config_hash: String,
+    pub config_json: String,
+    pub loaded_at: i64,
+    pub loaded_by: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct RuleProposal {
+    pub id: i64,
+    pub kind: String,
+    pub payload_json: String,
+    pub source_item_id: Option<String>,
+    pub note: String,
+    pub state: String,
+    pub created_at: i64,
+    pub decided_at: Option<i64>,
+    pub decided_by: Option<String>,
+    pub apply_error: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct PendingDecisionItem {
+    pub id: String,
+    pub source: String,
+    pub original_path: Option<String>,
+    pub thumb_512: Option<String>,
+    pub thumb_256: Option<String>,
+    pub rating: String,
+    pub x_restrict: Option<i64>,
+    pub sanity_level: Option<i64>,
+    pub restriction_attributes: String,
+    pub ai_type: String,
+    pub tag_count: usize,
+    pub width: u32,
+    pub height: u32,
+    pub bytes: u64,
+    pub sha1: Option<String>,
+}
+
+fn upsert_tag(
+    tx: &Transaction<'_>,
+    name: &str,
+    category: &str,
+    translated_name: Option<&str>,
+) -> Result<i64> {
     tx.execute(
-        "INSERT INTO tags(name, category) VALUES (?1, ?2)
-         ON CONFLICT(name) DO UPDATE SET category=excluded.category",
-        params![name, category],
+        "INSERT INTO tags(name, category, translated_name) VALUES (?1, ?2, ?3)
+         ON CONFLICT(name) DO UPDATE SET category=excluded.category,
+             translated_name=COALESCE(excluded.translated_name, tags.translated_name)",
+        params![name, category, translated_name],
     )?;
     Ok(
         tx.query_row("SELECT id FROM tags WHERE name=?1", params![name], |row| {
             row.get(0)
         })?,
     )
+}
+
+fn rule_proposal_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<RuleProposal> {
+    Ok(RuleProposal {
+        id: row.get(0)?,
+        kind: row.get(1)?,
+        payload_json: row.get(2)?,
+        source_item_id: row.get(3)?,
+        note: row.get(4)?,
+        state: row.get(5)?,
+        created_at: row.get(6)?,
+        decided_at: row.get(7)?,
+        decided_by: row.get(8)?,
+        apply_error: row.get(9)?,
+    })
 }
 
 fn derived_id(kind: &str, key: &str) -> String {

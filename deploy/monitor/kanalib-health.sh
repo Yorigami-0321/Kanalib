@@ -6,6 +6,7 @@ set -uo pipefail
 
 PUBLIC_HEALTH="${KANALIB_PUBLIC_HEALTH:-http://127.0.0.1:8787/api/health}"
 PRIVATE_HEALTH="${KANALIB_PRIVATE_HEALTH:-}"
+INGEST_HEALTH="${KANALIB_INGEST_HEALTH:-}"
 WEB_DB="${KANALIB_WEB_DB:-/var/lib/kanalib-web/kanalib-web.db}"
 INGEST_DB="${KANALIB_INGEST_DB:-/var/lib/kanalib-ingest/ingest.db}"
 DISK_PATH="${KANALIB_DISK_PATH:-/var/lib/kanalib-web}"
@@ -38,6 +39,7 @@ check_http() {
 
 check_http public "$PUBLIC_HEALTH"
 check_http private "$PRIVATE_HEALTH"
+check_http ingest "$INGEST_HEALTH"
 
 if [[ -n "$TLS_HOST" ]]; then
     if command -v openssl >/dev/null 2>&1; then

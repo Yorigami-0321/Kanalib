@@ -1087,12 +1087,12 @@ on_fail = "review"
 
 ### 17.3 阻断性：规则层基线审计（2026-11-21）
 
-本节记录规则层落地前的基线；`rules`/`tagging`/`review`/`pipeline`/`rules_state` 现已落地，现状与剩余项以 [`pending/ingest-i2-handoff.md`](pending/ingest-i2-handoff.md) 为准。
+本节记录规则层落地前的基线；`rules`/`tagging`/`review`/`pipeline`/`rules_state`/`rules_edit`/`admin`/`metrics` 现已落地，现状与剩余项以 [`pending/ingest-i2-handoff.md`](pending/ingest-i2-handoff.md) 为准。
 
 | # | 文件 | 现状 | 目标 |
 |---|---|---|---|
 | B14 | `src/db.rs:129-136` | 有可写的 `rules` 表（`kind`/`payload_json`/`priority`/`enabled`） | **删除**；换成 `rule_snapshots`（只读快照）+ `rule_proposals`（草稿），见 §3 |
-| B15 | `src/db.rs` | **部分完成**：schema v6 已有 `rule_snapshots`；`rule_proposals` 待规则编辑步骤补 | 按 §3 建表 |
+| B15 | `src/db.rs` | **已完成**：schema v7 含只读 `rule_snapshots` 与 `rule_proposals`；草稿→应用→重载链路已接通 | 按 §3 建表 |
 | B16 | `src/lib.rs` | 只导出 4 个模块 | 增加 `pub mod rules; pub mod tagging; pub mod review; pub mod rules_edit;` |
 | B17 | 新建 `src/rules.rs` | 不存在 | `RuleConfig` 反序列化 + 校验（`rating.block` 只允许 `r18g`、版本必须递增、词条归一化后重复→告警去重、`tags`/`watch` 同词→拒绝启动）+ 十步决策（含 `watch`） |
 | B18 | 新建 `src/rules_edit.rs` | 不存在 | proposal → `toml_edit` 原子改写 → 版本自增 → hash 比对（§7.8） |
@@ -1113,12 +1113,12 @@ on_fail = "review"
 
 ### 17.5 非阻断：推送与对外接口
 
-`src/push.rs` 已实现队列、签名、重试、删除事件与原图签名校验，并已接进主循环：每轮从库里挑 `decision='allow'` 且 `revision > pushed_revision` 的条目生成批次，ack 后回写追踪位；删除事件按 `works.status='deleted'` 生成。规则层（B14–B22）未落地前不会自动产生 `allow`，所以主循环不会推送任何条目。
+`src/push.rs` 已实现队列、签名、重试、删除事件与原图签名校验，并已接进主循环：每轮从库里挑 `decision='allow'` 且 `revision > pushed_revision` 的条目生成批次，ack 后回写追踪位；删除事件按 `works.status='deleted'` 生成。规则层落地后 `allow` 会正常产生；批次 `rules_version` 默认取当前生效版本，`config.push.rules_version` 仅用于显式覆盖或回放历史批次。
 
 | # | 文件 | 现状 | 目标 |
 |---|---|---|---|
 | B27 | `src/push.rs` | **已完成**：`enqueue_decisions` 从 DB 生成 allow/delete 批次；`flush` ack 后回写 `pushed_revision` / `delete_pushed` | 批次大小与重试参数来自 `[push]` |
-| B28 | 新建 `src/admin.rs` | 不存在 | 审核页 + 规则页 + 健康检查；只绑 EasyTier 虚拟 IP |
+| B28 | `src/admin.rs` | **已完成**：审核放行/拒绝、规则草稿/预览 diff/应用、状态、指标、健康检查；默认只绑回环，部署时绑 EasyTier 虚拟 IP | 审核页 + 规则页 + 健康检查；只绑 EasyTier 虚拟 IP |
 | B29 | `src/media.rs` | **已完成**：`GET/HEAD /original/{id}` 校验签名/过期/条目存活，单区间 Range，流式返回；只绑配置地址 | 路径不进入响应；EasyTier 未就绪时 30s 重试绑定 |
 
 ### 17.6 已完成、不需改动

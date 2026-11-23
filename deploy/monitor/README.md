@@ -5,6 +5,8 @@
 - public `/api/health`（默认 `127.0.0.1:8787`）。
 - 可选 private `/api/health`（例如 EasyTier 地址 `10.126.126.2:8788`），只配
   `KANALIB_PRIVATE_HEALTH` 时才检查。
+- 可选 ingest 管理口 `/admin/api/health`（例如 EasyTier 地址 `10.126.126.3:8792`），
+  只配 `KANALIB_INGEST_HEALTH` 时才检查。
 - 磁盘占用、推送积压/失败/拒绝、review 队列、下载队列。
 
 非 0 退出表示需要处理。阈值全部走环境变量：
@@ -12,6 +14,7 @@
 ```text
 KANALIB_PUBLIC_HEALTH=http://127.0.0.1:8787/api/health
 KANALIB_PRIVATE_HEALTH=http://10.126.126.2:8788/api/health
+KANALIB_INGEST_HEALTH=http://10.126.126.3:8792/admin/api/health
 KANALIB_WEB_DB=/var/lib/kanalib-web/kanalib-web.db
 KANALIB_INGEST_DB=/var/lib/kanalib-ingest/ingest.db
 KANALIB_DISK_PATH=/var/lib/kanalib-web

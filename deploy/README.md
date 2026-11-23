@@ -6,6 +6,7 @@
 公网浏览器 ──443──> Nginx ──> kanalib-web 127.0.0.1:8787（只读）
                                       │
 box ──EasyTier 私网──> kanalib-web 10.126.126.2:8788（ingest / desktop / 原图）
+                  └──> kanalib-ingest 10.126.126.3:8792（审核 / 规则草稿 / 指标）
 桌面 ──EasyTier 私网──> 同上
 ```
 
@@ -15,7 +16,7 @@ box ──EasyTier 私网──> kanalib-web 10.126.126.2:8788（ingest / deskto
 |---|---|
 | `nginx/kanalib.conf.example` | TLS、静态站、公开只读反代，显式 404 私网路由 |
 | `systemd/kanalib-web.service.example` | 网页后端 public + private 双 listener |
-| `systemd/kanalib-ingest.service.example` | box 入库服务（当前仅 mock 来源） |
+| `systemd/kanalib-ingest.service.example` | box 入库服务（Pixiv/mock + 规则 + 审核页） |
 | `systemd/*backup*` | 每日 SQLite/媒体备份 |
 | `systemd/kanalib-health.*` | 每 5 分钟健康检查 |
 | `backup/*.sh` | 在线备份脚本 |
@@ -105,6 +106,7 @@ box ──EasyTier 私网──> kanalib-web 10.126.126.2:8788（ingest / deskto
 ```bash
 KANALIB_PUBLIC_HEALTH=http://127.0.0.1:8787/api/health \
 KANALIB_PRIVATE_HEALTH=http://10.126.126.2:8788/api/health \
+KANALIB_INGEST_HEALTH=http://10.126.126.3:8792/admin/api/health \
 /usr/local/sbin/kanalib-health.sh
 ```
 
@@ -112,7 +114,9 @@ KANALIB_PRIVATE_HEALTH=http://10.126.126.2:8788/api/health \
 `KANALIB_TLS_HOST` 检查证书剩余天数，`KANALIB_ALERT_WEBHOOK` 在失败时 POST 报告。
 webhook 只放 `/etc/kanalib/health.env`，不写入仓库。
 
-## Current limitation
+## Current state
 
-`kanalib-ingest.service.example` 仍用 `--source mock`：真实 Pixiv 适配与规则/打标主循环属于
-P3，尚未接入。切换来源时只改 `--source` 与配置，不要改推送/备份路径。
+`kanalib-ingest.service.example` 通过 `--config /etc/kanalib/ingest.toml` 启动；来源由
+`[source.pixiv].enabled` 或 `--source` 决定。规则热重载、审核页、规则草稿与 Prometheus
+指标已接入。真实 Pixiv 令牌只放在 `/etc/kanalib`（0600），首次上线仍需要在 box 上做
+一次手动联调（见 `docs/backlog/ingest-service.md` §12.3）。

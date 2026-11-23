@@ -32,9 +32,9 @@ retry_max = 5
 timeout_secs = 60
 
 [tagging]
-# 规则层（B14–B22）落地前不会调用打标后端；先留空。
+# 标签不足 min_tags 时调用一次；endpoint 指向 box 上的 sidecar。
 # backend = "http"
-# endpoint = "http://127.0.0.1:8791/tag"
+# endpoint = "http://127.0.0.1:8793/tag"
 concurrency = 2
 timeout_secs = 30
 
@@ -45,7 +45,13 @@ batch_size = 100
 max_attempts = 5
 backoff_base_secs = 5
 backoff_max_secs = 600
-rules_version = "unversioned"
+# 默认使用当前生效的 rules.version；只有回放历史批次才需要覆盖。
+# rules_version = "2026-11-22.1"
+
+[admin]
+# 管理页 / 审核 / 规则草稿 / 指标；只绑回环或 EasyTier 虚拟 IP，绝不绑 0.0.0.0。
+enabled = true
+bind = "10.126.126.3:8792"
 
 [media]
 # 与 kanalib-web 的 --media-signing-key / KANALIB_MEDIA_SIGNING_KEY 相同。
