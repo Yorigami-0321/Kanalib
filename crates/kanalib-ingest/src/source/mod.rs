@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 
 pub mod mock;
 pub mod pixiv;
+pub mod public;
 
 use crate::db::SourceAuthorRow;
 
@@ -262,6 +263,13 @@ pub trait SourceAdapter: Send + Sync {
         user_id: &str,
         cursor: Option<&str>,
     ) -> BoxFuture<'_, Result<Page<SourceWork>, SourceError>>;
+    /// 匿名发现流：榜单、标签搜索或作者作品。默认来源没有这条流。
+    fn list_works(
+        &self,
+        _cursor: Option<&str>,
+    ) -> BoxFuture<'_, Result<Page<SourceWork>, SourceError>> {
+        Box::pin(async { Ok(Page::default()) })
+    }
     fn resolve_image(
         &self,
         work: &SourceWork,

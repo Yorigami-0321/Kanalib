@@ -762,6 +762,33 @@ signing_key_file = "/etc/kanalib/media-signing-key"
 
 仓库根部的可直接复制版本见 [`deploy/ingest.toml.example`](../../deploy/ingest.toml.example)。当前版本只支持令牌文件：`credential_ref` 会显式报错，不会静默回退。
 
+#### 10.1.1 无登录公开来源
+
+`source.public` 与 `source.pixiv` 二选一。它只用 Pixiv 网页匿名可见的端点，不需要账号或 token：
+
+| 目标 | 端点 | 说明 |
+|---|---|---|
+| `ranking` | `/ranking.php?...&format=json` | 榜单；`mode` 支持 daily/weekly/monthly/rookie/original/male/female |
+| `tag` | `/ajax/search/artworks/<tag>` | 标签搜索；`order` 默认 `date_d` |
+| `author` | `/ajax/user/<id>/profile/all` | 指定作者的全部作品 ID |
+
+每个作品再走 `/ajax/illust/<id>` 补元数据、`/ajax/illust/<id>/pages` 取多页原图。边界：
+
+- 只覆盖全年龄公开作品；没有收藏、私密内容和 R-18/R-18G，因此不能替代 `source.pixiv` 做收藏订阅。
+- 页面内作品已全部入库时跳过详情请求；首次同步会按每作品 2 个请求抓取。
+- 匿名端点没有稳定性承诺，遇到 429 会按 `Retry-After` 退避；不要把第三方 HibiAPI/PxveAPI 实例当成生产依赖。
+
+```toml
+[source.public]
+enabled = true
+
+[[source.public.targets]]
+kind = "ranking"
+mode = "daily"
+content = "illust"
+pages = 1
+```
+
 ### 10.2 规则文件 `rules.toml`
 
 ```toml

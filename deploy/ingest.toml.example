@@ -26,6 +26,29 @@ client_secret = "pixiv-oauth-client-secret"
 # credential_ref = "keyring:kanalib-pixiv"
 user_agent = "Kanalib/0.1 (Pixiv ingest)"
 
+# 无登录公开来源：与 source.pixiv 二选一，只抓匿名可见的全年龄作品。
+# 没有收藏、私密内容和 R-18；每个目标按顺序抓取，pages 上限 10。
+[source.public]
+enabled = false
+# user_agent = "Mozilla/5.0 ... Chrome/131.0 Safari/537.36"
+
+[[source.public.targets]]
+kind = "ranking"
+mode = "daily"      # daily / weekly / monthly / rookie / original / male / female
+content = "illust"  # illust / manga
+pages = 1
+
+# [[source.public.targets]]
+# kind = "tag"
+# tag = "花"
+# order = "date_d"
+# pages = 1
+
+# [[source.public.targets]]
+# kind = "author"
+# user_id = "59688623"
+# pages = 1
+
 [download]
 concurrency = 3
 retry_max = 5

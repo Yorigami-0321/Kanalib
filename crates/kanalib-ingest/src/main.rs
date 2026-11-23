@@ -20,6 +20,7 @@ use kanalib_ingest::{
         self, SourceAdapter,
         mock::MockSource,
         pixiv::{self, PixivSource, ReqwestPixivTransport},
+        public::PublicSource,
     },
     tagging::{HttpTaggingBackend, TaggingBackend},
 };
@@ -79,13 +80,19 @@ async fn run(args: Args, config: IngestConfig) -> Result<()> {
         .media_dir
         .clone()
         .unwrap_or_else(|| config.service.media_dir.clone());
-    let source_id = args
-        .source
-        .clone()
-        .or_else(|| config.source.pixiv.enabled.then(|| "pixiv".to_string()))
-        .unwrap_or_else(|| "mock".to_string());
-    if !matches!(source_id.as_str(), "mock" | "pixiv") {
-        bail!("unknown source {source_id}; expected mock or pixiv");
+    let source_id = if let Some(source) = args.source.clone() {
+        source
+    } else if config.source.pixiv.enabled && config.source.public.enabled {
+        bail!("enable only one of source.pixiv and source.public");
+    } else if config.source.pixiv.enabled {
+        "pixiv".to_string()
+    } else if config.source.public.enabled {
+        "public".to_string()
+    } else {
+        "mock".to_string()
+    };
+    if !matches!(source_id.as_str(), "mock" | "pixiv" | "public") {
+        bail!("unknown source {source_id}; expected mock, pixiv or public");
     }
     if let Some(public_base) = &config.service.public_base {
         info!(public_base, "configured public base");
@@ -131,6 +138,7 @@ async fn run(args: Args, config: IngestConfig) -> Result<()> {
     );
     let adapter: Arc<dyn SourceAdapter> = match source_id.as_str() {
         "pixiv" => Arc::new(build_pixiv_source(&config, download_timeout)?),
+        "public" => Arc::new(PublicSource::new(&config.source.public, download_timeout)?),
         _ => Arc::new(MockSource::new("mock")),
     };
     let image_transport: Arc<dyn download::ImageTransport> = if source_id == "mock" {
@@ -188,18 +196,32 @@ async fn run(args: Args, config: IngestConfig) -> Result<()> {
     loop {
         report_reload(rules_state.reload_if_changed(&db, "watch"), &rules_state);
 
-        for user in &bookmark_users {
-            match ingest::ingest_bookmarks(&mut db, adapter.as_ref(), user).await {
+        if source_id == "public" {
+            match ingest::ingest_feed(&mut db, adapter.as_ref()).await {
                 Ok(outcome) => info!(
-                    user,
                     pages = outcome.fetched_pages,
                     new_works = outcome.new_works,
-                    stopped_early = outcome.stopped_early,
-                    "bookmarks synced"
+                    "public feed synced"
                 ),
                 Err(error) => {
                     metrics.record_source_error();
-                    warn!(user, %error, "bookmark sync failed; keeping the service alive")
+                    warn!(%error, "public feed sync failed; keeping the service alive")
+                }
+            }
+        } else {
+            for user in &bookmark_users {
+                match ingest::ingest_bookmarks(&mut db, adapter.as_ref(), user).await {
+                    Ok(outcome) => info!(
+                        user,
+                        pages = outcome.fetched_pages,
+                        new_works = outcome.new_works,
+                        stopped_early = outcome.stopped_early,
+                        "bookmarks synced"
+                    ),
+                    Err(error) => {
+                        metrics.record_source_error();
+                        warn!(user, %error, "bookmark sync failed; keeping the service alive")
+                    }
                 }
             }
         }

@@ -380,7 +380,7 @@ fn parse_work(value: &serde_json::Value) -> Result<SourceWork, SourceError> {
 }
 
 /// Pixiv `x_restrict`：0 全年龄、1 R-18、2 R-18G；缺失/未知一律 Unknown。
-fn rating_from_x_restrict(value: Option<i64>) -> Rating {
+pub(crate) fn rating_from_x_restrict(value: Option<i64>) -> Rating {
     match value {
         Some(0) => Rating::All,
         Some(1) => Rating::R18,
@@ -390,7 +390,7 @@ fn rating_from_x_restrict(value: Option<i64>) -> Rating {
 }
 
 /// Pixiv `illust_ai_type`：1 非 AI、2 AI、0/缺失未知。
-fn ai_from_illust_ai_type(value: Option<i64>) -> AiType {
+pub(crate) fn ai_from_illust_ai_type(value: Option<i64>) -> AiType {
     match value {
         Some(1) => AiType::No,
         Some(2) => AiType::Ai,
@@ -434,7 +434,7 @@ fn parse_work_page(value: &serde_json::Value) -> Result<Page<SourceWork>, Source
     })
 }
 
-fn chrono_like_timestamp(value: &str) -> Option<i64> {
+pub(crate) fn chrono_like_timestamp(value: &str) -> Option<i64> {
     let bytes = value.as_bytes();
     if bytes.len() < 19 {
         return None;
@@ -447,7 +447,7 @@ fn chrono_like_timestamp(value: &str) -> Option<i64> {
     Some(days * 86_400 + hour * 3_600 + minute * 60 + second)
 }
 
-fn days_from_civil(year: i64, month: i64, day: i64) -> i64 {
+pub(crate) fn days_from_civil(year: i64, month: i64, day: i64) -> i64 {
     let year = year - i64::from(month <= 2);
     let era = if year >= 0 { year } else { year - 399 } / 400;
     let yoe = year - era * 400;

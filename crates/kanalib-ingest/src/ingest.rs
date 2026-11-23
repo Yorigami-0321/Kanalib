@@ -79,6 +79,71 @@ pub async fn ingest_bookmarks(
     Ok(outcome)
 }
 
+/// 无登录发现流：榜单、标签搜索、作者作品。
+///
+/// 先按来源页判断整页是否已入库；已知作品不再请求详情和图片 URL。
+pub async fn ingest_feed(db: &mut Db, adapter: &dyn SourceAdapter) -> Result<IngestOutcome> {
+    db.sync_source(adapter.id(), "remote")?;
+    let mut cursor = None;
+    let mut outcome = IngestOutcome {
+        fetched_pages: 0,
+        new_works: 0,
+        stopped_early: false,
+    };
+
+    loop {
+        let page = match adapter.list_works(cursor.as_deref()).await {
+            Ok(page) => page,
+            Err(error) => {
+                handle_source_error(db, adapter, None, &error).await?;
+                return Err(error.into());
+            }
+        };
+        outcome.fetched_pages += 1;
+
+        for stub in &page.items {
+            if all_pages_known(db, adapter.id(), stub) {
+                continue;
+            }
+            let work = match adapter.fetch_work(&stub.external_id).await {
+                Ok(work) => work,
+                Err(error) if error.kind == SourceErrorKind::NotFound => {
+                    warn!(work = %stub.external_id, %error, "public work disappeared");
+                    continue;
+                }
+                Err(error) => {
+                    handle_source_error(db, adapter, None, &error).await?;
+                    warn!(work = %stub.external_id, %error, "public work fetch failed");
+                    return Err(error.into());
+                }
+            };
+            match ingest_work(db, adapter, &work) {
+                Ok(is_new) => outcome.new_works += usize::from(is_new),
+                Err(error) => {
+                    warn!(error = %error, work = %work.external_id, "ingest work failed");
+                    return Err(error);
+                }
+            }
+            for page_index in 0..work.page_count.max(1) {
+                if let Ok(image) = adapter.resolve_image(&work, page_index).await {
+                    db.persist_bookmark_image(
+                        &item_id(adapter.id(), &work.external_id, page_index),
+                        &image.url,
+                        image.ext.as_deref(),
+                    )?;
+                }
+            }
+        }
+
+        match page.next_cursor {
+            Some(next) => cursor = Some(next),
+            None => break,
+        }
+    }
+    db.record_source_sync(adapter.id(), now())?;
+    Ok(outcome)
+}
+
 pub async fn ingest_single_work(
     db: &mut Db,
     adapter: &dyn SourceAdapter,
