@@ -22,9 +22,9 @@
 | F-084 | Pixiv 来源适配与作品层（box） | 高 | F-089 的子项；计划 [../pixiv-integration.md](../pixiv-integration.md) §3 + 设计 [../ingest-service.md](../ingest-service.md) §3/§4；作品/页/作者在 box 库，**不改桌面 schema、不新增桌面导入管线**；**不做数据迁移** | 2026-11-21 调研 |
 | F-085 | Pixiv 元数据同步与作者（box） | 高 | F-089 的子项；设计 [../ingest-service.md](../ingest-service.md) §4.2/§6；refresh token 只在 box；404 保留元数据并标 deleted；失败分类退避；作者改名/头像更新 | 2026-11-21 调研 |
 | F-086 | Pixiv 收藏订阅与可靠下载（box） | 中 | F-089 的子项；设计 [../ingest-service.md](../ingest-service.md) §4.2/§5；订阅按用户 ID、快速追平；`.part`/Range/多页并发；动图 GIF；sync 与 subs 并行；**不做数据迁移** | 2026-11-21 调研 |
-| F-087 | 网页横向导航改版 | 高 | 规格 [../web-rail-horizontal.md](../web-rail-horizontal.md)；208px 横排文字 + 60px 折叠 + ≤760 底部条；浮层不推挤画布；保留 `--seam-w` 别名 | 2026-11-21 调研 |
-| F-088 | 网页轻量后端与动态化 | 高 | 设计 [../web-dynamic-backend.md](../web-dynamic-backend.md)；独立 `kanalib-web`（axum + SQLite WAL）+ `ApiSource`；**不读桌面 DB、不做统一后端**；只收 F-089 的 allow 批次；静态导出保留 | 2026-11-21 调研 |
-| F-089 | 入库过滤服务（box） | 高 | 设计 [../ingest-service.md](../ingest-service.md)；外部来源唯一入口；来源→下载→打标→**配置文件黑名单（用户 + 标签）**→review→HMAC 推送；**R-18/AI 放行、只拦 R-18G、内容标签<5 补标**；**fail-closed**；不服务浏览器、不写网页 DB、不扫桌面库；部署在 box | 2026-11-23 I2 提交 / I5 待实机 |
+| F-087 | 网页横向导航改版 | 高 | 代码已落地（208px / 60px 折叠 / `[` `]` / ≤760px 底部条）；剩窄屏与折叠态视觉复验 | 2026-11-23 复核 |
+| F-088 | 网页轻量后端与动态化 | 高 | W0–W3 与 W4 ingest 接口已上线，box 推送的 10 条 allow 可见；剩桌面桥接、备份/健康定时器安装与监控接线 | 2026-11-23 复核 |
+| F-089 | 入库过滤服务（box） | 高 | 实机闭环：10 allow / 4 block / 0 review；打标走 box → 云端代理 → 本机 EasyTier 直连；剩 I5 现场项（ACL 复核、断网/重启演练、原图直连、告警阈值）与 ugoira/真实令牌冒烟 | 2026-11-23 实机 |
 | F-090 | 三端互联与 EasyTier | 高 | 设计 [../easytier-connectivity.md](../easytier-connectivity.md)；公网 HTTPS 只读，写接口/同步/原图走 EasyTier 虚拟网；桌面 P2P 直连 box 省云出口；不要求访客装客户端；魔法 DNS `*.et.net` + `peers.txt` 便于迁移 | 2026-11-22 调研 |
 | F-091 | 私网组网备选方案对比 | 中 | 调研 [../private-networking-options.md](../private-networking-options.md)；**EasyTier 主方案**（无账号/无控制面）；Tailscale/Headscale 次选；最小回退 frp；业务只写稳定服务名 + 端口 | 2026-11-22 调研 |
 

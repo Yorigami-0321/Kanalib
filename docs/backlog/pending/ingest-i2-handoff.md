@@ -154,7 +154,7 @@ $cargo = Join-Path $env:USERPROFILE ".cargo\bin\cargo.exe"
    - 复核管理口 `8792` 只绑 EasyTier 虚拟 IP、公网不可达（ACL 已配置，尚未逐条验公网路径）。
    - 断网重试、box 重启恢复、桌面拉原图走直连仍需手动演练。
    - 云端只部署前端精简包（`index.html`、`favicon.svg`、`assets/*`）；不要上传 418 MB 的静态 `data/`。
-2. **打标后端**：已改为 EasyTier 直连（本机 `10.126.126.1:8793`），SSH 隧道与云端转发已停用。box 侧 endpoint 尚未切换（box 当前离线），恢复后按 [tagger-easytier-handoff.md](tagger-easytier-handoff.md) 第 6 节执行。当前依赖本机 Windows 与 EasyTier 服务在线；长期应迁到常驻 GPU 主机。
+2. **打标后端**：已闭环。box → 云端代理 `10.126.126.2:8793` → 本机 EasyTier `10.126.126.1:8793`；SSH 隧道与旧转发服务已删除。`9fd683d` 标签计数修复已部署，`2087cc90…` 重跑 `tagged=1`、51 标签、已推送。当前依赖本机 Windows 与 EasyTier 服务在线；长期应迁到常驻 GPU 主机。细节见 [tagger-easytier-handoff.md](tagger-easytier-handoff.md)。
 3. **真实 Pixiv 令牌冒烟**：无登录路线已跑通；令牌路线仍只在 box 手动执行，不写入仓库/CI。
 4. **告警接线**：`deploy/monitor/kanalib-health.sh` 已覆盖磁盘、推送积压、推送失败/被拒、review 积压、HTTP 健康、TLS 与**打标后端连续失败**（`model_error_streak` gauge，2026-11-23 补，提交 `086cfcb`）。剩下的是按部署环境调阈值与 webhook，属于 I5 现场工作。
 5. **草稿类型**：当前只支持 tags/users 的增删；`watch`、rating、tag_budget 等仍走手工编辑文件。
@@ -171,14 +171,14 @@ $cargo = Join-Path $env:USERPROFILE ".cargo\bin\cargo.exe"
 - `rules.config_hash_check = false` 是显式逃生口：允许同版本覆盖快照，但会告警；正常流程必须升 `rules.version`。
 - 预览与真正应用共用 `plan_edit()`；不要在预览里另写一套编辑逻辑，否则 diff 会和落盘结果不一致。
 - 规则文件是多行数组时 diff 才有意义；单行超长数组会表现为整行替换。
-- 工作区还有若干与本任务无关的未跟踪文件（如 `probe-rail-*.json`、`web/box-preview.html`、`key-acl.txt`、`package*.json`）；提交前逐个确认，不要一并打包。
+- 工作区已清理；提交前仍按 `git status` 逐项确认。
 
 ## 8. 当前工作区
 
 - 分支：`main`，与 `origin/main` 同步
 - public 来源提交：`da3df61`（adapter）、`2600307`（`limit` 控制）
 - 状态：无登录路线与打标后端已部署到 box/云端；规则 `2026-11-23.3`，10 allow / 4 block / 0 review
-- 工作区仍有与本任务无关的未跟踪文件（`key-acl.txt`、`probe-rail-*.json`、`web/box-preview.html`、`web/dist-api*/`、`package*.json`、`.kanalib-hook-log-check.mjs`、`SELECT COUNT( ) FROM t;`）。`key-acl.txt` 含部署 ACL，入库前要单独定夺
+- 工作区已清理（2026-11-23），无未跟踪残留
 - 约束：继续遵循“不推送，除非用户明确要求”。
 
 ## 9. 快速接手命令

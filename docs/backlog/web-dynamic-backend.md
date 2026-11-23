@@ -701,8 +701,8 @@ cargo run -p kanalib-web -- --db .kanalib-web/kanalib-web.db --media .kanalib-we
 | W2 | 搜索/排序/游标 + works/authors/collections（已实现） | 2c2g 压测达标；分页稳定 |
 | W3a | `ApiSource` + `createSource` + `fetchItem`（已实现） | 静态/API 双 bundle；现有探针 |
 | W3b | 筛选/排序/计数切到 `setQuery`（已实现） | `wall_api_check.mjs` |
-| W4 | 内部 ingest 接口 + 桌面桥接 + EasyTier 私网 | 签名/幂等/令牌测试；公网写路由 404 |
-| W5 | 部署脚本/反代/备份/监控 | 文档 + 冒烟 |
+| W4 | 内部 ingest 接口 + 桌面桥接 + EasyTier 私网（**部分实现**） | 签名/幂等/令牌测试；公网写路由 404。已上线 `/internal/ingest/batch|delete` 与 private listener；**桌面桥接未做** |
+| W5 | 部署脚本/反代/备份/监控（**部分实现**） | 文档 + 冒烟。`kanalib-web` 已部署、systemd/备份模板已有；**备份/健康定时器未安装，监控未接线** |
 
 > W3 拆成两步：W3a 只换数据源（`createSource` + `ApiSource` + `useWall.reset` + `fetchItem`），页面仍用现有内存筛选；W3b 再把筛选/排序/计数切到 `setQuery`。W3a 通过现有探针，W3b 通过 `wall_api_check.mjs`（含 `--ui` 请求断言）。
 
