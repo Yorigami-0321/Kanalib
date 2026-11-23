@@ -32,7 +32,7 @@ check_http() {
     if [[ -z "$url" ]]; then
         return 0
     fi
-    if curl -fsS --max-time 5 "$url" | grep -q '"ok":true'; then
+    if curl -fsS --noproxy '*' --max-time 5 "$url" | grep -q '"ok":true'; then
         ok "$name health"
     else
         bad "$name health: $url"
@@ -50,7 +50,7 @@ if [[ -z "$metrics_url" && -n "$INGEST_HEALTH" ]]; then
     metrics_url="${INGEST_HEALTH%/admin/api/health}/admin/api/metrics"
 fi
 if [[ -n "$metrics_url" ]]; then
-    if streak="$(curl -fsS --max-time 5 "$metrics_url" \
+    if streak="$(curl -fsS --noproxy '*' --max-time 5 "$metrics_url" \
             | sed -n 's/^model_error_streak \([0-9][0-9]*\)$/\1/p')"; then
         if [[ -z "$streak" ]]; then
             bad "model_error_streak missing from $metrics_url"

@@ -38,3 +38,17 @@ KANALIB_ALERT_WEBHOOK=
   `KANALIB_TLS_MIN_DAYS` 失败。
 - 配 `KANALIB_ALERT_WEBHOOK` 时，只有检查失败才 POST 纯文本报告；webhook 地址只来自
   `/etc/kanalib/health.env`（0600），不写入仓库。没配就只靠 systemd 日志/`OnFailure=`。
+
+## 告警收件箱
+
+`kanalib-alert-sink.py` 是一个只接收纯文本报告的小收件箱：
+
+- 公网：`https://patchouli.us.ci/kanalib-alert/<token>`，Nginx 反代 `127.0.0.1:8794`。
+- 私网：`http://10.126.126.2:8795/kanalib-alert`，只给 box 用，不需要 token。
+- `POST text/plain` 追加到 `/var/lib/kanalib-alert/alerts.jsonl`，保留最近 500 条。
+- 浏览器 GET 同一地址查看最近 50 条；公网必须带 token。
+- token 放 `/etc/kanalib/alert.env`（0600），不写入仓库。
+
+云端 `health.env` 填公网 URL，box 填私网 URL；两边共用同一个收件箱。
+box 有全局 HTTP 代理，`health.env` 需加
+`NO_PROXY=10.126.126.0/24,127.0.0.1,localhost`，否则私网 POST 会被代理返回 403。

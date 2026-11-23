@@ -143,6 +143,10 @@ KANALIB_INGEST_HEALTH=http://10.126.126.3:8792/admin/api/health \
 `KANALIB_TLS_HOST` 检查证书剩余天数，`KANALIB_ALERT_WEBHOOK` 在失败时 POST 报告。
 webhook 只放 `/etc/kanalib/health.env`，不写入仓库。
 
+告警收件箱由 `kanalib-alert-sink.service` 提供：公网
+`https://patchouli.us.ci/kanalib-alert/<token>`，box 用私网
+`http://10.126.126.2:8795/kanalib-alert`。安装见 `deploy/monitor/README.md`。
+
 ## Current state
 
 `kanalib-ingest.service.example` 通过 `--config /etc/kanalib/ingest.toml` 启动；来源由

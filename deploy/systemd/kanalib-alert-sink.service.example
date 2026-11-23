@@ -1,0 +1,20 @@
+[Unit]
+Description=Kanalib alert inbox
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=kanalib
+StateDirectory=kanalib-alert
+EnvironmentFile=/etc/kanalib/alert.env
+ExecStart=/usr/bin/python3 /usr/local/sbin/kanalib-alert-sink.py
+Restart=always
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+
+[Install]
+WantedBy=multi-user.target
