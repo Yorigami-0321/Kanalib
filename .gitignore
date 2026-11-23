@@ -34,5 +34,6 @@ __pycache__/
 # 图片墙前端（F-081）：依赖与构建产物、发布器导出数据
 /web/node_modules/
 /web/dist/
+/web/dist-api*/
 /web/public/data/
 /web/.vite/
