@@ -13,6 +13,8 @@ $model = Join-Path $root "models\pixai-tagger-v1.0"
 $outLog = Join-Path $env:TEMP "kanalib-tagger.log"
 $errLog = Join-Path $env:TEMP "kanalib-tagger.err"
 $tunnelLog = Join-Path $env:TEMP "kanalib-tagger-tunnel.err"
+$taggerPidFile = Join-Path $env:TEMP "kanalib-tagger.pid"
+$tunnelPidFile = Join-Path $env:TEMP "kanalib-tagger-tunnel.pid"
 
 foreach ($path in @($python, $server, $model, $SshKey)) {
     if (-not (Test-Path -LiteralPath $path)) {
@@ -20,19 +22,25 @@ foreach ($path in @($python, $server, $model, $SshKey)) {
     }
 }
 
-$listening = netstat -ano | Select-String ":$Port\s+.*LISTENING"
-if (-not $listening) {
-    Start-Process -FilePath $python -ArgumentList @(
+function Test-PidFile([string]$Path) {
+    if (-not (Test-Path -LiteralPath $Path)) { return $false }
+    $saved = Get-Content -LiteralPath $Path -ErrorAction SilentlyContinue
+    if (-not $saved) { return $false }
+    return [bool](Get-Process -Id ([int]$saved) -ErrorAction SilentlyContinue)
+}
+
+if (-not (Test-PidFile $taggerPidFile)) {
+    $tagger = Start-Process -FilePath $python -ArgumentList @(
         $server, "--model", $model, "--device", "cuda",
         "--host", "127.0.0.1", "--port", "$Port"
-    ) -WindowStyle Hidden -RedirectStandardOutput $outLog -RedirectStandardError $errLog
+    ) -WindowStyle Hidden -PassThru -RedirectStandardOutput $outLog -RedirectStandardError $errLog
+    Set-Content -LiteralPath $taggerPidFile -Value $tagger.Id
     Write-Host "started tagger on 127.0.0.1:$Port"
 }
 
-$tunnel = netstat -ano | Select-String "127.0.0.1:$Port\s+.*LISTENING"
-if (-not $tunnel) {
+if (-not (Test-PidFile $tunnelPidFile)) {
     $ssh = Join-Path $env:SystemRoot "System32\OpenSSH\ssh.exe"
-    Start-Process -FilePath $ssh -ArgumentList @(
+    $tunnel = Start-Process -FilePath $ssh -ArgumentList @(
         "-N", "-R", "127.0.0.1:$Port:127.0.0.1:$Port",
         "-i", $SshKey,
         "-o", "BatchMode=yes",
@@ -40,7 +48,8 @@ if (-not $tunnel) {
         "-o", "ServerAliveInterval=30",
         "-o", "ServerAliveCountMax=3",
         "$CloudUser@$CloudHost"
-    ) -WindowStyle Hidden -RedirectStandardError $tunnelLog
+    ) -WindowStyle Hidden -PassThru -RedirectStandardError $tunnelLog
+    Set-Content -LiteralPath $tunnelPidFile -Value $tunnel.Id
     Write-Host "started reverse tunnel to $CloudUser@$CloudHost"
 }
 
