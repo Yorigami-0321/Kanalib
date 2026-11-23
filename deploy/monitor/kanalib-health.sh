@@ -9,8 +9,8 @@ PRIVATE_HEALTH="${KANALIB_PRIVATE_HEALTH:-}"
 INGEST_HEALTH="${KANALIB_INGEST_HEALTH:-}"
 KANALIB_INGEST_METRICS="${KANALIB_INGEST_METRICS:-}"
 MAX_MODEL_ERROR_STREAK="${KANALIB_MAX_MODEL_ERROR_STREAK:-10}"
-WEB_DB="${KANALIB_WEB_DB:-/var/lib/kanalib-web/kanalib-web.db}"
-INGEST_DB="${KANALIB_INGEST_DB:-/var/lib/kanalib-ingest/ingest.db}"
+WEB_DB="${KANALIB_WEB_DB-/var/lib/kanalib-web/kanalib-web.db}"
+INGEST_DB="${KANALIB_INGEST_DB-/var/lib/kanalib-ingest/ingest.db}"
 DISK_PATH="${KANALIB_DISK_PATH:-/var/lib/kanalib-web}"
 MAX_DISK_PCT="${KANALIB_MAX_DISK_PCT:-90}"
 MAX_PUSH_BACKLOG="${KANALIB_MAX_PUSH_BACKLOG:-100}"
@@ -95,8 +95,9 @@ else
     warn "disk path missing: $DISK_PATH"
 fi
 
+if [[ -n "$INGEST_DB" || -n "$WEB_DB" ]]; then
 if command -v sqlite3 >/dev/null 2>&1; then
-    if [[ -f "$INGEST_DB" ]]; then
+    if [[ -n "$INGEST_DB" && -f "$INGEST_DB" ]]; then
         due=0 failed=0 rejected=0 review=0 queued=0
         if stats="$(sqlite3 -readonly "$INGEST_DB" "
                 SELECT
@@ -120,7 +121,7 @@ if command -v sqlite3 >/dev/null 2>&1; then
         warn "ingest db missing: $INGEST_DB"
     fi
 
-    if [[ -f "$WEB_DB" ]]; then
+    if [[ -n "$WEB_DB" && -f "$WEB_DB" ]]; then
         items="$(sqlite3 -readonly "$WEB_DB" 'SELECT COUNT(*) FROM items WHERE deleted=0;' 2>/dev/null || echo '?')"
         ok "web live items ${items}"
     else
@@ -128,6 +129,7 @@ if command -v sqlite3 >/dev/null 2>&1; then
     fi
 else
     warn "sqlite3 not installed; queue/database checks skipped"
+fi
 fi
 
 if (( fail != 0 )) && [[ -n "$ALERT_WEBHOOK" ]]; then

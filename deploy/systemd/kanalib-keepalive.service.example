@@ -1,0 +1,9 @@
+[Unit]
+Description=Kanalib box keepalive probe
+After=network-online.target kanalib-easytier.service kanalib-ingest.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+EnvironmentFile=-/etc/kanalib/keepalive.env
+ExecStart=/usr/local/sbin/kanalib-keepalive.sh

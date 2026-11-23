@@ -41,4 +41,7 @@ business configuration contain no virtual-network IP addresses.
 - 备份脚本在 `deploy/backup/`，timer 模板为 `kanalib-*-backup.{service,timer}.example`。
 - 健康检查脚本在 `deploy/monitor/kanalib-health.sh`，timer 为
   `kanalib-health.{service,timer}.example`。
+- box 侧保活脚本在 `deploy/keepalive/kanalib-keepalive.sh`，timer 为
+  `kanalib-keepalive.{service,timer}.example`；每分钟探测云端私网健康，连续 3 次失败重启
+  `kanalib-easytier`。
 - 完整安装/恢复/回滚步骤见 `deploy/README.md`。
