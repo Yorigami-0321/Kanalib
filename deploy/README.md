@@ -113,6 +113,11 @@ iifname "et0" tcp dport { 8790, 8792 } accept
 
 `kanalib-keepalive.timer` 每分钟 ping 云端 `10.126.126.2`，连续 3 次失败重启
 `kanalib-easytier`；本地 ingest 健康只记录，不触发网络重启，避免网页/代理短停误判。
+同时屏蔽 OS 级休眠：
+
+```bash
+sudo systemctl mask sleep.target suspend.target hibernate.target hybrid-sleep.target
+```
 
 ## Backup / restore / rollback
 
