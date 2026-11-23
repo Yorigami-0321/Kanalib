@@ -10,7 +10,7 @@ table inet cocoonbox {
 		ct state established,related accept
 		ct state invalid drop
 		meta l4proto ipv6-icmp accept
-		iif "et0" ip protocol icmp accept
-		iif "et0" tcp dport { 8790, 8792 } accept
+		iifname "et0" ip protocol icmp accept
+		iifname "et0" tcp dport { 8790, 8792 } accept
 	}
 }

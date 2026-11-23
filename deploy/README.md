@@ -99,13 +99,15 @@ box 的 `cocoonbox` nftables 默认 `policy drop`，重启后会挡掉 EasyTier 
 `/etc/nftables.conf` 的 `inet cocoonbox` input 链：
 
 ```nft
-iif "et0" ip protocol icmp accept
-iif "et0" tcp dport { 8790, 8792 } accept
+iifname "et0" ip protocol icmp accept
+iifname "et0" tcp dport { 8790, 8792 } accept
 ```
 
 改完 `sudo nft -f /etc/nftables.conf`，重启后从云端验证 `ping 10.126.126.3` 与
 `curl http://10.126.126.3:8792/admin/api/health`。8790 是原图回源，8792 是管理口。
 完整模板见 `deploy/box/nftables-cocoonbox.conf.example`。
+必须用 `iifname`：`nftables.service` 在 EasyTier 建出 `et0` 之前加载，`iif "et0"` 会因
+接口不存在导致整份规则加载失败。
 
 ## Box keepalive
 
