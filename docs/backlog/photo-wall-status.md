@@ -101,7 +101,7 @@ cargo test -p kanalib-publish         # 25 单元 + 23 集成契约测试
 | 2 | ~~所有列表路由都串行拉全部分片~~ **已完成（2026-11-21）**：无限首页/大标签墙首片到达即铺满，剩余分片在 `requestIdleCallback` 空闲期补拉；总览页 `index.json` 一到就出标签目录，封面与桶计数后台补齐；搜索/有限墙仍立即补全 | `App.tsx` `needAll` / `infiniteWall` / `loadingTags` | — | 回归：`wall_probe_state`、`wall_probe_cold_search`、`wall_probe_tag360`、`wall_probe_tag_threshold`、`wall_probe_edge`、`wall_probe_detail_nav` |
 | 3 | ~~分片失败后没有就地重试~~ **已修复（2026-11-11）**：游标改为请求成功后才推进 + generation 作废旧请求；失败自动补拉 800/2000ms；空态与“已有卡片”错误条均可重试/续拉，不清空已加载 | `StaticSource.ts`、`useWall.ts`、`Wall.tsx` | — | 回归：`wall_probe_recover.mjs` 连续 3 次失败 → 真实坐标点击 → 84 张恢复 |
 | 4 | ~~标签总览一次渲染全部 2,000 张卡~~ **已决策维持现状（2026-11-16）**：标签页保持全量平铺，不做目录化/窗口化 | `TagGallery.tsx` | 大库首屏 DOM 与封面请求偏重，已知并接受 | — |
-| 5 | ~~筛选/排序/单色/留白只在内存~~ **已完成**：`q/sort/mono/matte` 写入 hash query，刷新/深链可恢复 | `App.tsx`、`lib/router.ts` | — | 遗留：跨入口静默延续 query 无可视 chip（见 §5 第二批 B） |
+| 5 | ~~筛选/排序/单色/留白只在内存~~ **已完成**：`q/sort/mono/matte` 写入 hash query，刷新/深链可恢复；跨入口延续的 query 现在在标题旁显示可清除 chip（首页补「搜索结果」标题）。 | `App.tsx`、`lib/router.ts`、`styles.css` | — | 验证：`#/t/long_hair?q=blue` 桌面/移动截图均显示 `blue ×` chip；点击清除回全量。 |
 | 6 | ~~详情深链最多补拉 8 个分片~~ **已完成（2026-11-21）**：去掉固定上限，按序读到命中或整库读完；`StaticSource` 只在成功后才推进游标，失败片不会被反复重试 | `useWall.ts` `findItem` | — | 回归：`wall_probe_state`（无效深链 8s 内落到缺失页、console 0）、`wall_probe_detail_nav`（深链刷新/翻页不拉分片） |
 | 7 | ~~未知 hash 静默回落首页~~ **已完成**：未知非空路径解析为 `notfound`，渲染缺失页（说明 + 回首页 / 去搜索），不进全量拉取；有效路由与历史前进后退正常 | `lib/router.ts`、`App.tsx` | — | 回归：`wall_probe_edge` |
 | 8 | ~~标签/分组墙为空时动作不足~~ **已完成**：五类空态各带动作（清空搜索 / 回标签·分级·分组总览 / 回首页） | `App.tsx`、`Wall.tsx`、`BucketGallery.tsx` | — | 回归：`wall_probe_edge` |
@@ -170,7 +170,7 @@ cargo test -p kanalib-publish         # 25 单元 + 23 集成契约测试
 ### 第二批 A（已开工，不依赖产品决策）
 
 1. `search-index.json`：已完成——发布器生成/重建（`crates/kanalib-publish/src/search.rs`、`--index-only`），前端按元组契约接入并复验（索引缺失时退回文件名搜索）。
-2. URL 状态持久化：已完成并复验。**遗留**：跨入口会静默延续 query（URL 可见但画布无 chip），可清除筛选条进 2B。
+2. URL 状态持久化：已完成并复验；跨入口延续 query 时的可视 chip 已于 2026-11-23 补齐，直接点 chip 即可清除。
 3. 稳定性与信任小修：无效深链、弱网骨架、小集合有限墙、0 收藏空态，均已完成并复验。
 4. 详情体验（前端二号）：邻屏 t512 占位不重复拉档；相似为空回退同标签/分组；去掉不可达的“打开原图”承诺。**已完成并复核**（正常网首屏 64–196KB，Fast 3G 50–368KB；t512 ≤1.03s、锐利层 ≤2.04s；B2 抽样 10 页回退 10/10；原图入口 0）。
 5. 详情翻页路由同步（前端一号）：A4 引入的 `replaceState` 无事件回归，**已完成并复核**；`wall_probe_detail_nav` 固化“→ 后 500ms 画面必须变”。
@@ -191,7 +191,7 @@ cargo test -p kanalib-publish         # 25 单元 + 23 集成契约测试
 - ~~概要遮罩边缘 1px 亮边~~ **已完成并复核**：遮罩外扩 2px 越出卡片裁切边界，`.tile__media` 承担圆角裁切，装饰环改为遮罩之上的 `.tile__ring`（概要态关闭/键盘焦点保留）。回归：`wall_probe_mask_edge`（zoom 1 / 1.2635 / 1.6 / DPR 2.5 四边 Δ ≤3/255）、`wall_probe_tag360`、`wall_probe_tag_threshold`、`wall_probe_edge`、`wall_probe_detail_nav`、`wall_probe_detail_preload`。明细见 §4.4。
 - ~~重复图同时聚焦（§4 #12）~~ **已完成（2026-11-23）**：聚焦/当前态按 `items` 实例下标区分，同一 id 的多个实例只有被点的那张进入 `spotlight` 并放大；布局按实例下标选英雄，不再按 id 过滤掉另一张同图。回归：重复 id 布局断言、`tsc`、`vite build`。
 - ~~聚焦挤压规则重构（§4 #13）~~ **已完成（2026-11-23）**：英雄卡面积不小于原可见面积；邻图按原比例分行摆放，短边低于阈值时减少邻图数量而不是压条；极端竖图在有限墙右列先跳过，避免阻塞后续邻图。回归：4 视口 × 12 seed 真实数据离线断言（无重叠、无横条、英雄 ≥1.05×、最短边达标）+ 密集格/有限墙截图复核，`tsc` / `vite build` 通过。
-- 检查器信息密度与标签分组交互（默认组、展开记忆）。
+- ~~检查器信息密度与标签分组交互~~ **已完成（2026-11-23）**：类别顺序固定（通用 → 角色 → 作品 → 人工 → 风格 → 元信息），默认每组最多 6 个、总数 18 个；「全部 N 个标签 / 收起标签」的展开状态写入 `localStorage`，换图与刷新后保持。验证：34 标签详情页在 `expanded=true / false` 下分别渲染全量与折叠视图，折叠态显示 `+22` 和展开按钮。
 - ~~发布器原子发布~~ **已完成（2026-11-21）**：暂存目录 + 整体替换，失败保留旧产物。
 - 发布器线程池（大库首编耗时）。
 - 真实设备手感复验（触控板/触屏/高分屏 DPR）。

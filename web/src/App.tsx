@@ -994,9 +994,10 @@ export function App() {
       case 'group':
         return { title: displayGroup(route.group), count };
       default:
-        return null;
+        // 首页没有固定标题；搜索生效时补一个，让跨入口延续的 query 可见。
+        return queryActive ? { title: '搜索结果', count } : null;
     }
-  }, [route, shown.length, serverMode, total]);
+  }, [route, shown.length, serverMode, total, queryActive]);
 
   const emptyText = queryActive
     ? '没有符合条件的图片'
@@ -1197,6 +1198,20 @@ export function App() {
               <header className="wallhead">
                 <h1 className="wallhead__title">{wallHead.title}</h1>
                 <span className="wallhead__count">{formatCount(wallHead.count)} 张</span>
+                {queryActive ? (
+                  <button
+                    type="button"
+                    className="wallhead__query"
+                    title="清除搜索"
+                    aria-label={`清除搜索：${filters.query.trim()}`}
+                    onClick={() => setFilters((prev) => ({ ...prev, query: '' }))}
+                  >
+                    <span className="wallhead__query-text">{filters.query.trim()}</span>
+                    <span className="wallhead__query-x" aria-hidden="true">
+                      ×
+                    </span>
+                  </button>
+                ) : null}
               </header>
             ) : null}
 

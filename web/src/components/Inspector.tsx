@@ -17,6 +17,7 @@ import './inspector.css';
 
 const COLLAPSED_TAGS = 18;
 const COLLAPSED_PER_GROUP = 6;
+const TAGS_EXPANDED_KEY = 'kanalib.inspector.tags-expanded';
 
 export interface InspectorProps {
   item: WallItem;
@@ -50,12 +51,25 @@ export function Inspector({
   onSimilar,
   leaving = false,
 }: InspectorProps) {
-  const [expanded, setExpanded] = useState(false);
+  const [expanded, setExpanded] = useState(() => {
+    try {
+      return localStorage.getItem(TAGS_EXPANDED_KEY) === 'true';
+    } catch {
+      return false;
+    }
+  });
   /** 移动端底部 sheet 的展开态；桌面端把手隐藏，该状态不生效。 */
   const [sheetOpen, setSheetOpen] = useState(true);
   const [copied, setCopied] = useState(false);
   const copyTimer = useRef(0);
   useEffect(() => () => window.clearTimeout(copyTimer.current), []);
+  useEffect(() => {
+    try {
+      localStorage.setItem(TAGS_EXPANDED_KEY, String(expanded));
+    } catch {
+      /* localStorage 不可用时只保留本次会话状态 */
+    }
+  }, [expanded]);
 
   const copyLink = async () => {
     try {
