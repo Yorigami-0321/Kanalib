@@ -715,6 +715,26 @@ watch = ["SAME"]
     }
 
     #[test]
+    fn tag_blacklist_blocks_even_when_tag_budget_is_short() {
+        let rules = config(&["blocked"], &[]);
+        let mut subject = subject();
+        subject.tags = vec![
+            ("blocked".to_string(), None),
+            ("オリジナル".to_string(), None),
+        ];
+        let db = crate::db::Db::open_in_memory().unwrap();
+        let outcome = evaluate(DecisionInput {
+            db: &db,
+            config: &rules,
+            subject: &subject,
+        })
+        .unwrap();
+        assert_eq!(outcome.decision, Decision::Block);
+        assert_eq!(outcome.reason, "tag blacklist");
+        assert!(!outcome.needs_tagging);
+    }
+
+    #[test]
     fn sanity_fallback_reviews_instead_of_blocking() {
         let rules = config(&[], &[]);
         let mut subject = subject();
