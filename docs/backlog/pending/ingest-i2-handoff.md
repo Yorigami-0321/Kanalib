@@ -10,7 +10,7 @@
 
 2026-11-23 无登录 `source.public` 路线已在 box 与云端实机跑通：box 每日榜单 → 下载 → 规则判定 → HMAC 推送 → 云端 SQLite → `https://patchouli.us.ci/` 动态前端展示，形成完整闭环。首轮 10 个作品、14 页下载，规则 11 allow / 3 review / 0 block；后续每分钟同步 `new_works=0`，已入库作品不再重复抓详情，幂等成立。
 
-同日接入打标后端：本机 RTX 4060 跑 `sidecar/tagger/http_server.py`（CUDA/FP16），经 SSH 反向隧道到云端 `10.126.126.2:8793`，box 通过 EasyTier 调用。3 条 `tag budget short` 重跑后全部补标成功（`decided=3 allowed=3 tagged=3`），云端 `count=14`、review 归零。规则语义确认为：黑名单标签优先 `block`；内容标签 `< min_tags=5` 必须转打标，补标后重新跑黑名单。
+同日接入打标后端：本机 RTX 4060 跑 `sidecar/tagger/http_server.py`（CUDA/FP16），经 SSH 反向隧道到云端 `10.126.126.2:8793`，box 通过 EasyTier 调用。3 条 `tag budget short` 重跑后全部补标成功（`decided=3 allowed=3 tagged=3`），review 归零。规则语义确认为：黑名单标签优先 `block`；内容标签 `< min_tags=5` 必须转打标，补标后重新跑黑名单。随后把「漫画素材工房」（作者 `16776564` + 账号标签）与「毒うさぎ」（作者 `72177771` + 系列标签）加入黑名单，4 页转 `block`；`push::delete_candidates` 现在也会为已推送后被 block 的条目生成删除批次，云端从 14 条降到 10 条。
 
 本轮补完了上一份交接里的 1–8 项。2026-11-23 另完成三件事：I2 改动入库、评审 P1（`rules_file` 缺省策略）改为 fail-closed、告警补上打标后端连续失败（见第 6 节）。对应的未提交改动评审稿已闭环并归档到 [`../../archive/2026-11/ingest-i2-uncommitted-review-2026-11-22.md`](../../archive/2026-11/ingest-i2-uncommitted-review-2026-11-22.md)。
 
@@ -177,7 +177,7 @@ $cargo = Join-Path $env:USERPROFILE ".cargo\bin\cargo.exe"
 
 - 分支：`main`，与 `origin/main` 同步
 - public 来源提交：`da3df61`（adapter）、`2600307`（`limit` 控制）
-- 状态：无登录路线与打标后端已部署到 box/云端；规则 `2026-11-23.1`，14 allow / 0 review
+- 状态：无登录路线与打标后端已部署到 box/云端；规则 `2026-11-23.3`，10 allow / 4 block / 0 review
 - 工作区仍有与本任务无关的未跟踪文件（`key-acl.txt`、`probe-rail-*.json`、`web/box-preview.html`、`web/dist-api*/`、`package*.json`、`.kanalib-hook-log-check.mjs`、`SELECT COUNT( ) FROM t;`）。`key-acl.txt` 含部署 ACL，入库前要单独定夺
 - 约束：继续遵循“不推送，除非用户明确要求”。
 
