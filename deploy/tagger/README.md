@@ -1,15 +1,20 @@
-# 打标后端（本机 GPU 过渡方案）
+# 打标后端（本机 GPU，经 EasyTier 直连）
 
 box 只负责入库与规则；标签不足 `min_tags` 时通过 HTTP 调本机 GPU 打标。
-链路：
+链路全部走 EasyTier，没有 SSH 隧道，也没有云端转发：
 
 ```text
-kanalib-ingest (box)
-  └─ http://10.126.126.2:8793/tag
-       └─ cloud: kanalib-tagger-forward  (systemd, 监听 EasyTier 地址)
-            └─ 127.0.0.1:8793  (SSH -R 反向隧道)
-                 └─ Windows: sidecar/tagger/http_server.py (CUDA)
+kanalib-ingest (box, 10.126.126.3)
+  └─ http://10.126.126.1:8793/tag
+       └─ EasyTier 私网（kanalib 网络，wss 经 Cloudflare）
+            └─ Windows: sidecar/tagger/http_server.py，只绑 10.126.126.1（CUDA/FP16）
 ```
+
+## 为什么能当开关
+
+打标服务只绑定 EasyTier 虚拟地址 `10.126.126.1`，不监听 `127.0.0.1` 或 `0.0.0.0`。
+本地 EasyTier 客户端（Windows 服务 `easytier-gui`）停掉后该地址消失，box 的连接直接失败，
+条目落到 `review`，不会误放行。启动脚本也会先检查该地址，缺失就拒绝启动。
 
 ## 本机启动
 
@@ -17,47 +22,46 @@ kanalib-ingest (box)
 .\deploy\tagger\start-local-tagger.ps1
 ```
 
-脚本会启动两个后台进程（均隐藏窗口）：
+依赖：
 
-- `dist/Kanalib/runtime/python/python.exe sidecar/tagger/http_server.py --device cuda --port 8793`
-- `ssh -N -R 127.0.0.1:8793:127.0.0.1:8793 <user>@<cloud>`
+- `dist/Kanalib/runtime/python/python.exe`（带 torch/transformers）
+- `models/pixai-tagger-v1.0`
+- EasyTier 已连上 `kanalib` 网络并拿到 `10.126.126.1`
 
-默认 SSH 目标 `yorigami@128.1.132.31`、密钥 `%USERPROFILE%\.ssh\kanalib_deploy`，可用参数覆盖。
-日志写到 `%TEMP%\kanalib-tagger.log`、`%TEMP%\kanalib-tagger-tunnel.err`。
-
-## 云端
-
-```bash
-sudo install -m 0755 deploy/tagger/kanalib-tagger-forward.py /usr/local/bin/
-sudo install -m 0644 deploy/systemd/kanalib-tagger-forward.service.example \
-  /etc/systemd/system/kanalib-tagger-forward.service
-sudo systemctl daemon-reload
-sudo systemctl enable --now kanalib-tagger-forward.service
-```
+日志：`%TEMP%\kanalib-tagger.log`、`%TEMP%\kanalib-tagger.err`；PID：`%TEMP%\kanalib-tagger.pid`。
+脚本可重复执行，已在跑时只做健康检查。
 
 ## box 配置
 
 ```toml
 [tagging]
 backend = "http"
-endpoint = "http://10.126.126.2:8793/tag"
+endpoint = "http://10.126.126.1:8793/tag"
 concurrency = 2
 timeout_secs = 30
 ```
 
-改完重启 `kanalib-ingest`；规则文件里的 `min_tags` 与此无关，保持 5。
+改完 `sudo systemctl restart kanalib-ingest`。`min_tags` 保持 5，和打标后端配置无关。
 
 ## 验证
 
 ```bash
-# 云端
-curl -s http://127.0.0.1:8793/health
+# 本机
+curl http://10.126.126.1:8793/health
+
+# 云端（同网络任意节点）
+curl -s --noproxy '*' http://10.126.126.1:8793/health
 
 # box
-curl -s --noproxy '*' http://10.126.126.2:8793/health
 sudo curl -s --noproxy '*' -F "image=@/var/lib/kanalib-ingest/media/originals/<id>.png" \
-  http://10.126.126.2:8793/tag
+  http://10.126.126.1:8793/tag
 ```
 
-单张约 1–4 秒（RTX 4060 Laptop，FP16）。本机休眠、重启或断网后需要重新执行启动脚本；
-长期应把该服务迁到常驻 GPU 主机。
+单张推理约 1–4 秒（RTX 4060 Laptop，FP16），实际耗时主要受 EasyTier 路径影响：
+当前 wss 路径延迟约 0.4–1 秒、丢包 3%–5%，大图上传会明显慢于本地。
+
+## 限制
+
+- 本机必须在线；休眠、重启或退出 EasyTier 后，box 只能进 `review`。
+- 这是过渡方案。长期应迁到常驻 GPU 主机，或给 box/云端换足算力。
+- 网络密钥与 secure-mode 私钥都在本机 EasyTier 配置里，见 `docs/backlog/pending/tagger-easytier-handoff.md`。

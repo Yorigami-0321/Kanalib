@@ -1,7 +1,5 @@
 param(
-    [string]$CloudHost = "128.1.132.31",
-    [string]$CloudUser = "yorigami",
-    [string]$SshKey = "$env:USERPROFILE\.ssh\kanalib_deploy",
+    [string]$BindAddress = "10.126.126.1",
     [int]$Port = 8793
 )
 
@@ -12,47 +10,44 @@ $server = Join-Path $root "sidecar\tagger\http_server.py"
 $model = Join-Path $root "models\pixai-tagger-v1.0"
 $outLog = Join-Path $env:TEMP "kanalib-tagger.log"
 $errLog = Join-Path $env:TEMP "kanalib-tagger.err"
-$tunnelLog = Join-Path $env:TEMP "kanalib-tagger-tunnel.err"
-$taggerPidFile = Join-Path $env:TEMP "kanalib-tagger.pid"
-$tunnelPidFile = Join-Path $env:TEMP "kanalib-tagger-tunnel.pid"
+$pidFile = Join-Path $env:TEMP "kanalib-tagger.pid"
 
-foreach ($path in @($python, $server, $model, $SshKey)) {
+foreach ($path in @($python, $server, $model)) {
     if (-not (Test-Path -LiteralPath $path)) {
         throw "missing required path: $path"
     }
 }
 
-function Test-PidFile([string]$Path) {
-    if (-not (Test-Path -LiteralPath $Path)) { return $false }
-    $saved = Get-Content -LiteralPath $Path -ErrorAction SilentlyContinue
-    if (-not $saved) { return $false }
-    return [bool](Get-Process -Id ([int]$saved) -ErrorAction SilentlyContinue)
+$hasAddress = Get-NetIPAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue |
+    Where-Object { $_.IPAddress -eq $BindAddress }
+if (-not $hasAddress) {
+    throw "EasyTier is not up: $BindAddress is missing. Start the local EasyTier client first."
 }
 
-if (-not (Test-PidFile $taggerPidFile)) {
-    $tagger = Start-Process -FilePath $python -ArgumentList @(
-        $server, "--model", $model, "--device", "cuda",
-        "--host", "127.0.0.1", "--port", "$Port"
-    ) -WindowStyle Hidden -PassThru -RedirectStandardOutput $outLog -RedirectStandardError $errLog
-    Set-Content -LiteralPath $taggerPidFile -Value $tagger.Id
-    Write-Host "started tagger on 127.0.0.1:$Port"
+if (Test-Path -LiteralPath $pidFile) {
+    $saved = Get-Content -LiteralPath $pidFile -ErrorAction SilentlyContinue
+    if ($saved -and (Get-Process -Id ([int]$saved) -ErrorAction SilentlyContinue)) {
+        Write-Host "tagger already running (pid $saved)"
+        Invoke-RestMethod -Uri "http://${BindAddress}:$Port/health" -TimeoutSec 10 |
+            ConvertTo-Json -Compress
+        return
+    }
 }
 
-if (-not (Test-PidFile $tunnelPidFile)) {
-    $ssh = Join-Path $env:SystemRoot "System32\OpenSSH\ssh.exe"
-    $tunnel = Start-Process -FilePath $ssh -ArgumentList @(
-        "-N", "-R", "127.0.0.1:$Port:127.0.0.1:$Port",
-        "-i", $SshKey,
-        "-o", "BatchMode=yes",
-        "-o", "ExitOnForwardFailure=yes",
-        "-o", "ServerAliveInterval=30",
-        "-o", "ServerAliveCountMax=3",
-        "$CloudUser@$CloudHost"
-    ) -WindowStyle Hidden -PassThru -RedirectStandardError $tunnelLog
-    Set-Content -LiteralPath $tunnelPidFile -Value $tunnel.Id
-    Write-Host "started reverse tunnel to $CloudUser@$CloudHost"
-}
+$tagger = Start-Process -FilePath $python -ArgumentList @(
+    $server, "--model", $model, "--device", "cuda",
+    "--host", $BindAddress, "--port", "$Port"
+) -WindowStyle Hidden -PassThru -RedirectStandardOutput $outLog -RedirectStandardError $errLog
+Set-Content -LiteralPath $pidFile -Value $tagger.Id
+Write-Host "started tagger on ${BindAddress}:$Port (pid $($tagger.Id))"
 
-Start-Sleep -Seconds 10
-$health = Invoke-RestMethod -Uri "http://127.0.0.1:$Port/health" -TimeoutSec 10
-$health | ConvertTo-Json -Compress
+for ($attempt = 0; $attempt -lt 20; $attempt++) {
+    Start-Sleep -Seconds 2
+    try {
+        Invoke-RestMethod -Uri "http://${BindAddress}:$Port/health" -TimeoutSec 5 |
+            ConvertTo-Json -Compress
+        return
+    } catch {
+        if ($attempt -eq 19) { throw }
+    }
+}

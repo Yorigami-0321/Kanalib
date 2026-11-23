@@ -7,7 +7,7 @@
                                       │
 box ──EasyTier 私网──> kanalib-web 10.126.126.2:8788（ingest / desktop / 原图）
                   └──> kanalib-ingest 10.126.126.3:8792（审核 / 规则草稿 / 指标）
-kanalib-ingest ──HTTP──> tagger 10.126.126.2:8793（标签不足时补标，见 tagger/README.md）
+kanalib-ingest ──HTTP──> tagger 10.126.126.1:8793（标签不足时补标，走 EasyTier，见 tagger/README.md）
 桌面 ──EasyTier 私网──> 同上
 ```
 
@@ -22,7 +22,7 @@ kanalib-ingest ──HTTP──> tagger 10.126.126.2:8793（标签不足时补�
 | `systemd/kanalib-health.*` | 每 5 分钟健康检查 |
 | `backup/*.sh` | 在线备份脚本 |
 | `monitor/kanalib-health.sh` | HTTP/磁盘/队列检查 |
-| `tagger/` | 本机 GPU 打标服务、反向隧道与云端转发（过渡方案） |
+| `tagger/` | 本机 GPU 打标服务，直接绑 EasyTier 地址（过渡方案） |
 
 ## Install order
 

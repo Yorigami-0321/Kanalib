@@ -10,7 +10,7 @@
 
 2026-11-23 无登录 `source.public` 路线已在 box 与云端实机跑通：box 每日榜单 → 下载 → 规则判定 → HMAC 推送 → 云端 SQLite → `https://patchouli.us.ci/` 动态前端展示，形成完整闭环。首轮 10 个作品、14 页下载，规则 11 allow / 3 review / 0 block；后续每分钟同步 `new_works=0`，已入库作品不再重复抓详情，幂等成立。
 
-同日接入打标后端：本机 RTX 4060 跑 `sidecar/tagger/http_server.py`（CUDA/FP16），经 SSH 反向隧道到云端 `10.126.126.2:8793`，box 通过 EasyTier 调用。3 条 `tag budget short` 重跑后全部补标成功（`decided=3 allowed=3 tagged=3`），review 归零。规则语义确认为：黑名单标签优先 `block`；内容标签 `< min_tags=5` 必须转打标，补标后重新跑黑名单。随后把「漫画素材工房」（作者 `16776564` + 账号标签）与「毒うさぎ」（作者 `72177771` + 系列标签）加入黑名单，4 页转 `block`；`push::delete_candidates` 现在也会为已推送后被 block 的条目生成删除批次，云端从 14 条降到 10 条。
+同日接入打标后端：本机 RTX 4060 跑 `sidecar/tagger/http_server.py`（CUDA/FP16）。最初用 SSH 反向隧道 + 云端转发，3 条 `tag budget short` 重跑后全部补标成功（`decided=3 allowed=3 tagged=3`），review 归零；随后已改为本机直接加入 EasyTier、tagger 只绑 `10.126.126.1:8793`，详见 [tagger-easytier-handoff.md](tagger-easytier-handoff.md)。规则语义确认为：黑名单标签优先 `block`；内容标签 `< min_tags=5` 必须转打标，补标后重新跑黑名单。随后把「漫画素材工房」（作者 `16776564` + 账号标签）与「毒うさぎ」（作者 `72177771` + 系列标签）加入黑名单，4 页转 `block`；`push::delete_candidates` 现在也会为已推送后被 block 的条目生成删除批次，云端从 14 条降到 10 条。
 
 本轮补完了上一份交接里的 1–8 项。2026-11-23 另完成三件事：I2 改动入库、评审 P1（`rules_file` 缺省策略）改为 fail-closed、告警补上打标后端连续失败（见第 6 节）。对应的未提交改动评审稿已闭环并归档到 [`../../archive/2026-11/ingest-i2-uncommitted-review-2026-11-22.md`](../../archive/2026-11/ingest-i2-uncommitted-review-2026-11-22.md)。
 
@@ -154,7 +154,7 @@ $cargo = Join-Path $env:USERPROFILE ".cargo\bin\cargo.exe"
    - 复核管理口 `8792` 只绑 EasyTier 虚拟 IP、公网不可达（ACL 已配置，尚未逐条验公网路径）。
    - 断网重试、box 重启恢复、桌面拉原图走直连仍需手动演练。
    - 云端只部署前端精简包（`index.html`、`favicon.svg`、`assets/*`）；不要上传 418 MB 的静态 `data/`。
-2. **打标后端的过渡性**：当前依赖本机 Windows 在线、`dist/Kanalib/runtime/python`（CUDA）与 SSH 反向隧道；本机休眠/重启/断网后需重跑 `deploy/tagger/start-local-tagger.ps1`。长期应迁到常驻 GPU 主机，或给 box/云端换足内存与算力。部署链路见 [`deploy/tagger/README.md`](../../../deploy/tagger/README.md)。
+2. **打标后端**：已改为 EasyTier 直连（本机 `10.126.126.1:8793`），SSH 隧道与云端转发已停用。box 侧 endpoint 尚未切换（box 当前离线），恢复后按 [tagger-easytier-handoff.md](tagger-easytier-handoff.md) 第 6 节执行。当前依赖本机 Windows 与 EasyTier 服务在线；长期应迁到常驻 GPU 主机。
 3. **真实 Pixiv 令牌冒烟**：无登录路线已跑通；令牌路线仍只在 box 手动执行，不写入仓库/CI。
 4. **告警接线**：`deploy/monitor/kanalib-health.sh` 已覆盖磁盘、推送积压、推送失败/被拒、review 积压、HTTP 健康、TLS 与**打标后端连续失败**（`model_error_streak` gauge，2026-11-23 补，提交 `086cfcb`）。剩下的是按部署环境调阈值与 webhook，属于 I5 现场工作。
 5. **草稿类型**：当前只支持 tags/users 的增删；`watch`、rating、tag_budget 等仍走手工编辑文件。
