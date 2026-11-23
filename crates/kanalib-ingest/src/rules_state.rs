@@ -49,15 +49,30 @@ pub struct RulesState {
 }
 
 impl RulesState {
-    /// 启动时加载规则并立即写入快照；解析失败直接拒绝启动。
+    /// 启动时加载规则并立即写入快照。
+    /// 未配置 `rules_file` 与解析失败一样拒绝启动：不存在默认 allow 的兜底路径。
     pub fn load(db: &Db, path: Option<&Path>) -> Result<Self> {
-        let loaded = match path {
-            Some(path) => rules::load_file(path)?,
-            None => {
-                warn!("rules_file is not configured; using safe default rules");
-                rules::load_str(DEFAULT_RULES)?
-            }
+        let Some(path) = path else {
+            bail!(
+                "service.rules_file is not configured; refusing to start without a rules file \
+                 (fail-closed, see docs/backlog/ingest-service.md §7.6)"
+            );
         };
+        let loaded = rules::load_file(path)?;
+        Self::startup(db, loaded, Some(path.to_path_buf()))
+    }
+
+    /// 只给 mock 来源的本地冒烟使用：没有真实内容需要过滤，才允许内置默认规则。
+    /// 真实来源必须走 `load`，缺规则文件一律拒绝启动。
+    pub fn load_without_file(db: &Db) -> Result<Self> {
+        warn!(
+            "rules_file is not configured; using built-in default rules because the source is mock"
+        );
+        let loaded = rules::load_str(DEFAULT_RULES)?;
+        Self::startup(db, loaded, None)
+    }
+
+    fn startup(db: &Db, loaded: LoadedRules, path: Option<PathBuf>) -> Result<Self> {
         if let Some(existing) = db.rule_snapshot(&loaded.version)?
             && existing.config_hash != loaded.config_hash
         {
@@ -75,9 +90,9 @@ impl RulesState {
         }
         record_snapshot(db, &loaded, "startup")?;
         warn_if_empty_tag_blacklist(&loaded);
-        let observed = path.and_then(file_stamp);
+        let observed = path.as_deref().and_then(file_stamp);
         Ok(Self {
-            path: path.map(Path::to_path_buf),
+            path,
             current: RwLock::new(Arc::new(loaded)),
             observed: Mutex::new(observed),
             last_error: Mutex::new(None),
@@ -393,9 +408,21 @@ mod tests {
     }
 
     #[test]
-    fn missing_rules_file_uses_default_snapshot() {
+    fn missing_rules_file_refuses_to_start() {
         let db = Db::open_in_memory().unwrap();
-        let state = RulesState::load(&db, None).unwrap();
+        let error = RulesState::load(&db, None).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("service.rules_file is not configured"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn mock_only_default_still_records_snapshot() {
+        let db = Db::open_in_memory().unwrap();
+        let state = RulesState::load_without_file(&db).unwrap();
         assert_eq!(state.current().version, "default");
         assert_eq!(
             state.reload_if_changed(&db, "watch").unwrap(),

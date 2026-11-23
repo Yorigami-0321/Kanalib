@@ -22,6 +22,8 @@
 
 相关位置：`crates/kanalib-ingest/src/rules_state.rs:57`、`crates/kanalib-ingest/src/rules.rs:38`。
 
+**2026-11-23 状态更新**：已改为缺文件即拒绝启动。`RulesState::load()` 在 `path` 为 `None` 时直接 `bail!`，不再加载 `DEFAULT_RULES`；内置默认规则拆到 `RulesState::load_without_file()`，仅 `main.rs` 在来源为 `mock` 且未配置规则文件时调用。日志措辞同步改为写明「因为来源是 mock 才用默认规则」。§7.6 补了缺文件与空表的区别。
+
 ### 2.2 [P2] `dedup.on_conflict` 被静默忽略
 
 规则校验允许 `dedup.on_conflict = "block|review"`，`deploy/rules.toml.example` 也把它作为可配开关；但 `evaluate()` 硬编码 `RuleOutcome::block("duplicate hash", matched)`。配成 `review` 不会生效，管理员会以为冲突项进了人工队列。
@@ -53,8 +55,12 @@
 
 ## 4. 修复清单
 
-1. 决定 `rules_file` 缺省策略：拒绝启动，或提供真正 fail-closed 的默认规则；同步改日志措辞与文档。
-2. 让 `dedup.on_conflict`、`size.on_fail` 真正分流，或从配置/文档中删除这两个开关。
-3. 给 `pipeline::run_decisions()` 加单条异常隔离；补一条“前一条失败不影响后一条”的测试。
-4. 确认并清理无关未跟踪文件；不要把它们混入规则层提交。
-5. 在当前工作树稳定后重跑：`cargo test -p kanalib-ingest`、`cargo check -p kanalib-ingest`、`cargo clippy -p kanalib-ingest --all-targets -- -D warnings`、`cargo fmt -p kanalib-ingest -- --check`。
+按当前状态重排，已完成项标注日期与落点。
+
+| # | 项 | 状态 | 落点 |
+|---|---|---|---|
+| 1 | `rules_file` 缺省策略 | **已完成**（2026-11-23） | `RulesState::load()` 未配置即 `bail!`；内置默认规则改走 `RulesState::load_without_file()`，只在 `main.rs` 判定来源为 `mock` 且未配置规则文件时调用。真实来源（`pixiv`）没有这条路。§7.6 补了「缺规则文件 ≠ 规则为空」：空表仍只告警（I-Q10 不变），缺文件拒绝启动。测试 `missing_rules_file_refuses_to_start`、`mock_only_default_still_records_snapshot` |
+| 2 | `dedup.on_conflict` / `size.on_fail` 真正分流 | **已完成**（2026-11-22） | 见 2.2 / 2.3 状态更新，`rules.rs::policy_outcome()` |
+| 3 | `pipeline::run_decisions()` 单条异常隔离 | **已完成**（2026-11-22） | 见 2.4 状态更新；测试 `one_item_error_is_reviewed_without_blocking_the_rest` |
+| 4 | 清理无关未跟踪文件 | **已完成**（2026-11-23） | I2 提交 `253fd09` 只纳入规则层相关文件；`key-acl.txt`、`probe-rail-*.json`、`web/box-preview.html`、`package*.json`、`.kanalib-hook-log-check.mjs`、`SELECT COUNT( ) FROM t;` 均未入库 |
+| 5 | 工作树稳定后重跑测试与静态检查 | **已完成**（2026-11-23） | 77 passed（43 单元 + 8 admin + 6 decision + 8 ingest + 12 push）；`clippy -D warnings` 与 `fmt --check` 通过 |

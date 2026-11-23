@@ -92,7 +92,13 @@ async fn run(args: Args, config: IngestConfig) -> Result<()> {
     }
 
     let mut db = Db::open(&db_path)?;
-    let rules_state = Arc::new(RulesState::load(&db, config.service.rules_file.as_deref())?);
+    // mock 来源没有真实内容要过滤，才允许用内置默认规则；真实来源缺规则文件一律拒绝启动。
+    let rules_state = if source_id == "mock" && config.service.rules_file.is_none() {
+        RulesState::load_without_file(&db)?
+    } else {
+        RulesState::load(&db, config.service.rules_file.as_deref())?
+    };
+    let rules_state = Arc::new(rules_state);
     let metrics = Arc::new(Metrics::default());
     let tagging_backend = match (&config.tagging.backend, &config.tagging.endpoint) {
         (Some(backend), Some(endpoint)) if backend == "http" => {

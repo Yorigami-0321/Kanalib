@@ -1,6 +1,6 @@
-# F-089 / I2 交接文档（2026-11-22，更新）
+# F-089 / I2 交接文档（2026-11-23，更新）
 
-> 上级文档：[ingest-service.md](../ingest-service.md) · 登记：[registry.md](../registry.md#f-089) · 分支：`main` @ `ebe2fa7`（工作树有未提交改动）
+> 上级文档：[ingest-service.md](../ingest-service.md) · 登记：[registry.md](../registry.md#f-089) · 分支：`main` @ `253fd09`（I2 已提交；未推送）
 >
 > 本文档交接 **I2 当前实现进度**，不是最终设计文档。设计仍以 [../ingest-service.md](../ingest-service.md) 为准；有冲突时先查设计，再改文档。
 
@@ -8,12 +8,12 @@
 
 `crates/kanalib-ingest` 的 I2 主体已经闭环：下载完成后按 `rules.toml` 做黑名单/R-18G/标签预算/观察词/尺寸/去重判定；标签不足时调用 HTTP 打标后端补标一次再复判；结果写入 `items.decision` 与 `decisions` 审计表。规则加载写入只读 `rule_snapshots`，支持 mtime 变更检测与 Unix `SIGHUP` 重载；管理页提供审核、规则草稿、逐行 diff 预览、重载与指标。
 
-本轮补完了上一份交接里的 1–8 项（第 9 项 I5 仍需 box 实机）：
+本轮补完了上一份交接里的 1–8 项（第 9 项 I5 仍需 box 实机）；2026-11-23 又定掉了评审清单里唯一悬着的 P1（`rules_file` 缺省策略，见第 6 节）：
 
 | 范围 | 进度 | 结论 |
 |---|---:|---|
 | I2：打标后端 + 规则加载/校验 + 决策 + 补标 + review + 快照/热重载 | 100% | 主循环、规则状态、管理页、指标、规则编辑均已接通；I2 测试全绿 |
-| F-089 整体 | ~65% | I0/I1/I2/I3 主体完成；I4 管理页代码完成；**I5 box 部署 + 网页联调未做** |
+| F-089 整体 | ~70% | I0/I1/I2/I3 主体完成；I4 管理页与规则层代码完成（告警仍缺模型连续失败一项）；**I5 box 部署 + 网页联调未做** |
 
 ## 2. 本轮完成
 
@@ -150,7 +150,7 @@ $cargo = Join-Path $env:USERPROFILE ".cargo\bin\cargo.exe"
    - 审核放行/拒绝各一条，网页批次结果符合预期。
    - 断网重试、box 重启恢复、桌面拉原图走直连。
 2. **真实 Pixiv 令牌冒烟**：只在 box 手动执行，不写入仓库/CI。
-3. **告警接线**：指标已齐全，告警规则（模型连续失败、推送连续失败、review 积压、磁盘不足）仍需按部署环境落地。
+3. **告警接线**：`deploy/monitor/kanalib-health.sh` 已覆盖磁盘、推送积压、推送失败/被拒、review 积压、HTTP 健康与 TLS；仍缺**模型连续失败**——`model_errors` 计数器已在 `src/metrics.rs` 暴露，脚本没读它。
 4. **草稿类型**：当前只支持 tags/users 的增删；`watch`、rating、tag_budget 等仍走手工编辑文件。
 
 ## 7. 重要实现细节与坑
@@ -170,12 +170,10 @@ $cargo = Join-Path $env:USERPROFILE ".cargo\bin\cargo.exe"
 ## 8. 当前工作区
 
 - 分支：`main`
-- 基线 commit：`ebe2fa7`
-- 状态：**有未提交改动**
-- 本任务相关改动：
-  - 新增：`src/rules.rs`、`src/tagging.rs`、`src/review.rs`、`src/pipeline.rs`、`src/rules_state.rs`、`src/rules_edit.rs`、`src/admin.rs`、`src/metrics.rs`、`tests/decision_flow.rs`、`tests/admin_flow.rs`、`deploy/rules.toml.example`
-  - 修改：`src/db.rs`、`src/main.rs`、`src/ingest.rs`、`src/lib.rs`、`Cargo.toml`、`Cargo.lock`、`tests/push_flow.rs`、`deploy/ingest.toml.example`、`docs/backlog/*`
-- 约束：继续遵循“不提交、不推送，除非用户明确要求”。
+- 基线 commit：`253fd09`（I2 规则层，含 `deploy/rules.toml.example` 与本次 `rules_file` 缺省策略改动）
+- 状态：**I2 相关改动已提交，未推送**；`781d447` 为词表移出文档那次提交
+- 工作区仍有与本任务无关的未跟踪文件（`key-acl.txt`、`probe-rail-*.json`、`web/box-preview.html`、`package*.json`、`.kanalib-hook-log-check.mjs`、`SELECT COUNT( ) FROM t;`）；I2 提交按路径显式暂存，未把它们纳入。`key-acl.txt` 含部署 ACL，入库前要单独定夺
+- 约束：继续遵循“不推送，除非用户明确要求”。
 
 ## 9. 快速接手命令
 
