@@ -2289,10 +2289,6 @@ impl AppState {
         Db::open(&self.db_path)?.pending_tag_candidates(&folders, limit)
     }
 
-    pub fn asset_tag_candidates(&self, path: &Path) -> Result<Vec<TagCandidateReview>> {
-        Db::open(&self.db_path)?.asset_candidates(path)
-    }
-
     pub fn review_tag_candidate(
         &self,
         path: &Path,
@@ -3947,41 +3943,6 @@ impl AppState {
                 Err(error)
             }
         }
-    }
-
-    /// 后台同步入口：只启动线程，立即返回；不与本地扫描互斥。
-    pub fn start_source_sync(self: &Arc<Self>, id: i64) -> Result<()> {
-        let info = self.source_info_by_id(id)?;
-        {
-            let mut shared = self.shared.lock().unwrap();
-            set_status!(
-                shared,
-                "notice.remote.syncing",
-                "正在同步 {name}...",
-                name = info.name
-            );
-            shared.error = None;
-            shared.revision = shared.revision.wrapping_add(1);
-        }
-        let state = self.clone();
-        let spawned = std::thread::Builder::new()
-            .name("kanalib-source-sync".into())
-            .spawn(move || {
-                if let Err(error) = state.sync_source_blocking(id) {
-                    log::warn!("source sync {id}: {error}");
-                }
-            });
-        if spawned.is_err() {
-            let mut shared = self.shared.lock().unwrap();
-            shared.error = Some("无法创建同步线程".into());
-            set_status!(
-                shared,
-                "notice.remote.sync_failed_plain",
-                "远端来源同步失败"
-            );
-            bail!("无法创建同步线程");
-        }
-        Ok(())
     }
 
     fn source_info_by_id(&self, id: i64) -> Result<SourceInfo> {

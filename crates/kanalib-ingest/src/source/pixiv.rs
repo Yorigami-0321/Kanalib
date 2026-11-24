@@ -115,10 +115,6 @@ impl PixivSource {
         }
     }
 
-    pub fn with_gate(transport: Arc<dyn PixivTransport>, gate: ApiGate) -> Self {
-        Self { transport, gate }
-    }
-
     pub fn gate_state(&self) -> &ApiGate {
         &self.gate
     }
@@ -628,16 +624,6 @@ impl ReqwestPixivTransport {
         Self {
             client,
             token: Some(Arc::new(token.into())),
-        }
-    }
-
-    pub fn with_token_provider(
-        client: reqwest::Client,
-        provider: Arc<dyn PixivTokenProvider>,
-    ) -> Self {
-        Self {
-            client,
-            token: Some(provider),
         }
     }
 

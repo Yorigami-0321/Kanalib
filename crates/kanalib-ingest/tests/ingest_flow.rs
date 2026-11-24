@@ -1,4 +1,4 @@
-use std::{path::PathBuf, sync::Arc, time::Duration};
+use std::{sync::Arc, time::Duration};
 
 use anyhow::Result;
 use image::{ImageFormat, RgbaImage};
@@ -333,6 +333,47 @@ async fn rate_limit_sets_retry_after_and_pauses_queue() {
 }
 
 #[tokio::test]
+async fn due_paused_downloads_return_to_queue() {
+    let mut db = Db::open_in_memory().unwrap();
+    db.connection()
+        .execute(
+            "INSERT INTO works (id, source, external_id, title) VALUES ('w', 'mock', 'w', 'w')",
+            [],
+        )
+        .unwrap();
+    {
+        let tx = db.transaction().unwrap();
+        for (item_id, page) in [("due", 0), ("later", 1), ("manual", 2)] {
+            Db::persist_page(&tx, item_id, "w", "mock", page, None, None).unwrap();
+        }
+        tx.commit().unwrap();
+    }
+
+    db.pause_downloads(Some(now() - 60), "quota exhausted")
+        .unwrap();
+    db.connection()
+        .execute(
+            "UPDATE download_queue SET next_retry_at=?1 WHERE item_id='later'",
+            params![now() + 3600],
+        )
+        .unwrap();
+    db.connection()
+        .execute(
+            "UPDATE download_queue SET next_retry_at=NULL WHERE item_id='manual'",
+            [],
+        )
+        .unwrap();
+    assert!(db.pending_item_ids().unwrap().is_empty());
+
+    assert_eq!(db.requeue_due_paused_downloads().unwrap(), 1);
+    assert_eq!(db.pending_item_ids().unwrap(), vec!["due".to_string()]);
+    assert!(db.claim_download("due").unwrap());
+    for (item_id, expected) in [("later", "paused"), ("manual", "paused")] {
+        assert_eq!(db.queue_row(item_id).unwrap().unwrap().state, expected);
+    }
+}
+
+#[tokio::test]
 async fn auth_failure_pauses_whole_batch_and_gate_blocks_next_call() {
     let statuses = Arc::new(Mutex::new(vec![401]));
     let transport = Arc::new(ScriptedPixiv {
@@ -391,6 +432,3 @@ async fn api_gate_uses_exponential_backoff_on_repeated_429() {
     assert!(delays[2] >= delays[1]);
     assert!(classify_status(404, None).unwrap_err().kind == SourceErrorKind::NotFound);
 }
-
-#[allow(dead_code)]
-fn unused_path(_: &PathBuf) {}

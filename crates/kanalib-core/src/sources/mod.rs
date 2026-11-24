@@ -22,7 +22,6 @@ use std::collections::HashMap;
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow};
 use serde::{Deserialize, Serialize};
@@ -105,11 +104,6 @@ impl SourceInfo {
             last_sync_at: record.last_sync_at,
             sync_cursor: record.sync_cursor.clone(),
         })
-    }
-
-    /// `assets.folder` / `load_library` 使用的统一键。
-    pub fn folder(&self) -> &str {
-        &self.locator
     }
 
     pub fn is_remote(&self) -> bool {
@@ -404,13 +398,6 @@ pub fn webdav_relative_path(path: &Path) -> Option<String> {
     (!relative.is_empty()).then(|| relative.to_string())
 }
 
-pub fn immich_asset_id(path: &Path) -> Option<String> {
-    path.to_string_lossy()
-        .strip_prefix(IMMICH_PATH_PREFIX)
-        .filter(|value| !value.is_empty())
-        .map(str::to_owned)
-}
-
 /// 凭据后端抽象：生产用 Windows Credential Manager，测试注入内存后端。
 pub trait CredentialBackend: Send + Sync {
     fn get(&self, service: &str, account: &str) -> Result<Option<String>>;
@@ -519,20 +506,8 @@ impl Credentials {
         )
     }
 
-    pub fn service(&self) -> &str {
-        &self.service
-    }
-
     pub fn set_api_key(&self, account: &str, api_key: &str) -> Result<()> {
         self.set_secret(account, api_key)
-    }
-
-    pub fn clear_api_key(&self, account: &str) -> Result<()> {
-        self.clear_secret(account)
-    }
-
-    pub fn has_api_key(&self, account: &str) -> Result<bool> {
-        self.has_secret(account)
     }
 
     pub fn api_key(&self, account: &str) -> Result<Option<String>> {
@@ -558,20 +533,6 @@ impl Credentials {
 
     pub fn secret(&self, account: &str) -> Result<Option<String>> {
         self.backend.get(&self.service, account)
-    }
-
-    /// 用已保存的凭据探测 Immich 版本；不会把密钥写入返回值。
-    pub fn test_immich(
-        &self,
-        info: &SourceInfo,
-        timeout: Duration,
-    ) -> Result<ImmichVersion, SourceError> {
-        let api_key = self
-            .api_key(&info.credential_account())
-            .map_err(SourceError::from_anyhow)?
-            .filter(|value| !value.is_empty())
-            .ok_or_else(|| SourceError::credential("尚未保存 Immich API key"))?;
-        probe_version(&info.locator, &api_key, timeout)
     }
 }
 

@@ -826,62 +826,6 @@ async fn w2_10k_db_only_concurrency_profile() {
 }
 
 #[test]
-#[ignore = "manual CPU parallelism profile"]
-fn cpu_parallelism_profile() {
-    let started = Instant::now();
-    let mut value = 0u64;
-    for index in 0..100_000_000u64 {
-        value = value.wrapping_add(std::hint::black_box(index).wrapping_mul(3));
-    }
-    std::hint::black_box(value);
-    eprintln!("1 thread x 100m loops wall: {:?}", started.elapsed());
-
-    let started = Instant::now();
-    let handles = (0..32)
-        .map(|_| {
-            std::thread::spawn(|| {
-                let mut value = 0u64;
-                for index in 0..100_000_000u64 {
-                    value = value.wrapping_add(std::hint::black_box(index).wrapping_mul(3));
-                }
-                value
-            })
-        })
-        .collect::<Vec<_>>();
-    for handle in handles {
-        std::hint::black_box(handle.join().expect("thread"));
-    }
-    eprintln!("32 threads x 100m loops wall: {:?}", started.elapsed());
-
-    let runtime = tokio::runtime::Builder::new_multi_thread()
-        .worker_threads(4)
-        .enable_all()
-        .build()
-        .expect("runtime");
-    let started = Instant::now();
-    runtime.block_on(async {
-        let handles = (0..32)
-            .map(|_| {
-                tokio::task::spawn_blocking(|| {
-                    let mut value = 0u64;
-                    for index in 0..100_000_000u64 {
-                        value = value.wrapping_add(std::hint::black_box(index).wrapping_mul(3));
-                    }
-                    value
-                })
-            })
-            .collect::<Vec<_>>();
-        for handle in handles {
-            std::hint::black_box(handle.await.expect("task"));
-        }
-    });
-    eprintln!(
-        "32 spawn_blocking x 100m loops wall: {:?}",
-        started.elapsed()
-    );
-}
-
-#[test]
 #[ignore = "manual query plan profile"]
 fn w2_query_plan_profile() {
     let fixture = fixture();

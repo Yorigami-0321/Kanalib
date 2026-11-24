@@ -377,13 +377,6 @@ impl IgnoreRules {
         }
         changed
     }
-
-    /// 来源被移除时同步清掉它的 glob，避免 settings 里留下无主规则。
-    pub fn prune_root(&mut self, root: &Path) {
-        let key = path_key(root);
-        self.globs
-            .retain(|stored, _| path_key(Path::new(stored)) != key);
-    }
 }
 
 fn validate_exclude_glob(root: &Path, pattern: &str) -> Result<()> {
@@ -507,17 +500,6 @@ pub fn save_filters(db: &Db, filters: &HashMap<PathBuf, ScanFilterConfig>) -> Re
         SCAN_FILTERS_SETTING_KEY,
         &serde_json::to_string(&values).context("序列化 scan.filters 失败")?,
     )
-}
-
-/// 监听事件使用的路径判断；配置非法时返回错误。
-pub fn path_excluded_by(
-    root: &Path,
-    compiled: &CompiledScanFilter,
-    path: &Path,
-    is_dir: bool,
-    bytes: Option<u64>,
-) -> bool {
-    !path.starts_with(root) || compiled.excludes(path, is_dir, bytes)
 }
 
 #[cfg(test)]

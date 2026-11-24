@@ -335,6 +335,21 @@ impl Db {
         Ok(changed)
     }
 
+    /// 到期的 `paused` 行重新入队。
+    ///
+    /// 配额/限流暂停会写 `next_retry_at`；`pending_item_ids` 只认 queued/failed，
+    /// 没有这一步，暂停行会永久停在队列里。人工暂停（`next_retry_at IS NULL`）
+    /// 保持不动，等人工恢复。
+    pub fn requeue_due_paused_downloads(&self) -> Result<usize> {
+        let changed = self.connection.execute(
+            "UPDATE download_queue
+                SET state='queued'
+              WHERE state='paused' AND next_retry_at IS NOT NULL AND next_retry_at <= ?1",
+            params![now()],
+        )?;
+        Ok(changed)
+    }
+
     pub fn sync_source(&self, id: &str, kind: &str) -> Result<()> {
         self.connection.execute(
             "INSERT INTO sources(id, kind) VALUES (?1, ?2) ON CONFLICT(id) DO NOTHING",
@@ -579,14 +594,6 @@ impl Db {
                 SET state='paused', last_error=?1, next_retry_at=?2
               WHERE state IN ('queued','failed')",
             params![error, retry_at],
-        )?)
-    }
-
-    pub fn resume_paused_downloads(&self) -> Result<usize> {
-        Ok(self.connection.execute(
-            "UPDATE download_queue SET state='queued', next_retry_at=NULL, last_error=NULL
-              WHERE state='paused'",
-            [],
         )?)
     }
 

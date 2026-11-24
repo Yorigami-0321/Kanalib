@@ -191,12 +191,6 @@ unsafe impl GlobalAlloc for CountingAlloc {
     }
 }
 
-pub fn live_bucket_bytes(index: usize) -> u64 {
-    LIVE.get(index)
-        .map(|counter| counter.load(Relaxed))
-        .unwrap_or_default()
-}
-
 pub fn spawn_logger() {
     let Some(interval) = std::env::var("KANALIB_ALLOC_STATS")
         .ok()

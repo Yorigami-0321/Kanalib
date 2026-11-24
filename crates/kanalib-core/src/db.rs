@@ -163,16 +163,6 @@ pub struct SearchCursor {
     key: CursorKey,
 }
 
-impl SearchCursor {
-    pub fn sort(&self) -> SearchSort {
-        self.sort
-    }
-
-    pub fn ascending(&self) -> bool {
-        self.ascending
-    }
-}
-
 #[derive(Clone, Debug, Default)]
 pub struct SearchPage {
     pub paths: Vec<PathBuf>,

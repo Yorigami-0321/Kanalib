@@ -85,6 +85,7 @@ pub async fn run_queue(
 
     let mut attempts_by_item = std::collections::HashMap::new();
     loop {
+        db.requeue_due_paused_downloads()?;
         let pending = db.pending_item_ids()?;
         if pending.is_empty() {
             break;

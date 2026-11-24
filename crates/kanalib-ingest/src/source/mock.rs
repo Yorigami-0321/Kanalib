@@ -17,9 +17,7 @@ pub struct MockSource {
     pub bookmark_pages: Vec<Vec<MockPage>>,
     pub author_works: Vec<SourceWork>,
     pub works: Vec<SourceWork>,
-    pub deleted_work_ids: Vec<String>,
     pub authors: Vec<SourceAuthor>,
-    pub image_bytes: Vec<u8>,
 }
 
 impl MockSource {
@@ -53,13 +51,6 @@ impl MockSource {
                 translated_name: None,
             }],
             is_ugoira: false,
-        }
-    }
-
-    pub fn page(external_id: &str, page: u32) -> MockPage {
-        MockPage {
-            work: Self::work(external_id, 1),
-            image_url: format!("mock://image/{external_id}/{page}"),
         }
     }
 }

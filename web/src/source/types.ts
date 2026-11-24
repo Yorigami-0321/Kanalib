@@ -96,12 +96,6 @@ export interface WallIndex {
   paths?: Partial<TierPaths>;
 }
 
-export interface ShardFile {
-  schema?: number;
-  index?: number;
-  items: WallItem[];
-}
-
 /** 服务端声明的能力；静态源也可以给出同样形状的默认值。 */
 export interface SourceCapabilities {
   source: string;

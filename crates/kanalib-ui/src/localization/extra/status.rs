@@ -356,8 +356,6 @@ pub(crate) const ZH: &[(&str, &str)] = &[
         "{name} 同步完成 · 新增 {imported} · 更新 {updated} · 跳过 {skipped} · 缩略图 {thumbs}",
     ),
     ("notice.remote.sync_failed", "{name} 同步失败：{message}"),
-    ("notice.remote.syncing", "正在同步 {name}..."),
-    ("notice.remote.sync_failed_plain", "远端来源同步失败"),
     ("notice.trash.records_failed", "回收站已移动 · 记录未删除"),
     ("notice.retry.failed", "重试失败"),
 ];
@@ -777,11 +775,6 @@ pub(crate) const EN: &[(&str, &str)] = &[
         "{name} sync complete · added {imported} · updated {updated} · skipped {skipped} · thumbnails {thumbs}",
     ),
     ("notice.remote.sync_failed", "{name} sync failed: {message}"),
-    ("notice.remote.syncing", "Syncing {name}..."),
-    (
-        "notice.remote.sync_failed_plain",
-        "Remote source sync failed",
-    ),
     (
         "notice.trash.records_failed",
         "Moved to recycle bin · records not deleted",

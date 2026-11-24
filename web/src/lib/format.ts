@@ -96,8 +96,3 @@ export function displayGroup(group: string): string {
 export function formatCount(value: number): string {
   return value.toLocaleString('zh-CN');
 }
-
-/** 面积足够的图给“大图突出”档位用。 */
-export function isLargeImage(w: number, h: number): boolean {
-  return Math.min(w, h) >= 900;
-}

@@ -144,22 +144,6 @@ pub async fn ingest_feed(db: &mut Db, adapter: &dyn SourceAdapter) -> Result<Ing
     Ok(outcome)
 }
 
-pub async fn ingest_single_work(
-    db: &mut Db,
-    adapter: &dyn SourceAdapter,
-    external_id: &str,
-) -> Result<bool> {
-    db.sync_source(adapter.id(), "remote")?;
-    let work = match adapter.fetch_work(external_id).await {
-        Ok(work) => work,
-        Err(error) => {
-            handle_source_error(db, adapter, None, &error).await?;
-            return Err(error.into());
-        }
-    };
-    ingest_work(db, adapter, &work)
-}
-
 pub fn ingest_work(db: &mut Db, adapter: &dyn SourceAdapter, work: &SourceWork) -> Result<bool> {
     let source = adapter.id();
     let author = work

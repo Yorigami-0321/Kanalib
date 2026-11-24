@@ -332,13 +332,6 @@ const ITEM_FROM: &str = "FROM items i \
 const WORK_COLUMNS: &str =
     "w.id, w.source, w.external_id, w.title, w.author_id, w.page_count, w.posted_at, w.status";
 
-pub fn count_items(conn: &Connection) -> Result<u32> {
-    let count: i64 = conn.query_row("SELECT COUNT(*) FROM items WHERE deleted = 0", [], |row| {
-        row.get(0)
-    })?;
-    Ok(as_u32(count))
-}
-
 pub fn count_works(conn: &Connection) -> Result<u32> {
     let count: i64 = conn.query_row("SELECT COUNT(*) FROM works", [], |row| row.get(0))?;
     Ok(as_u32(count))
@@ -352,19 +345,6 @@ pub fn count_authors(conn: &Connection) -> Result<u32> {
 pub fn count_collections(conn: &Connection) -> Result<u32> {
     let count: i64 = conn.query_row("SELECT COUNT(*) FROM collections", [], |row| row.get(0))?;
     Ok(as_u32(count))
-}
-
-pub fn list_items(conn: &Connection, limit: u32, offset: u32) -> Result<Vec<WallItemDto>> {
-    let sql = format!(
-        "SELECT {ITEM_COLUMNS} {ITEM_FROM} \
-         WHERE i.deleted = 0 \
-         ORDER BY i.updated_at DESC, i.id DESC LIMIT ?1 OFFSET ?2"
-    );
-    let mut stmt = conn.prepare(&sql)?;
-    let rows = stmt.query_map(params![i64::from(limit), i64::from(offset)], map_item_row)?;
-    let mut items = rows.collect::<rusqlite::Result<Vec<_>>>()?;
-    attach_tags(conn, &mut items)?;
-    Ok(items)
 }
 
 pub fn get_item(conn: &Connection, id: &str) -> Result<Option<WallItemDto>> {
@@ -570,42 +550,6 @@ pub fn list_collection_works(
     collect_works(conn, &sql, params![id, i64::from(limit), i64::from(offset)])
 }
 
-pub fn list_tags(conn: &Connection, limit: u32) -> Result<Vec<FacetTag>> {
-    let mut stmt = conn.prepare(
-        "SELECT t.name, t.category, COUNT(*), MIN(it.item_id)
-           FROM item_tags it
-           JOIN tags t ON t.id = it.tag_id
-           JOIN items i ON i.id = it.item_id
-          WHERE i.deleted = 0
-          GROUP BY t.id
-          ORDER BY COUNT(*) DESC, t.name ASC LIMIT ?1",
-    )?;
-    let rows = stmt.query_map([i64::from(limit)], |row| {
-        Ok(FacetTag {
-            name: row.get(0)?,
-            category: row.get(1)?,
-            count: as_u32(row.get(2)?),
-            cover: row.get(3)?,
-        })
-    })?;
-    Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
-}
-
-pub fn group_facets(conn: &Connection, limit: u32) -> Result<Vec<String>> {
-    let mut stmt = conn.prepare(
-        "SELECT group_name FROM items
-          WHERE deleted = 0 AND group_name <> ''
-          GROUP BY group_name
-          ORDER BY COUNT(*) DESC, group_name ASC LIMIT ?1",
-    )?;
-    let rows = stmt.query_map([i64::from(limit)], |row| row.get(0))?;
-    Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
-}
-
-pub fn index_facets(conn: &Connection) -> Result<IndexFacets> {
-    index_facets_filtered(conn, &ItemFilter::default())
-}
-
 pub fn index_facets_filtered(conn: &Connection, filter: &ItemFilter) -> Result<IndexFacets> {
     let mut parts = filter_parts(filter);
     parts.inline_candidates();
@@ -719,16 +663,6 @@ pub fn search_items(
     let mut items = rows.into_iter().map(|(item, _)| item).collect::<Vec<_>>();
     attach_tags(conn, &mut items)?;
     Ok(ItemPage { items, next })
-}
-
-pub fn count_items_filtered(conn: &Connection, filter: &ItemFilter) -> Result<u32> {
-    let mut parts = filter_parts(filter);
-    parts.inline_candidates();
-    let sql = format!("SELECT COUNT(*) FROM items i WHERE {}", parts.where_sql());
-    let mut stmt = conn.prepare(&sql)?;
-    let bindings = parts.bindings();
-    let count: i64 = stmt.query_row(bindings.as_slice(), |row| row.get(0))?;
-    Ok(as_u32(count))
 }
 
 pub fn index_counts(conn: &Connection, filter: &ItemFilter) -> Result<IndexCounts> {

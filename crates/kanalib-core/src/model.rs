@@ -369,10 +369,6 @@ impl CountAccumulator {
         self.total
     }
 
-    pub fn tagged_count(&self) -> usize {
-        self.tagged
-    }
-
     pub fn view(&self) -> Counts {
         Counts {
             total: self.total,
@@ -1543,11 +1539,6 @@ impl Shared {
         }
     }
 
-    /// 单个来源的运行时状态；未初始化时返回 None。
-    pub fn source_status(&self, root: &Path) -> Option<&SourceScanStatus> {
-        self.source_statuses.get(root)
-    }
-
     /// 本地 roots 的字符串形式；扫描/监听/清理与本地打标队列只使用这些。
     pub fn local_folders(&self) -> Vec<String> {
         self.roots
@@ -1567,10 +1558,6 @@ impl Shared {
         folders
     }
 
-    pub fn remote_sources(&self) -> impl Iterator<Item = &SourceInfo> {
-        self.sources.iter().filter(|source| source.is_remote())
-    }
-
     pub fn source_info(&self, id: i64) -> Option<&SourceInfo> {
         self.sources.iter().find(|source| source.id == Some(id))
     }
@@ -1585,10 +1572,6 @@ impl Shared {
                 online: root.is_dir(),
                 ..SourceScanStatus::default()
             })
-    }
-
-    pub fn set_source_status(&mut self, status: SourceScanStatus) {
-        self.source_statuses.insert(status.root.clone(), status);
     }
 
     /// 刷新所有来源的在线状态与资产数，并按根目录排序返回快照。

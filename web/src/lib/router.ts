@@ -24,8 +24,6 @@ export interface UiParams {
   matte: boolean;
 }
 
-export const DEFAULT_UI: UiParams = { q: '', sort: 'random', mono: false, matte: false };
-
 const SORTS: readonly SortParam[] = ['random', 'time', 'name', 'stars'];
 
 function safeDecode(value: string): string {

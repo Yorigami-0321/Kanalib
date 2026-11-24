@@ -255,11 +255,6 @@ pub fn validate_protected_entry(entry: &Path) -> Result<()> {
     Ok(())
 }
 
-/// 校验 glob 语法；供设置页在保存前提示非法规则。
-pub fn validate_protected_glob(pattern: &str) -> Result<()> {
-    compile_protected_glob(pattern).map(|_| ())
-}
-
 fn compile_protected_glob(pattern: &str) -> Result<GlobMatcher> {
     let pattern = pattern.trim();
     if pattern.is_empty() {
@@ -826,11 +821,6 @@ impl DedupState {
     /// 统一保护判定：用户保护项（目录/glob）或只读来源。
     pub fn is_protected(&self, path: &Path) -> bool {
         self.protected.is_protected(path)
-    }
-
-    pub fn clear_groups(&mut self) {
-        self.groups = Arc::new(Vec::new());
-        self.clear_similar();
     }
 
     pub fn clear_similar(&mut self) {
