@@ -105,6 +105,8 @@ async fn decide_item(
             _ => AiType::Unknown,
         },
         tags: db.item_tag_names(&pending.id)?,
+        // 已补过标的条目重跑规则时不再调用模型：同一张图不会因为 review 重跑而反复烧 GPU。
+        tagged: db.has_model_tags(&pending.id)?,
         tag_count: pending.tag_count,
         width: pending.width,
         height: pending.height,
@@ -140,6 +142,7 @@ async fn decide_item(
                 metrics.record_model_success();
                 db.record_model_tags(&pending.id, &tags.tags)?;
                 subject.tags = db.item_tag_names(&pending.id)?;
+                subject.tagged = true;
                 subject.tag_count = subject.tags.len();
                 tag_source = if pending.tag_count == 0 {
                     "model"

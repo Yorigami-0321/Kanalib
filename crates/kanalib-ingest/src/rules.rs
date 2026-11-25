@@ -46,7 +46,7 @@ pub struct RulesSection {
 impl Default for RulesSection {
     fn default() -> Self {
         Self {
-            version: "2026-11-22.1".to_string(),
+            version: "2026-11-25.1".to_string(),
             config_hash_check: true,
             blacklist: Blacklist::default(),
             rating: RatingRules::default(),
@@ -64,6 +64,35 @@ pub struct Blacklist {
     pub users: Vec<String>,
     pub tags: Vec<String>,
     pub watch: Vec<String>,
+    pub combos: Vec<ComboRule>,
+}
+
+/// 「只有 X、没有 Y」这类单个词表达不了的条件。
+///
+/// `any` 命中任一即成立，`none` 命中任一即否决；两个表都按标签归一化后精确匹配。
+/// 例：`any = ["1boy", "2boys"]` + `none = ["1girl", "2girls"]` 表达「只有男性」。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default, deny_unknown_fields)]
+pub struct ComboRule {
+    pub name: String,
+    pub any: Vec<String>,
+    pub none: Vec<String>,
+    /// 两组信号都没出现时，先补一次打标再判；补完仍无信号则照常往下走。
+    pub needs_tags: bool,
+    /// block | review
+    pub action: String,
+}
+
+impl Default for ComboRule {
+    fn default() -> Self {
+        Self {
+            name: String::new(),
+            any: Vec::new(),
+            none: Vec::new(),
+            needs_tags: true,
+            action: "block".to_string(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -222,6 +251,36 @@ fn normalize_and_validate(mut config: RuleConfig) -> Result<RuleConfig> {
     config.rules.blacklist.users = normalize_unique(config.rules.blacklist.users, "users")?;
     config.rules.blacklist.tags = normalize_unique(config.rules.blacklist.tags, "tags")?;
     config.rules.blacklist.watch = normalize_unique(config.rules.blacklist.watch, "watch")?;
+    for combo in &mut config.rules.blacklist.combos {
+        combo.name = combo.name.trim().to_string();
+        if combo.name.is_empty() {
+            bail!("rules.blacklist.combos contains an empty name");
+        }
+        if combo.any.is_empty() {
+            bail!(
+                "rules.blacklist.combos {:?} has an empty any list",
+                combo.name
+            );
+        }
+        if combo.action != "block" && combo.action != "review" {
+            bail!(
+                "rules.blacklist.combos {:?} action must be block or review",
+                combo.name
+            );
+        }
+        let label = format!("combos.{}", combo.name);
+        combo.any = normalize_unique(std::mem::take(&mut combo.any), &label)?;
+        combo.none = normalize_unique(std::mem::take(&mut combo.none), &label)?;
+        let any: HashSet<_> = combo.any.iter().map(|tag| normalize_tag(tag)).collect();
+        for tag in &combo.none {
+            if any.contains(&normalize_tag(tag)) {
+                bail!(
+                    "rules.blacklist.combos {:?} has {tag:?} in both any and none",
+                    combo.name
+                );
+            }
+        }
+    }
     config.rules.rating.block = normalize_unique(config.rules.rating.block, "rating.block")?;
     config.rules.rating.allow = normalize_unique(config.rules.rating.allow, "rating.allow")?;
     config.rules.tag_budget.ignore =
@@ -308,6 +367,8 @@ pub struct RuleSubject {
     pub restriction_attributes: Vec<String>,
     pub ai: AiType,
     pub tags: Vec<(String, Option<String>)>,
+    /// 本轮判定前是否已经跑过模型补标；组合条件只在补标前要求补一次，避免反复触发。
+    pub tagged: bool,
     pub tag_count: usize,
     pub width: u32,
     pub height: u32,
@@ -429,6 +490,45 @@ pub fn evaluate(input: DecisionInput<'_>) -> Result<RuleOutcome> {
             .map(|rule| format!("watch:{rule}"))
             .collect()
     };
+    // 组合条件先算：它比单标签更具体，命中后不必再看后面的兜底规则。
+    let combo_hits = |tags: &HashSet<String>| -> Vec<(&ComboRule, String)> {
+        config
+            .rules
+            .blacklist
+            .combos
+            .iter()
+            .filter_map(|combo| {
+                // 只要 `none` 出现，这条组合就整体不成立；哪怕 `any` 也命中。
+                if combo
+                    .none
+                    .iter()
+                    .map(|rule| normalize_tag(rule))
+                    .any(|rule| tags.contains(&rule))
+                {
+                    return None;
+                }
+                let hit = combo
+                    .any
+                    .iter()
+                    .map(|rule| normalize_tag(rule))
+                    .find(|rule| tags.contains(rule))?;
+                Some((combo, format!("combo:{}:{hit}", combo.name)))
+            })
+            .collect()
+    };
+    // 两边的词都没出现时，组合条件无从判断：先补一次标签，补完仍无信号才放弃。
+    let combo_needs_tags = |tags: &HashSet<String>| -> bool {
+        !subject.tagged
+            && config.rules.blacklist.combos.iter().any(|combo| {
+                combo.needs_tags
+                    && !combo
+                        .any
+                        .iter()
+                        .chain(combo.none.iter())
+                        .map(|rule| normalize_tag(rule))
+                        .any(|rule| tags.contains(&rule))
+            })
+    };
 
     let mut tags = tag_names();
     if let Some(reason) = hard_r18g_reason(subject, &tags) {
@@ -448,6 +548,18 @@ pub fn evaluate(input: DecisionInput<'_>) -> Result<RuleOutcome> {
     if !hits.is_empty() {
         matched.extend(hits);
         return Ok(RuleOutcome::block("tag blacklist", matched));
+    }
+
+    let combos = combo_hits(&tags);
+    if !combos.is_empty() {
+        // 同一作品可能同时命中 block 与 review 的组合；取更严的那个。
+        let action = if combos.iter().any(|(combo, _)| combo.action == "block") {
+            "block"
+        } else {
+            "review"
+        };
+        matched.extend(combos.iter().map(|(_, hit)| hit.clone()));
+        return Ok(policy_outcome(action, "combo rule", matched));
     }
 
     if config.rules.dedup.enabled && duplicate_exists(input.db, subject)? {
@@ -484,6 +596,16 @@ pub fn evaluate(input: DecisionInput<'_>) -> Result<RuleOutcome> {
         ));
     }
 
+    // 组合条件依赖标签，排在去重/观察词/尺寸之后：这几条已有终态，没必要为它们白跑一次模型。
+    if combo_needs_tags(&tags) {
+        return Ok(RuleOutcome {
+            decision: Decision::Review,
+            reason: "combo rule needs tags".to_string(),
+            matched,
+            needs_tagging: true,
+        });
+    }
+
     let content_count = content_tag_count(config, subject);
     if content_count < config.rules.tag_budget.min_tags {
         return Ok(RuleOutcome {
@@ -493,6 +615,7 @@ pub fn evaluate(input: DecisionInput<'_>) -> Result<RuleOutcome> {
             needs_tagging: true,
         });
     }
+
     matched.clear();
     Ok(RuleOutcome::allow("all rules passed"))
 }
@@ -573,6 +696,7 @@ mod tests {
                     users: vec!["blocked-author".to_string()],
                     tags: tags.iter().map(|tag| tag.to_string()).collect(),
                     watch: watch.iter().map(|tag| tag.to_string()).collect(),
+                    ..Blacklist::default()
                 },
                 ..RulesSection::default()
             },
@@ -590,6 +714,7 @@ mod tests {
             restriction_attributes: Vec::new(),
             ai: AiType::No,
             tags: (0..5).map(|index| (format!("tag{index}"), None)).collect(),
+            tagged: false,
             tag_count: 5,
             width: 800,
             height: 800,
@@ -597,6 +722,18 @@ mod tests {
             sha1: Some("hash".to_string()),
             item_id: "item".to_string(),
         }
+    }
+
+    fn combo_config(combos: &str) -> std::sync::Arc<RuleConfig> {
+        load_str(&format!(
+            r#"
+[rules]
+version = "v1"
+{combos}
+"#
+        ))
+        .unwrap()
+        .config
     }
 
     #[test]
@@ -765,6 +902,166 @@ watch = ["SAME"]
     }
 
     #[test]
+    fn creature_only_combo_blocks_the_raichu_screenshot() {
+        let rules = combo_config(
+            r#"
+[[rules.blacklist.combos]]
+name = "creature_only"
+any = ["pokemon", "pokemon_(creature)", "creature", "monster"]
+none = ["1girl", "1boy", "multiple_boys", "multiple_girls", "people"]
+action = "block"
+"#,
+        );
+        let mut subject = subject();
+        // 打标模型对第一张截图的真实输出（节选）。
+        subject.tags = [
+            "raichu",
+            "highres",
+            "pokemon",
+            "rating:g",
+            "can",
+            "no_humans",
+            "canned_food",
+            "fish",
+            "chibi",
+            "pokemon_(creature)",
+        ]
+        .iter()
+        .map(|tag| (tag.to_string(), None))
+        .collect();
+        let db = crate::db::Db::open_in_memory().unwrap();
+        let outcome = evaluate(DecisionInput {
+            db: &db,
+            config: &rules,
+            subject: &subject,
+        })
+        .unwrap();
+        assert_eq!(outcome.decision, Decision::Block);
+        assert_eq!(outcome.reason, "combo rule");
+        assert_eq!(outcome.matched, vec!["combo:creature_only:pokemon"]);
+    }
+
+    #[test]
+    fn male_only_combo_blocks_the_two_boys_screenshot() {
+        let rules = combo_config(
+            r#"
+[[rules.blacklist.combos]]
+name = "male_only"
+any = ["1boy", "2boys", "multiple_boys", "male_focus"]
+none = ["1girl", "2girls", "multiple_girls", "female", "girl"]
+action = "block"
+"#,
+        );
+        let mut subject = subject();
+        // 打标模型对第二张截图的真实输出（节选）。
+        subject.tags = [
+            "highres",
+            "mask",
+            "persona_5",
+            "rating:g",
+            "multiple_boys",
+            "2boys",
+            "eye_mask",
+            "male_focus",
+            "short_hair",
+            "gloves",
+        ]
+        .iter()
+        .map(|tag| (tag.to_string(), None))
+        .collect();
+        let db = crate::db::Db::open_in_memory().unwrap();
+        let outcome = evaluate(DecisionInput {
+            db: &db,
+            config: &rules,
+            subject: &subject,
+        })
+        .unwrap();
+        assert_eq!(outcome.decision, Decision::Block);
+        assert_eq!(outcome.reason, "combo rule");
+        assert_eq!(outcome.matched, vec!["combo:male_only:2boys"]);
+    }
+
+    #[test]
+    fn combo_none_vetoes_even_when_any_matches() {
+        let rules = combo_config(
+            r#"
+[[rules.blacklist.combos]]
+name = "male_only"
+any = ["1boy", "2boys"]
+none = ["1girl"]
+action = "block"
+"#,
+        );
+        let mut subject = subject();
+        subject.tags = vec![
+            ("1boy".to_string(), None),
+            ("1girl".to_string(), None),
+            ("tag2".to_string(), None),
+            ("tag3".to_string(), None),
+            ("tag4".to_string(), None),
+        ];
+        let db = crate::db::Db::open_in_memory().unwrap();
+        let outcome = evaluate(DecisionInput {
+            db: &db,
+            config: &rules,
+            subject: &subject,
+        })
+        .unwrap();
+        assert_eq!(outcome.decision, Decision::Allow);
+    }
+
+    #[test]
+    fn combo_without_signal_asks_for_one_tagging_pass_only() {
+        let rules = combo_config(
+            r#"
+[[rules.blacklist.combos]]
+name = "male_only"
+any = ["1boy", "2boys"]
+none = ["1girl"]
+needs_tags = true
+action = "block"
+"#,
+        );
+        let db = crate::db::Db::open_in_memory().unwrap();
+        let mut subject = subject();
+        let first = evaluate(DecisionInput {
+            db: &db,
+            config: &rules,
+            subject: &subject,
+        })
+        .unwrap();
+        assert!(first.needs_tagging);
+        assert_eq!(first.reason, "combo rule needs tags");
+
+        // 补标后仍无信号：不再要求第二次补标。
+        subject.tagged = true;
+        let second = evaluate(DecisionInput {
+            db: &db,
+            config: &rules,
+            subject: &subject,
+        })
+        .unwrap();
+        assert!(!second.needs_tagging);
+        assert_eq!(second.decision, Decision::Allow);
+    }
+
+    #[test]
+    fn combo_rejects_conflicting_any_and_none_entries() {
+        let error = load_str(
+            r#"
+[rules]
+version = "v1"
+[[rules.blacklist.combos]]
+name = "bad"
+any = ["1boy"]
+none = ["1BOY"]
+"#,
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("in both any and none"));
+    }
+
+    #[test]
     fn five_bilingual_content_tags_meet_budget() {
         let rules = config(&[], &[]);
         let mut subject = subject();
@@ -836,7 +1133,65 @@ ignore = ["Original"]
         assert_eq!(blacklist.users.len(), 9);
         assert_eq!(blacklist.tags.len(), 142);
         assert_eq!(blacklist.watch.len(), 18);
-        assert_eq!(parsed.version, "2026-11-22.1");
+        assert_eq!(blacklist.combos.len(), 2);
+        let names = blacklist
+            .combos
+            .iter()
+            .map(|combo| combo.name.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(names, vec!["creature_only", "male_only"]);
+        assert_eq!(parsed.version, "2026-11-25.1");
+    }
+
+    /// 用发版规则模板 + 打标模型对两张截图的真实输出，确认组合条件确实生效。
+    #[test]
+    fn shipped_template_blocks_both_reported_screenshots() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../deploy/rules.toml.example");
+        let rules = load_file(&path).unwrap().config;
+        let db = crate::db::Db::open_in_memory().unwrap();
+
+        let cases = [
+            (
+                "raichu",
+                vec![
+                    "raichu", "highres", "pokemon", "rating:g", ":3", "can", "no_humans",
+                    "canned_food", "fish", "chibi", "open_mouth", "blush", "pokemon_(creature)",
+                    "drink_can", "tears", "smile", "pillarboxed", "sparkle", "animal_focus",
+                    "crying", "solo",
+                ],
+            ),
+            (
+                "persona5",
+                vec![
+                    "highres", "mask", "persona_5", "rating:g", "multiple_boys", "2boys",
+                    "eye_mask", "epaulettes", "red_eyes", "male_focus", "short_hair",
+                    "open_mouth", "pants", "smile", "persona", "looking_at_viewer", "gloves",
+                    "black_hair", "masquerade_mask", "long_sleeves", "jacket", "absurdres",
+                    "amamiya_ren", "red_nails", "utaite", "red_hair", ":d", "blue_eyes",
+                    "white_pants", "art_program_in_frame",
+                ],
+            ),
+        ];
+        for (label, tags) in cases {
+            let mut subject = subject();
+            subject.tags = tags
+                .iter()
+                .map(|tag| (tag.to_string(), None))
+                .collect();
+            let outcome = evaluate(DecisionInput {
+                db: &db,
+                config: &rules,
+                subject: &subject,
+            })
+            .unwrap_or_else(|error| panic!("{label} must evaluate: {error}"));
+            assert_eq!(
+                outcome.decision,
+                Decision::Block,
+                "{label} should be blocked by a combo rule, got {outcome:?}"
+            );
+            assert_eq!(outcome.reason, "combo rule", "{label}");
+        }
     }
 
     fn seed_item(db: &crate::db::Db, id: &str, sha1: &str, created_at: i64) {

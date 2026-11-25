@@ -756,6 +756,16 @@ impl Db {
             .map_err(Into::into)
     }
 
+    /// 该条目是否已有模型补标结果；重跑规则时据此跳过第二次打标。
+    pub fn has_model_tags(&self, item_id: &str) -> Result<bool> {
+        let count: i64 = self.connection.query_row(
+            "SELECT COUNT(*) FROM item_tags WHERE item_id = ?1 AND origin = 'model'",
+            [item_id],
+            |row| row.get(0),
+        )?;
+        Ok(count > 0)
+    }
+
     pub fn item_author(&self, item_id: &str) -> Result<Option<String>> {
         self.connection
             .query_row(

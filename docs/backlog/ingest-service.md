@@ -459,6 +459,7 @@ AVIF 比 q90 JPEG 小约 32–36%，SSIM/PSNR 反而更高。speed 6 与 speed 8
 | 用户黑名单 | `rules.blacklist.users` | 该作者（Pixiv user id）的**所有**作品一律 `block` | 精确匹配 `author.external_id`，不做昵称/模糊匹配 |
 | 标签黑名单 | `rules.blacklist.tags` | 作品标签命中任一词即 `block` | 归一化后**精确**匹配，同时查 `name` 与 `translated_name` |
 | 观察词表 | `rules.blacklist.watch` | 命中**不拦截**，只写 `decisions.reason` 并进 `review` 供人工判断 | 用于高误杀风险的泛词；人工可一键升级到 `tags` |
+| 组合条件 | `rules.blacklist.combos` | `any` 命中任一、且 `none` 一个都没命中 → 按 `action` 处理 | 表达「只有 X、没有 Y」；单标签表达不了的否定式规则，见 §7.6 |
 | 分级硬拦 | `rules.rating.block` | 仅 `r18g` | R-18 与全年龄放行，见 §7.4 |
 
 其余规则只是**兜底与质量门**，不做内容判断：
@@ -482,13 +483,14 @@ AVIF 比 q90 JPEG 小约 32–36%，SSIM/PSNR 反而更高。speed 6 与 speed 8
 2. 作者在黑名单                   → block
 3. R-18G（三路任一命中）           → block，终态
 4. 标签黑名单（来源标签）          → block
-5. 重复哈希                        → block/review，终态
-6. 命中观察词表                    → review，终态
-7. 尺寸/字节不达标                 → block/review，终态
-8. 以上规则均已通过但内容标签不足   → 打标模型补标签一次 → 合并后重跑第 3–7 步
-9. 合并后仍不足或再次命中终态规则   → review/block，按复判结果
-10. 全部通过                       → allow
-11. 规则解析/模型/DB 异常           → review
+5. 组合条件（any 命中且 none 未命中）→ 按 action block/review，终态
+6. 重复哈希                        → block/review，终态
+7. 命中观察词表                    → review，终态
+8. 尺寸/字节不达标                 → block/review，终态
+9. 组合条件缺信号或内容标签不足     → 打标模型补标签一次 → 合并后重跑第 3–8 步
+10. 合并后仍不足或再次命中终态规则  → review/block，按复判结果
+11. 全部通过                       → allow
+12. 规则解析/模型/DB 异常           → review
 ```
 
 - 顺序固定，先命中先返回；`decisions.matched_rules_json` 记录**全部**命中项，不只第一条。
@@ -510,7 +512,7 @@ raw        → NFKC → trim → 去内部多余空白 → lowercase
 - 全角/半角、大小写、首尾空格差异都吃掉；**不做**同义词、罗马字、分词、模糊匹配。
 - 同义词靠词表自己列全（例如 `loli` 与 `ロリ` 各写一条），不引入隐式映射。
 - 黑名单词条同样按上面规则归一化后再比较。归一化后**重复**（如 `QOS` 与 `qos`、`ＱＯＳ`）→ **自动去重 + 启动告警**，不拒绝启动：同义重复无害，写两遍只是啰嗦。
-- 只有**语义冲突**才拒绝启动：同一个词同时出现在 `rules.rating.block` 与 `rules.rating.allow`，同一个词同时出现在 `tags` 与 `watch`，或同一 user id 既在 `users` 又被白名单引用（当前无白名单，预留）。
+- 只有**语义冲突**才拒绝启动：同一个词同时出现在 `rules.rating.block` 与 `rules.rating.allow`，同一个词同时出现在 `tags` 与 `watch`，同一个词同时出现在某条组合的 `any` 与 `none`，或同一 user id 既在 `users` 又被白名单引用（当前无白名单，预留）。
 - 只匹配标签，不匹配标题/简介/作者名。标题里的词是弱信号，容易误杀。
 
 ### 7.4 R-18G 的三路判定
@@ -579,7 +581,27 @@ decisions.tag_count_used = count(tags)
 - **不采信模型输出的 `rating` 分类做过滤**。现有 sidecar 的 rating 是 `g/s/q/e` 四档艺术性分级，不是内容安全等级（见 [PLAN.md](../PLAN.md) 的实测结论）；本服务只用它补标签集合，不用它决定 allow/block。
 - 必须记录 `tag_budget_hit_total` 指标，按来源分维度；上线两周后按真实分布决定阈值调 4 还是 6（按 13.9% 的基线，调到 6 会让约四分之一作品进模型，需要先确认 box 的推理吞吐）。
 
-### 7.6 fail-closed
+### 7.6 组合条件
+
+单个标签只能表达「出现 X 就拦」，表达不了「只有 X、没有 Y」。后者用 `[[rules.blacklist.combos]]` 描述：
+
+```toml
+[[rules.blacklist.combos]]
+name = "male_only"
+any = ["1boy", "2boys", "multiple_boys", "male_focus"]
+none = ["1girl", "2girls", "multiple_girls", "female"]
+needs_tags = true
+action = "block"        # block | review
+```
+
+- `any` 命中任一即视为「有信号」，`none` 命中任一即整体否决——哪怕 `any` 也命中。同一条规则里同一个词不能既在 `any` 又在 `none`，启动时报错。
+- 两边都没出现时无法判断。`needs_tags = true` 会先补一次打标，补完仍无信号就照常往下走，不循环补标（`RuleSubject.tagged` 记录本轮是否补过）。
+- 判定排在去重、观察词、尺寸之后：这几条已经能给出终态，没必要为它们白跑一次模型。
+- 命中后 `reason = "combo rule"`，`matched` 写成 `combo:<name>:<命中词>`，指标归入 `combo_rule` 桶。
+- 现有两条：`creature_only`（只有宝可梦/虚构生物、没有人类）与 `male_only`（只有男性、没有女性）。词表在 `deploy/rules.toml.example`。
+- 词表刻意不收 `male` / `boys` / `男性向`：前两个在 Pixiv 上含义过宽，`男性向` 是「面向男性读者」的取向标签，收了会把大量正常作品误判成「只有男性」。
+
+### 7.7 fail-closed
 
 - 规则文件解析失败 → 服务**拒绝启动**，不是降级为「全部放行」；已运行的实例保持旧快照并告警。
 - 未配置 `service.rules_file` → 同样**拒绝启动**。「缺规则文件」不是「规则为空」，不允许走内置默认规则。唯一例外是 `--source mock` 的本地冒烟：mock 没有真实内容要过滤，此时用内置默认规则并告警；真实来源（`pixiv`）永远走拒绝启动这条路。
@@ -587,7 +609,7 @@ decisions.tag_count_used = count(tags)
 - 不存在「默认 allow」的兜底配置；第 9 步的 allow 是「黑名单、R-18G、重复、观察词、尺寸全部跑完且没命中」的结果，不是异常路径。
 - `rating='r18g'` 一旦判定，人工操作也不能改成 `allow`；要放行只能改规则文件并升版本。
 
-### 7.7 规则文件是唯一权威
+### 7.8 规则文件是唯一权威
 
 结论：**纯配置文件，不建可写的规则表。** 理由是这套规则属于声明式配置（一组 user id、一组标签），不是运行时业务数据。
 
@@ -608,7 +630,7 @@ decisions.tag_count_used = count(tags)
 
 **为什么 UI 不能直接写文件**：会丢注释、会和手工编辑冲突、会和 git 工作区打架、systemd 用户的文件权限也可能不对。所以走「草稿 → 人工确认 → 原子改写」。
 
-### 7.8 规则变更流程
+### 7.9 规则变更流程
 
 ```text
 管理页点「拉黑作者 / 拉黑标签」
@@ -635,7 +657,7 @@ decisions.tag_count_used = count(tags)
 - 应用前在管理页展示 diff 预览（新增/删除哪几行），确认后才落盘。
 - 手工编辑文件仍然是一等公民：改完 `SIGHUP` 即可，不经过 proposal 流程，但同样要过校验。
 
-### 7.9 为什么不用数据库规则表
+### 7.10 为什么不用数据库规则表
 
 如果真建一张 `rules(kind, payload_json, enabled, priority)` 表并让引擎读它，会出现三个具体问题：
 
@@ -653,9 +675,9 @@ decisions.tag_count_used = count(tags)
 - 列表：缩略图、来源、作者、标签、命中规则、分数、时间。
 - 操作：放行、拒绝、拉黑标签/作者、按当前规则重跑、打开原图。
 - 批量操作必须二次确认；所有操作写 `decisions` 与操作者标识。
-- 「拉黑作者」把 user id 写进 `rules.blacklist.users`；「拉黑标签」把归一化后的词写进 `rules.blacklist.tags`。两者都先落 `rule_proposals`（草稿），**不直接改文件**；点「应用」后走 §7.8 的原子改写，自动升 `rules.version`，并在页面上先给 diff 预览。
+- 「拉黑作者」把 user id 写进 `rules.blacklist.users`；「拉黑标签」把归一化后的词写进 `rules.blacklist.tags`。两者都先落 `rule_proposals`（草稿），**不直接改文件**；点「应用」后走 §7.9 的原子改写，自动升 `rules.version`，并在页面上先给 diff 预览。
 - 规则页要显示：当前生效的 `rules.version`、`config_hash`、文件路径、上次重载时间、待应用草稿数、上次重载失败原因。
-- R-18G 条目在列表里显示为「终态拒绝」，不提供放行按钮（见 §7.6）。
+- R-18G 条目在列表里显示为「终态拒绝」，不提供放行按钮（见 §7.7）。
 
 ### 8.2 审核语义
 
@@ -738,7 +760,7 @@ easytier-core --hostname kanalib-box -i 10.126.126.3 \
 
 ## 10. 配置
 
-拆成两份文件：`ingest.toml`（服务参数，改动要重启）与 `rules.toml`（规则，支持热重载）。理由见 §7.7——规则要能 `git diff`、能回滚、能被 UI 原子改写；服务参数不需要。
+拆成两份文件：`ingest.toml`（服务参数，改动要重启）与 `rules.toml`（规则，支持热重载）。理由见 §7.8——规则要能 `git diff`、能回滚、能被 UI 原子改写；服务参数不需要。
 
 ### 10.1 主配置 `ingest.toml`
 
@@ -829,7 +851,7 @@ limit = 50
 # version 必须比当前生效值大；rating.block 只允许 r18g。
 
 [rules]
-version = "2026-11-22.1"
+version = "2026-11-25.1"
 # 内容变了但版本没变 → 拒绝重载并告警，防止"改了文件以为生效了"
 config_hash_check = true
 
@@ -850,6 +872,16 @@ watch = [
   # "おっぱい",
   # "tentacle",
 ]
+
+# 组合条件：表达「只有 X、没有 Y」。
+# any 命中任一即成立；none 命中任一即整体否决。
+# 两边都没信号时 needs_tags 会先补一次打标再判，补完仍无信号则照常往下走。
+[[rules.blacklist.combos]]
+name = "male_only"
+any = ["1boy", "2boys", "multiple_boys", "male_focus"]
+none = ["1girl", "2girls", "multiple_girls", "female"]
+needs_tags = true
+action = "block"
 
 [rules.rating]
 # 只拦 R-18G；R-18 与全年龄显式放行。
@@ -893,6 +925,8 @@ on_fail = "review"
 
 用户 2026-11-22 给定 27 条，归一化后 26 条（`QOS` 与 `qos` 合并）。补充变体 118 条，再按 2026-11-22 二次定调把 `おっぱい`、`巨乳` 两个泛词移到 `watch`，当前 `tags` **142 条**、`watch` **18 条**，归一化后无重复、两表无交集。分组只为可读，服务侧是一张平表，顺序无意义。
 
+2026-11-25 增加 2 条组合条件（`creature_only`、`male_only`，见 §7.6）：这两类规则需要「有 X 且没有 Y」，单标签黑名单表达不了，所以走 `combos` 而不是往 `tags` 里堆词。`rules.version` 随之升到 `2026-11-25.1`。
+
 二次定调的边界：只降 `おっぱい`、`巨乳` 这两个**光秃秃的泛词**。它们的组合变体照旧硬拦——`おっぱい星人`、`おっぱい飲み`、`おっぱい巨大化`、`巨乳娘`、`巨乳フェラ`、`巨乳フェチ`、`巨乳女子`、`超巨乳` 全部仍在 `tags`。
 
 分层原则：
@@ -922,7 +956,7 @@ on_fail = "review"
 1. **从种子词拉相关标签**：对每个概念组取 1–2 个种子词（如 `爆乳`、`獣人`、`ボテ腹`、`猿轡`、`アヘ顔`、`皮モノ`），调 Pixiv 的相关标签接口（`/v1/illust/related` 返回同作品的相关标签）与搜索补全（`/v1/search/autocomplete`），把返回标签收进候选池。
 2. **候选池去噪**：按归一化去重；剔除作品名、角色名、画师名、纯体裁词；只保留「指向同一概念」的词。判断不了的一律先放 `watch`，不放 `tags`。
 3. **命中量预演**：用已入库数据对候选词跑 dry-run，输出「命中条数 / 命中样例 / 其中会被其他规则先拦掉的比例」。命中量异常高的词先降级到 `watch`——这类词通常是泛词，不是漏词。
-4. **落盘走草稿**：候选词写进 `rule_proposals`（§7.8），人工确认后才 `toml_edit` 写 `rules.toml` 并升版本；不要在管理页直接改文件。
+4. **落盘走草稿**：候选词写进 `rule_proposals`（§7.9），人工确认后才 `toml_edit` 写 `rules.toml` 并升版本；不要在管理页直接改文件。
 5. **别指望同义词自动合并**：服务不做词干化、罗马字转换、翻译映射。`ケモノ` / `kemono` / `furry` 是三条，`獣姦` / `獸姦` / `兽奸` 也是三条。少写一条就少拦一类写法。
 
 需要继续盯的高风险缺口（这些概念在 Pixiv 上写法特别散，建议优先补）：
@@ -1070,8 +1104,8 @@ on_fail = "review"
 | I-Q10 | 标签黑名单初始词表 | 用户 2026-11-22 给定 27 条，补变体后 `tags` 142 条 + `watch` 18 条（§10.4，`おっぱい`/`巨乳` 按二次定调在 `watch`）；空表时启动告警（不是拒绝启动），管理页显示「黑名单为空」 |
 | I-Q11 | 用户黑名单初始 ID | 用户给定 9 个：`108664166, 88232335, 101499615, 80373205, 49157160, 92724137, 3006351, 24518360, 18512565`（§10.4）；后续靠审核页「拉黑作者」一键写入草稿，人工确认后落盘 |
 | I-Q12 | `min_tags = 5` 是否长期成立 | 暂定 5；按 §7.5 实测约 13.9% 进模型队列，上线后看 `tag_budget_hit_total` 与 review 积压再调 |
-| I-Q13 | 规则存文件还是存 DB | **文件**（§7.7）；DB 只存只读快照与待应用草稿，不存可写规则 |
-| I-Q14 | 管理页能否直接改规则文件 | **不直接改**：写 `rule_proposals` → 人工确认 → `toml_edit` 原子改写（§7.8） |
+| I-Q13 | 规则存文件还是存 DB | **文件**（§7.8）；DB 只存只读快照与待应用草稿，不存可写规则 |
+| I-Q14 | 管理页能否直接改规则文件 | **不直接改**：写 `rule_proposals` → 人工确认 → `toml_edit` 原子改写（§7.9） |
 
 ## 16. 调研依据（v2 新增）
 
@@ -1155,7 +1189,7 @@ on_fail = "review"
 | B15 | `src/db.rs` | **已完成**：schema v7 含只读 `rule_snapshots` 与 `rule_proposals`；草稿→应用→重载链路已接通 | 按 §3 建表 |
 | B16 | `src/lib.rs` | 只导出 4 个模块 | 增加 `pub mod rules; pub mod tagging; pub mod review; pub mod rules_edit;` |
 | B17 | 新建 `src/rules.rs` | 不存在 | `RuleConfig` 反序列化 + 校验（`rating.block` 只允许 `r18g`、版本必须递增、词条归一化后重复→告警去重、`tags`/`watch` 同词→拒绝启动）+ 十步决策（含 `watch`） |
-| B18 | 新建 `src/rules_edit.rs` | 不存在 | proposal → `toml_edit` 原子改写 → 版本自增 → hash 比对（§7.8） |
+| B18 | 新建 `src/rules_edit.rs` | 不存在 | proposal → `toml_edit` 原子改写 → 版本自增 → hash 比对（§7.9） |
 | B19 | 新建 `src/tagging.rs` | 不存在 | `TaggingBackend` trait + sidecar/HTTP 实现 + 超时重试 |
 | B20 | 新建 `src/review.rs` | 不存在 | review 队列、放行/拒绝、禁止放行 R-18G |
 | B21 | `Cargo.toml:21-36` | 无 TOML 解析依赖 | 加 `toml`（读）、`toml_edit`（写）；文件锁按需加 `fs2` |

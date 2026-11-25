@@ -140,10 +140,12 @@ pub fn reason_kind(reason: &str) -> &'static str {
         "author blacklist" => "author_blacklist",
         "r18g" => "r18g",
         "tag blacklist" => "tag_blacklist",
+        "combo rule" => "combo_rule",
         "duplicate hash" => "dedup",
         "watch list" => "watch",
         "size below minimum" | "empty image" => "size",
         "tag budget short" => "tag_budget",
+        "combo rule needs tags" => "tag_budget",
         "rating sanity review" => "sanity",
         "model tagging failed" | "tag budget short; tagger unavailable" => "model_error",
         "review approved" | "review rejected" => "human",
@@ -179,6 +181,7 @@ mod tests {
     #[test]
     fn reasons_are_bucketed_for_dashboards() {
         assert_eq!(reason_kind("tag blacklist"), "tag_blacklist");
+        assert_eq!(reason_kind("combo rule"), "combo_rule");
         assert_eq!(reason_kind("duplicate hash"), "dedup");
         assert_eq!(reason_kind("model tagging failed"), "model_error");
         assert_eq!(reason_kind("watch:tentacle"), "watch");

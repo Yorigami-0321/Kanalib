@@ -5,7 +5,7 @@
 # 词表只在本文件维护，设计文档不再内联副本（见 docs/backlog/ingest-service.md 10.4）。
 
 [rules]
-version = "2026-11-22.1"
+version = "2026-11-25.1"
 # 内容变了但版本没变 -> 拒绝重载并告警，防止"改了文件以为生效了"
 config_hash_check = true
 
@@ -91,6 +91,55 @@ watch = [
   # 用户 2026-11-22 拍板降级：本身是身材描述，非内容指向
   "巨乳",
 ]
+
+# 组合条件：单个词表达不了的「只有 X、没有 Y」。
+# any 命中任一即成立，none 命中任一即整体否决（哪怕 any 也命中）。
+# 两边都没有信号时，needs_tags = true 会先补一次打标再判；补完仍无信号则照常往下走。
+
+[[rules.blacklist.combos]]
+# 只有兽/生物、没有人类。第一张截图（雷丘/宝可梦）属于这一类：
+# 打标输出 raichu / pokemon / no_humans，没有任何人类标签。
+name = "creature_only"
+any = [
+  # 宝可梦 / 数码兽：模型对这类图通常至少给出一个通用词
+  "pokemon", "pokemon_(creature)", "pokemon_focus",
+  "digimon", "digimon_(creature)",
+  # 虚构生物；不含 animal / animal_focus，避免把宠物照和实景一起杀掉
+  "creature", "creature_focus", "monster", "monster_focus",
+  "kaiju", "giant_monster",
+  # 日文 / 中文写法（精确匹配，不做同义映射）
+  "ポケモン", "デジモン", "ピカチュウ", "ライチュウ", "イーブイ",
+  "獣", "モンスター", "兽", "怪物",
+]
+none = [
+  "1girl", "2girls", "3girls", "4girls", "5girls", "6+girls", "multiple_girls",
+  "1boy", "2boys", "3boys", "4boys", "5boys", "6+boys", "multiple_boys",
+  "male_focus", "female", "male",
+  "女の子", "男の子", "女性", "男性", "女子", "男子", "少女", "男孩", "女孩",
+  "people", "solo_focus",
+]
+needs_tags = true
+action = "block"
+
+[[rules.blacklist.combos]]
+# 只有男性、没有女性。第二张截图（Persona 5 双男主）属于这一类：
+# 打标输出 2boys / multiple_boys / male_focus，没有任何女性标签。
+name = "male_only"
+any = [
+  "1boy", "2boys", "3boys", "4boys", "5boys", "6+boys", "multiple_boys",
+  "male_focus", "bara", "muscular_male",
+  "男の子", "男性", "男子", "イケメン", "男孩",
+  # 注意：不要收 `男性向` / `male` / `boys`。前者是「面向男性读者」的取向标签，
+  # 后者在 Pixiv 上含义过宽，都会把大量正常作品算成「只有男性」。
+]
+none = [
+  "1girl", "2girls", "3girls", "4girls", "5girls", "6+girls", "multiple_girls",
+  "female", "female_focus", "woman", "women", "girl", "girls",
+  "女の子", "女性", "女子", "少女", "女孩", "百合", "yuri",
+  "futanari", "futa", "ふたなり",
+]
+needs_tags = true
+action = "block"
 
 [rules.rating]
 # 只拦 R-18G；R-18 与全年龄显式放行。
