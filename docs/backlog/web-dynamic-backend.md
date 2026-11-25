@@ -378,7 +378,7 @@ pub struct Capabilities {
       "width": 1200, "height": 1600, "name": "001.jpg",
       "rating": "S", "star": 4, "favorite": true,
       "tags": [{"name": "1girl", "category": "general", "score": 0.99}],
-      "mtime": 1700000000, "group": "原创", "orig": "jpg", "sharp": 512,
+      "mtime": 1700000000, "group": "原创", "orig": "jpg", "sharp": 1024,
       "work_id": "work-1", "page_count": 2, "page": 0,
       "author": "作者", "author_id": "author-1", "title": "作品标题"
     }
@@ -430,7 +430,8 @@ limit     1–200，默认 60
 ```
 
 - 未知参数忽略；非法 `sort` 回退 `updated`；`limit` 夹取。
-- 游标内容：`{ sort, ascending, key... }` 的 base64url；换排序必须从第一页开始（400）。
+- `sort=random` 的排序键是 `kanalib_order_hash(id, seed)`：同 seed 稳定、换 seed 得到另一套洗牌。
+- 游标内容：`{ sort, ascending, key, fingerprint }` 的 base64url；`fingerprint` 覆盖筛选词与 seed，换排序/筛选/seed 都必须从第一页开始（400）。
 - `q` 支持 `tag:`/`name:`/`group:`/`rating:` 字段、引号短语与 `-` 排除；≥3 字符走 FTS5 trigram 子串匹配，短词与排除项退回 `LIKE`。
 - 标签筛选用 `EXISTS` 半连接（`item_tags` 允许同一条目多 origin），不物化去重候选集；FTS 是唯一会物化候选 ID 的筛选。
 - `/api/items` 只返回 `items` + `next`，**不再逐页 `COUNT`**；`total` 由 `/api/index` 的 `count/counts` 提供，分页端点保持 keyset 的 O(limit) 成本。

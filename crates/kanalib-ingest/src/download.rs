@@ -95,6 +95,19 @@ fn mark_thumbnail_ready(media_dir: &std::path::Path, item_id: &str, size: u32) -
     Ok(())
 }
 
+/// 只有原图足够大才生成大档，避免把 800px 原图放大成假 2048。
+fn thumbnail_sizes(width: u32, height: u32) -> Vec<u32> {
+    let side = width.max(height);
+    let mut sizes = vec![256, 512];
+    if side >= 1024 {
+        sizes.push(1024);
+    }
+    if side >= 2048 {
+        sizes.push(2048);
+    }
+    sizes
+}
+
 pub fn backfill_thumbnails(db: &Db, media_dir: &std::path::Path) -> Result<usize> {
     let mut statement = db.connection().prepare(
         "SELECT id, original_path FROM items
@@ -110,12 +123,6 @@ pub fn backfill_thumbnails(db: &Db, media_dir: &std::path::Path) -> Result<usize
 
     let mut refreshed = 0;
     for (item_id, original_path) in items {
-        let complete = [256, 512]
-            .iter()
-            .all(|size| thumbnail_pair_ready(media_dir, &item_id, *size));
-        if complete {
-            continue;
-        }
         let bytes = match std::fs::read(&original_path) {
             Ok(bytes) => bytes,
             Err(error) => {
@@ -134,27 +141,37 @@ pub fn backfill_thumbnails(db: &Db, media_dir: &std::path::Path) -> Result<usize
                 continue;
             }
         };
-        let thumb_256 = match write_thumbnail(media_dir, &item_id, &decoded, 256) {
-            Ok(path) => path,
-            Err(error) => {
-                warn!(item = %item_id, %error, "t256 thumbnail backfill failed");
-                continue;
+        let sizes = thumbnail_sizes(decoded.width(), decoded.height());
+        let complete = sizes
+            .iter()
+            .all(|size| thumbnail_pair_ready(media_dir, &item_id, *size));
+        if complete {
+            continue;
+        }
+        let mut written = Vec::with_capacity(sizes.len());
+        let mut failed = false;
+        for size in &sizes {
+            match write_thumbnail(media_dir, &item_id, &decoded, *size) {
+                Ok(path) => written.push((*size, path)),
+                Err(error) => {
+                    warn!(item = %item_id, size, %error, "thumbnail backfill failed");
+                    failed = true;
+                    break;
+                }
             }
-        };
-        let thumb_512 = match write_thumbnail(media_dir, &item_id, &decoded, 512) {
-            Ok(path) => path,
-            Err(error) => {
-                warn!(item = %item_id, %error, "t512 thumbnail backfill failed");
-                continue;
-            }
-        };
+        }
+        if failed {
+            continue;
+        }
+        let thumb_256 = &written[0].1;
+        let thumb_512 = &written[1].1;
         db.connection().execute(
             "UPDATE items SET thumb_256=?2, thumb_512=?3, revision=revision+1, updated_at=?4
               WHERE id=?1 AND decision='allow'",
             rusqlite::params![item_id, thumb_256, thumb_512, now()],
         )?;
-        for size in [256, 512] {
-            if let Err(error) = mark_thumbnail_ready(media_dir, &item_id, size) {
+        for (size, _) in &written {
+            if let Err(error) = mark_thumbnail_ready(media_dir, &item_id, *size) {
                 warn!(item = %item_id, size, %error, "thumbnail ready marker failed");
             }
         }
@@ -170,6 +187,18 @@ pub async fn run_queue(
     transport: &dyn ImageTransport,
     config: &DownloadConfig,
 ) -> Result<DownloadReport> {
+    run_queue_limited(db, adapter, transport, config, usize::MAX).await
+}
+
+/// 每轮最多领取 `max_items` 条，把下载阶段限制在有限时间内，
+/// 让决策与推送不会因为下载积压而饿死。
+pub async fn run_queue_limited(
+    db: &Db,
+    adapter: &dyn SourceAdapter,
+    transport: &dyn ImageTransport,
+    config: &DownloadConfig,
+    max_items: usize,
+) -> Result<DownloadReport> {
     std::fs::create_dir_all(&config.media_dir)?;
     let mut report = DownloadReport {
         succeeded: Vec::new(),
@@ -177,12 +206,17 @@ pub async fn run_queue(
     };
 
     let mut attempts_by_item = std::collections::HashMap::new();
+    let mut processed = 0usize;
     loop {
+        if processed >= max_items {
+            break;
+        }
         db.requeue_due_paused_downloads()?;
-        let pending = db.pending_item_ids()?;
+        let mut pending = db.pending_item_ids()?;
         if pending.is_empty() {
             break;
         }
+        pending.truncate(max_items.saturating_sub(processed));
         let mut items = Vec::with_capacity(pending.len());
         for item_id in pending {
             if !db.claim_download(&item_id)? {
@@ -205,6 +239,7 @@ pub async fn run_queue(
             .buffer_unordered(config.concurrency.max(1))
             .collect::<Vec<_>>()
             .await;
+        let batch_size = outcomes.len();
         for (item_id, outcome) in outcomes {
             match outcome {
                 Ok(()) => {
@@ -230,6 +265,7 @@ pub async fn run_queue(
                 }
             }
         }
+        processed += batch_size;
         if db.pending_item_ids()?.is_empty() {
             break;
         }
@@ -284,7 +320,22 @@ pub async fn download_item(
     let final_path = originals.join(format!("{}.{}", item.id, ext));
     if final_path.exists() {
         let bytes = std::fs::read(&final_path)?;
-        return finalize_item(db, item, config, &final_path, &ext, bytes);
+        let size_mismatch = item.bytes > 0 && bytes.len() as u64 != item.bytes;
+        let hash_mismatch = item
+            .sha1
+            .as_deref()
+            .filter(|sha1| !sha1.is_empty())
+            .is_some_and(|sha1| sha1_hex(&bytes) != sha1);
+        if size_mismatch || hash_mismatch {
+            warn!(
+                item = %item.id,
+                path = %final_path.display(),
+                "existing original does not match metadata; re-downloading"
+            );
+            let _ = std::fs::remove_file(&final_path);
+        } else {
+            return finalize_item(db, item, config, &final_path, &ext, bytes);
+        }
     }
 
     let part_path = parts.join(format!("{}.{}.part", item.id, ext));
@@ -363,6 +414,12 @@ pub async fn download_item(
     {
         bail!("incomplete download: expected {total} bytes, got {actual_total}");
     }
+    // 206 续传只看 Content-Range 总量；再用来源给出的字节数兜一次底。
+    if let Some(expected) = image.expected_bytes
+        && actual_total != expected
+    {
+        bail!("image byte count mismatch after resume: expected {expected}, got {actual_total}");
+    }
     let bytes = std::fs::read(&part_path)?;
     let decoder = ImageReader::new(std::io::Cursor::new(&bytes))
         .with_guessed_format()?
@@ -395,11 +452,11 @@ fn finalize_item(
     let (width, height) = (decoder.width(), decoder.height());
     let thumb_256 = write_thumbnail(&config.media_dir, &item.id, &decoder, 256)?;
     let thumb_512 = write_thumbnail(&config.media_dir, &item.id, &decoder, 512)?;
-    let sha1 = Sha1::digest(&bytes);
-    let sha1 = sha1
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect::<String>();
+    let sizes = thumbnail_sizes(width, height);
+    for size in sizes.iter().copied().filter(|size| *size > 512) {
+        write_thumbnail(&config.media_dir, &item.id, &decoder, size)?;
+    }
+    let sha1 = sha1_hex(&bytes);
     db.set_download_result(
         &item.id,
         &DownloadResult {
@@ -412,13 +469,20 @@ fn finalize_item(
         },
     )?;
     db.set_thumbnails(&item.id, &thumb_256, &thumb_512)?;
-    for size in [256, 512] {
+    for size in sizes {
         if let Err(error) = mark_thumbnail_ready(&config.media_dir, &item.id, size) {
             warn!(item = %item.id, size, %error, "thumbnail ready marker failed");
         }
     }
     info!(item = %item.id, width, height, bytes = bytes.len(), "download completed");
     Ok(())
+}
+
+fn sha1_hex(bytes: &[u8]) -> String {
+    Sha1::digest(bytes)
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
 }
 
 const THUMBNAIL_JPEG_QUALITY: u8 = 90;

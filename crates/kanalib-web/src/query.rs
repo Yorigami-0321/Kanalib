@@ -82,6 +82,34 @@ impl ItemFilter {
             && self.rating.is_none()
             && self.fav.is_none()
     }
+
+    /// 过滤条件 + seed 的稳定指纹；写进游标，换条件复用游标会直接报错。
+    pub fn fingerprint(&self, seed: i64) -> String {
+        use sha2::{Digest, Sha256};
+        let mut hasher = Sha256::new();
+        for value in [&self.q, &self.tag, &self.group, &self.rating] {
+            match value {
+                Some(text) => {
+                    hasher.update([1u8]);
+                    hasher.update(text.as_bytes());
+                }
+                None => hasher.update([0u8]),
+            }
+            hasher.update([0u8]);
+        }
+        hasher.update([match self.fav {
+            None => 0,
+            Some(false) => 1,
+            Some(true) => 2,
+        }]);
+        hasher.update(seed.to_le_bytes());
+        hasher
+            .finalize()
+            .iter()
+            .take(8)
+            .map(|byte| format!("{byte:02x}"))
+            .collect()
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -220,6 +248,7 @@ pub struct Cursor {
     pub ascending: bool,
     pub key: SortKey,
     pub id: String,
+    pub fingerprint: String,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -229,6 +258,8 @@ struct WireCursor {
     order: String,
     key: Value,
     id: String,
+    #[serde(default)]
+    fingerprint: String,
 }
 
 const B64: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
@@ -285,11 +316,12 @@ pub fn base64url_decode(input: &str) -> Option<Vec<u8>> {
 
 pub fn encode_cursor(cursor: &Cursor) -> String {
     let wire = WireCursor {
-        v: 1,
+        v: 2,
         sort: cursor.sort.as_str().to_string(),
         order: if cursor.ascending { "asc" } else { "desc" }.to_string(),
         key: cursor.key.to_json(),
         id: cursor.id.clone(),
+        fingerprint: cursor.fingerprint.clone(),
     };
     match serde_json::to_vec(&wire) {
         Ok(bytes) => base64url_encode(&bytes),
@@ -300,7 +332,7 @@ pub fn encode_cursor(cursor: &Cursor) -> String {
 pub fn decode_cursor(raw: &str) -> Option<Cursor> {
     let bytes = base64url_decode(raw)?;
     let wire: WireCursor = serde_json::from_slice(&bytes).ok()?;
-    if wire.v != 1 || wire.id.is_empty() {
+    if wire.v != 2 || wire.id.is_empty() || wire.fingerprint.is_empty() {
         return None;
     }
     let sort = SortKind::from_token(&wire.sort)?;
@@ -314,6 +346,7 @@ pub fn decode_cursor(raw: &str) -> Option<Cursor> {
         ascending,
         key: SortKey::from_json(&wire.key)?,
         id: wire.id,
+        fingerprint: wire.fingerprint,
     })
 }
 
@@ -379,6 +412,7 @@ mod tests {
                 ascending: false,
                 key: key.clone(),
                 id: "a".repeat(40),
+                fingerprint: "fingerprint".to_string(),
             };
             let encoded = encode_cursor(&cursor);
             assert_eq!(decode_cursor(&encoded), Some(cursor));

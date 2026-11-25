@@ -108,6 +108,8 @@ pub struct DownloadSettings {
     pub concurrency: usize,
     pub retry_max: u32,
     pub timeout_secs: u64,
+    /// 每轮最多下载多少条；0 表示不限制。
+    pub batch_items: usize,
 }
 
 impl Default for DownloadSettings {
@@ -116,6 +118,7 @@ impl Default for DownloadSettings {
             concurrency: 3,
             retry_max: 5,
             timeout_secs: 60,
+            batch_items: 60,
         }
     }
 }
@@ -125,6 +128,8 @@ impl Default for DownloadSettings {
 pub struct TaggingSettings {
     pub backend: Option<String>,
     pub endpoint: Option<String>,
+    /// 打标服务共享 token 文件；与 tagger 的 `--token-file` 相同。
+    pub token_file: Option<PathBuf>,
     pub concurrency: usize,
     pub timeout_secs: u64,
 }
@@ -134,6 +139,7 @@ impl Default for TaggingSettings {
         Self {
             backend: None,
             endpoint: None,
+            token_file: None,
             concurrency: 2,
             timeout_secs: 1800,
         }
@@ -181,6 +187,10 @@ pub struct AdminSettings {
     /// 管理页与审核/规则 API；只应绑回环或 EasyTier 虚拟 IP。
     pub enabled: bool,
     pub bind: SocketAddr,
+    /// 管理面共享 token 文件；绑非回环地址时必须配置。
+    pub token_file: Option<PathBuf>,
+    /// 可选来源 IP 白名单；非空时只接受列表内的地址。
+    pub allowed_ips: Vec<IpAddr>,
 }
 
 impl Default for AdminSettings {
@@ -188,6 +198,8 @@ impl Default for AdminSettings {
         Self {
             enabled: true,
             bind: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8791),
+            token_file: None,
+            allowed_ips: Vec::new(),
         }
     }
 }
@@ -217,6 +229,13 @@ pub fn read_secret(path: &Path) -> Result<String> {
                 mode
             );
         }
+    }
+    #[cfg(windows)]
+    {
+        tracing::warn!(
+            path = %path.display(),
+            "secret file ACLs are not verified on Windows; restrict the file to the service account"
+        );
     }
     let value = std::fs::read_to_string(path)
         .with_context(|| format!("reading secret {}", path.display()))?;

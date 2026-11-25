@@ -56,11 +56,15 @@ limit = 50          # 每页最多取多少条；上限 100
 concurrency = 3
 retry_max = 5
 timeout_secs = 60
+# 每轮最多下载多少条，然后让决策/推送跑一轮；0 = 不限制（积压时会饿死后续阶段）。
+batch_items = 60
 
 [tagging]
 # 标签不足 min_tags 时调用一次；endpoint 指向 box 上的 sidecar。
 # backend = "http"
 # endpoint = "http://127.0.0.1:8793/tag"
+# 打标服务的共享 token；与 tagger 的 --token-file 内容一致。
+# token_file = "/etc/kanalib/tagger-token"
 concurrency = 2
 timeout_secs = 1800
 
@@ -78,6 +82,10 @@ backoff_max_secs = 600
 # 管理页 / 审核 / 规则草稿 / 指标；只绑回环或 EasyTier 虚拟 IP，绝不绑 0.0.0.0。
 enabled = true
 bind = "10.126.126.3:8792"
+# 非回环绑定必须配置 token，否则拒绝启动。
+token_file = "/etc/kanalib/admin-token"
+# 可选来源白名单；留空只靠 token。填了就只接受这些地址。
+# allowed_ips = ["10.126.126.2"]
 
 [media]
 # 与 kanalib-web 的 --media-signing-key / KANALIB_MEDIA_SIGNING_KEY 相同。

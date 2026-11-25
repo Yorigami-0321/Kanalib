@@ -20,7 +20,8 @@ use crate::{
 };
 
 pub const TIERS: [&str; 4] = ["t256", "t512", "t1024", "t2048"];
-pub const MEDIA_CACHE_CONTROL: &str = "public, max-age=31536000, immutable";
+// ETag 只含 updated_at；同 id 换图时它可能不变，因此不做一年 immutable 缓存。
+pub const MEDIA_CACHE_CONTROL: &str = "public, max-age=3600";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ThumbFormat {

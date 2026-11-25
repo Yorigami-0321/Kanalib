@@ -87,29 +87,44 @@ pub fn is_r18g_item(
     x_restrict: Option<i64>,
     restriction_attributes: &str,
 ) -> Result<bool> {
+    Ok(is_r18g_with_tags(
+        rating,
+        x_restrict,
+        restriction_attributes,
+        &db.item_tag_names(item_id)?,
+    ))
+}
+
+/// 已拿到标签集合时的同判定；审核列表用它避免逐条查库。
+pub fn is_r18g_with_tags(
+    rating: &str,
+    x_restrict: Option<i64>,
+    restriction_attributes: &str,
+    tags: &[(String, Option<String>)],
+) -> bool {
     if rating == "r18g" || x_restrict == Some(2) {
-        return Ok(true);
+        return true;
     }
     let attributes: Vec<String> = serde_json::from_str(restriction_attributes).unwrap_or_default();
     if attributes
         .iter()
         .any(|attribute| crate::rules::normalize_tag(attribute) == "r18g")
     {
-        return Ok(true);
+        return true;
     }
     let is_r18g_tag = |value: &str| {
         let tag = crate::rules::normalize_tag(value);
         tag == "r18g" || tag == "r-18g"
     };
-    for (name, translated) in db.item_tag_names(item_id)? {
-        if is_r18g_tag(&name) {
-            return Ok(true);
+    for (name, translated) in tags {
+        if is_r18g_tag(name) {
+            return true;
         }
         if translated.as_deref().is_some_and(is_r18g_tag) {
-            return Ok(true);
+            return true;
         }
     }
-    Ok(false)
+    false
 }
 
 #[cfg(test)]

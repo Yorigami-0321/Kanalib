@@ -9,7 +9,8 @@ use kanalib_wall_model::{
 };
 use rusqlite::types::Value as SqlValue;
 use rusqlite::{
-    Connection, OpenFlags, OptionalExtension, Row, Transaction, params, params_from_iter,
+    Connection, OpenFlags, OptionalExtension, Row, Transaction, functions::FunctionFlags, params,
+    params_from_iter,
 };
 use serde::Serialize;
 
@@ -162,8 +163,8 @@ CREATE INDEX IF NOT EXISTS idx_desktop_devices_token ON desktop_devices(token_ha
 pub fn rebuild_search_index(conn: &Connection) -> Result<()> {
     conn.execute("DELETE FROM item_search", [])?;
     conn.execute(
-        "INSERT INTO item_search (item_id, name, tags, group_name, rating)
-         SELECT i.id, replace(i.name, '_', ' '),
+        "INSERT INTO item_search (rowid, item_id, name, tags, group_name, rating)
+         SELECT i.rowid, i.id, replace(i.name, '_', ' '),
                 COALESCE((SELECT group_concat(replace(t.name, '_', ' '), ' ')
                             FROM item_tags it JOIN tags t ON t.id = it.tag_id
                            WHERE it.item_id = i.id), ''),
@@ -172,6 +173,58 @@ pub fn rebuild_search_index(conn: &Connection) -> Result<()> {
         [],
     )?;
     Ok(())
+}
+
+/// 只刷新受影响的条目；`item_search.rowid` 与 `items.rowid` 对齐后可按主键删改。
+pub fn refresh_search_index(conn: &Connection, item_ids: &[String]) -> Result<()> {
+    if item_ids.is_empty() {
+        return Ok(());
+    }
+    let mut delete = conn.prepare_cached(
+        "DELETE FROM item_search
+          WHERE rowid = (SELECT rowid FROM items WHERE id = ?1)",
+    )?;
+    let mut insert = conn.prepare_cached(
+        "INSERT INTO item_search (rowid, item_id, name, tags, group_name, rating)
+         SELECT i.rowid, i.id, replace(i.name, '_', ' '),
+                COALESCE((SELECT group_concat(replace(t.name, '_', ' '), ' ')
+                            FROM item_tags it JOIN tags t ON t.id = it.tag_id
+                           WHERE it.item_id = i.id), ''),
+                replace(i.group_name, '_', ' '), i.rating
+           FROM items i WHERE i.id = ?1 AND i.deleted = 0",
+    )?;
+    for item_id in item_ids {
+        delete.execute([item_id])?;
+        insert.execute([item_id])?;
+    }
+    Ok(())
+}
+
+fn register_functions(conn: &Connection) -> Result<()> {
+    conn.create_scalar_function(
+        "kanalib_order_hash",
+        2,
+        FunctionFlags::SQLITE_UTF8 | FunctionFlags::SQLITE_DETERMINISTIC,
+        |ctx| {
+            let value: String = ctx.get(0)?;
+            let seed: i64 = ctx.get(1)?;
+            Ok(order_hash(&value, seed as u64) as i64)
+        },
+    )?;
+    Ok(())
+}
+
+fn order_hash(value: &str, seed: u64) -> u64 {
+    let mut hash = 0xcbf2_9ce4_8422_2325u64 ^ seed.wrapping_mul(0x9e37_79b9_7f4a_7c15);
+    for byte in value.as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    hash ^= hash >> 30;
+    hash = hash.wrapping_mul(0xbf58_476d_1ce4_e5b9);
+    hash ^= hash >> 27;
+    hash = hash.wrapping_mul(0x94d0_49bb_1331_11eb);
+    hash ^ (hash >> 31)
 }
 
 pub fn open(path: &Path) -> Result<Connection> {
@@ -183,6 +236,7 @@ pub fn open(path: &Path) -> Result<Connection> {
     }
     let conn =
         Connection::open(path).with_context(|| format!("open database {}", path.display()))?;
+    register_functions(&conn)?;
     conn.busy_timeout(Duration::from_secs(5))?;
     conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;")?;
     conn.execute_batch(SCHEMA_SQL)?;
@@ -196,6 +250,7 @@ pub fn open_read(path: &Path) -> Result<Connection> {
         OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
     )
     .with_context(|| format!("open read-only database {}", path.display()))?;
+    register_functions(&conn)?;
     conn.busy_timeout(Duration::from_secs(5))?;
     conn.execute_batch("PRAGMA temp_store = MEMORY; PRAGMA cache_size = -16000;")?;
     Ok(conn)
@@ -612,7 +667,7 @@ pub fn search_items(
 ) -> Result<ItemPage> {
     let mut parts = filter_parts(filter);
     parts.inline_candidates();
-    let sort_expr = sort_expression(sort);
+    let sort_expr = sort_expression(&mut parts, sort);
     if let Some(cursor) = cursor {
         cursor_clause(&mut parts, sort, &sort_expr, cursor);
     }
@@ -655,6 +710,7 @@ pub fn search_items(
             ascending: sort.ascending,
             key: key.clone(),
             id: item.id.clone(),
+            fingerprint: filter.fingerprint(sort.seed),
         })
     } else {
         None
@@ -900,13 +956,14 @@ fn escape_like(value: &str) -> String {
         match ch {
             '\\' => out.push_str("\\\\"),
             '%' => out.push_str("\\%"),
+            '_' => out.push_str("\\_"),
             _ => out.push(ch),
         }
     }
     out
 }
 
-fn sort_expression(sort: &ItemSort) -> String {
+fn sort_expression(parts: &mut WhereParts, sort: &ItemSort) -> String {
     match sort.kind {
         SortKind::Updated => "i.updated_at".to_string(),
         SortKind::Posted => "COALESCE(i.posted_at, 0)".to_string(),
@@ -916,8 +973,11 @@ fn sort_expression(sort: &ItemSort) -> String {
         SortKind::Rating => "CASE rating WHEN 'G' THEN 0 WHEN 'S' THEN 1 WHEN 'Q' THEN 2 \
              WHEN 'E' THEN 3 ELSE 0 END"
             .to_string(),
-        // id 是内容哈希，直接按 id 排就是稳定的伪随机顺序，且能走主键索引。
-        SortKind::Random => "i.id".to_string(),
+        // 同一 seed 得到同一顺序；换 seed 就是另一套稳定洗牌。
+        SortKind::Random => {
+            let seed = parts.param(SqlValue::Integer(sort.seed));
+            format!("kanalib_order_hash(i.id, {seed})")
+        }
     }
 }
 
@@ -973,10 +1033,17 @@ pub fn apply_ingest_batch(
 
     let tx = conn.transaction()?;
     let mut apply = IngestApply::default();
+    let mut touched = Vec::new();
     for entry in &batch.items {
         match upsert_ingest_item(&tx, batch, entry, now)? {
-            ItemWrite::Inserted => apply.inserted += 1,
-            ItemWrite::Updated => apply.updated += 1,
+            ItemWrite::Inserted => {
+                apply.inserted += 1;
+                touched.push(entry.item.id.clone());
+            }
+            ItemWrite::Updated => {
+                apply.updated += 1;
+                touched.push(entry.item.id.clone());
+            }
             ItemWrite::Stale => apply.stale += 1,
         }
     }
@@ -988,7 +1055,7 @@ pub fn apply_ingest_batch(
         batch.rules_version.as_deref(),
         now,
     )?;
-    rebuild_search_index(&tx)?;
+    refresh_search_index(&tx, &touched)?;
     tx.commit()?;
     Ok(apply)
 }
@@ -1009,6 +1076,7 @@ pub fn apply_ingest_delete(
 
     let tx = conn.transaction()?;
     let mut apply = DeleteApply::default();
+    let mut touched = Vec::new();
     for entry in &delete.items {
         let current: Option<i64> = tx
             .query_row(
@@ -1027,6 +1095,7 @@ pub fn apply_ingest_delete(
                     params![&entry.id, entry.revision, now],
                 )?;
                 apply.deleted += 1;
+                touched.push(entry.id.clone());
             }
         }
     }
@@ -1038,7 +1107,7 @@ pub fn apply_ingest_delete(
         delete.rules_version.as_deref(),
         now,
     )?;
-    rebuild_search_index(&tx)?;
+    refresh_search_index(&tx, &touched)?;
     tx.commit()?;
     Ok(apply)
 }
@@ -1228,7 +1297,7 @@ fn upsert_tag(tx: &Transaction<'_>, name: &str, category: &str) -> Result<i64> {
     tx.execute(
         "INSERT INTO tags (name, category) VALUES (?1, ?2)
          ON CONFLICT(name) DO UPDATE SET
-            category = CASE WHEN excluded.category <> '' THEN excluded.category ELSE tags.category END",
+            category = CASE WHEN tags.category = '' THEN excluded.category ELSE tags.category END",
         params![name, category],
     )?;
     let id = tx.query_row("SELECT id FROM tags WHERE name = ?1", [name], |row| {
@@ -1332,7 +1401,7 @@ pub struct PushApply {
 pub fn apply_push(conn: &mut Connection, updates: &[PushUpdate], now: i64) -> Result<PushApply> {
     let tx = conn.transaction()?;
     let mut apply = PushApply::default();
-    let mut search_dirty = false;
+    let mut search_dirty: Vec<String> = Vec::new();
     for update in updates {
         let current: Option<(i64, i64, i64, String)> = tx
             .query_row(
@@ -1378,7 +1447,7 @@ pub fn apply_push(conn: &mut Connection, updates: &[PushUpdate], now: i64) -> Re
                 "UPDATE items SET rating = ?2 WHERE id = ?1",
                 params![&update.id, rating],
             )?;
-            search_dirty = true;
+            search_dirty.push(update.id.clone());
         }
         tx.execute(
             "UPDATE items SET revision = ?2, updated_at = ?3 WHERE id = ?1",
@@ -1402,7 +1471,7 @@ pub fn apply_push(conn: &mut Connection, updates: &[PushUpdate], now: i64) -> Re
                     params![&update.id, tag_id, normalize_score(tag.score)],
                 )?;
             }
-            search_dirty = true;
+            search_dirty.push(update.id.clone());
         }
         if let Some(collections) = &update.collections {
             tx.execute(
@@ -1419,9 +1488,9 @@ pub fn apply_push(conn: &mut Connection, updates: &[PushUpdate], now: i64) -> Re
         }
         apply.applied += 1;
     }
-    if search_dirty {
-        rebuild_search_index(&tx)?;
-    }
+    search_dirty.sort();
+    search_dirty.dedup();
+    refresh_search_index(&tx, &search_dirty)?;
     tx.commit()?;
     Ok(apply)
 }

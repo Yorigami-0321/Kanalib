@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
+import hmac
 import json
 import os
 import re
 import sys
+import threading
 import warnings
 from pathlib import Path
 
@@ -38,7 +41,29 @@ CANDIDATE_CAPS = {
 }
 CANDIDATE_FLOOR = 0.005
 # 448 输入只需缩略图；显式限制像素数，避免超大图在 RGBA 画布/tensor 上吃满内存。
-MAX_TAG_PIXELS = 100_000_000
+MAX_TAG_PIXELS = 32_000_000
+# 单次推理的图片数上限；配合逐批加载，避免整批解码后同时驻留内存。
+MAX_INFER_BATCH = 4
+
+_DECODE_LOCK = threading.Lock()
+
+
+def model_guard_hash(model_dir: Path) -> str:
+    """Hash the executable surface of a model directory (`*.py` and `*.json`).
+
+    `trust_remote_code=True` executes Python shipped next to the weights, so a
+    swapped directory is arbitrary code execution. Pinning this digest makes
+    that swap detectable without hashing multi-GB weight files.
+    """
+    digest = hashlib.sha256()
+    for path in sorted(model_dir.rglob("*")):
+        if not path.is_file() or path.suffix not in {".py", ".json"}:
+            continue
+        digest.update(path.relative_to(model_dir).as_posix().encode("utf-8"))
+        digest.update(b"\0")
+        digest.update(path.read_bytes())
+        digest.update(b"\0")
+    return digest.hexdigest()
 
 
 def classify_error(exc: BaseException) -> tuple[str, str, str]:
@@ -62,23 +87,37 @@ def classify_error(exc: BaseException) -> tuple[str, str, str]:
     return "decode_failed", "图片解码失败，文件可能已损坏", detail
 
 
-def load_rgb(path: Path, tolerant: bool = False) -> Image.Image:
-    previous = ImageFile.LOAD_TRUNCATED_IMAGES
-    ImageFile.LOAD_TRUNCATED_IMAGES = tolerant
-    try:
-        img = Image.open(path)
-        if img.width * img.height > MAX_TAG_PIXELS:
-            raise ValueError(f"image too large: {img.width}x{img.height}")
-        img.load()
-        img = ImageOps.exif_transpose(img)
-        if img.mode != "RGB":
-            img = img.convert("RGBA")
-            canvas = Image.new("RGBA", img.size, (255, 255, 255, 255))
-            canvas.alpha_composite(img)
-            img = canvas.convert("RGB")
-        return img
-    finally:
-        ImageFile.LOAD_TRUNCATED_IMAGES = previous
+def load_rgb(
+    path: Path, tolerant: bool = False, max_side: int = 2048
+) -> Image.Image:
+    # `LOAD_TRUNCATED_IMAGES` is process-global in Pillow; serialize the toggle
+    # so concurrent decodes cannot observe each other's setting.
+    with _DECODE_LOCK:
+        previous = ImageFile.LOAD_TRUNCATED_IMAGES
+        ImageFile.LOAD_TRUNCATED_IMAGES = tolerant
+        try:
+            img = Image.open(path)
+            # JPEG/MPO can decode at reduced scale, so only non-draftable
+            # formats need the pixel cap before decoding.
+            draftable = img.format in {"JPEG", "MPO"}
+            if not draftable and img.width * img.height > MAX_TAG_PIXELS:
+                raise ValueError(f"image too large: {img.width}x{img.height}")
+            # JPEG can decode at a reduced scale; do that before allocating the
+            # full RGBA canvas for very large originals.
+            if draftable and max(img.size) > max_side:
+                img.draft("RGB", (max_side, max_side))
+            img.load()
+            if img.width * img.height > MAX_TAG_PIXELS:
+                raise ValueError(f"image too large: {img.width}x{img.height}")
+            img = ImageOps.exif_transpose(img)
+            if img.mode != "RGB":
+                img = img.convert("RGBA")
+                canvas = Image.new("RGBA", img.size, (255, 255, 255, 255))
+                canvas.alpha_composite(img)
+                img = canvas.convert("RGB")
+            return img
+        finally:
+            ImageFile.LOAD_TRUNCATED_IMAGES = previous
 
 
 def preprocess(images: list[Image.Image], size: int) -> torch.Tensor:
@@ -115,7 +154,8 @@ def build_thresholds(
         ranges[category] = (start, start + count)
         defaults[category] = value
         start += count
-    assert start == config.num_classes
+    if start != config.num_classes:
+        raise RuntimeError(f"tag split totals {start}, expected {config.num_classes}")
     return thresholds, ranges, defaults
 
 
@@ -130,6 +170,20 @@ class Tagger:
         if self.device.type == "cuda" and not torch.cuda.is_available():
             self.device = torch.device("cpu")
         self.half = bool(half and self.device.type == "cuda")
+
+        expected_guard = os.environ.get("KANALIB_TAGGER_MODEL_SHA256", "").strip().lower()
+        guard = model_guard_hash(model_dir)
+        if expected_guard:
+            if not hmac.compare_digest(guard, expected_guard):
+                raise RuntimeError(
+                    f"model directory guard mismatch: expected {expected_guard}, got {guard}"
+                )
+        else:
+            print(
+                f"[model] guard hash {guard}; set KANALIB_TAGGER_MODEL_SHA256 to pin it",
+                file=sys.stderr,
+                flush=True,
+            )
 
         model = AutoModel.from_pretrained(
             model_dir,
@@ -279,8 +333,20 @@ class Tagger:
         }
 
     def tag_paths(self, paths: list[str]) -> list[dict]:
-        loaded: list[tuple[str, Image.Image]] = []
         results: list[dict] = []
+        pending: list[tuple[dict, Image.Image]] = []
+        pending_pixels = 0
+
+        def flush() -> None:
+            nonlocal pending_pixels
+            if not pending:
+                return
+            probs = self._infer([image for _, image in pending])
+            for (result, _image), prob in zip(pending, probs):
+                result.update(self.decode(prob))
+            pending.clear()
+            pending_pixels = 0
+
         for raw in paths:
             path = Path(raw)
             try:
@@ -329,22 +395,19 @@ class Tagger:
                     file=sys.stderr,
                     flush=True,
                 )
-            loaded.append((raw, image))
-            results.append(
-                {
-                    "path": raw,
-                    "ok": True,
-                    "width": image.width,
-                    "height": image.height,
-                    "damage": damage,
-                }
-            )
-        if loaded:
-            probs = self._infer([image for _, image in loaded])
-            for result, (_, _image), prob in zip(
-                [item for item in results if item["ok"]], loaded, probs
-            ):
-                result.update(self.decode(prob))
+            result = {
+                "path": raw,
+                "ok": True,
+                "width": image.width,
+                "height": image.height,
+                "damage": damage,
+            }
+            results.append(result)
+            pending.append((result, image))
+            pending_pixels += image.width * image.height
+            if len(pending) >= MAX_INFER_BATCH or pending_pixels >= MAX_TAG_PIXELS:
+                flush()
+        flush()
         return results
 
 

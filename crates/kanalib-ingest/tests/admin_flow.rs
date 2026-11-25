@@ -121,6 +121,18 @@ fn app(fixture: &Fixture) -> Router {
     ))
 }
 
+fn authed_app(fixture: &Fixture) -> Router {
+    admin::router(
+        AdminState::new(
+            fixture.db_path.clone(),
+            Arc::clone(&fixture.state),
+            Some(fixture.rules_path.clone()),
+            Arc::new(Metrics::default()),
+        )
+        .with_auth(Some("test-token".to_string()), Vec::new()),
+    )
+}
+
 fn get(uri: &str) -> Request<Body> {
     Request::builder().uri(uri).body(Body::empty()).unwrap()
 }
@@ -177,6 +189,23 @@ async fn health_status_and_review_list_expose_current_state() {
         .find(|item| item["r18g"] == true)
         .expect("r18g item");
     assert_eq!(terminal["allowable"], false);
+}
+
+#[tokio::test]
+async fn admin_api_requires_token_when_configured() {
+    let fixture = fixture();
+    let app = authed_app(&fixture);
+
+    let response = app.clone().oneshot(get("/admin/api/status")).await.unwrap();
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+
+    let request = Request::builder()
+        .uri("/admin/api/status")
+        .header("x-admin-token", "test-token")
+        .body(Body::empty())
+        .unwrap();
+    let response = app.oneshot(request).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
 }
 
 #[tokio::test]

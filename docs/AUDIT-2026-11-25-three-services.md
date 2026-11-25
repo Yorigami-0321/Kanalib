@@ -114,3 +114,60 @@
 - 所有行号已在提交时的工作区中复核；`db.rs`、`push.rs`、`download.rs`、`media.rs`、`routes/ingest.rs` 在另一进程的 AVIF 改动后仍有漂移可能。
 - 未执行编译、测试或压测；结论为静态分析，P0/P1 的资源类判断基于代码结构（全表扫描、无上限读取、串行阻塞），未做实测数据。
 - 未检查运行时配置与部署环境（证书、反代、EasyTier ACL、Windows 服务账户），实际风险以部署形态为准。
+
+## 8. 修复状态（2026-11-25 首轮）
+
+已修复并有构建/测试覆盖：
+
+| 编号 | 处理 |
+| --- | --- |
+| I-01 | `[admin].token_file` + 可选 `allowed_ips`；非回环绑定无 token 拒绝启动；管理 API 统一鉴权中间件。 |
+| I-02 | 管理页改用 DOM API/`textContent` 构建，删除所有内联 `onclick`；token 存 sessionStorage。 |
+| I-03 | box 原图回源与网页 `original` 都要求 `decision='allow'`。 |
+| I-04 | 管理端原图改为流式响应，支持单区间 Range。 |
+| I-05 | 打标客户端改为单实例 async reqwest；4xx 立即失败；决策阶段按 `tagging.concurrency` 并发（每条独立连接）。 |
+| I-06 | `tagging.concurrency` 真正接入决策流水线。 |
+| I-07 | 新增 `persist_item_image(favorite)`；public/feed 不再写 `favorite=1`。 |
+| I-08 | 已存在原图先比对 `bytes`/`sha1`，不匹配删除重下。 |
+| I-09 | 206 续传完成后再按来源 `expected_bytes` 复核总量。 |
+| I-10 | 新增 `download.batch_items`（默认 60），每轮下载有配额，决策/推送不再被无限积压饿死。 |
+| I-11 | 缩略图按条目并发上传（4 路）；批次重试语义保留（上传本身幂等）。 |
+| I-12 | 审核列表一次批量取标签并在内存判 R-18G，去掉每行两次查询。 |
+| I-13 | Windows 读取密钥时显式告警 ACL 未校验。 |
+| I-14 | `tag_count` 按实际来源计数，不再取 max 虚高。 |
+| T-01 | `/tag` 声明长度上限（默认 32 MiB）+ 全局并发信号量 + 读超时；超限 413/503。 |
+| T-02 | tagger 共享 token（`--token-file`/env），`/tag` 与 `/health` 都校验；代理支持来源 allowlist 与 backlog 调整。 |
+| T-03 | multipart 改用 `email.parser` 标准解析，支持带参数 boundary。 |
+| T-04 | 错误响应只回稳定 code；`/health` 不再泄露模型路径。 |
+| T-05 | 打标按像素预算分批加载/推理（≤4 张且 ≤32 MP），JPEG 先 `draft()` 降采样。 |
+| T-06 | 截断图开关用进程级锁串行化，避免多线程互相污染。 |
+| T-07 | 增加模型目录 `*.py`/`*.json` guard hash；可用 `KANALIB_TAGGER_MODEL_SHA256` 强制校验。 |
+| T-08 | 代理增加客户端读超时、`TCP_NODELAY`、`request_queue_size=64`。 |
+| T-09 | `assert` 改为显式 `RuntimeError`。 |
+| W-01 | `sort=random` 改为 `kanalib_order_hash(id, seed)`，同 seed 稳定、换 seed 变序。 |
+| W-02 | FTS5 改为按受影响 id 增量刷新（rowid 与 items 对齐），不再每批全表重建。 |
+| W-03 | 游标写入筛选+seed 指纹，换条件复用直接 400。 |
+| W-04 | `escape_like` 同时转义 `_`。 |
+| W-05 | 原图 ≥1024/≥2048 时真正生成并上传 t1024/t2048；`sharp` 按实际尺寸声明。 |
+| W-06 | web 路由统一安全头（CSP/XFO/Referrer-Policy/HSTS/nosniff），nginx 示例同步。 |
+| W-07 | 桌面 upload 增加读取路由（`/api/desktop/uploads/{file}`）与 5000 文件 / 8 GiB 配额清理。 |
+| W-09 | 缩略图缓存从一年 immutable 降为 `max-age=3600`。 |
+| W-10 | `upsert_tag` 只在原分类为空时写入，后续批次不再覆盖 facet 分组。 |
+| W-11 | 公开 `/api/health` 不再返回版本号。 |
+| W-14 | 降级改用 `failedSrc` 去重 + 函数式更新，避免一次跳两档。 |
+| X-01 | ingest → tagger 请求带共享 token，伪造标签需先拿到密钥。 |
+| X-03 | random seed、tagging.concurrency、sharp 档位三处文档已按实现修订。 |
+
+仍未处理（需要契约或产品决策）：
+
+| 编号 | 原因 |
+| --- | --- |
+| W-08 | 原图 302 的目标地址属于桌面端契约；改成相对路径需要客户端配合，先保持现状。 |
+| W-12 | 静态模式筛选仍会逐片加载全库；改成本地索引/分页需要重做 static 数据层。 |
+| W-13 | 深链详情的前后条目仍回退到已加载页；需要新增按 id 取相邻条目的接口。 |
+| W-15 | 静态模式关闭虚拟化与按键全量重排；与 W-12 同一处数据层改造。 |
+| X-02 | 缩略图签名空 batch_id 需 ingest 与 web 同步改协议；当前签名已绑定路径与 body，重放只能覆盖同一文件。 |
+
+验证：`cargo fmt --check`、`cargo test -p kanalib-ingest -p kanalib-web --offline`（ingest 101 项、web 34 项）、
+`npm --prefix web run build`、tagger 与代理 `py_compile`、`start-local-tagger.ps1` 解析均通过。
+新增覆盖：管理 API 强制 token（`tests/admin_flow.rs`）、random seed 稳定性与游标指纹绑定（`tests/web_flow.rs`）。

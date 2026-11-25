@@ -142,7 +142,7 @@ fn allow_batch_is_built_from_live_rows_and_fails_closed() {
     assert_eq!(entry.item.orig.as_deref(), Some("jpg"));
     assert_eq!(entry.item.mtime, 1_700_000_000);
     assert_eq!(entry.item.rating, "G");
-    assert_eq!(entry.item.sharp, Some(0));
+    assert_eq!(entry.item.sharp, Some(1024));
     assert!(!entry.item.favorite);
     assert_eq!(entry.item.phash, None);
     assert_eq!(entry.item.tags.len(), 1);

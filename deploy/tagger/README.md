@@ -33,12 +33,28 @@ kanalib-ingest (box 10.126.126.3)
 日志：`%TEMP%\kanalib-tagger.log`、`%TEMP%\kanalib-tagger.err`；PID：`%TEMP%\kanalib-tagger.pid`。
 脚本可重复执行，已在跑时只做健康检查。
 
+## 鉴权与配额
+
+打标服务不再接受匿名请求。启动脚本首次运行会生成
+`C:\ProgramData\Kanalib\tagger-token`（32 字节 hex），并作为
+`--token-file` 传给 `http_server.py`；把同一份内容放到 box 的
+`/etc/kanalib/tagger-token`，让 ingest 的 `[tagging].token_file` 指向它。
+
+- `/tag` 与 `/health` 都要求 `x-tagger-token`（或 `Authorization: Bearer`）。
+- 请求体默认上限 32 MiB、并发 4，超出分别返回 413/503；
+  可用 `KANALIB_TAGGER_MAX_BODY`、`KANALIB_TAGGER_MAX_INFLIGHT` 调整。
+- 云端代理可用 `KANALIB_TAGGER_PROXY_ALLOW=10.126.126.3` 限制来源；
+  它只做 TCP 转发，鉴权仍由 tagger 校验。
+- 模型目录的 `*.py`/`*.json` 会算出 guard hash；设置
+  `KANALIB_TAGGER_MODEL_SHA256` 后目录被替换会拒绝启动。
+
 ## box 配置
 
 ```toml
 [tagging]
 backend = "http"
 endpoint = "http://10.126.126.2:8793/tag"
+token_file = "/etc/kanalib/tagger-token"
 concurrency = 2
 timeout_secs = 1800
 ```
@@ -59,18 +75,22 @@ timeout_secs = 1800
 
 ```bash
 # 本机
-curl http://10.126.126.1:8793/health
+curl -H "x-tagger-token: $(cat /etc/kanalib/tagger-token)" http://10.126.126.1:8793/health
 
 # 云端（同网络任意节点）
-curl -s --noproxy '*' http://10.126.126.1:8793/health
+curl -s --noproxy '*' -H "x-tagger-token: $(cat /etc/kanalib/tagger-token)" \
+  http://10.126.126.1:8793/health
 
 # box（经云端代理）
 sudo curl -s --noproxy '*' -F "image=@/var/lib/kanalib-ingest/media/originals/<id>.png" \
+  -H "x-tagger-token: $(cat /etc/kanalib/tagger-token)" \
   http://10.126.126.2:8793/tag
 
 # Nodaroo CPU（经云端第二代理）
-curl -s --noproxy '*' http://10.126.126.2:18793/health
+curl -s --noproxy '*' -H "x-tagger-token: $(cat /etc/kanalib/tagger-token)" \
+  http://10.126.126.2:18793/health
 sudo curl -s --noproxy '*' -F "image=@/var/lib/kanalib-ingest/media/originals/<id>.png" \
+  -H "x-tagger-token: $(cat /etc/kanalib/tagger-token)" \
   http://10.126.126.2:18793/tag
 ```
 

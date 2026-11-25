@@ -1,7 +1,8 @@
 //! 私网管理页与审核/规则 API；只应监听回环或 EasyTier 虚拟 IP。
 
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, HashMap},
+    net::{IpAddr, SocketAddr},
     path::{Path, PathBuf},
     sync::Arc,
 };
@@ -10,8 +11,9 @@ use anyhow::{Result, bail};
 use axum::{
     Json, Router,
     body::Body,
-    extract::{Path as AxumPath, Query, State},
-    http::{HeaderValue, StatusCode, header},
+    extract::{ConnectInfo, Path as AxumPath, Query, Request, State},
+    http::{HeaderMap, HeaderValue, Method, StatusCode, header},
+    middleware::{self, Next},
     response::{Html, IntoResponse, Response},
     routing::{get, post},
 };
@@ -34,14 +36,18 @@ pub struct AdminState {
     pub rules_path: Option<PathBuf>,
     pub editor: Arc<RulesEditor>,
     pub metrics: Arc<Metrics>,
+    token: Option<Arc<str>>,
+    allowed_ips: Arc<Vec<IpAddr>>,
 }
 
-type ItemPaths = (
-    Option<String>,
-    Option<String>,
-    Option<String>,
-    Option<String>,
-);
+struct ItemPaths {
+    thumb_512: Option<String>,
+    thumb_256: Option<String>,
+    original_path: Option<String>,
+    ext: Option<String>,
+    decision: String,
+    deleted: i64,
+}
 
 impl AdminState {
     pub fn new(
@@ -56,14 +62,21 @@ impl AdminState {
             rules_path,
             editor: Arc::new(RulesEditor::default()),
             metrics,
+            token: None,
+            allowed_ips: Arc::new(Vec::new()),
         }
+    }
+
+    /// 管理面共享 token 与来源 IP 白名单；`None` 只允许回环绑定（启动时强制）。
+    pub fn with_auth(mut self, token: Option<String>, allowed_ips: Vec<IpAddr>) -> Self {
+        self.token = token.map(Arc::from);
+        self.allowed_ips = Arc::new(allowed_ips);
+        self
     }
 }
 
 pub fn router(state: AdminState) -> Router {
-    Router::new()
-        .route("/admin", get(page))
-        .route("/admin/", get(page))
+    let api = Router::new()
         .route("/admin/api/health", get(health))
         .route("/admin/api/status", get(status))
         .route("/admin/api/metrics", get(metrics_text))
@@ -81,7 +94,65 @@ pub fn router(state: AdminState) -> Router {
         .route("/admin/api/proposals/{id}/apply", post(apply_proposal))
         .route("/admin/api/proposals/{id}/reject", post(reject_proposal))
         .route("/admin/api/rules/reload", post(reload_rules))
+        .route_layer(middleware::from_fn_with_state(
+            state.clone(),
+            require_admin_auth,
+        ));
+    Router::new()
+        .route("/admin", get(page))
+        .route("/admin/", get(page))
+        .merge(api)
         .with_state(state)
+}
+
+/// 管理 API 鉴权：先查来源 IP 白名单，再校验共享 token。
+///
+/// 页面本身只有静态外壳；数据全部走 `/admin/api/*`，因此不需要为页面发放 cookie。
+async fn require_admin_auth(
+    State(state): State<AdminState>,
+    request: Request,
+    next: Next,
+) -> Response {
+    if !state.allowed_ips.is_empty() {
+        let peer = request
+            .extensions()
+            .get::<ConnectInfo<SocketAddr>>()
+            .map(|info| info.0);
+        let allowed = peer.is_some_and(|addr| state.allowed_ips.contains(&addr.ip()));
+        if !allowed {
+            return forbidden("source address is not allowed");
+        }
+    }
+    if let Some(expected) = state.token.as_deref() {
+        let provided = request
+            .headers()
+            .get("x-admin-token")
+            .and_then(|value| value.to_str().ok())
+            .or_else(|| {
+                request
+                    .headers()
+                    .get(header::AUTHORIZATION)
+                    .and_then(|value| value.to_str().ok())
+                    .and_then(|value| value.strip_prefix("Bearer "))
+            });
+        let ok = provided
+            .is_some_and(|value| constant_time_eq(value.trim().as_bytes(), expected.as_bytes()));
+        if !ok {
+            return unauthorized();
+        }
+    }
+    next.run(request).await
+}
+
+fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
+    if left.len() != right.len() {
+        return false;
+    }
+    let mut diff = 0u8;
+    for (a, b) in left.iter().zip(right) {
+        diff |= a ^ b;
+    }
+    diff == 0
 }
 
 async fn page() -> Html<&'static str> {
@@ -216,6 +287,38 @@ fn review_json(db_path: &Path, limit: usize) -> Result<Vec<Value>> {
         ))
     })?;
     let rows = rows.collect::<rusqlite::Result<Vec<_>>>()?;
+    // 一次取回整页标签：避免每行两次查询（标签 + R-18G 判定）占满阻塞线程池。
+    let mut tags_by_item: HashMap<String, Vec<(String, Option<String>)>> = HashMap::new();
+    if !rows.is_empty() {
+        let placeholders = std::iter::repeat("?")
+            .take(rows.len())
+            .collect::<Vec<_>>()
+            .join(",");
+        let sql = format!(
+            "SELECT it.item_id, t.name, t.translated_name
+               FROM item_tags it JOIN tags t ON t.id = it.tag_id
+              WHERE it.item_id IN ({placeholders})
+              ORDER BY t.name"
+        );
+        let mut statement = db.connection().prepare(&sql)?;
+        let mapped = statement.query_map(
+            rusqlite::params_from_iter(rows.iter().map(|row| &row.0)),
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                ))
+            },
+        )?;
+        for row in mapped {
+            let (item_id, name, translated) = row?;
+            tags_by_item
+                .entry(item_id)
+                .or_default()
+                .push((name, translated));
+        }
+    }
     let mut values = Vec::with_capacity(rows.len());
     for (
         id,
@@ -236,12 +339,13 @@ fn review_json(db_path: &Path, limit: usize) -> Result<Vec<Value>> {
         author_name,
     ) in rows
     {
-        let tags = db
-            .item_tag_names(&id)?
-            .into_iter()
-            .map(|(name, _)| name)
+        let item_tags = tags_by_item.remove(&id).unwrap_or_default();
+        let tags = item_tags
+            .iter()
+            .map(|(name, _)| name.clone())
             .collect::<Vec<_>>();
-        let r18g = review::is_r18g_item(&db, &id, &rating, x_restrict, &restriction_attributes)?;
+        let r18g =
+            review::is_r18g_with_tags(&rating, x_restrict, &restriction_attributes, &item_tags);
         values.push(json!({
             "id": id,
             "thumb": thumb_512.or(thumb_256).map(|_| format!("/admin/api/items/{id}/thumb")),
@@ -326,18 +430,31 @@ enum ItemFile {
     Original,
 }
 
-async fn item_thumb(State(state): State<AdminState>, AxumPath(id): AxumPath<String>) -> Response {
-    serve_item_file(state, id, ItemFile::Thumb).await
+async fn item_thumb(
+    State(state): State<AdminState>,
+    AxumPath(id): AxumPath<String>,
+    method: Method,
+    headers: HeaderMap,
+) -> Response {
+    serve_item_file(state, id, ItemFile::Thumb, method, headers).await
 }
 
 async fn item_original(
     State(state): State<AdminState>,
     AxumPath(id): AxumPath<String>,
+    method: Method,
+    headers: HeaderMap,
 ) -> Response {
-    serve_item_file(state, id, ItemFile::Original).await
+    serve_item_file(state, id, ItemFile::Original, method, headers).await
 }
 
-async fn serve_item_file(state: AdminState, id: String, kind: ItemFile) -> Response {
+async fn serve_item_file(
+    state: AdminState,
+    id: String,
+    kind: ItemFile,
+    method: Method,
+    headers: HeaderMap,
+) -> Response {
     if !kanalib_wall_model::valid_item_id(&id) {
         return not_found();
     }
@@ -345,12 +462,22 @@ async fn serve_item_file(state: AdminState, id: String, kind: ItemFile) -> Respo
     let lookup = id.clone();
     let path = match blocking_ok(move || {
         let db = Db::open_read(&db_path)?;
-        let row: Option<ItemPaths> = db
+        let row = db
             .connection()
             .query_row(
-                "SELECT thumb_512, thumb_256, original_path, ext FROM items WHERE id=?1",
+                "SELECT thumb_512, thumb_256, original_path, ext, decision, deleted
+                   FROM items WHERE id=?1",
                 [lookup],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+                |row| {
+                    Ok(ItemPaths {
+                        thumb_512: row.get(0)?,
+                        thumb_256: row.get(1)?,
+                        original_path: row.get(2)?,
+                        ext: row.get(3)?,
+                        decision: row.get(4)?,
+                        deleted: row.get(5)?,
+                    })
+                },
             )
             .optional()?;
         Ok(row)
@@ -360,12 +487,12 @@ async fn serve_item_file(state: AdminState, id: String, kind: ItemFile) -> Respo
         Ok(row) => row,
         Err(response) => return response,
     };
-    let Some((thumb_512, thumb_256, original_path, ext)) = path else {
+    let Some(paths) = path else {
         return not_found();
     };
     let (path, extension) = match kind {
         ItemFile::Thumb => {
-            let path = thumb_512.or(thumb_256);
+            let path = paths.thumb_512.or(paths.thumb_256);
             match path {
                 Some(path) => {
                     let extension = extension_of(&path);
@@ -374,27 +501,21 @@ async fn serve_item_file(state: AdminState, id: String, kind: ItemFile) -> Respo
                 None => return not_found(),
             }
         }
-        ItemFile::Original => match original_path {
-            Some(path) => {
-                let extension = ext.unwrap_or_else(|| extension_of(&path));
-                (path, extension)
+        ItemFile::Original => {
+            // 与 box 原图端点保持一致：只有 allow 且未删除的条目才可回源。
+            if paths.decision != "allow" || paths.deleted != 0 {
+                return not_found();
             }
-            None => return not_found(),
-        },
+            match paths.original_path {
+                Some(path) => {
+                    let extension = paths.ext.unwrap_or_else(|| extension_of(&path));
+                    (path, extension)
+                }
+                None => return not_found(),
+            }
+        }
     };
-    let bytes = match tokio::fs::read(&path).await {
-        Ok(bytes) => bytes,
-        Err(_) => return not_found(),
-    };
-    let mut response = Response::new(Body::from(bytes));
-    response.headers_mut().insert(
-        header::CONTENT_TYPE,
-        HeaderValue::from_static(content_type(&extension)),
-    );
-    response
-        .headers_mut()
-        .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
-    response
+    crate::media::serve_file_response(Path::new(&path), &extension, method, &headers).await
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -682,18 +803,25 @@ fn extension_of(path: &str) -> String {
         .to_string()
 }
 
-fn content_type(extension: &str) -> &'static str {
-    match extension.to_ascii_lowercase().as_str() {
-        "png" => "image/png",
-        "jpg" | "jpeg" => "image/jpeg",
-        "webp" => "image/webp",
-        "gif" => "image/gif",
-        _ => "application/octet-stream",
-    }
-}
-
 fn not_found() -> Response {
     (StatusCode::NOT_FOUND, "not found").into_response()
+}
+
+fn unauthorized() -> Response {
+    (
+        StatusCode::UNAUTHORIZED,
+        [(header::WWW_AUTHENTICATE, "Bearer")],
+        Json(json!({ "ok": false, "error": "missing or invalid admin token" })),
+    )
+        .into_response()
+}
+
+fn forbidden(message: impl Into<String>) -> Response {
+    (
+        StatusCode::FORBIDDEN,
+        Json(json!({ "ok": false, "error": message.into() })),
+    )
+        .into_response()
 }
 
 fn bad_request(message: impl Into<String>) -> Response {
@@ -763,7 +891,12 @@ tr:last-child td{border-bottom:0}
 <body>
 <header>
   <div><h1>Kanalib Ingest</h1><div class="meta" id="rules-meta">loading…</div></div>
-  <div class="row"><button id="reload-btn" class="primary">重载规则</button><span id="flash" class="meta"></span></div>
+  <div class="row">
+    <input id="admin-token" type="password" placeholder="管理 token" autocomplete="off">
+    <button id="token-btn">保存 token</button>
+    <button id="reload-btn" class="primary">重载规则</button>
+    <span id="flash" class="meta"></span>
+  </div>
 </header>
 <div class="pills" id="pills"></div>
 <main>
@@ -801,12 +934,47 @@ tr:last-child td{border-bottom:0}
 <script>
 const $ = (id) => document.getElementById(id);
 const esc = (v) => String(v ?? "").replace(/[&<>"']/g, (c) => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+function element(tag, props, children) {
+  const node = document.createElement(tag);
+  for (const [key, value] of Object.entries(props || {})) {
+    if (key === "class") node.className = value;
+    else if (key === "text") node.textContent = value ?? "";
+    else if (key === "disabled") { if (value) node.disabled = true; }
+    else if (value === true) node.setAttribute(key, "");
+    else if (value !== false && value != null) node.setAttribute(key, String(value));
+  }
+  for (const child of children || []) if (child) node.append(child);
+  return node;
+}
+function storedToken() {
+  try { return sessionStorage.getItem("kanalib-admin-token") || ""; } catch { return ""; }
+}
+function currentToken() {
+  return ($("admin-token").value || "").trim() || storedToken();
+}
+function saveToken() {
+  const value = $("admin-token").value.trim();
+  try {
+    if (value) sessionStorage.setItem("kanalib-admin-token", value);
+    else sessionStorage.removeItem("kanalib-admin-token");
+  } catch {}
+  flash(value ? "token 已保存在本标签页" : "token 已清除");
+  load();
+}
 async function api(path, options) {
-  const response = await fetch(path, options);
+  const options_ = Object.assign({}, options || {});
+  options_.headers = Object.assign({}, options_.headers || {});
+  const token = currentToken();
+  if (token) options_.headers["x-admin-token"] = token;
+  const response = await fetch(path, options_);
   const text = await response.text();
   let data;
   try { data = JSON.parse(text); } catch { data = { error: text }; }
-  if (!response.ok) throw new Error(data.error || `HTTP ${response.status}`);
+  if (!response.ok) {
+    if (response.status === 401) throw new Error("管理 token 缺失或无效");
+    if (response.status === 403) throw new Error(data.error || "来源地址不在白名单");
+    throw new Error(data.error || `HTTP ${response.status}`);
+  }
   return data;
 }
 async function post(path, body) {
@@ -849,38 +1017,78 @@ function renderStatus(status) {
 }
 function renderReview(items) {
   $("review-count").textContent = items.length ? `(${items.length})` : "";
-  $("review").innerHTML = items.length ? items.map((item) => `
-    <article class="card">
-      <a href="${esc(item.original)}" target="_blank" rel="noreferrer"><img loading="lazy" src="${esc(item.thumb || "")}" alt=""></a>
-      <div class="body">
-        <div><b>${esc(item.title || item.work_id)}</b></div>
-        <div class="meta">${esc(item.source || "")} · ${esc(item.author_name || "")} · ${esc(item.author_id || "")} · ${item.width}×${item.height} · score ${item.score ?? "—"}</div>
-        <div class="meta">${esc(item.reason || "")}</div>
-        <div class="tags">${item.tags.map(esc).join(" · ")}</div>
-        ${item.r18g ? '<div class="r18g">R-18G 终态拒绝</div>' : ""}
-      </div>
-      <div class="actions">
-        <button ${item.allowable ? "" : "disabled"} onclick="decide('${esc(item.id)}','allow')">放行</button>
-        <button class="danger" onclick="decide('${esc(item.id)}','reject')">拒绝</button>
-        <button onclick="recheck('${esc(item.id)}')">按规则重跑</button>
-        ${item.author_id ? `<button onclick="propose('add_user','${esc(item.author_id)}','review ${esc(item.id)}')">拉黑作者</button>` : ""}
-        ${item.tags[0] ? `<button onclick="propose('add_tag','${esc(item.tags[0])}','review ${esc(item.id)}')">拉黑首个标签</button>` : ""}
-      </div>
-    </article>`).join("") : '<div class="empty">审核队列为空</div>';
+  const root = $("review");
+  root.replaceChildren();
+  if (!items.length) {
+    root.append(element("div", { class: "empty", text: "审核队列为空" }));
+    return;
+  }
+  for (const item of items) {
+    const image = element("img", { loading: "lazy", alt: "" });
+    if (item.thumb) image.src = item.thumb;
+    const link = element("a", {
+      href: item.original || "#",
+      target: "_blank",
+      rel: "noreferrer",
+    }, [image]);
+    const body = element("div", { class: "body" }, [
+      element("div", {}, [element("b", { text: item.title || item.work_id || "" })]),
+      element("div", {
+        class: "meta",
+        text: `${item.source || ""} · ${item.author_name || ""} · ${item.author_id || ""} · ${item.width}×${item.height} · score ${item.score ?? "—"}`,
+      }),
+      element("div", { class: "meta", text: item.reason || "" }),
+      element("div", { class: "tags", text: (item.tags || []).join(" · ") }),
+    ]);
+    if (item.r18g) body.append(element("div", { class: "r18g", text: "R-18G 终态拒绝" }));
+    const actions = element("div", { class: "actions" });
+    const allow = element("button", { text: "放行", disabled: !item.allowable });
+    allow.addEventListener("click", () => decide(item.id, "allow"));
+    const reject = element("button", { class: "danger", text: "拒绝" });
+    reject.addEventListener("click", () => decide(item.id, "reject"));
+    const recheckButton = element("button", { text: "按规则重跑" });
+    recheckButton.addEventListener("click", () => recheck(item.id));
+    actions.append(allow, reject, recheckButton);
+    if (item.author_id) {
+      const banAuthor = element("button", { text: "拉黑作者" });
+      banAuthor.addEventListener("click", () => propose("add_user", item.author_id, `review ${item.id}`));
+      actions.append(banAuthor);
+    }
+    if (item.tags && item.tags.length) {
+      const banTag = element("button", { text: "拉黑首个标签" });
+      banTag.addEventListener("click", () => propose("add_tag", item.tags[0], `review ${item.id}`));
+      actions.append(banTag);
+    }
+    root.append(element("article", { class: "card" }, [link, body, actions]));
+  }
 }
 function renderProposals(items) {
-  $("proposals").innerHTML = items.length ? items.map((item) => `
-    <tr>
-      <td>${item.id}</td>
-      <td>${esc(item.kind)}</td>
-      <td>${esc(item.value || "")}</td>
-      <td>${esc(item.state)}</td>
-      <td>${esc(item.note || "")}${item.apply_error ? `<div class="error">${esc(item.apply_error)}</div>` : ""}</td>
-      <td class="row">
-        <button class="primary" onclick="previewProposal(${item.id})">预览</button>
-        <button class="danger" onclick="rejectProposal(${item.id})">驳回</button>
-      </td>
-    </tr>`).join("") : '<tr><td colspan="6" class="empty">没有待应用草稿</td></tr>';
+  const body = $("proposals");
+  body.replaceChildren();
+  if (!items.length) {
+    body.append(element("tr", {}, [
+      element("td", { colspan: "6", class: "empty", text: "没有待应用草稿" }),
+    ]));
+    return;
+  }
+  for (const item of items) {
+    const note = element("td", { text: item.note || "" });
+    if (item.apply_error) note.append(element("div", { class: "error", text: item.apply_error }));
+    const actions = element("td", { class: "row" });
+    const preview = element("button", { class: "primary", text: "预览" });
+    preview.addEventListener("click", () => previewProposal(item.id));
+    const reject = element("button", { class: "danger", text: "驳回" });
+    reject.addEventListener("click", () => rejectProposal(item.id));
+    actions.append(preview, reject);
+    body.append(element("tr", {}, [
+      element("td", { text: item.id }),
+      element("td", { text: item.kind }),
+      element("td", { text: item.value || "" }),
+      element("td", { text: item.state }),
+      note,
+      actions,
+    ]));
+  }
 }
 async function decide(id, action) {
   try { await post(`/admin/api/review/${id}/${action}`, { reviewer: "operator" }); flash(action === "allow" ? "已放行" : "已拒绝"); await load(); }
@@ -945,6 +1153,8 @@ $("proposal-form").addEventListener("submit", async (event) => {
   await propose($("kind").value, $("value").value, $("note").value);
   $("value").value = ""; $("note").value = "";
 });
+$("admin-token").value = storedToken();
+$("token-btn").addEventListener("click", saveToken);
 load();
 setInterval(load, 15000);
 </script>

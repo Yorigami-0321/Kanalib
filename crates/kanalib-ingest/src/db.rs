@@ -372,11 +372,23 @@ impl Db {
         url: &str,
         ext: Option<&str>,
     ) -> Result<()> {
+        self.persist_item_image(item_id, url, ext, true)
+    }
+
+    /// 记录图片 URL；`favorite` 只由真正代表收藏的来源置位。
+    pub fn persist_item_image(
+        &self,
+        item_id: &str,
+        url: &str,
+        ext: Option<&str>,
+        favorite: bool,
+    ) -> Result<()> {
         self.connection.execute(
             "UPDATE items
-                SET original_url=?2, ext=COALESCE(?3, ext), favorite=1
+                SET original_url=?2, ext=COALESCE(?3, ext),
+                    favorite=CASE WHEN ?4 THEN 1 ELSE favorite END
               WHERE id=?1",
-            params![item_id, url, ext],
+            params![item_id, url, ext, favorite],
         )?;
         Ok(())
     }

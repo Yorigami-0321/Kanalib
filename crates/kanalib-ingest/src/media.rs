@@ -98,17 +98,27 @@ async fn serve_original(
         }
     };
 
-    let mut file = match tokio::fs::File::open(&record.path).await {
+    serve_file_response(&record.path, &record.ext, method, &headers).await
+}
+
+/// 流式返回单个文件，支持单区间 Range；签名原图与管理端原图共用。
+pub(crate) async fn serve_file_response(
+    path: &Path,
+    extension: &str,
+    method: Method,
+    headers: &HeaderMap,
+) -> Response {
+    let mut file = match tokio::fs::File::open(path).await {
         Ok(file) => file,
         Err(error) => {
-            tracing::warn!(%error, path = %record.path.display(), "original file missing");
+            tracing::warn!(%error, path = %path.display(), "media file missing");
             return not_found();
         }
     };
     let size = match file.metadata().await {
         Ok(metadata) => metadata.len(),
         Err(error) => {
-            tracing::warn!(%error, "original metadata failed");
+            tracing::warn!(%error, "media metadata failed");
             return not_found();
         }
     };
@@ -118,7 +128,7 @@ async fn serve_original(
         .and_then(|value| value.to_str().ok())
         .map(|value| parse_range(value, size))
         .unwrap_or(RangeSpec::Full);
-    let content_type = content_type(&record.ext);
+    let content_type = content_type(extension);
 
     match range {
         RangeSpec::Unsatisfiable => {
@@ -137,7 +147,7 @@ async fn serve_original(
         RangeSpec::Partial { start, end } => {
             let length = end - start + 1;
             if let Err(error) = file.seek(SeekFrom::Start(start)).await {
-                tracing::warn!(%error, "original seek failed");
+                tracing::warn!(%error, "media seek failed");
                 return unavailable();
             }
             let body = if method == Method::HEAD {
@@ -185,6 +195,9 @@ fn live_original(db: &Db, item_id: &str) -> Result<Option<OriginalRecord>> {
     let Some(row) = db.item_row(item_id)? else {
         return Ok(None);
     };
+    if row.decision != "allow" {
+        return Ok(None);
+    }
     let Some(path) = row.original_path else {
         return Ok(None);
     };

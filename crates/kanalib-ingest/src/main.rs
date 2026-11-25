@@ -109,11 +109,18 @@ async fn run(args: Args, config: IngestConfig) -> Result<()> {
     let metrics = Arc::new(Metrics::default());
     let tagging_backend = match (&config.tagging.backend, &config.tagging.endpoint) {
         (Some(backend), Some(endpoint)) if backend == "http" => {
-            Some(Arc::new(HttpTaggingBackend::new(
-                endpoint.clone(),
-                Duration::from_secs(config.tagging.timeout_secs.max(1)),
-                2,
-            )?) as Arc<dyn TaggingBackend>)
+            let token = match &config.tagging.token_file {
+                Some(path) => Some(config::read_secret(path)?),
+                None => None,
+            };
+            Some(Arc::new(
+                HttpTaggingBackend::new(
+                    endpoint.clone(),
+                    Duration::from_secs(config.tagging.timeout_secs.max(1)),
+                    2,
+                )?
+                .with_token(token),
+            ) as Arc<dyn TaggingBackend>)
         }
         (Some(backend), _) => bail!("unsupported tagging backend {backend}"),
         _ => None,
@@ -228,11 +235,16 @@ async fn run(args: Args, config: IngestConfig) -> Result<()> {
             }
         }
 
-        match download::run_queue(
+        match download::run_queue_limited(
             &db,
             adapter.as_ref(),
             image_transport.as_ref(),
             &download_config,
+            if config.download.batch_items == 0 {
+                usize::MAX
+            } else {
+                config.download.batch_items
+            },
         )
         .await
         {
@@ -245,11 +257,12 @@ async fn run(args: Args, config: IngestConfig) -> Result<()> {
         }
 
         let active_rules = rules_state.current();
-        match pipeline::run_decisions(
+        match pipeline::run_decisions_with_concurrency(
             &db,
             &active_rules.config,
             tagging_backend.as_ref(),
             metrics.as_ref(),
+            config.tagging.concurrency.max(1),
         )
         .await
         {
@@ -510,12 +523,31 @@ async fn start_admin_server(
             "admin UI is bound to all interfaces; bind the EasyTier virtual IP in production"
         );
     }
+    let token = match &config.admin.token_file {
+        Some(path) => Some(config::read_secret(path)?),
+        None => None,
+    };
+    if token.is_none() && !bind.ip().is_loopback() {
+        bail!(
+            "admin.bind {bind} is not loopback; configure admin.token_file before exposing the admin API"
+        );
+    }
+    if token.is_some() {
+        info!("admin API token authentication enabled");
+    }
+    if !config.admin.allowed_ips.is_empty() {
+        info!(
+            count = config.admin.allowed_ips.len(),
+            "admin IP allowlist enabled"
+        );
+    }
     let state = AdminState::new(
         db_path.to_path_buf(),
         rules,
         config.service.rules_file.clone(),
         metrics,
-    );
+    )
+    .with_auth(token, config.admin.allowed_ips.clone());
     let router = admin::router(state);
     tokio::spawn(async move {
         loop {

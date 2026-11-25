@@ -126,10 +126,11 @@ pub async fn ingest_feed(db: &mut Db, adapter: &dyn SourceAdapter) -> Result<Ing
             }
             for page_index in 0..work.page_count.max(1) {
                 if let Ok(image) = adapter.resolve_image(&work, page_index).await {
-                    db.persist_bookmark_image(
+                    db.persist_item_image(
                         &item_id(adapter.id(), &work.external_id, page_index),
                         &image.url,
                         image.ext.as_deref(),
+                        false,
                     )?;
                 }
             }

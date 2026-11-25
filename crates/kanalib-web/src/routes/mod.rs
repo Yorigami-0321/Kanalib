@@ -9,6 +9,8 @@ use axum::{
     Router,
     body::Body,
     extract::{DefaultBodyLimit, Request, State},
+    http::{HeaderName, HeaderValue, header},
+    middleware::{self, Next},
     response::Response,
     routing::{get, post},
 };
@@ -19,6 +21,37 @@ use crate::{
     AppState,
     response::{internal, not_found},
 };
+
+const CSP: &str = "default-src 'self'; base-uri 'none'; object-src 'none'; \
+frame-ancestors 'none'; form-action 'none'; script-src 'self'; \
+style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self'";
+
+/// 反代之外的最后一道：HTML/JSON/媒体响应都带上基线安全头。
+async fn security_headers(request: Request, next: Next) -> Response {
+    let mut response = next.run(request).await;
+    let headers = response.headers_mut();
+    headers.insert(
+        HeaderName::from_static("x-frame-options"),
+        HeaderValue::from_static("DENY"),
+    );
+    headers.insert(
+        HeaderName::from_static("referrer-policy"),
+        HeaderValue::from_static("no-referrer"),
+    );
+    headers.insert(
+        header::STRICT_TRANSPORT_SECURITY,
+        HeaderValue::from_static("max-age=31536000"),
+    );
+    headers.insert(
+        HeaderName::from_static("content-security-policy"),
+        HeaderValue::from_static(CSP),
+    );
+    headers.insert(
+        HeaderName::from_static("x-content-type-options"),
+        HeaderValue::from_static("nosniff"),
+    );
+    response
+}
 
 pub fn public_router(state: AppState) -> Router {
     Router::new()
@@ -38,6 +71,7 @@ pub fn public_router(state: AppState) -> Router {
         .route("/api/tags", get(read::tags))
         .route("/media/{tier}/{file}", get(crate::media::serve_media))
         .fallback(public_fallback)
+        .layer(middleware::from_fn(security_headers))
         .with_state(state)
 }
 
@@ -50,9 +84,11 @@ pub fn private_router(state: AppState) -> Router {
         .route("/api/desktop/pull", get(desktop::pull))
         .route("/api/desktop/push", post(desktop::push))
         .route("/api/desktop/upload", post(desktop::upload))
+        .route("/api/desktop/uploads/{file}", get(desktop::serve_upload))
         .route("/api/items/{id}/original", get(original::original))
         .layer(DefaultBodyLimit::max(64 * 1024 * 1024))
         .fallback(private_fallback)
+        .layer(middleware::from_fn(security_headers))
         .with_state(state)
 }
 

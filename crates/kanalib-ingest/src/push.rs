@@ -5,6 +5,7 @@
 use std::{fmt, future::Future, pin::Pin, time::Duration};
 
 use anyhow::{Context, Result, bail};
+use futures::{StreamExt, stream};
 use hmac::{Hmac, Mac};
 use kanalib_wall_model::{
     IngestBatch, IngestBatchItem, IngestDelete, IngestDeleteItem, IngestItem, IngestTag,
@@ -456,79 +457,118 @@ async fn sync_thumbs<T: PushTransport>(
 ) -> Result<(), String> {
     let batch: IngestBatch =
         serde_json::from_slice(payload).map_err(|error| format!("invalid allow batch: {error}"))?;
-    for entry in batch.items {
-        for (tier, column) in [("t256", "thumb_256"), ("t512", "thumb_512")] {
-            let path: Option<String> = db
-                .connection()
-                .query_row(
-                    &format!("SELECT {column} FROM items WHERE id = ?1"),
-                    [&entry.item.id],
-                    |row| row.get(0),
-                )
-                .optional()
-                .map_err(|error| format!("thumbnail lookup failed: {error}"))?
-                .flatten();
-            let Some(path) = path else {
-                continue;
+    // 逐条并发上传；失败的条目仍会让批次重试，但不会再串行等待整批往返。
+    let results = stream::iter(batch.items)
+        .map(|entry| sync_entry_thumbs(db, config, transport, entry, now_ts))
+        .buffer_unordered(4)
+        .collect::<Vec<_>>()
+        .await;
+    if let Some(error) = results.into_iter().find_map(Result::err) {
+        return Err(error);
+    }
+    Ok(())
+}
+
+async fn sync_entry_thumbs<T: PushTransport>(
+    db: &Db,
+    config: &PushConfig,
+    transport: &T,
+    entry: IngestBatchItem,
+    now_ts: i64,
+) -> Result<(), String> {
+    let sharp = entry.item.sharp.unwrap_or(0);
+    let mut tiers = vec![("t256", "thumb_256"), ("t512", "thumb_512")];
+    if sharp >= 1024 {
+        tiers.push(("t1024", "thumb_512"));
+    }
+    if sharp >= 2048 {
+        tiers.push(("t2048", "thumb_512"));
+    }
+    for (tier, column) in tiers {
+        let path: Option<String> = db
+            .connection()
+            .query_row(
+                &format!("SELECT {column} FROM items WHERE id = ?1"),
+                [&entry.item.id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|error| format!("thumbnail lookup failed: {error}"))?
+            .flatten();
+        let Some(path) = path else {
+            continue;
+        };
+        let jpeg_path = if tier == "t1024" || tier == "t2048" {
+            thumbnail_for_tier(std::path::Path::new(&path), tier)
+        } else {
+            std::path::PathBuf::from(&path)
+        };
+        let avif_path = jpeg_path.with_extension("avif");
+        let mut uploaded = false;
+        for (format, candidate) in [
+            (ThumbFormat::Avif, avif_path),
+            (ThumbFormat::Jpeg, jpeg_path),
+        ] {
+            let bytes = match std::fs::read(&candidate) {
+                Ok(bytes) => bytes,
+                Err(error) => {
+                    if format == ThumbFormat::Jpeg {
+                        tracing::warn!(path = %candidate.display(), %error, "thumbnail file missing; skipped");
+                    }
+                    continue;
+                }
             };
-            let jpeg_path = std::path::PathBuf::from(&path);
-            let avif_path = jpeg_path.with_extension("avif");
-            let mut uploaded = false;
-            for (format, candidate) in [
-                (ThumbFormat::Avif, avif_path),
-                (ThumbFormat::Jpeg, jpeg_path),
-            ] {
-                let bytes = match std::fs::read(&candidate) {
-                    Ok(bytes) => bytes,
-                    Err(error) => {
-                        if format == ThumbFormat::Jpeg {
-                            tracing::warn!(path = %candidate.display(), %error, "thumbnail file missing; skipped");
-                        }
-                        continue;
-                    }
-                };
-                let request = thumb_request(config, &entry.item.id, tier, format, bytes, now_ts);
-                match transport.send(request).await {
-                    Ok(response) if (200..300).contains(&response.status) => uploaded = true,
-                    Ok(response) if format == ThumbFormat::Avif => {
-                        tracing::warn!(
-                            tier,
-                            item = %entry.item.id,
-                            status = response.status,
-                            "AVIF thumbnail rejected; keeping JPEG fallback"
-                        );
-                    }
-                    Ok(response) => {
-                        return Err(format!(
-                            "thumbnail {tier} {} for {} returned status {}",
-                            format.extension(),
-                            entry.item.id,
-                            response.status
-                        ));
-                    }
-                    Err(error) if format == ThumbFormat::Avif => {
-                        tracing::warn!(
-                            tier,
-                            item = %entry.item.id,
-                            %error,
-                            "AVIF thumbnail upload failed; keeping JPEG fallback"
-                        );
-                    }
-                    Err(error) => {
-                        return Err(format!(
-                            "thumbnail {tier} {} for {} failed: {error}",
-                            format.extension(),
-                            entry.item.id
-                        ));
-                    }
+            let request = thumb_request(config, &entry.item.id, tier, format, bytes, now_ts);
+            match transport.send(request).await {
+                Ok(response) if (200..300).contains(&response.status) => uploaded = true,
+                Ok(response) if format == ThumbFormat::Avif => {
+                    tracing::warn!(
+                        tier,
+                        item = %entry.item.id,
+                        status = response.status,
+                        "AVIF thumbnail rejected; keeping JPEG fallback"
+                    );
+                }
+                Ok(response) => {
+                    return Err(format!(
+                        "thumbnail {tier} {} for {} returned status {}",
+                        format.extension(),
+                        entry.item.id,
+                        response.status
+                    ));
+                }
+                Err(error) if format == ThumbFormat::Avif => {
+                    tracing::warn!(
+                        tier,
+                        item = %entry.item.id,
+                        %error,
+                        "AVIF thumbnail upload failed; keeping JPEG fallback"
+                    );
+                }
+                Err(error) => {
+                    return Err(format!(
+                        "thumbnail {tier} {} for {} failed: {error}",
+                        format.extension(),
+                        entry.item.id
+                    ));
                 }
             }
-            if !uploaded {
-                tracing::warn!(path, "thumbnail files missing; skipped");
-            }
+        }
+        if !uploaded {
+            tracing::warn!(path, "thumbnail files missing; skipped");
         }
     }
     Ok(())
+}
+
+fn thumbnail_for_tier(jpeg_path: &std::path::Path, tier: &str) -> std::path::PathBuf {
+    match (
+        jpeg_path.parent().and_then(|parent| parent.parent()),
+        jpeg_path.file_name(),
+    ) {
+        (Some(root), Some(file)) => root.join(tier).join(file),
+        _ => jpeg_path.to_path_buf(),
+    }
 }
 
 pub fn classify_status(status: u16, attempts: u32, config: &PushConfig) -> Disposition {
@@ -798,8 +838,15 @@ pub fn build_allow_batch(
         if thumb_256.is_none() && thumb_512.is_none() {
             bail!("item {item_id} has no thumbnails, refusing to push");
         }
-        // 前端只认 0/1024/2048；512 会被丢弃并导致详情页试探不存在的档位。
-        let sharp = Some(0);
+        // 前端只认 0/1024/2048；按原图短边声明实际生成过的最大档。
+        let max_side = width.max(height);
+        let sharp = Some(if max_side >= 2048 {
+            2048
+        } else if max_side >= 1024 {
+            1024
+        } else {
+            0
+        });
         items.push(IngestBatchItem {
             revision: revision.max(1),
             decision: "allow".to_string(),

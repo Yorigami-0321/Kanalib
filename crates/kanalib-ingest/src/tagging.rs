@@ -6,7 +6,6 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use serde::Deserialize;
-use tokio::task;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TaggingResult {
@@ -25,9 +24,10 @@ pub trait TaggingBackend: Send + Sync {
 
 #[derive(Debug)]
 pub struct HttpTaggingBackend {
+    client: reqwest::Client,
     endpoint: String,
-    timeout: Duration,
     attempts: usize,
+    token: Option<String>,
 }
 
 impl HttpTaggingBackend {
@@ -36,11 +36,22 @@ impl HttpTaggingBackend {
         if endpoint.trim().is_empty() {
             bail!("tagging endpoint is empty");
         }
+        let client = reqwest::Client::builder()
+            .timeout(timeout)
+            .build()
+            .context("build tagging client")?;
         Ok(Self {
+            client,
             endpoint,
-            timeout,
             attempts: attempts.clamp(1, 3),
+            token: None,
         })
+    }
+
+    /// 打标服务的共享 token；与 tagger 的 `--token-file` 相同。
+    pub fn with_token(mut self, token: Option<String>) -> Self {
+        self.token = token.filter(|value| !value.trim().is_empty());
+        self
     }
 }
 
@@ -68,63 +79,58 @@ impl HttpTaggingBackend {
         item_id: &str,
         image_path: &std::path::Path,
     ) -> Result<TaggingResult, anyhow::Error> {
-        let path = image_path.to_path_buf();
-        let item_id = item_id.to_string();
-        let endpoint = self.endpoint.clone();
-        let timeout = self.timeout;
-        let attempts = self.attempts;
-        task::spawn_blocking(move || {
-            let bytes = std::fs::read(&path)
-                .with_context(|| format!("reading image {}", path.display()))?;
-            let mut last_error = None;
-            for _ in 0..attempts {
-                let form = reqwest::blocking::multipart::Form::new().part(
-                    "image",
-                    reqwest::blocking::multipart::Part::bytes(bytes.clone()).file_name(
-                        path.file_name()
-                            .and_then(|name| name.to_str())
-                            .unwrap_or("image")
-                            .to_string(),
-                    ),
-                );
-                let blocking_client = reqwest::blocking::Client::builder()
-                    .timeout(timeout)
-                    .build()
-                    .context("build blocking tagging client")?;
-                let request = blocking_client
-                    .post(&endpoint)
-                    .header("x-kanalib-item-id", &item_id)
-                    .multipart(form);
-                match request.send() {
-                    Ok(response) => {
-                        let status = response.status();
-                        let body = response.bytes().context("read tagging response")?;
-                        if !status.is_success() {
-                            last_error = Some(anyhow::anyhow!(
-                                "tagging endpoint returned {}",
-                                status.as_u16()
-                            ));
-                        } else {
-                            let parsed: TagResponse =
-                                serde_json::from_slice(&body).context("parse tagging response")?;
-                            let tags = parsed
-                                .tags
-                                .into_iter()
-                                .map(|tag| tag.trim().to_string())
-                                .filter(|tag| !tag.is_empty())
-                                .collect::<Vec<_>>();
-                            if tags.is_empty() {
-                                return Err(anyhow::anyhow!("tagging endpoint returned no tags"));
-                            }
-                            return Ok(TaggingResult { tags });
-                        }
-                    }
-                    Err(error) => last_error = Some(anyhow::Error::from(error)),
-                }
+        let bytes = tokio::fs::read(image_path)
+            .await
+            .with_context(|| format!("reading image {}", image_path.display()))?;
+        let file_name = image_path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("image")
+            .to_string();
+        let mut last_error = None;
+        for _ in 0..self.attempts {
+            let form = reqwest::multipart::Form::new().part(
+                "image",
+                reqwest::multipart::Part::bytes(bytes.clone()).file_name(file_name.clone()),
+            );
+            let mut request = self
+                .client
+                .post(&self.endpoint)
+                .header("x-kanalib-item-id", item_id)
+                .multipart(form);
+            if let Some(token) = &self.token {
+                request = request.header("x-tagger-token", token);
             }
-            Err(last_error.unwrap_or_else(|| anyhow::anyhow!("tagging backend failed")))
-        })
-        .await
-        .context("tagging task failed")?
+            match request.send().await {
+                Ok(response) => {
+                    let status = response.status();
+                    let body = response.bytes().await.context("read tagging response")?;
+                    if !status.is_success() {
+                        let error =
+                            anyhow::anyhow!("tagging endpoint returned {}", status.as_u16());
+                        // 4xx 是请求/配置问题，重试只会重复等待；立刻失败让上层转 review。
+                        if status.is_client_error() {
+                            return Err(error);
+                        }
+                        last_error = Some(error);
+                    } else {
+                        let parsed: TagResponse =
+                            serde_json::from_slice(&body).context("parse tagging response")?;
+                        let tags = parsed
+                            .tags
+                            .into_iter()
+                            .map(|tag| tag.trim().to_string())
+                            .filter(|tag| !tag.is_empty())
+                            .collect::<Vec<_>>();
+                        if tags.is_empty() {
+                            return Err(anyhow::anyhow!("tagging endpoint returned no tags"));
+                        }
+                        return Ok(TaggingResult { tags });
+                    }
+                }
+                Err(error) => last_error = Some(anyhow::Error::from(error)),
+            }
+        }
+        Err(last_error.unwrap_or_else(|| anyhow::anyhow!("tagging backend failed")))
     }
 }

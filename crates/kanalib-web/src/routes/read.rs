@@ -108,7 +108,7 @@ impl ItemQuery {
         }
     }
 
-    fn cursor(&self, sort: &ItemSort) -> Result<Option<Cursor>, ApiError> {
+    fn cursor(&self, sort: &ItemSort, filter: &ItemFilter) -> Result<Option<Cursor>, ApiError> {
         let Some(raw) = self
             .cursor
             .as_deref()
@@ -124,14 +124,20 @@ impl ItemQuery {
                 "cursor does not match sort or order",
             ));
         }
+        if cursor.fingerprint != filter.fingerprint(sort.seed) {
+            return Err(ApiError::invalid_cursor(
+                "cursor does not match filters or seed",
+            ));
+        }
         Ok(Some(cursor))
     }
 
     fn page(&self) -> Result<(u32, u32, ItemSort, Option<Cursor>), ApiError> {
         let sort = self.sort();
+        let filter = self.filter();
         let limit = self.limit()?;
         let offset = self.offset()?;
-        let cursor = self.cursor(&sort)?;
+        let cursor = self.cursor(&sort, &filter)?;
         Ok((limit, offset, sort, cursor))
     }
 }
@@ -242,7 +248,6 @@ pub async fn health(State(state): State<AppState>) -> Response {
                 "ok": true,
                 "db": true,
                 "media_root": media_ok,
-                "version": state.version,
             }),
         )
     } else {
@@ -252,7 +257,6 @@ pub async fn health(State(state): State<AppState>) -> Response {
                 "ok": false,
                 "db": false,
                 "media_root": media_ok,
-                "version": state.version,
             }),
         )
     }

@@ -101,6 +101,7 @@ export const WallCard = memo(function WallCard({
   const [failed, setFailed] = useState(false);
   const [loaded, setLoaded] = useState(false);
   const imgRef = useRef<HTMLImageElement | null>(null);
+  const failedSrc = useRef<string | null>(null);
   /** 聚焦换图窗口：锐利档解码完成前继续显示旧画面（holdSrc），避免基线 JPEG 半解码白带。 */
   const [spotReady, setSpotReady] = useState(false);
   const [holdSrc, setHoldSrc] = useState<string | null>(null);
@@ -109,6 +110,7 @@ export const WallCard = memo(function WallCard({
   // 锐利档先离屏 decode()，整帧解码完才替换 src：data/t1024 是基线 JPEG，
   // 直接换 src 会把未解码的行渲染成白色（聚焦下半白带，反馈文档 §5）。
   useEffect(() => {
+    failedSrc.current = null;
     setTierIndex(0);
     setFailed(false);
     if (!spotlight) {
@@ -146,9 +148,11 @@ export const WallCard = memo(function WallCard({
 
   // updater 必须是纯函数（StrictMode 下会跑两次），降级判定放在外面。
   const handleError = useCallback(() => {
+    if (failedSrc.current === sources[tierIndex]) return;
+    failedSrc.current = sources[tierIndex] ?? null;
     if (tierIndex + 1 < sources.length) setTierIndex(tierIndex + 1);
     else setFailed(true);
-  }, [sources.length, tierIndex]);
+  }, [sources, tierIndex]);
 
   const handleContextMenu = useCallback(
     (event: React.MouseEvent<HTMLDivElement>) => {

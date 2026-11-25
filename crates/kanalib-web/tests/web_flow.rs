@@ -302,7 +302,7 @@ async fn media_full_fallback_headers() {
     assert_eq!(header_text(&headers, header::ACCEPT_RANGES), "bytes");
     assert_eq!(
         header_text(&headers, header::CACHE_CONTROL),
-        "public, max-age=31536000, immutable"
+        "public, max-age=3600"
     );
     assert_eq!(header_text(&headers, header::CONTENT_TYPE), "image/jpeg");
     assert!(header_text(&headers, header::ETAG).starts_with("W/\""));
@@ -658,6 +658,53 @@ async fn w2_rejects_bad_cursor_limit_and_sort_switch() {
     assert_eq!(status, StatusCode::OK);
     let cursor = body["next"].as_str().expect("next cursor");
     let uri = format!("/api/items?limit=1&sort=name&cursor={cursor}");
+    let (status, body) = get_json(&fixture.public, &uri).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(body["error"]["code"], "invalid_cursor");
+}
+
+#[tokio::test]
+async fn w2_random_seed_splits_order_and_cursor_is_pinned_to_filter() {
+    let fixture = extra_fixture();
+    let ids = |body: &Value| -> Vec<String> {
+        body["items"]
+            .as_array()
+            .expect("items")
+            .iter()
+            .map(|item| item["id"].as_str().expect("id").to_string())
+            .collect()
+    };
+
+    let (status, seed_one) =
+        get_json(&fixture.public, "/api/items?limit=32&sort=random&seed=1").await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, seed_one_again) =
+        get_json(&fixture.public, "/api/items?limit=32&sort=random&seed=1").await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, seed_two) =
+        get_json(&fixture.public, "/api/items?limit=32&sort=random&seed=2").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        ids(&seed_one),
+        ids(&seed_one_again),
+        "same seed must be stable"
+    );
+    assert_ne!(
+        ids(&seed_one),
+        ids(&seed_two),
+        "different seed must reorder"
+    );
+
+    let (status, body) = get_json(&fixture.public, "/api/items?limit=7&sort=random&seed=1").await;
+    assert_eq!(status, StatusCode::OK);
+    let cursor = body["next"].as_str().expect("next cursor");
+
+    let uri = format!("/api/items?limit=7&sort=random&seed=2&cursor={cursor}");
+    let (status, body) = get_json(&fixture.public, &uri).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(body["error"]["code"], "invalid_cursor");
+
+    let uri = format!("/api/items?limit=7&sort=random&seed=1&rating=G&cursor={cursor}");
     let (status, body) = get_json(&fixture.public, &uri).await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
     assert_eq!(body["error"]["code"], "invalid_cursor");

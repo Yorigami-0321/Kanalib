@@ -3,7 +3,7 @@
 use axum::{
     Json,
     body::Body,
-    extract::{Query, State},
+    extract::{Path as AxumPath, Query, State},
     http::{HeaderMap, Request, StatusCode, header},
     response::Response,
 };
@@ -22,6 +22,8 @@ const DEFAULT_PULL_LIMIT: u32 = 100;
 const MAX_PULL_LIMIT: u32 = 200;
 const MAX_PUSH_ITEMS: usize = 1_000;
 const MAX_EXT_LEN: usize = 8;
+const MAX_UPLOAD_FILES: usize = 5_000;
+const MAX_UPLOAD_BYTES: u64 = 8 * 1024 * 1024 * 1024;
 
 #[derive(Clone, Copy)]
 enum Capability {
@@ -363,6 +365,7 @@ pub async fn upload(
         cleanup_part(&part_path).await;
         return internal();
     }
+    enforce_upload_quota(&root).await;
 
     json_response(
         StatusCode::OK,
@@ -372,6 +375,80 @@ pub async fn upload(
             bytes: written,
         },
     )
+}
+
+/// 上传文件目前不入库，但要能被授权客户端读回，否则只是磁盘死区。
+pub async fn serve_upload(
+    State(state): State<AppState>,
+    AxumPath(file): AxumPath<String>,
+    headers: HeaderMap,
+) -> Response {
+    if let Err(response) = authorize(&state, &headers, Capability::Pull).await {
+        return *response;
+    }
+    let Some((stem, ext)) = file.rsplit_once('.') else {
+        return not_found();
+    };
+    if !valid_item_id(stem) {
+        return not_found();
+    }
+    let content_type = match ext.to_ascii_lowercase().as_str() {
+        "jpg" | "jpeg" => "image/jpeg",
+        "png" => "image/png",
+        "gif" => "image/gif",
+        "webp" => "image/webp",
+        "avif" => "image/avif",
+        _ => return not_found(),
+    };
+    let path = state.media_root.as_ref().join("uploads").join(&file);
+    let bytes = match tokio::fs::read(&path).await {
+        Ok(bytes) => bytes,
+        Err(_) => return not_found(),
+    };
+    let mut response = Response::new(Body::from(bytes));
+    let response_headers = response.headers_mut();
+    response_headers.insert(
+        header::CONTENT_TYPE,
+        header::HeaderValue::from_static(content_type),
+    );
+    response_headers.insert(
+        header::CACHE_CONTROL,
+        header::HeaderValue::from_static("no-store"),
+    );
+    response
+}
+
+/// 超出文件数或总字节上限时按 mtime 从旧到新清理。
+async fn enforce_upload_quota(root: &std::path::Path) {
+    let mut files = Vec::new();
+    let mut total = 0u64;
+    let Ok(mut dir) = tokio::fs::read_dir(root).await else {
+        return;
+    };
+    while let Ok(Some(entry)) = dir.next_entry().await {
+        let Ok(metadata) = entry.metadata().await else {
+            continue;
+        };
+        if !metadata.is_file() {
+            continue;
+        }
+        total = total.saturating_add(metadata.len());
+        files.push((metadata.modified().ok(), entry.path(), metadata.len()));
+    }
+    if files.len() <= MAX_UPLOAD_FILES && total <= MAX_UPLOAD_BYTES {
+        return;
+    }
+    files.sort_by_key(|(modified, _, _)| *modified);
+    let mut count = files.len();
+    for (_, path, size) in files {
+        if count <= MAX_UPLOAD_FILES && total <= MAX_UPLOAD_BYTES {
+            break;
+        }
+        if tokio::fs::remove_file(&path).await.is_ok() {
+            count -= 1;
+            total = total.saturating_sub(size);
+        }
+    }
 }
 
 async fn authorize(

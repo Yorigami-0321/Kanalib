@@ -707,7 +707,7 @@ action = "block"        # block | review
       "width": 1200, "height": 1600, "name": "001.jpg",
       "rating": "S", "star": 4, "favorite": true,
       "tags": [{"name": "tag", "category": "general", "score": 0.92}],
-      "mtime": 1700000000, "group": "原创", "orig": "jpg", "sharp": 512,
+      "mtime": 1700000000, "group": "原创", "orig": "jpg", "sharp": 1024,
       "work_id": "work-1", "page_count": 2, "page": 0,
       "author": "作者", "author_id": "author-1", "title": "作品标题"
     }
@@ -790,10 +790,12 @@ user_agent = "Kanalib/0.1 (Pixiv ingest)"
 concurrency = 3
 retry_max = 5
 timeout_secs = 60
+batch_items = 60          # 每轮下载上限；0 = 不限制
 
 [tagging]
 backend = "http"
 endpoint = "http://127.0.0.1:8791/tag"
+token_file = "/etc/kanalib/tagger-token"
 concurrency = 2
 timeout_secs = 1800
 
@@ -804,6 +806,12 @@ batch_size = 100
 max_attempts = 5
 backoff_base_secs = 5
 backoff_max_secs = 600
+
+[admin]
+enabled = true
+bind = "10.126.126.3:8792"
+token_file = "/etc/kanalib/admin-token"   # 非回环绑定必填
+# allowed_ips = ["10.126.126.2"]
 
 [media]
 signing_key_file = "/etc/kanalib/media-signing-key"
