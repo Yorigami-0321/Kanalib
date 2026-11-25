@@ -47,6 +47,28 @@ impl PushConfig {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ThumbFormat {
+    Jpeg,
+    Avif,
+}
+
+impl ThumbFormat {
+    pub fn extension(self) -> &'static str {
+        match self {
+            Self::Jpeg => "jpg",
+            Self::Avif => "avif",
+        }
+    }
+
+    pub fn content_type(self) -> &'static str {
+        match self {
+            Self::Jpeg => "image/jpeg",
+            Self::Avif => "image/avif",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PushKind {
     Allow,
     Delete,
@@ -449,28 +471,60 @@ async fn sync_thumbs<T: PushTransport>(
             let Some(path) = path else {
                 continue;
             };
-            let bytes = match std::fs::read(&path) {
-                Ok(bytes) => bytes,
-                Err(error) => {
-                    tracing::warn!(path, %error, "thumbnail file missing; skipped");
-                    continue;
+            let jpeg_path = std::path::PathBuf::from(&path);
+            let avif_path = jpeg_path.with_extension("avif");
+            let mut uploaded = false;
+            for (format, candidate) in [
+                (ThumbFormat::Avif, avif_path),
+                (ThumbFormat::Jpeg, jpeg_path),
+            ] {
+                let bytes = match std::fs::read(&candidate) {
+                    Ok(bytes) => bytes,
+                    Err(error) => {
+                        if format == ThumbFormat::Jpeg {
+                            tracing::warn!(path = %candidate.display(), %error, "thumbnail file missing; skipped");
+                        }
+                        continue;
+                    }
+                };
+                let request = thumb_request(config, &entry.item.id, tier, format, bytes, now_ts);
+                match transport.send(request).await {
+                    Ok(response) if (200..300).contains(&response.status) => uploaded = true,
+                    Ok(response) if format == ThumbFormat::Avif => {
+                        tracing::warn!(
+                            tier,
+                            item = %entry.item.id,
+                            status = response.status,
+                            "AVIF thumbnail rejected; keeping JPEG fallback"
+                        );
+                    }
+                    Ok(response) => {
+                        return Err(format!(
+                            "thumbnail {tier} {} for {} returned status {}",
+                            format.extension(),
+                            entry.item.id,
+                            response.status
+                        ));
+                    }
+                    Err(error) if format == ThumbFormat::Avif => {
+                        tracing::warn!(
+                            tier,
+                            item = %entry.item.id,
+                            %error,
+                            "AVIF thumbnail upload failed; keeping JPEG fallback"
+                        );
+                    }
+                    Err(error) => {
+                        return Err(format!(
+                            "thumbnail {tier} {} for {} failed: {error}",
+                            format.extension(),
+                            entry.item.id
+                        ));
+                    }
                 }
-            };
-            let request = thumb_request(config, &entry.item.id, tier, bytes, now_ts);
-            match transport.send(request).await {
-                Ok(response) if (200..300).contains(&response.status) => {}
-                Ok(response) => {
-                    return Err(format!(
-                        "thumbnail {tier} for {} returned status {}",
-                        entry.item.id, response.status
-                    ));
-                }
-                Err(error) => {
-                    return Err(format!(
-                        "thumbnail {tier} for {} failed: {error}",
-                        entry.item.id
-                    ));
-                }
+            }
+            if !uploaded {
+                tracing::warn!(path, "thumbnail files missing; skipped");
             }
         }
     }
@@ -614,10 +668,11 @@ pub fn thumb_request(
     config: &PushConfig,
     item_id: &str,
     tier: &str,
+    format: ThumbFormat,
     body: Vec<u8>,
     now_ts: i64,
 ) -> PushRequest {
-    let file = format!("{item_id}.jpg");
+    let file = format!("{item_id}.{}", format.extension());
     let path = format!("{THUMB_PREFIX}/{tier}/{file}");
     let payload = signature_payload(&path, "", now_ts, &body);
     PushRequest {
@@ -628,7 +683,10 @@ pub fn thumb_request(
                 "x-kanalib-signature".to_string(),
                 hmac_sha256_hex(config.secret.as_bytes(), payload.as_bytes()),
             ),
-            ("content-type".to_string(), "image/jpeg".to_string()),
+            (
+                "content-type".to_string(),
+                format.content_type().to_string(),
+            ),
         ],
         body,
     }

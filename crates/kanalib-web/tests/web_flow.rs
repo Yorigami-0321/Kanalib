@@ -315,6 +315,82 @@ async fn media_full_fallback_headers() {
 }
 
 #[tokio::test]
+async fn media_negotiates_avif_and_keeps_jpeg_fallback() {
+    let fixture = fixture();
+    let avif = b"\x00\x00\x00\x18ftypavif\x00\x00\x00\x00avifmif1".to_vec();
+    std::fs::write(
+        fixture
+            ._dir
+            .path()
+            .join(format!("media/t256/{}.avif", db::SAMPLE_ITEM_A)),
+        &avif,
+    )
+    .expect("write avif");
+    let uri = format!("/media/t256/{}.jpg", db::SAMPLE_ITEM_A);
+
+    let (status, headers, body) = send(
+        &fixture.public,
+        Method::GET,
+        &uri,
+        &[("accept", "image/avif,image/webp,*/*;q=0.8")],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body, avif);
+    assert_eq!(header_text(&headers, header::CONTENT_TYPE), "image/avif");
+    assert_eq!(header_text(&headers, header::VARY), "Accept");
+
+    let (status, headers, body) = send(
+        &fixture.public,
+        Method::GET,
+        &uri,
+        &[("accept", "image/jpeg")],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body, b"0123456789abcdef");
+    assert_eq!(header_text(&headers, header::CONTENT_TYPE), "image/jpeg");
+
+    let (status, headers, body) = send(
+        &fixture.public,
+        Method::GET,
+        &uri,
+        &[("accept", "image/avif;q=0,image/jpeg")],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body, b"0123456789abcdef");
+    assert_eq!(header_text(&headers, header::CONTENT_TYPE), "image/jpeg");
+
+    let (status, headers, body) = send(
+        &fixture.public,
+        Method::GET,
+        &uri,
+        &[("accept", "image/avif;q=0,*/*;q=1")],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body, b"0123456789abcdef");
+    assert_eq!(header_text(&headers, header::CONTENT_TYPE), "image/jpeg");
+
+    let (status, headers, body) = send(
+        &fixture.public,
+        Method::GET,
+        &uri,
+        &[("accept", "IMAGE/AVIF;Q=1")],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body, avif);
+    assert_eq!(header_text(&headers, header::CONTENT_TYPE), "image/avif");
+
+    let (status, headers, body) = send(&fixture.public, Method::GET, &uri, &[]).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body, b"0123456789abcdef");
+    assert_eq!(header_text(&headers, header::CONTENT_TYPE), "image/jpeg");
+}
+
+#[tokio::test]
 async fn media_range_and_etag() {
     let fixture = fixture();
     let uri = format!("/media/t512/{}.jpg", db::SAMPLE_ITEM_A);
@@ -1099,7 +1175,12 @@ fn signed_delete_headers(body: &[u8], batch_id: &str, timestamp: i64) -> Vec<(St
     )
 }
 
-fn signed_thumb_headers(path: &str, body: &[u8], timestamp: i64) -> Vec<(String, String)> {
+fn signed_thumb_headers(
+    path: &str,
+    body: &[u8],
+    timestamp: i64,
+    content_type: &str,
+) -> Vec<(String, String)> {
     let payload = format!("POST\n{path}\n\n{timestamp}\n{}", crypto::sha256_hex(body));
     vec![
         ("x-kanalib-timestamp".to_string(), timestamp.to_string()),
@@ -1107,7 +1188,7 @@ fn signed_thumb_headers(path: &str, body: &[u8], timestamp: i64) -> Vec<(String,
             "x-kanalib-signature".to_string(),
             crypto::hmac_sha256_hex(INGEST_SECRET.as_bytes(), payload.as_bytes()).expect("sign"),
         ),
-        ("content-type".to_string(), "image/jpeg".to_string()),
+        ("content-type".to_string(), content_type.to_string()),
     ]
 }
 
@@ -1267,7 +1348,7 @@ async fn ingest_thumb_upload_writes_media_and_rejects_bad_signature() {
     let fixture = write_fixture();
     let path = format!("/internal/ingest/thumb/t256/{NEW_ITEM}.jpg");
     let body = b"\xff\xd8\xff\xe0fake-jpeg-payload".to_vec();
-    let headers = signed_thumb_headers(&path, &body, crypto::unix_now());
+    let headers = signed_thumb_headers(&path, &body, crypto::unix_now(), "image/jpeg");
 
     let (status, value) = post_signed(&fixture.private, &path, &headers, &body).await;
     assert_eq!(status, StatusCode::OK, "{value}");
@@ -1292,6 +1373,32 @@ async fn ingest_thumb_upload_writes_media_and_rejects_bad_signature() {
     )
     .await;
     assert_eq!(status, StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn ingest_thumb_upload_accepts_avif_and_rejects_format_mismatch() {
+    let fixture = write_fixture();
+    let path = format!("/internal/ingest/thumb/t512/{NEW_ITEM}.avif");
+    let body = b"\x00\x00\x00\x18ftypavif\x00\x00\x00\x00avifmif1".to_vec();
+    let headers = signed_thumb_headers(&path, &body, crypto::unix_now(), "image/avif");
+
+    let (status, value) = post_signed(&fixture.private, &path, &headers, &body).await;
+    assert_eq!(status, StatusCode::OK, "{value}");
+    let stored = fixture
+        ._dir
+        .path()
+        .join(format!("media/t512/{NEW_ITEM}.avif"));
+    assert_eq!(std::fs::read(&stored).expect("avif thumb"), body);
+
+    let jpeg_path = format!("/internal/ingest/thumb/t512/{NEW_ITEM}.jpg");
+    let mismatched = signed_thumb_headers(&jpeg_path, &body, crypto::unix_now(), "image/avif");
+    let (status, _) = post_signed(&fixture.private, &jpeg_path, &mismatched, &body).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    let invalid = b"\x00\x00\x00\x18ftypheic\x00\x00\x00\x00heicmif1".to_vec();
+    let invalid_headers = signed_thumb_headers(&path, &invalid, crypto::unix_now(), "image/avif");
+    let (status, _) = post_signed(&fixture.private, &path, &invalid_headers, &invalid).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
 }
 
 #[tokio::test]

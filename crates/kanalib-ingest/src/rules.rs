@@ -450,16 +450,6 @@ pub fn evaluate(input: DecisionInput<'_>) -> Result<RuleOutcome> {
         return Ok(RuleOutcome::block("tag blacklist", matched));
     }
 
-    let content_count = content_tag_count(config, subject);
-    if content_count < config.rules.tag_budget.min_tags {
-        return Ok(RuleOutcome {
-            decision: Decision::Review,
-            reason: "tag budget short".to_string(),
-            matched,
-            needs_tagging: true,
-        });
-    }
-
     if config.rules.dedup.enabled && duplicate_exists(input.db, subject)? {
         matched.push("dedup:sha1".to_string());
         return Ok(policy_outcome(
@@ -492,6 +482,16 @@ pub fn evaluate(input: DecisionInput<'_>) -> Result<RuleOutcome> {
             "empty image",
             matched,
         ));
+    }
+
+    let content_count = content_tag_count(config, subject);
+    if content_count < config.rules.tag_budget.min_tags {
+        return Ok(RuleOutcome {
+            decision: Decision::Review,
+            reason: "tag budget short".to_string(),
+            matched,
+            needs_tagging: true,
+        });
     }
     matched.clear();
     Ok(RuleOutcome::allow("all rules passed"))
@@ -685,7 +685,7 @@ watch = ["SAME"]
     fn watch_goes_to_review_not_block() {
         let rules = config(&[], &["tentacle"]);
         let mut subject = subject();
-        subject.tags.push(("Tentacle".to_string(), None));
+        subject.tags = vec![("Tentacle".to_string(), None)];
         let db = crate::db::Db::open_in_memory().unwrap();
         let outcome = evaluate(DecisionInput {
             db: &db,
@@ -696,6 +696,7 @@ watch = ["SAME"]
         assert_eq!(outcome.decision, Decision::Review);
         assert_eq!(outcome.reason, "watch:tentacle");
         assert_eq!(outcome.matched, vec!["watch:tentacle"]);
+        assert!(!outcome.needs_tagging);
     }
 
     #[test]
@@ -865,6 +866,7 @@ ignore = ["Original"]
         let mut subject = subject();
         subject.item_id = "subject".to_string();
         subject.sha1 = Some("same".to_string());
+        subject.tags.truncate(1);
 
         let mut rules = config(&[], &[]);
         let block = evaluate(DecisionInput {
@@ -875,6 +877,7 @@ ignore = ["Original"]
         .unwrap();
         assert_eq!(block.decision, Decision::Block);
         assert_eq!(block.reason, "duplicate hash");
+        assert!(!block.needs_tagging);
 
         rules.rules.dedup.on_conflict = "review".to_string();
         let review = evaluate(DecisionInput {
@@ -884,7 +887,9 @@ ignore = ["Original"]
         })
         .unwrap();
         assert_eq!(review.decision, Decision::Review);
+        assert_eq!(review.reason, "duplicate hash");
         assert_eq!(review.matched, vec!["dedup:sha1"]);
+        assert!(!review.needs_tagging);
     }
 
     #[test]
@@ -892,17 +897,16 @@ ignore = ["Original"]
         let db = crate::db::Db::open_in_memory().unwrap();
         let mut subject = subject();
         subject.width = 100;
+        subject.tags.truncate(1);
         let mut rules = config(&[], &[]);
-        assert_eq!(
-            evaluate(DecisionInput {
-                db: &db,
-                config: &rules,
-                subject: &subject,
-            })
-            .unwrap()
-            .decision,
-            Decision::Review
-        );
+        let review = evaluate(DecisionInput {
+            db: &db,
+            config: &rules,
+            subject: &subject,
+        })
+        .unwrap();
+        assert_eq!(review.decision, Decision::Review);
+        assert!(!review.needs_tagging);
 
         rules.rules.size.on_fail = "block".to_string();
         let outcome = evaluate(DecisionInput {
@@ -913,6 +917,7 @@ ignore = ["Original"]
         .unwrap();
         assert_eq!(outcome.decision, Decision::Block);
         assert_eq!(outcome.reason, "size below minimum");
+        assert!(!outcome.needs_tagging);
     }
 
     #[test]

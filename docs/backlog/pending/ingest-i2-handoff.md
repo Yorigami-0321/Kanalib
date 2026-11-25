@@ -20,6 +20,18 @@
 | I5：box 部署 + 云端网页联调 | 95% | public 路线与打标后端端到端跑通；剩余管理口 ACL 复核、断网重试、重启恢复、桌面原图直连 |
 | F-089 整体 | ~95% | I0–I4 完成；I5 主链路已实机验证，review 已清零 |
 
+## 1.1 2026-11-25 补标与缩略图优化
+
+本节改动已写入代码与测试，**尚未部署到 box/云端**。
+
+1. **终态规则先于补标**：`rules::evaluate` 先跑来源/作者/R-18G/黑名单/去重/观察词/尺寸；这些规则已能返回 `block/review` 时不再调用 tagger。内容标签足量且全规则通过本来就直接 `allow`，本轮补了“配置了 tagger 但调用数仍为 0”的端到端回归。
+2. **缩略图保清晰度与格式**：原图仍按来源字节保存；t256/t512 改为 Lanczos3、不放大、q90 JPEG + q90 AVIF（speed 8）。AVIF 失败只告警并保留 JPEG，不阻断下载。
+3. **旧条目回填**：启动时 `download::backfill_thumbnails` 仅处理 `allow` 条目，检查两档双格式及 `.<id>.ready` 完成标记；齐全时跳过，缺失时从原图重编码。已 `allow` 的条目回填后 `revision+1`，下一轮 HMAC 推送把 AVIF/JPEG 都补到云端。
+4. **web 协商**：private 上传接受 `.jpg/.avif` 并校验 magic bytes；public 的稳定 `.jpg` URL 按 `Accept` 返回 AVIF 或 JPEG，带 `Vary: Accept`，ETag 包含实际格式。显式 `image/avif;q=0` 排除优先于通配符接受；显式 `.avif` URL 只返回 AVIF，前端无需改。AVIF 推送失败时继续 JPEG，兼容旧 web 或滚动升级。
+5. **验证**：`kanalib-ingest` 新增规则跳过、双格式生成、回填 revision、双格式推送测试；`kanalib-web` 新增 AVIF 上传、格式错配拒绝、`Accept`/`q=0`/JPEG 回退测试。完整门禁结果见文末当前工作区。
+
+格式调研与 512 档实测见 [../ingest-service.md](../ingest-service.md#54-缩略图格式选型与实测)：AVIF 比 q90 JPEG 小约 32–36%，SSIM/PSNR 更高；speed 8 与 speed 6 的 SSIM 差小于 0.00004。选择 AVIF 而不是 HEIC，是因为随包 LGPL FFmpeg 有 AVIF muxer、无 HEIF muxer，且 HEIF 浏览器支持明显更窄。
+
 ## 2. 本轮完成
 
 1. **规则开关真正分流**：`dedup.on_conflict` 支持 `block|review`，`size.on_fail` 支持 `review|block`；不再只校验不生效。位置：`rules.rs` 的 `policy_outcome()`。
@@ -196,14 +208,15 @@ $cargo = Join-Path $env:USERPROFILE ".cargo\bin\cargo.exe"
 - `rules.config_hash_check = false` 是显式逃生口：允许同版本覆盖快照，但会告警；正常流程必须升 `rules.version`。
 - 预览与真正应用共用 `plan_edit()`；不要在预览里另写一套编辑逻辑，否则 diff 会和落盘结果不一致。
 - 规则文件是多行数组时 diff 才有意义；单行超长数组会表现为整行替换。
-- 工作区已清理；提交前仍按 `git status` 逐项确认。
+- 工作区可能有并行改动；提交前按 `git status` 与文件逐项确认，不整批 `git add`。
 
 ## 8. 当前工作区
 
 - 分支：`main`，与 `origin/main` 同步
 - public 来源提交：`da3df61`（adapter）、`2600307`（`limit` 控制）
-- 状态：无登录路线与打标后端已部署到 box/云端；规则 `2026-11-23.3`，10 allow / 4 block / 0 review
-- 工作区已清理（2026-11-23），无未跟踪残留
+- 状态：无登录路线与打标后端已部署到 box/云端；2026-11-25 的补标跳过、AVIF/JPEG 双格式与旧条目回填已代码/测试完成，尚未部署
+- 验证：`kanalib-ingest` 94 passed；`kanalib-web` 33 passed / 4 ignored（既有手工压测）；`cargo fmt --check` 与 `cargo clippy --all-targets -- -D warnings` 通过
+- 本次优化未提交；工作区另有并行规则改动与既有文档修改，提交时必须按文件筛选
 - 约束：继续遵循“不推送，除非用户明确要求”。
 
 ## 9. 快速接手命令
@@ -212,8 +225,9 @@ $cargo = Join-Path $env:USERPROFILE ".cargo\bin\cargo.exe"
 # 测试 + 静态检查
 $cargo = Join-Path $env:USERPROFILE ".cargo\bin\cargo.exe"
 & $cargo test -p kanalib-ingest
-& $cargo clippy -p kanalib-ingest --all-targets -- -D warnings
-& $cargo fmt -p kanalib-ingest -- --check
+& $cargo test -p kanalib-web
+& $cargo clippy -p kanalib-ingest -p kanalib-web --all-targets -- -D warnings
+& $cargo fmt -p kanalib-ingest -p kanalib-web -- --check
 
 # 只跑决策端到端
 & $cargo test -p kanalib-ingest --test decision_flow

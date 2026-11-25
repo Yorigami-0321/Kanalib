@@ -20,7 +20,7 @@
 | DTO | 新增 `crates/kanalib-wall-model`，网页后端、入库服务、静态发布器共用；网页端只认这一种形状 |
 | 前端 | 新增 `ApiSource`，用 `VITE_WALL_SOURCE=api` 切换；`StaticSource` 保留 |
 | 搜索 | api 模式服务端搜索 + keyset 游标；static 模式保留浏览器侧子集 |
-| 媒体 | 缩略图同源 `/media/{t256,t512,t1024,t2048}/<id>.jpg`；原图默认不落云，按需签名回源 box |
+| 媒体 | 缩略图同源 `/media/{t256,t512,t1024,t2048}/<id>.jpg`；URL 保持 `.jpg`，服务端按 `Accept` 协商 AVIF/JPEG；原图默认不落云，按需签名回源 box |
 | 写入 | **public listener 只读**；内部 ingest（HMAC）与桌面设备（设备令牌）只挂在 private listener（EasyTier 私网） |
 | 网络 | 公网 HTTPS 只读；写接口/桌面桥接/原图入口走 EasyTier 虚拟网；公网写路由 404 |
 | 兼容 | 动态 `/api/index` 的 `schema` 仍为 **1**，能力放 `capabilities`；新增字段全部可选 |
@@ -351,6 +351,7 @@ pub struct Capabilities {
 |---|---|---|
 | POST | `/internal/ingest/batch` | box 推送 allow 批次；HMAC + 时间戳 + 幂等键 |
 | POST | `/internal/ingest/delete` | box 通知下架/删除；只置 `deleted=1` |
+| POST | `/internal/ingest/thumb/{tier}/{id}.{jpg,avif}` | box 上传缩略图；HMAC + 时间戳；扩展名、magic bytes 与 MIME 必须一致 |
 | GET | `/api/items/{id}/original` | 302 到 box 签名 URL；只对 EasyTier 私网可用 |
 
 约束：
@@ -461,11 +462,14 @@ limit     1–200，默认 60
 
 ### 6.1 缩略图
 
-1. 校验 `tier` 白名单与 `file` 形状：`^[0-9a-f]{40,64}\.jpg$`。
-2. 用 id 反查 DB（`items`），不拼接用户输入路径。
-3. `canonicalize` 目标，校验以媒体根为前缀（防 `..`/符号链接逃逸）。
-4. 不存在时按档位回退：`t256→t512`、`t1024→t512`、`t2048→t1024→t512`。
-5. 支持 `Range`（单区间）与 `HEAD`。
+1. 校验 `tier` 白名单与 `file` 形状：`^[0-9a-f]{40,64}\.(jpg|avif)$`。
+2. `.jpg` URL 是稳定契约：客户端声明 `Accept: image/avif` 且同档 AVIF 存在时返回 AVIF，否则返回 JPEG；显式 `image/avif;q=0` 排除优先于 `*/*` 接受，显式 `.avif` URL 只返回 AVIF。响应带 `Content-Type` 与 `Vary: Accept`，ETag 包含实际格式。
+3. 用 id 反查 DB（`items`），不拼接用户输入路径。
+4. `canonicalize` 目标，校验以媒体根为前缀（防 `..`/符号链接逃逸）。
+5. 不存在时按档位回退：`t256→t512`、`t1024→t512`、`t2048→t1024→t512`；回退只使用客户端可接受的格式。
+6. 支持 `Range`（单区间）与 `HEAD`。
+
+box 为每个新条目同时生成并上传 t256/t512 的 AVIF 与 JPEG。AVIF 是公网传输的高效路径，JPEG 保留给不支持 AVIF 的客户端和旧条目；静态导出仍沿用原 JPEG 契约。若以后接入 CDN，缓存键必须遵守 `Vary: Accept`，不能把 AVIF 响应按 `.jpg` 无差别缓存。
 
 ### 6.2 原图回源
 

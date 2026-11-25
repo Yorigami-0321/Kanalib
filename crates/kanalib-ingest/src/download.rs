@@ -4,7 +4,11 @@ use std::{io::Write, path::PathBuf, pin::Pin};
 
 use anyhow::{Context, Result, bail};
 use futures::StreamExt;
-use image::{ImageFormat, ImageReader};
+use image::{
+    ExtendedColorType, ImageEncoder, ImageReader,
+    codecs::{avif::AvifEncoder, jpeg::JpegEncoder},
+    imageops::FilterType,
+};
 use sha1::Digest;
 use sha1::Sha1;
 use tracing::{info, warn};
@@ -69,6 +73,95 @@ pub fn recover(db: &Db, media_dir: &std::path::Path) -> Result<usize> {
     let changed = db.recover_running_downloads()?;
     let _ = media_dir;
     Ok(changed)
+}
+
+fn thumbnail_pair_ready(media_dir: &std::path::Path, item_id: &str, size: u32) -> bool {
+    let dir = media_dir.join("thumbs").join(format!("t{size}"));
+    ["jpg", "avif"]
+        .iter()
+        .all(|extension| dir.join(format!("{item_id}.{extension}")).is_file())
+        && dir.join(format!(".{item_id}.ready")).is_file()
+}
+
+fn mark_thumbnail_ready(media_dir: &std::path::Path, item_id: &str, size: u32) -> Result<()> {
+    let dir = media_dir.join("thumbs").join(format!("t{size}"));
+    if !["jpg", "avif"]
+        .iter()
+        .all(|extension| dir.join(format!("{item_id}.{extension}")).is_file())
+    {
+        return Ok(());
+    }
+    std::fs::write(dir.join(format!(".{item_id}.ready")), b"ready")?;
+    Ok(())
+}
+
+pub fn backfill_thumbnails(db: &Db, media_dir: &std::path::Path) -> Result<usize> {
+    let mut statement = db.connection().prepare(
+        "SELECT id, original_path FROM items
+          WHERE original_path IS NOT NULL AND decision='allow'
+          ORDER BY id",
+    )?;
+    let items = statement
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    drop(statement);
+
+    let mut refreshed = 0;
+    for (item_id, original_path) in items {
+        let complete = [256, 512]
+            .iter()
+            .all(|size| thumbnail_pair_ready(media_dir, &item_id, *size));
+        if complete {
+            continue;
+        }
+        let bytes = match std::fs::read(&original_path) {
+            Ok(bytes) => bytes,
+            Err(error) => {
+                warn!(item = %item_id, path = %original_path, %error, "thumbnail backfill source missing");
+                continue;
+            }
+        };
+        let decoded = match ImageReader::new(std::io::Cursor::new(&bytes))
+            .with_guessed_format()
+            .map_err(anyhow::Error::from)
+            .and_then(|reader| reader.decode().map_err(anyhow::Error::from))
+        {
+            Ok(decoded) => decoded,
+            Err(error) => {
+                warn!(item = %item_id, %error, "thumbnail backfill decode failed");
+                continue;
+            }
+        };
+        let thumb_256 = match write_thumbnail(media_dir, &item_id, &decoded, 256) {
+            Ok(path) => path,
+            Err(error) => {
+                warn!(item = %item_id, %error, "t256 thumbnail backfill failed");
+                continue;
+            }
+        };
+        let thumb_512 = match write_thumbnail(media_dir, &item_id, &decoded, 512) {
+            Ok(path) => path,
+            Err(error) => {
+                warn!(item = %item_id, %error, "t512 thumbnail backfill failed");
+                continue;
+            }
+        };
+        db.connection().execute(
+            "UPDATE items SET thumb_256=?2, thumb_512=?3, revision=revision+1, updated_at=?4
+              WHERE id=?1 AND decision='allow'",
+            rusqlite::params![item_id, thumb_256, thumb_512, now()],
+        )?;
+        for size in [256, 512] {
+            if let Err(error) = mark_thumbnail_ready(media_dir, &item_id, size) {
+                warn!(item = %item_id, size, %error, "thumbnail ready marker failed");
+            }
+        }
+        refreshed += 1;
+        info!(item = %item_id, "thumbnails refreshed");
+    }
+    Ok(refreshed)
 }
 
 pub async fn run_queue(
@@ -300,8 +393,8 @@ fn finalize_item(
         .decode()
         .context("stored image cannot be decoded")?;
     let (width, height) = (decoder.width(), decoder.height());
-    let thumb_256 = write_thumbnail(&config.media_dir, item, &decoder, 256)?;
-    let thumb_512 = write_thumbnail(&config.media_dir, item, &decoder, 512)?;
+    let thumb_256 = write_thumbnail(&config.media_dir, &item.id, &decoder, 256)?;
+    let thumb_512 = write_thumbnail(&config.media_dir, &item.id, &decoder, 512)?;
     let sha1 = Sha1::digest(&bytes);
     let sha1 = sha1
         .iter()
@@ -319,24 +412,63 @@ fn finalize_item(
         },
     )?;
     db.set_thumbnails(&item.id, &thumb_256, &thumb_512)?;
+    for size in [256, 512] {
+        if let Err(error) = mark_thumbnail_ready(&config.media_dir, &item.id, size) {
+            warn!(item = %item.id, size, %error, "thumbnail ready marker failed");
+        }
+    }
     info!(item = %item.id, width, height, bytes = bytes.len(), "download completed");
     Ok(())
 }
 
+const THUMBNAIL_JPEG_QUALITY: u8 = 90;
+const THUMBNAIL_AVIF_QUALITY: u8 = 90;
+const THUMBNAIL_AVIF_SPEED: u8 = 8;
+
 fn write_thumbnail(
     media_dir: &std::path::Path,
-    item: &ItemRow,
+    item_id: &str,
     image: &image::DynamicImage,
     size: u32,
 ) -> Result<String> {
     let tier = format!("t{size}");
     let dir = media_dir.join("thumbs").join(&tier);
     std::fs::create_dir_all(&dir)?;
-    // 网页按 `/media/{tier}/<id>.jpg` 提供缩略图；这里直接生成同名 JPEG。
-    let path = dir.join(format!("{}.jpg", item.id));
-    let thumbnail = image.thumbnail(size, size);
-    thumbnail.save_with_format(&path, ImageFormat::Jpeg)?;
-    Ok(path.to_string_lossy().into_owned())
+    let thumbnail = if image.width() <= size && image.height() <= size {
+        image.clone()
+    } else {
+        image.resize(size, size, FilterType::Lanczos3)
+    };
+
+    let jpeg_path = dir.join(format!("{item_id}.jpg"));
+    let rgb = thumbnail.to_rgb8();
+    let mut jpeg = Vec::new();
+    JpegEncoder::new_with_quality(&mut jpeg, THUMBNAIL_JPEG_QUALITY).encode_image(&rgb)?;
+    std::fs::write(&jpeg_path, jpeg)?;
+
+    let avif_path = dir.join(format!("{item_id}.avif"));
+    match encode_avif(&thumbnail) {
+        Ok(bytes) => {
+            if let Err(error) = std::fs::write(&avif_path, bytes) {
+                warn!(%error, item = %item_id, tier, "AVIF thumbnail write failed; keeping JPEG");
+            }
+        }
+        Err(error) => warn!(%error, item = %item_id, tier, "AVIF thumbnail failed; keeping JPEG"),
+    }
+    Ok(jpeg_path.to_string_lossy().into_owned())
+}
+
+fn encode_avif(image: &image::DynamicImage) -> Result<Vec<u8>> {
+    let rgba = image.to_rgba8();
+    let mut bytes = Vec::new();
+    AvifEncoder::new_with_speed_quality(&mut bytes, THUMBNAIL_AVIF_SPEED, THUMBNAIL_AVIF_QUALITY)
+        .write_image(
+        rgba.as_raw(),
+        rgba.width(),
+        rgba.height(),
+        ExtendedColorType::Rgba8,
+    )?;
+    Ok(bytes)
 }
 
 async fn handle_source_error(db: &Db, item: &ItemRow, error: &SourceError) -> Result<()> {
@@ -358,4 +490,59 @@ async fn find_work(db: &Db, adapter: &dyn SourceAdapter, item: &ItemRow) -> Resu
         .work_external_id(&item.work_id)?
         .ok_or_else(|| anyhow::anyhow!("work {} missing for item {}", item.work_id, item.id))?;
     Ok(adapter.fetch_work(&external_id).await?)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use image::RgbaImage;
+    use tempfile::TempDir;
+
+    #[test]
+    fn thumbnail_writes_avif_and_high_quality_jpeg_fallback() {
+        let dir = TempDir::new().unwrap();
+        let source = image::DynamicImage::ImageRgba8(RgbaImage::from_fn(1024, 512, |x, y| {
+            image::Rgba([(x % 256) as u8, (y % 256) as u8, ((x + y) % 256) as u8, 255])
+        }));
+
+        let jpeg_path =
+            write_thumbnail(dir.path(), "a".repeat(40).as_str(), &source, 256).expect("thumbnail");
+        let jpeg_path = std::path::Path::new(&jpeg_path);
+        let avif_path = jpeg_path.with_extension("avif");
+        let jpeg = std::fs::read(jpeg_path).expect("jpeg");
+        let avif = std::fs::read(&avif_path).expect("avif");
+
+        assert!(jpeg.starts_with(&[0xFF, 0xD8, 0xFF]));
+        assert!(avif.len() > 12 && &avif[4..8] == b"ftyp");
+        assert!(avif.windows(4).any(|brand| brand == b"avif"));
+        let decoded = ImageReader::new(std::io::Cursor::new(jpeg))
+            .with_guessed_format()
+            .unwrap()
+            .decode()
+            .unwrap();
+        assert_eq!((decoded.width(), decoded.height()), (256, 128));
+
+        let ispe = avif.windows(4).position(|value| value == b"ispe").unwrap();
+        let width = u32::from_be_bytes(avif[ispe + 8..ispe + 12].try_into().unwrap());
+        let height = u32::from_be_bytes(avif[ispe + 12..ispe + 16].try_into().unwrap());
+        assert_eq!((width, height), (256, 128));
+    }
+
+    #[test]
+    fn thumbnail_does_not_upscale_small_sources() {
+        let dir = TempDir::new().unwrap();
+        let source = image::DynamicImage::ImageRgba8(RgbaImage::from_pixel(
+            32,
+            16,
+            image::Rgba([1, 2, 3, 255]),
+        ));
+        let jpeg_path =
+            write_thumbnail(dir.path(), "b".repeat(40).as_str(), &source, 256).expect("thumbnail");
+        let decoded = ImageReader::new(std::io::Cursor::new(std::fs::read(jpeg_path).unwrap()))
+            .with_guessed_format()
+            .unwrap()
+            .decode()
+            .unwrap();
+        assert_eq!((decoded.width(), decoded.height()), (32, 16));
+    }
 }

@@ -123,9 +123,11 @@ async fn run(args: Args, config: IngestConfig) -> Result<()> {
         info!(batch_id, found, "push batch replay requested");
     }
     let recovered = download::recover(&db, &media_dir)?;
+    let backfilled = download::backfill_thumbnails(&db, &media_dir)?;
     info!(
         schema = db::SCHEMA_VERSION,
         recovered,
+        backfilled,
         db = %db_path.display(),
         source = %source_id,
         "database ready"

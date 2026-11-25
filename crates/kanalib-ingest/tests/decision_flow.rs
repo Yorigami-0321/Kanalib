@@ -340,6 +340,82 @@ async fn chain_decides_allow_block_and_review_with_matching_audits() {
 }
 
 #[tokio::test]
+async fn direct_decisions_never_call_tagger() {
+    let dir = TempDir::new().unwrap();
+    let mut db = Db::open_in_memory().unwrap();
+    let pages = vec![
+        work(
+            "direct-clean",
+            "author-a",
+            Rating::All,
+            Some(0),
+            &[],
+            &["art", "sky", "sea"],
+        ),
+        work(
+            "direct-watch",
+            "author-b",
+            Rating::All,
+            Some(0),
+            &[],
+            &["tentative"],
+        ),
+        work(
+            "direct-blocked-tag",
+            "author-d",
+            Rating::All,
+            Some(0),
+            &[],
+            &["guro"],
+        ),
+        work(
+            "direct-blocked-author",
+            "blocked-author",
+            Rating::All,
+            Some(0),
+            &[],
+            &["art"],
+        ),
+    ];
+    ingest_and_download(&mut db, &pages, dir.path())
+        .await
+        .unwrap();
+    let config = rules::load_str(
+        r#"
+[rules]
+version = "direct-rules"
+[rules.blacklist]
+users = ["blocked-author"]
+tags = ["guro"]
+watch = ["tentative"]
+[rules.tag_budget]
+min_tags = 3
+"#,
+    )
+    .unwrap()
+    .config;
+    let (endpoint, calls) = start_tagger(
+        200,
+        HashMap::new(),
+        vec!["bird".to_string(), "cat".to_string(), "dog".to_string()],
+    )
+    .await;
+    let backend: Arc<dyn TaggingBackend> =
+        Arc::new(HttpTaggingBackend::new(endpoint, Duration::from_secs(5), 2).unwrap());
+
+    let report = pipeline::run_decisions(&db, &config, Some(&backend), &metrics())
+        .await
+        .unwrap();
+    assert_eq!(report.decided, 4);
+    assert_eq!(report.allowed, 1);
+    assert_eq!(report.blocked, 2);
+    assert_eq!(report.reviewed, 1);
+    assert_eq!(report.tagged, 0);
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+    assert_audits_match_items(&db);
+}
+
+#[tokio::test]
 async fn short_tags_are_tagged_once_then_rechecked() {
     let dir = TempDir::new().unwrap();
     let mut db = Db::open_in_memory().unwrap();

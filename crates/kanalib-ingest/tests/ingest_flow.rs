@@ -207,6 +207,61 @@ async fn downloading_bookmarks_preserves_page_order_and_creates_thumbnails() {
 }
 
 #[tokio::test]
+async fn thumbnail_backfill_upgrades_existing_allow_items() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut db = Db::open_in_memory().unwrap();
+    let mut adapter = MockSource::new("mock");
+    adapter.bookmark_pages.push(vec![work_page("backfill")]);
+    ingest::ingest_bookmarks(&mut db, &adapter, "user")
+        .await
+        .unwrap();
+    let id = item_id("mock", "backfill", 0);
+    db.persist_bookmark_image(&id, "mock://backfill", Some("png"))
+        .unwrap();
+    let transport = Transport {
+        bytes: png_bytes(),
+        interrupted: Arc::new(Mutex::new(false)),
+        ranges: Arc::new(Mutex::new(Vec::new())),
+    };
+    download::run_queue(&db, &adapter, &transport, &config(&dir))
+        .await
+        .unwrap();
+    db.connection()
+        .execute(
+            "UPDATE items SET decision='allow', pushed_revision=revision WHERE id=?1",
+            [&id],
+        )
+        .unwrap();
+    let before: i64 = db
+        .connection()
+        .query_row("SELECT revision FROM items WHERE id=?1", [&id], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    for tier in ["t256", "t512"] {
+        std::fs::remove_file(dir.path().join(format!("thumbs/{tier}/{id}.avif"))).unwrap();
+    }
+
+    assert_eq!(download::backfill_thumbnails(&db, dir.path()).unwrap(), 1);
+    for tier in ["t256", "t512"] {
+        assert!(dir.path().join(format!("thumbs/{tier}/{id}.jpg")).is_file());
+        assert!(
+            dir.path()
+                .join(format!("thumbs/{tier}/{id}.avif"))
+                .is_file()
+        );
+    }
+    let after: i64 = db
+        .connection()
+        .query_row("SELECT revision FROM items WHERE id=?1", [&id], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert_eq!(after, before + 1);
+    assert_eq!(download::backfill_thumbnails(&db, dir.path()).unwrap(), 0);
+}
+
+#[tokio::test]
 async fn interrupted_download_resumes_from_partial_bytes() {
     let dir = tempfile::tempdir().unwrap();
     let mut db = Db::open_in_memory().unwrap();

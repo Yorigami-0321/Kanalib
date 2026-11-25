@@ -9,7 +9,9 @@
 >
 > 代码现状与本文档的差距见 **§17 落地审计**（按文件列出）；已完成项已在表中标注，未完成项以 [`pending/ingest-i2-handoff.md`](pending/ingest-i2-handoff.md) 为准。
 >
-> 状态：**I2 代码已落地**（规则层/补标/review/决策/管理页/指标，`086cfcb`）；**I5 box 部署与网页联调待实机**。本文件定职责、契约、数据模型与验收。
+> 状态：**I2 代码已落地**（规则层/补标/review/决策/管理页/指标，`086cfcb`）；**I5 box 部署与网页联调已实机跑通**。本文件定职责、契约、数据模型与验收。
+>
+> 2026-11-25 优化：无需补标即可终态判定的条目不调用打标服务；缩略图改为 Lanczos3 + q90 AVIF/q90 JPEG 双格式，公网按 `Accept` 协商。代码与测试已落地，尚未部署到 box/云端。
 
 ## 0. 一句话
 
@@ -81,18 +83,15 @@ Scheduler
          ├─ 多页并发
          └─ ugoira → GIF
               ▼
-         Tagger
-           ├─ sidecar 或 HTTP 模型
-           ├─ 超时 / 重试 / 批处理
-           └─ 失败 → review
-                ▼
-           RuleEngine
-             ├─ 来源开关 / 作者黑名单
-             ├─ R-18G 硬拦（x_restrict / 标签 / restriction_attributes）
-             ├─ 标签黑名单（原名 + 译名，归一化精确匹配）
-             ├─ 标签数 < 阈值 → 回 Tagger 补标签 → 再跑一次黑名单
-             ├─ 重复哈希（直接丢）/ 观察词（转 review）/ 尺寸（review 兜底）
-             └─ allow / block / review
+         RuleEngine（先跑无需补标的规则）
+           ├─ 来源开关 / 作者黑名单
+           ├─ R-18G 硬拦（x_restrict / 标签 / restriction_attributes）
+           ├─ 标签黑名单（原名 + 译名，归一化精确匹配）
+           ├─ 重复哈希 / 观察词 / 尺寸
+           ├─ 已能终态判定 → 直接落库，不调用打标
+           └─ 内容标签数 < 阈值 → Tagger 补标签一次 → 合并后复判
+                  ▼
+             allow / block / review
                   ▼
              ReviewQueue（人工）
                   ▼
@@ -387,12 +386,37 @@ queued ──► running ──► done
 4. 多页作品并发下载，但受 `ImageSemaphore` 限制；单页失败不影响其他页。
 5. 部分成功先入库，缺页进队列；管理页显示「3/5 页」。
 6. 下载完成才算 `done`；缩略图生成失败不回滚原图，但条目进 `review`。
+7. 原图按来源字节保留，不转码，确保打标与原图回源清晰度；t256/t512 用 Lanczos3 缩放，不放大，同时生成 q90 AVIF（speed 8）与 q90 JPEG。AVIF 编码/写盘失败时保留 JPEG 并告警，不阻断下载。
 
 ### 5.3 动图
 
 - 下载 ugoira zip → 校验帧清单 → 逐帧解码 → 合成无限循环 GIF。
 - 帧数上限 500；超限截断并在管理页标注。
 - 首帧作为缩略图；GIF 作为原图回源文件。
+
+### 5.4 缩略图格式选型与实测
+
+选 **AVIF**，不直接选 HEIC/HEIF：
+
+- AVIF 属 HEIF 家族但使用免版税 AV1；MDN 的浏览器格式指南将 AVIF/WebP 列为比 JPEG/PNG 更高效的现代格式。HEIF/HEIC 的浏览器支持长期主要集中在 Safari，Chrome/Firefox 支持很差。
+- 本机随包 LGPL FFmpeg 实测有 `avif` muxer 与多个 AV1 编码器，没有 `heif` muxer；Rust 侧使用 `image 0.25` 的 `AvifEncoder`（ravif），不引入 FFmpeg 进程或 GPL 编码器。
+- 原图不转码：打标端继续接收来源原图，原图回源也不损失质量。高效格式只用于公网缩略图传输。
+- 启动时仅回填已 `allow` 且缺少 AVIF/JPEG 的旧条目；两档双格式与 `.<id>.ready` 标记齐全时跳过，避免文件已写、DB 更新前崩溃导致永远不重推。回填后 `revision+1`，下一轮推送把双格式缩略图补到云端。AVIF 上传被旧 web 拒绝或网络失败时告警并继续 JPEG，不阻断整批。
+
+2026-11-25 本机 Windows / 16 逻辑核实测，尺寸为缩放后的 512 长边；耗时只计编码，不含解码与 Lanczos3 缩放：
+
+| 样本 | 格式 | 字节 | SSIM All | PSNR avg | 编码耗时 |
+|---|---|---:|---:|---:|---:|
+| 4K 插画 | JPEG q75（旧默认） | 27,341 | 0.967328 | 39.437 dB | 3 ms |
+| 4K 插画 | JPEG q90 | 46,825 | 0.981217 | 43.126 dB | 4 ms |
+| 4K 插画 | AVIF q90 / speed 8 | 29,777 | 0.987681 | 45.245 dB | 562 ms |
+| 1550×2297 照片 | JPEG q75（旧默认） | 41,802 | 0.961831 | 36.945 dB | 5 ms |
+| 1550×2297 照片 | JPEG q90 | 68,686 | 0.980486 | 41.649 dB | 5 ms |
+| 1550×2297 照片 | AVIF q90 / speed 8 | 46,376 | 0.989767 | 44.654 dB | 577 ms |
+
+AVIF 比 q90 JPEG 小约 32–36%，SSIM/PSNR 反而更高。speed 6 与 speed 8 的 SSIM 差小于 0.00004，但 speed 8 快约 25–30%，因此选 speed 8。代价是 AVIF 编码比 JPEG 慢；box 2c2g 上仍需部署后复测吞吐。双格式会让本地/云端缩略图存储略增，但公网支持 AVIF 的浏览器传输更小，旧客户端仍有 JPEG 回退。
+
+调研来源：[FFmpeg Formats — AVIF muxer](https://ffmpeg.org/ffmpeg-formats.html#avif)、[MDN Image file type and format guide](https://developer.mozilla.org/en-US/docs/Web/Media/Formats/Image_types)、[Can I use — HEIF/HEIC](https://caniuse.com/heif)。
 
 ## 6. 打标
 
@@ -418,7 +442,7 @@ queued ──► running ──► done
 | 情况 | 决策 |
 |---|---|
 | 模型返回空标签 | `review`（可配置为 `block`） |
-| 补标后标签数仍 < `min_tags` | 照常判定；若黑名单无命中则 `allow`，只记录 `tag_budget_short_total` |
+| 补标后标签数仍 < `min_tags` | `review`；不再二次补标，记录 `tag_budget_short_total` |
 | 超时/连接失败 | `review` |
 | 图片损坏/无法解码 | `review` |
 | 规则引擎异常 | `review` |
@@ -458,18 +482,19 @@ queued ──► running ──► done
 2. 作者在黑名单                   → block
 3. R-18G（三路任一命中）           → block，终态
 4. 标签黑名单（来源标签）          → block
-5. 参与判定的标签数 < 阈值         → 打标模型补标签 → 合并 → 回到第 4 步一次
-6. 重复哈希                        → block（保留最早）
-7. 命中观察词表                    → review（不拦截，标记原因）
-8. 尺寸/字节不达标                 → review
-9. 以上全过                        → allow
-10. 规则解析/模型/DB 异常           → review
+5. 重复哈希                        → block/review，终态
+6. 命中观察词表                    → review，终态
+7. 尺寸/字节不达标                 → block/review，终态
+8. 以上规则均已通过但内容标签不足   → 打标模型补标签一次 → 合并后重跑第 3–7 步
+9. 合并后仍不足或再次命中终态规则   → review/block，按复判结果
+10. 全部通过                       → allow
+11. 规则解析/模型/DB 异常           → review
 ```
 
 - 顺序固定，先命中先返回；`decisions.matched_rules_json` 记录**全部**命中项，不只第一条。
-- 第 5 步只补一次标签，不循环；补完仍不足阈值也照常判定（见 §7.5）。
-- 去重放在 `watch` 之前：重复图直接丢，不占审核队列。若同一作品既命中硬黑名单又命中观察词，按 `block` 处理，不必再看观察结果。
-- allow 永远是最后一步：只有黑名单、R-18G、重复、观察词、尺寸全部过完才会走到它。
+- 重复哈希、观察词、尺寸都在补标之前：这些规则已经能产生终态 `block/review`，不应再浪费 CPU 打标。
+- 内容标签足量的条目在首轮直接 `allow`，不调用打标；只有首轮全部通过但标签不足时才补标一次。补完仍不足阈值转 `review`，不循环。
+- allow 永远是最后一步：只有黑名单、R-18G、重复、观察词、尺寸和标签预算全部过完才会走到它。
 - 规则变更必须同时改 `rules.version`；服务检测到 `config_hash` 变化但版本未变时**拒绝热重载**并告警。
 - 旧条目不会自动重算；手动「按当前规则重跑」只影响 `pending/review` 与显式选中的条目，已 `allow` 的条目需二次确认。
 
@@ -533,17 +558,21 @@ raw        → NFKC → trim → 去内部多余空白 → lowercase
 补标流程：
 
 ```text
-tags = 来源标签（归一化去重）
+先跑来源/作者/R-18G/黑名单/去重/观察词/尺寸
+若已得到 block/review → 直接落库，不调用 tagger
+否则 tags = 来源标签（归一化去重）
 if count(tags) < min_tags:
-    model_tags = tagger.tag(image)          # 单张，超时 30s，重试 1 次
+    model_tags = tagger.tag(image)          # 单张，默认超时 1800s，重试 1 次
     tags = dedupe(tags ∪ model_tags)
     decisions.tag_source = "merged"
+    # 合并后重跑黑名单/观察词/尺寸；仍不足则 review
 else:
     decisions.tag_source = "source"
+    decisions.decision = "allow"
 decisions.tag_count_used = count(tags)
-再跑一次标签黑名单（只跑一次，不递归）
 ```
 
+- 内容标签足量且其他规则全过的条目首轮直接 `allow`，不转交打标服务。
 - 模型补的标签与来源标签**合并后一起判**；不能因为「模型判过了」就放行。
 - 模型失败/超时 → `review`，不是 `allow`，也不退回「只看来源标签」。
 - 补标结果写 `item_tags(origin='model')`，与 `origin='pixiv'` 并存，不覆盖。

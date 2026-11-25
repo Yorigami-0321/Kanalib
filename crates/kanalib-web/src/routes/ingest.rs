@@ -163,7 +163,7 @@ pub async fn delete_batch(
     }
 }
 
-/// box → 网页缩略图上传。只走 private listener，body 为 JPEG 原字节。
+/// box → 网页缩略图上传。只走 private listener，body 为 JPEG 或 AVIF 原字节。
 pub async fn thumb(
     State(state): State<AppState>,
     Path((tier, file)): Path<(String, String)>,
@@ -194,11 +194,18 @@ pub async fn thumb(
             "thumbnail is too large",
         );
     }
-    if !body.starts_with(&[0xFF, 0xD8, 0xFF]) {
+    let Some(format) = crate::media::detect_thumb_format(&body) else {
         return api_error(
             StatusCode::BAD_REQUEST,
             "invalid_thumb",
-            "thumbnail must be a JPEG",
+            "thumbnail must be a JPEG or AVIF",
+        );
+    };
+    if crate::media::format_for_file(&file) != Some(format) {
+        return api_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_thumb",
+            "thumbnail extension does not match its format",
         );
     }
     let path = format!("{THUMB_PREFIX}/{tier}/{file}");
