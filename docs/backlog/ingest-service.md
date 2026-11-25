@@ -727,6 +727,7 @@ action = "block"        # block | review
 - `X-Kanalib-Timestamp`：Unix 秒；与网页后端时间差 ≤ 5 分钟。
 - `X-Kanalib-Signature`：`HMAC-SHA256(body, shared_secret)`。
 - `X-Kanalib-Batch-Id`：幂等键。
+- 缩略图上传也必须带 `X-Kanalib-Batch-Id`，并纳入签名规范串；空批次 id 直接 400，避免窗口期内跨批次重放。
 - 共享密钥只存 box 与网页后端的密钥文件（0600）；轮换时支持新旧双密钥过渡。
 
 ### 9.3 删除事件

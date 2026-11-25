@@ -209,7 +209,11 @@ pub async fn thumb(
         );
     }
     let path = format!("{THUMB_PREFIX}/{tier}/{file}");
-    if let Err(response) = verify_payload(&headers, &path, "", &secret, &body) {
+    let batch_id = match batch_id(&headers) {
+        Ok(value) => value,
+        Err(response) => return *response,
+    };
+    if let Err(response) = verify_payload(&headers, &path, &batch_id, &secret, &body) {
         return *response;
     }
 

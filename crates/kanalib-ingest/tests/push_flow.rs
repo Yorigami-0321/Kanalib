@@ -664,6 +664,7 @@ fn thumb_request_signs_path_and_body() {
         "t256",
         ThumbFormat::Jpeg,
         b"\xff\xd8\xffjpeg".to_vec(),
+        "batch-42",
         99,
     );
     assert_eq!(
@@ -681,10 +682,15 @@ fn thumb_request_signs_path_and_body() {
         push::sign_payload(
             "push-secret",
             &format!("/internal/ingest/thumb/t256/{ITEM_ID}.jpg"),
-            "",
+            "batch-42",
             99,
             &request.body
         )
+    );
+    assert!(
+        request
+            .headers
+            .contains(&("x-kanalib-batch-id".to_string(), "batch-42".to_string()))
     );
     assert!(
         request
@@ -698,6 +704,7 @@ fn thumb_request_signs_path_and_body() {
         "t512",
         ThumbFormat::Avif,
         b"\x00\x00\x00\x18ftypavif".to_vec(),
+        "batch-42",
         99,
     );
     assert_eq!(

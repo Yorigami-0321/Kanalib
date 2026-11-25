@@ -1225,11 +1225,16 @@ fn signed_delete_headers(body: &[u8], batch_id: &str, timestamp: i64) -> Vec<(St
 fn signed_thumb_headers(
     path: &str,
     body: &[u8],
+    batch_id: &str,
     timestamp: i64,
     content_type: &str,
 ) -> Vec<(String, String)> {
-    let payload = format!("POST\n{path}\n\n{timestamp}\n{}", crypto::sha256_hex(body));
+    let payload = format!(
+        "POST\n{path}\n{batch_id}\n{timestamp}\n{}",
+        crypto::sha256_hex(body)
+    );
     vec![
+        ("x-kanalib-batch-id".to_string(), batch_id.to_string()),
         ("x-kanalib-timestamp".to_string(), timestamp.to_string()),
         (
             "x-kanalib-signature".to_string(),
@@ -1395,7 +1400,13 @@ async fn ingest_thumb_upload_writes_media_and_rejects_bad_signature() {
     let fixture = write_fixture();
     let path = format!("/internal/ingest/thumb/t256/{NEW_ITEM}.jpg");
     let body = b"\xff\xd8\xff\xe0fake-jpeg-payload".to_vec();
-    let headers = signed_thumb_headers(&path, &body, crypto::unix_now(), "image/jpeg");
+    let headers = signed_thumb_headers(
+        &path,
+        &body,
+        "thumb-batch-1",
+        crypto::unix_now(),
+        "image/jpeg",
+    );
 
     let (status, value) = post_signed(&fixture.private, &path, &headers, &body).await;
     assert_eq!(status, StatusCode::OK, "{value}");
@@ -1408,9 +1419,18 @@ async fn ingest_thumb_upload_writes_media_and_rejects_bad_signature() {
     assert_eq!(std::fs::read(&stored).expect("thumb file"), body);
 
     let mut bad = headers.clone();
-    bad[0].1 = (crypto::unix_now() + 1).to_string();
+    bad[1].1 = (crypto::unix_now() + 1).to_string();
     let (status, _) = post_signed(&fixture.private, &path, &bad, &body).await;
     assert_eq!(status, StatusCode::UNAUTHORIZED);
+
+    let empty_batch: Vec<(String, String)> = headers
+        .iter()
+        .filter(|(name, _)| name != "x-kanalib-batch-id")
+        .cloned()
+        .collect();
+    let (status, value) = post_signed(&fixture.private, &path, &empty_batch, &body).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(value["error"]["code"], "missing_batch_id");
 
     let (status, _) = post_signed(
         &fixture.private,
@@ -1427,7 +1447,13 @@ async fn ingest_thumb_upload_accepts_avif_and_rejects_format_mismatch() {
     let fixture = write_fixture();
     let path = format!("/internal/ingest/thumb/t512/{NEW_ITEM}.avif");
     let body = b"\x00\x00\x00\x18ftypavif\x00\x00\x00\x00avifmif1".to_vec();
-    let headers = signed_thumb_headers(&path, &body, crypto::unix_now(), "image/avif");
+    let headers = signed_thumb_headers(
+        &path,
+        &body,
+        "thumb-batch-2",
+        crypto::unix_now(),
+        "image/avif",
+    );
 
     let (status, value) = post_signed(&fixture.private, &path, &headers, &body).await;
     assert_eq!(status, StatusCode::OK, "{value}");
@@ -1438,12 +1464,24 @@ async fn ingest_thumb_upload_accepts_avif_and_rejects_format_mismatch() {
     assert_eq!(std::fs::read(&stored).expect("avif thumb"), body);
 
     let jpeg_path = format!("/internal/ingest/thumb/t512/{NEW_ITEM}.jpg");
-    let mismatched = signed_thumb_headers(&jpeg_path, &body, crypto::unix_now(), "image/avif");
+    let mismatched = signed_thumb_headers(
+        &jpeg_path,
+        &body,
+        "thumb-batch-2",
+        crypto::unix_now(),
+        "image/avif",
+    );
     let (status, _) = post_signed(&fixture.private, &jpeg_path, &mismatched, &body).await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
 
     let invalid = b"\x00\x00\x00\x18ftypheic\x00\x00\x00\x00heicmif1".to_vec();
-    let invalid_headers = signed_thumb_headers(&path, &invalid, crypto::unix_now(), "image/avif");
+    let invalid_headers = signed_thumb_headers(
+        &path,
+        &invalid,
+        "thumb-batch-2",
+        crypto::unix_now(),
+        "image/avif",
+    );
     let (status, _) = post_signed(&fixture.private, &path, &invalid_headers, &invalid).await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
 }

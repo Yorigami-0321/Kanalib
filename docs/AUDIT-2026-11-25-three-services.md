@@ -156,6 +156,7 @@
 | W-11 | 公开 `/api/health` 不再返回版本号。 |
 | W-14 | 降级改用 `failedSrc` 去重 + 函数式更新，避免一次跳两档。 |
 | X-01 | ingest → tagger 请求带共享 token，伪造标签需先拿到密钥。 |
+| X-02 | 缩略图上传签名纳入批次 id（`X-Kanalib-Batch-Id` 必填并参与规范串），空批次 id 直接 400。 |
 | X-03 | random seed、tagging.concurrency、sharp 档位三处文档已按实现修订。 |
 
 仍未处理（需要契约或产品决策）：
@@ -166,8 +167,7 @@
 | W-12 | 静态模式筛选仍会逐片加载全库；改成本地索引/分页需要重做 static 数据层。 |
 | W-13 | 深链详情的前后条目仍回退到已加载页；需要新增按 id 取相邻条目的接口。 |
 | W-15 | 静态模式关闭虚拟化与按键全量重排；与 W-12 同一处数据层改造。 |
-| X-02 | 缩略图签名空 batch_id 需 ingest 与 web 同步改协议；当前签名已绑定路径与 body，重放只能覆盖同一文件。 |
 
-验证：`cargo fmt --check`、`cargo test -p kanalib-ingest -p kanalib-web --offline`（ingest 101 项、web 34 项）、
+验证：`cargo fmt --check`、`cargo test -p kanalib-ingest -p kanalib-web --offline`（ingest 101 项、web 38 项，含 4 项 `#[ignore]`）、
 `npm --prefix web run build`、tagger 与代理 `py_compile`、`start-local-tagger.ps1` 解析均通过。
-新增覆盖：管理 API 强制 token（`tests/admin_flow.rs`）、random seed 稳定性与游标指纹绑定（`tests/web_flow.rs`）。
+新增覆盖：管理 API 强制 token（`tests/admin_flow.rs`）、random seed 稳定性与游标指纹绑定、缩略图批次 id 必填（`tests/web_flow.rs`）。

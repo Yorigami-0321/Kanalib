@@ -393,7 +393,8 @@ pub async fn flush<T: PushTransport>(
     for batch in pending(db, now_ts, limit)? {
         let attempts = batch.attempts + 1;
         if batch.kind == PushKind::Allow
-            && let Err(error) = sync_thumbs(db, config, transport, &batch.payload, now_ts).await
+            && let Err(error) =
+                sync_thumbs(db, config, transport, &batch.payload, &batch.id, now_ts).await
         {
             let delay = backoff(attempts, config.backoff_base, config.backoff_max);
             mark_retry(
@@ -453,13 +454,14 @@ async fn sync_thumbs<T: PushTransport>(
     config: &PushConfig,
     transport: &T,
     payload: &[u8],
+    batch_id: &str,
     now_ts: i64,
 ) -> Result<(), String> {
     let batch: IngestBatch =
         serde_json::from_slice(payload).map_err(|error| format!("invalid allow batch: {error}"))?;
     // 逐条并发上传；失败的条目仍会让批次重试，但不会再串行等待整批往返。
     let results = stream::iter(batch.items)
-        .map(|entry| sync_entry_thumbs(db, config, transport, entry, now_ts))
+        .map(|entry| sync_entry_thumbs(db, config, transport, entry, batch_id, now_ts))
         .buffer_unordered(4)
         .collect::<Vec<_>>()
         .await;
@@ -474,6 +476,7 @@ async fn sync_entry_thumbs<T: PushTransport>(
     config: &PushConfig,
     transport: &T,
     entry: IngestBatchItem,
+    batch_id: &str,
     now_ts: i64,
 ) -> Result<(), String> {
     let sharp = entry.item.sharp.unwrap_or(0);
@@ -518,7 +521,15 @@ async fn sync_entry_thumbs<T: PushTransport>(
                     continue;
                 }
             };
-            let request = thumb_request(config, &entry.item.id, tier, format, bytes, now_ts);
+            let request = thumb_request(
+                config,
+                &entry.item.id,
+                tier,
+                format,
+                bytes,
+                batch_id,
+                now_ts,
+            );
             match transport.send(request).await {
                 Ok(response) if (200..300).contains(&response.status) => uploaded = true,
                 Ok(response) if format == ThumbFormat::Avif => {
@@ -710,15 +721,17 @@ pub fn thumb_request(
     tier: &str,
     format: ThumbFormat,
     body: Vec<u8>,
+    batch_id: &str,
     now_ts: i64,
 ) -> PushRequest {
     let file = format!("{item_id}.{}", format.extension());
     let path = format!("{THUMB_PREFIX}/{tier}/{file}");
-    let payload = signature_payload(&path, "", now_ts, &body);
+    let payload = signature_payload(&path, batch_id, now_ts, &body);
     PushRequest {
         url: format!("{}{path}", config.base_url),
         headers: vec![
             ("x-kanalib-timestamp".to_string(), now_ts.to_string()),
+            ("x-kanalib-batch-id".to_string(), batch_id.to_string()),
             (
                 "x-kanalib-signature".to_string(),
                 hmac_sha256_hex(config.secret.as_bytes(), payload.as_bytes()),
