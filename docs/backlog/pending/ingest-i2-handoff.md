@@ -22,7 +22,7 @@
 
 ## 1.1 2026-11-25 补标与缩略图优化
 
-本节改动已写入代码与测试，**尚未部署到 box/云端**。
+本节改动已写入代码与测试，并于 **2026-11-25 部署到 box/云端**；提交 `5a7aa93`。box 启动回填 29 条旧 `allow` 条目，推送 `acked=1 / retried=0 / rejected=0`，`push_pending=0`；公网 AVIF/JPEG 协商与 magic bytes 抽检通过。
 
 1. **终态规则先于补标**：`rules::evaluate` 先跑来源/作者/R-18G/黑名单/去重/观察词/尺寸；这些规则已能返回 `block/review` 时不再调用 tagger。内容标签足量且全规则通过本来就直接 `allow`，本轮补了“配置了 tagger 但调用数仍为 0”的端到端回归。
 2. **缩略图保清晰度与格式**：原图仍按来源字节保存；t256/t512 改为 Lanczos3、不放大、q90 JPEG + q90 AVIF（speed 8）。AVIF 失败只告警并保留 JPEG，不阻断下载。
@@ -214,9 +214,9 @@ $cargo = Join-Path $env:USERPROFILE ".cargo\bin\cargo.exe"
 
 - 分支：`main`，与 `origin/main` 同步
 - public 来源提交：`da3df61`（adapter）、`2600307`（`limit` 控制）
-- 状态：无登录路线与打标后端已部署到 box/云端；2026-11-25 的补标跳过、AVIF/JPEG 双格式与旧条目回填已代码/测试完成，尚未部署
-- 验证：`kanalib-ingest` 94 passed；`kanalib-web` 33 passed / 4 ignored（既有手工压测）；`cargo fmt --check` 与 `cargo clippy --all-targets -- -D warnings` 通过
-- 本次优化未提交；工作区另有并行规则改动与既有文档修改，提交时必须按文件筛选
+- 状态：无登录路线与打标后端已部署到 box/云端；2026-11-25 的补标跳过、AVIF/JPEG 双格式与旧条目回填已提交 `5a7aa93` 并部署，29 条旧 `allow` 回填推送成功
+- 验证：`kanalib-ingest` 94 passed；`kanalib-web` 33 passed / 4 ignored（既有手工压测）；`cargo fmt --check` 与 `cargo clippy --all-targets -- -D warnings` 通过；公网 AVIF/JPEG 协商抽检通过
+- 本次优化已提交并推送；工作区仍有并行规则改动、既有文档修改与未跟踪审计稿，未纳入本次提交
 - 约束：继续遵循“不推送，除非用户明确要求”。
 
 ## 9. 快速接手命令
