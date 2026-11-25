@@ -135,7 +135,7 @@ impl Default for TaggingSettings {
             backend: None,
             endpoint: None,
             concurrency: 2,
-            timeout_secs: 30,
+            timeout_secs: 1800,
         }
     }
 }

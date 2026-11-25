@@ -11,6 +11,9 @@
 - 云端 `kanalib-tagger-proxy.service` 已上线：监听 `10.126.126.2:8793`，把请求再发起给 `10.126.126.1:8793`。旧的 `kanalib-tagger-forward.service` 与脚本已删除。
 - box 的 `[tagging].endpoint = "http://10.126.126.2:8793/tag"`，`kanalib-ingest` 已部署到 `9fd683d` 并运行。
 - 端到端已闭环：health 约 1.2 秒，真实打标 4.9–7.1 秒；`2087cc90…` 重跑后 `tagged=1`、`tag_source=merged`、51 个标签、`push_pending=0`。
+- 2026-11-24 Nodaroo CPU 打标已部署：EasyTier `10.126.126.5`，打标 `http://10.126.126.5:8793`，bootstrap health `http://10.126.126.5:18793/health`；公网 `se2.nodaroo.fun:25926` 改为 EasyTier TCP 监听，不再提供 HTTP health。
+- 本机已添加并持久化直连 peer `tcp://se2.nodaroo.fun:25926`，peer 为 `p2p`、`tunnel_proto=tcp`、路由 `DIRECT`；真实打标返回 39 个标签，耗时 206 秒，ingest 默认超时改为 1800 秒。
+- 云端新增 `kanalib-nodaroo-tagger-proxy.service`：`10.126.126.2:18793 → 10.126.126.5:8793`；box 已切到该端点、并发 1、超时 1800，并重启 `kanalib-ingest`。box 经云端代理的真实打标返回 26 个标签，耗时 74.5 秒；24.6MB 大图重跑返回 51 个标签，条目转 `allow` 且已推送，端到端约 20 分 30 秒。
 
 ## 2. 拓扑
 

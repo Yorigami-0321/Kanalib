@@ -744,7 +744,7 @@ timeout_secs = 60
 backend = "http"
 endpoint = "http://127.0.0.1:8791/tag"
 concurrency = 2
-timeout_secs = 30
+timeout_secs = 1800
 
 [push]
 web_base = "http://kanalib-web.et.net:8788"

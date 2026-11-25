@@ -40,10 +40,20 @@ kanalib-ingest (box 10.126.126.3)
 backend = "http"
 endpoint = "http://10.126.126.2:8793/tag"
 concurrency = 2
-timeout_secs = 30
+timeout_secs = 1800
 ```
 
 改完 `sudo systemctl restart kanalib-ingest`。`min_tags` 保持 5，和打标后端配置无关。
+
+Nodaroo CPU 部署时，Nodaroo 使用 EasyTier `10.126.126.5`，云端 `kanalib-nodaroo-tagger-proxy.service` 监听 `10.126.126.2:18793` 并转发到 `10.126.126.5:8793`。box 使用：
+
+```toml
+[tagging]
+backend = "http"
+endpoint = "http://10.126.126.2:18793/tag"
+concurrency = 1
+timeout_secs = 1800
+```
 
 ## 验证
 
@@ -57,10 +67,15 @@ curl -s --noproxy '*' http://10.126.126.1:8793/health
 # box（经云端代理）
 sudo curl -s --noproxy '*' -F "image=@/var/lib/kanalib-ingest/media/originals/<id>.png" \
   http://10.126.126.2:8793/tag
+
+# Nodaroo CPU（经云端第二代理）
+curl -s --noproxy '*' http://10.126.126.2:18793/health
+sudo curl -s --noproxy '*' -F "image=@/var/lib/kanalib-ingest/media/originals/<id>.png" \
+  http://10.126.126.2:18793/tag
 ```
 
-单张推理约 1–4 秒（RTX 4060 Laptop，FP16）。实测 box 端到端约 7 秒（含两跳 EasyTier 传输），
-`timeout_secs = 30` 仍有富余。
+单张推理约 1–4 秒（RTX 4060 Laptop，FP16）。实测 box 端到端约 7 秒（含两跳 EasyTier 传输）。
+Nodaroo CPU 实测单张 206 秒；24.6MB 原图经 EasyTier 上传加推理端到端约 20 分 30 秒，因此 CPU 部署使用 `timeout_secs = 1800`。
 
 ## 限制
 
