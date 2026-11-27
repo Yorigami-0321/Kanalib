@@ -6,9 +6,12 @@ import {
   cellTilesInView,
   layoutFeaturedWorld,
   layoutSpotlightCell,
-  layoutWorld,
+  layoutWorldRange,
+  measureWorld,
   visibleSlice,
+  worldRowSlice,
   type CellSpec,
+  type LaidTile,
   type PlacedTile,
   type TileRect,
 } from '../lib/world';
@@ -47,6 +50,10 @@ const INTERACTIVE = 'button, a, input, select, textarea, [role="button"]';
 
 /** 首屏骨架的图位比例：只在 boot/首片未到时出现，不参与真实布局。 */
 const SKELETON_SLOTS = [0.78, 1.32, 0.92, 1.18, 0.72, 1.44, 0.86, 1.1, 1.36, 0.68, 1.02, 0.84];
+
+/** 空布局的稳定引用：无限模式/空墙不每次渲染都新建对象。 */
+const EMPTY_TILES: LaidTile[] = [];
+const EMPTY_LAYOUT = { tiles: EMPTY_TILES, height: 0 };
 
 /** 卡片在 DOM 里的稳定身份/顺序：不含 rect，聚焦重排时节点不会被移动或重挂。 */
 function tileRenderKey(tile: { item: WallItem; index: number }): string {
@@ -271,43 +278,90 @@ export function WallView({
     const index = items.findIndex((item) => item.id === spotlightId);
     return index >= 0 ? index : null;
   }, [items, spotlightId, spotlightIndex]);
-  const layout = useMemo(() => {
-    // 无限空间不排整墙：一万条跑一遍 justified rows 纯属浪费，格子按需生成就够了。
-    if (infinite) return { tiles: [], height: 0 };
-    const options = {
+  const featured = spotlightId != null && spotlightResolvedIndex != null;
+  const worldOptions = useMemo(
+    () => ({
       width: worldWidth,
       gap: GAP,
       targetHeight: rowTargetHeight,
       includePartialRow,
       stretchPartialRow,
-    };
-    if (spotlightId && spotlightResolvedIndex != null) {
-      return layoutFeaturedWorld(
-        items,
-        options,
-        spotlightId,
-        {
-          centerX: Math.max(200, viewWidth) / 2,
-          viewHeight: size.h,
-          bottomInset: 0,
-        },
-        spotlightAnchorRect ?? undefined,
-        spotlightResolvedIndex,
-      );
-    }
-    return layoutWorld(items, options);
+    }),
+    [worldWidth, rowTargetHeight, includePartialRow, stretchPartialRow],
+  );
+
+  // 有限墙先只算行几何（每行起止下标/高度），卡片 rect 只物化视口附近的行。
+  // 换筛选/排序不再生成全量卡片对象，滚动时也只补可见行（W-15）。
+  const geometry = useMemo(
+    () => (infinite ? null : measureWorld(items, worldOptions)),
+    [infinite, items, worldOptions],
+  );
+
+  const featuredLayout = useMemo(() => {
+    if (infinite || !featured || !spotlightId) return null;
+    return layoutFeaturedWorld(
+      items,
+      worldOptions,
+      spotlightId,
+      {
+        centerX: Math.max(200, viewWidth) / 2,
+        viewHeight: size.h,
+        bottomInset: 0,
+      },
+      spotlightAnchorRect ?? undefined,
+      spotlightResolvedIndex ?? undefined,
+    );
   }, [
     infinite,
-    items,
-    worldWidth,
-    rowTargetHeight,
-    includePartialRow,
-    stretchPartialRow,
+    featured,
     spotlightId,
-    spotlightResolvedIndex,
-    spotlightAnchorRect,
+    items,
+    worldOptions,
     viewWidth,
     size.h,
+    spotlightAnchorRect,
+    spotlightResolvedIndex,
+  ]);
+
+  // 行级缓存：平移时复用已物化的行，卡片对象与 rect 引用保持稳定，
+  // WallCard 的 memo 才能继续跳过纯平移重渲染。
+  const rowCache = useMemo(
+    () => new Map<number, LaidTile[]>(),
+    [geometry, items, worldOptions],
+  );
+
+  const viewTop = camera.y / camera.zoom;
+  const viewBottom = (camera.y + size.h) / camera.zoom;
+  const layout = useMemo(() => {
+    // 无限空间不排整墙：一万条跑一遍 justified rows 纯属浪费，格子按需生成就够了。
+    if (infinite) return EMPTY_LAYOUT;
+    if (featuredLayout) return featuredLayout;
+    if (!geometry) return EMPTY_LAYOUT;
+    const rowWindow = worldRowSlice(geometry.rows, viewTop, viewBottom, LOAD_AHEAD);
+    const pruneFrom = rowWindow.start - 8;
+    const pruneTo = rowWindow.end + 8;
+    for (const key of rowCache.keys()) {
+      if (key < pruneFrom || key >= pruneTo) rowCache.delete(key);
+    }
+    const tiles: LaidTile[] = [];
+    for (let row = rowWindow.start; row < rowWindow.end; row += 1) {
+      let laid = rowCache.get(row);
+      if (!laid) {
+        laid = layoutWorldRange(items, worldOptions, geometry, row, row + 1);
+        rowCache.set(row, laid);
+      }
+      tiles.push(...laid);
+    }
+    return { tiles, height: geometry.height };
+  }, [
+    infinite,
+    featuredLayout,
+    geometry,
+    rowCache,
+    items,
+    worldOptions,
+    viewTop,
+    viewBottom,
   ]);
   const layoutRef = useRef(layout);
   layoutRef.current = layout;

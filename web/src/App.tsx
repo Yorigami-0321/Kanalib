@@ -33,6 +33,7 @@ import { INSPECTOR_WIDTH, readLayoutMetrics } from './lib/layout';
 import { appendShuffled, hashString } from './lib/shuffle';
 import { createSource } from './source';
 import {
+  buildRecords,
   EMPTY_FILTERS,
   filterItems,
   filterSignature,
@@ -363,11 +364,26 @@ export function App() {
     }
   }, [orderedItems, route, serverMode]);
 
+  // 静态模式搜索索引缺失/未就绪时，用已加载条目派生一份轻量索引；
+  // 只在查询激活时构建，索引就绪后立即让位给全库索引。
+  const lightweightRecords = useMemo(
+    () => (searchRecords || !queryActive ? null : buildRecords(baseItems)),
+    [searchRecords, baseItems, queryActive],
+  );
+
   const shown = useMemo(() => {
     // 服务端已完成筛选/搜索/排序，不能再拿静态 search-index 语义二次过滤。
     if (serverMode) return orderedItems;
-    return sortItems(filterItems(baseItems, filters, searchRecords), sort);
-  }, [baseItems, filters, searchRecords, sort, serverMode, orderedItems]);
+    return sortItems(filterItems(baseItems, filters, searchRecords ?? lightweightRecords), sort);
+  }, [
+    baseItems,
+    filters,
+    searchRecords,
+    lightweightRecords,
+    sort,
+    serverMode,
+    orderedItems,
+  ]);
 
   // 详情页的浏览序列跟用户当前看到的墙（筛后+排序后）一致。
   const detailBrowseItems = useMemo(() => {

@@ -193,9 +193,30 @@ export function matchesRecord(record: SearchRecord, terms: readonly SearchTerm[]
   return matchesFields(record.name, record.tags, record.group, record.rating, record.hay, terms);
 }
 
+/** 无 search-index 时的轻量索引：直接由已加载条目派生，匹配语义与索引一致。 */
+export function buildRecords(items: readonly WallItem[]): Map<string, SearchRecord> {
+  const records = new Map<string, SearchRecord>();
+  for (const item of items) {
+    const name = fold(item.n);
+    const tags = item.tags.map((tag) => fold(tag[0]));
+    const group = fold(item.group ?? '');
+    const rating = fold(item.rt);
+    records.set(item.id, {
+      id: item.id,
+      name,
+      tags,
+      group,
+      rating,
+      hay: haystackOf(name, tags, group, rating),
+      shard: -1,
+    });
+  }
+  return records;
+}
+
 /**
- * 先按当前路由收窄，再按搜索词过滤。`records` 为 null 时说明索引不可用，
- * 保持旧的文件名子串搜索；索引就绪后名称/标签/分组/分级一起参与。
+ * 先按当前路由收窄，再按搜索词过滤。`records` 为 null 时用条目字段现场匹配
+ * （名称/标签/分组/分级），不再退回只看文件名。
  */
 export function filterItems(
   items: readonly WallItem[],
@@ -207,8 +228,7 @@ export function filterItems(
   const terms = parseQuery(raw);
   if (terms.length === 0) return [...items];
   if (!records) {
-    const needle = raw.toLowerCase();
-    return items.filter((item) => item.n.toLowerCase().includes(needle));
+    return items.filter((item) => matchesItem(item, undefined, terms));
   }
   return items.filter((item) => matchesItem(item, records.get(item.id), terms));
 }

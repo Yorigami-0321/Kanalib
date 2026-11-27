@@ -37,6 +37,138 @@ export interface WorldOptions {
   stretchPartialRow?: boolean;
 }
 
+export interface WorldRow {
+  /** 行首下标（含）。 */
+  start: number;
+  /** 行尾下标（不含）。 */
+  end: number;
+  y: number;
+  height: number;
+  ratioSum: number;
+  /** 满行/拉伸尾行居中；false 表示固定行高、左对齐。 */
+  stretch: boolean;
+}
+
+/** 只含行几何、不含每张卡的 rect：大列表换筛选/排序时先算这个。 */
+export interface WorldGeometry {
+  rows: WorldRow[];
+  height: number;
+}
+
+function ratioOf(item: WallItem): number {
+  return item.w > 0 && item.h > 0 ? item.w / item.h : 1;
+}
+
+/** 满行高度：夹在 target×0.72–1.6 之后再看能不能拉满。 */
+function justifiedHeight(
+  ratioSum: number,
+  count: number,
+  width: number,
+  gap: number,
+  targetHeight: number,
+): number {
+  const available = width - gap * (count - 1);
+  const raw = available / ratioSum;
+  // 上限必须先和 raw 取小。窄屏上 target×0.72 可能比"刚好填满"还大
+  // （390 宽、三张不齐比例的卡），硬夹上去会让整行比世界宽，最右一张被裁掉。
+  const upper = Math.min(targetHeight * 1.6, raw);
+  return Math.min(raw, Math.max(targetHeight * 0.72, upper));
+}
+
+/**
+ * 扫一遍条目，只记录每行的起止下标与高度。
+ * 纯函数：与 layoutWorldRange 组合后，坐标和旧版 layoutWorld 完全一致。
+ */
+export function measureWorld(
+  items: readonly WallItem[],
+  options: WorldOptions,
+): WorldGeometry {
+  const { width, gap, targetHeight, includePartialRow = true, stretchPartialRow = false } = options;
+  const rows: WorldRow[] = [];
+  let start = 0;
+  let ratioSum = 0;
+  let count = 0;
+  let y = 0;
+
+  for (let index = 0; index < items.length; index += 1) {
+    ratioSum += ratioOf(items[index]);
+    count += 1;
+    if (ratioSum * targetHeight + gap * (count - 1) >= width) {
+      const height = justifiedHeight(ratioSum, count, width, gap, targetHeight);
+      rows.push({ start, end: index + 1, y, height, ratioSum, stretch: true });
+      y += height + gap;
+      start = index + 1;
+      ratioSum = 0;
+      count = 0;
+    }
+  }
+
+  if (count > 0 && includePartialRow) {
+    const stretch = stretchPartialRow;
+    const height = stretch
+      ? justifiedHeight(ratioSum, count, width, gap, targetHeight)
+      : targetHeight;
+    rows.push({ start, end: items.length, y, height, ratioSum, stretch });
+    y += height + gap;
+  }
+
+  return { rows, height: Math.max(0, y - gap) };
+}
+
+/** 物化 [from, to) 行；范围外不生成 tile 对象。 */
+export function layoutWorldRange(
+  items: readonly WallItem[],
+  options: WorldOptions,
+  geometry: WorldGeometry,
+  from: number,
+  to: number,
+): LaidTile[] {
+  const { width, gap } = options;
+  const tiles: LaidTile[] = [];
+  const first = Math.max(0, from);
+  const last = Math.min(geometry.rows.length, to);
+  for (let rowIndex = first; rowIndex < last; rowIndex += 1) {
+    const row = geometry.rows[rowIndex];
+    const count = row.end - row.start;
+    const totalWidth = row.height * row.ratioSum + gap * (count - 1);
+    // 不拉伸时左对齐：居中会让追加一张卡就整行重新对中，等于抖动。
+    let x = row.stretch ? Math.max(0, (width - totalWidth) / 2) : 0;
+    for (let index = row.start; index < row.end; index += 1) {
+      const item = items[index];
+      const tileWidth = row.height * ratioOf(item);
+      tiles.push({
+        item,
+        index,
+        rect: { x, y: row.y, w: tileWidth, h: row.height },
+      });
+      x += tileWidth + gap;
+    }
+  }
+  return tiles;
+}
+
+/** 按行 y 二分出可见行区间（含 overscan）。 */
+export function worldRowSlice(
+  rows: readonly WorldRow[],
+  top: number,
+  bottom: number,
+  overscan = 600,
+): { start: number; end: number } {
+  const minY = top - overscan;
+  const maxY = bottom + overscan;
+  let low = 0;
+  let high = rows.length;
+  while (low < high) {
+    const mid = (low + high) >> 1;
+    if (rows[mid].y + rows[mid].height < minY) low = mid + 1;
+    else high = mid;
+  }
+  const start = low;
+  let end = start;
+  while (end < rows.length && rows[end].y <= maxY) end += 1;
+  return { start, end };
+}
+
 /**
  * 把条目排成一行行刚好填满世界宽度的"书脊"布局（justified rows）。
  * 纯函数：同样的条目顺序 + 同样的选项永远得到同样的坐标，虚拟化可以直接按 y 二分。
@@ -45,52 +177,11 @@ export function layoutWorld(
   items: readonly WallItem[],
   options: WorldOptions,
 ): { tiles: LaidTile[]; height: number } {
-  const { width, gap, targetHeight, includePartialRow = true, stretchPartialRow = false } = options;
-  const tiles: LaidTile[] = [];
-  let row: { item: WallItem; index: number; ratio: number }[] = [];
-  let ratioSum = 0;
-  let y = 0;
-
-  const flush = (stretch: boolean) => {
-    if (row.length === 0) return;
-    const available = width - gap * (row.length - 1);
-    const raw = available / ratioSum;
-    // 满行：夹在 target×0.72–1.6 之后再看能不能拉满；
-    // 不满的行：不拉伸，固定用 targetHeight（追加条目时宽度/高度都不变）。
-    //
-    // 关键：上限必须先和 raw 取小。窄屏上 target×0.72 可能比"刚好填满"还大
-    // （390 宽、三张不齐比例的卡），硬夹上去会让整行比世界宽，最右一张被画布裁掉。
-    const upper = Math.min(targetHeight * 1.6, raw);
-    const rowHeight = stretch
-      ? Math.min(raw, Math.max(targetHeight * 0.72, upper))
-      : targetHeight;
-    const totalWidth = rowHeight * ratioSum + gap * (row.length - 1);
-    // 不拉伸时左对齐：居中会让追加一张卡就整行重新对中，等于抖动。
-    let x = stretch ? Math.max(0, (width - totalWidth) / 2) : 0;
-    for (const entry of row) {
-      const tileWidth = rowHeight * entry.ratio;
-      tiles.push({
-        item: entry.item,
-        index: entry.index,
-        rect: { x, y, w: tileWidth, h: rowHeight },
-      });
-      x += tileWidth + gap;
-    }
-    y += rowHeight + gap;
-    row = [];
-    ratioSum = 0;
+  const geometry = measureWorld(items, options);
+  return {
+    tiles: layoutWorldRange(items, options, geometry, 0, geometry.rows.length),
+    height: geometry.height,
   };
-
-  items.forEach((item, index) => {
-    const ratio = item.w > 0 && item.h > 0 ? item.w / item.h : 1;
-    row.push({ item, index, ratio });
-    ratioSum += ratio;
-    if (ratioSum * targetHeight + gap * (row.length - 1) >= width) flush(true);
-  });
-
-  if (row.length > 0 && includePartialRow) flush(stretchPartialRow);
-
-  return { tiles, height: Math.max(0, y - gap) };
 }
 
 /**
