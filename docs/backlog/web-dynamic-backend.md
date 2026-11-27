@@ -399,21 +399,37 @@ pub struct Capabilities {
 |---|---|---|
 | GET | `/api/desktop/pull?since=&limit=` | 返回条目 + 媒体 URL；设备令牌 |
 | POST | `/api/desktop/push` | 回传标签/星级/收藏/相册成员；设备令牌 |
-| POST | `/api/desktop/upload` | 上传本地图片/元数据到网页；设备令牌 |
+| POST | `/api/desktop/items` | 本地发布第一阶段：写入条目元数据；设备令牌 |
+| POST | `/api/desktop/upload` | 本地发布第二阶段：上传原图并生成缩略图；设备令牌 |
 
 约束：
 
 1. `Authorization: Bearer <device_token>`；只存哈希，可撤销。
 2. push 按 `item_id + revision` 合并；同一字段双向都改过 → 进冲突列表，不静默覆盖。
 3. 设备令牌由网页后端生成，桌面手动粘贴；不在公网开放注册。
-4. 上传走 multipart/流式；单文件上限可配置；只写网页媒体目录，不碰桌面库。
+4. 上传走原始 body 流式写盘；单文件上限可配置；只写网页媒体目录，不碰桌面库。
+5. 本地发布是两阶段的：`items` 写入时 `origin='local'`、`decision='review'`，条目对公网不可见；`upload` 成功生成缩略图后才翻成 `allow`，因此不会出现半张图。
 
 实现形状：
 
 - `pull?since=<opaque|unix>&limit=≤200`：`{ items: [{ ...WallItemDto, revision, updated_at, media }], next, has_more }`；游标是 `(updated_at, id)` 的 base64url，包含 `deleted=1` 条目。
 - `push`：`{ items: [{ id, base_revision, star?, favorite?, rating?, tags?, collections? }] }`；`base_revision` 与服务端当前值不一致即冲突，返回 `{ applied, conflicts: [{ id, base_revision, server }], missing }`。
-- `upload`：原始 body 流式写入 `media/uploads/{id}.{ext}.part`，`X-Kanalib-Item-Id` 必填，`X-Kanalib-Ext` 可选；超限 413 `upload_too_large` 并删除 `.part`。
+- `items`：`{ items: [{ id, name, title?, width, height, rating?, orig, tags?, star?, favorite?, mtime?, posted_at?, group?, work_id?, work_title?, page?, page_count?, source? }] }`，单次 ≤200 条。`id` 为 40/64 位小写 hex（客户端用原图 sha1），`orig` 为扩展名；返回 `results: [{ id, status: created|updated|exists|rejected|error, error? }]`。已存在的非本地来源（例如 box 推上来的同 id）返回 `exists`，不覆盖。
+- `upload`：`X-Kanalib-Item-Id` 必填，`X-Kanalib-Ext` 可选；本地条目以 `items.orig_ext` 为准。原图写 `media/originals/{id}.{ext}`，随后在 `spawn_blocking` 里解码并按 t256/t512（长边 ≥1024/2048 时再加 t1024/t2048）写 JPEG q90，最后把条目翻成 `allow` 并刷新搜索索引与作品封面。非本地来源仍写 `media/uploads/{id}.{ext}`（兼容旧补原图流程）。
+- `upload` 失败：超过 `--upload-limit-mb` 返回 413 `upload_too_large` 并删除 `.part`；图片无法解码或扩展名与内容不符返回 400 `invalid_image`，条目留在 `review`，重试即可。
+- 原图回源：`origin='local'` 的条目由 private listener 直接读 `media/originals/{id}.{ext}`，不经过 box；`/api/items/{id}/original` 仍返回短线签名 URL，`/original/{id}` 自己校验 HMAC 与有效期后才读盘。
 - 设备令牌生成：`kanalib-web --db <path> --issue-device <name>` 打印一次；只存 SHA-256。
+
+本地发布客户端：`kanalib-sync`（`crates/kanalib-sync`）。
+
+```powershell
+kanalib-sync --web http://10.126.126.2:8788 --token-file .kanalib\sync-token `
+  --dir D:\Pictures\某相册 --recursive [--dry-run] [--limit 20]
+```
+
+- 只接受 jpg/jpeg/png/webp/gif；按文件 sha1 去重，重复运行会更新元数据并重新上传原图。
+- 每张图自成一个 work（`work_id = local-<sha1>`，单页），避免与 box 的作品页序冲突。
+- 客户端强制 `no_proxy`，避免 EasyTier 私网地址被本机代理拦截。
 
 ### 5.4 查询参数
 

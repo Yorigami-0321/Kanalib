@@ -155,3 +155,36 @@ webhook 只放 `/etc/kanalib/health.env`，不写入仓库。
 `[source.pixiv].enabled` 或 `--source` 决定。规则热重载、审核页、规则草稿与 Prometheus
 指标已接入。真实 Pixiv 令牌只放在 `/etc/kanalib`（0600），首次上线仍需要在 box 上做
 一次手动联调（见 `docs/backlog/ingest-service.md` §12.3）。
+
+## 本地图片发布
+
+web 端支持把本机目录里的图片直接发布上墙（建条目 → 传原图 → 服务端生成缩略图与搜索索引）。
+
+1. 生成设备令牌（只显示一次，DB 只存 SHA-256）：
+
+   ```bash
+   sudo -u kanalib kanalib-web \
+     --db /var/lib/kanalib-web/kanalib-web.db \
+     --media /var/lib/kanalib-web/media \
+     --issue-device kanalib-pc
+   ```
+
+2. 在 PC 上把 token 存进文件（`~/.kanalib/sync-token` 或仓库内已忽略的 `.kanalib/sync-token`），然后：
+
+   ```powershell
+   kanalib-sync --web http://10.126.126.2:8788 --token-file .kanalib\sync-token `
+     --dir D:\Pictures\相册 --recursive --dry-run
+   kanalib-sync --web http://10.126.126.2:8788 --token-file .kanalib\sync-token `
+     --dir D:\Pictures\相册 --recursive
+   ```
+
+3. 原图落在 `/var/lib/kanalib-web/media/originals/`，缩略图落在 `media/t256|t512|t1024|t2048/`；
+   条目只有在上传成功后才从 `review` 翻成 `allow`。撤销设备用
+   `UPDATE desktop_devices SET revoked = 1 WHERE id = 'dev_…'`。
+
+若 PC 访问私网 8788 被本机过滤（`WSAEACCES 10013`，但 ICMP 正常），用 SSH 隧道：
+
+```powershell
+ssh -N -L 18788:10.126.126.2:8788 yorigami@128.1.132.31
+kanalib-sync --web http://127.0.0.1:18788 --token-file .kanalib\sync-token --dir D:\Pictures\相册
+```

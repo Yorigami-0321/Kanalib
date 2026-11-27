@@ -518,11 +518,45 @@ box 上还有两条容易踩的网络事实：
 
 | 服务 | 版本/哈希 | 备份与回滚 |
 |---|---|---|
-| `kanalib-web`（web） | `37314d9`，sha256 `fcaf3d8a1c1a8e18911e02a3548e1eb62b572d48af049b9dad5e37ea8e12ae37` | 二进制 `/usr/local/bin/kanalib-web.bak-20261127`；DB `/var/lib/kanalib-web/kanalib-web.db.bak-20261127`（schema 未变，可直接回退） |
+| `kanalib-web`（web） | `aa2b850`，sha256 `4a6633298006d876d6b74dcb0ae43c108ca899f04e7866719392fc702e8cd2b9` | 二进制 `/usr/local/bin/kanalib-web.bak-20261127-b`（上一版 `…bak-20261127`）；DB `/var/lib/kanalib-web/kanalib-web.db.bak-20261127-local`。schema v2 只新增 `items.origin`，旧库自动 ALTER |
 | `kanalib-ingest`（box） | `37314d9`，sha256 `4d5c43e8a9807888fce2a90ab7b16971fab839a17f9e53c72b3ef39c69ced93f` | 二进制 `/usr/local/bin/kanalib-ingest.bak-20261127`；配置 `/etc/kanalib/ingest.toml.bak-20261127-tagging` |
 
 - 两台二进制都必须 ≥ `0812627`（X-02：缩略图签名纳入批次 id）。只升一边会在缩略图上传处得到 `401/403`。
 - 重放方式：停 `kanalib-ingest` → `kanalib-ingest --config /etc/kanalib/ingest.toml --once --replay-push <batch-id>` → 起服务。手工重放会继承调用者的 `http_proxy`，私网地址不在 `NO_PROXY` 时会被 `3128` 代理 403 拦截；service 自身的 `ingest.env` 已含 `NO_PROXY=10.126.126.0/24,.et.net`，正常轮询不受影响。
+
+### 15.6 本地图片发布
+
+本机目录 → web 的两阶段发布，不经过 box；条目 `origin='local'`，缩略图生成成功后才从 `review` 翻成 `allow`。
+
+1. 生成设备令牌（一次性显示，DB 只存 SHA-256）：
+
+   ```bash
+   sudo -u kanalib kanalib-web --db /var/lib/kanalib-web/kanalib-web.db \
+     --media /var/lib/kanalib-web/media --issue-device kanalib-pc
+   ```
+
+   当前线上已为 PC 生成 `kanalib-pc`，token 存在本机 `D:\Code\Kanalib\.kanalib\sync-token`（已被 `.gitignore` 忽略）。
+
+2. PC 侧发布：
+
+   ```powershell
+   & 'D:\Code\Kanalib\target\release\kanalib-sync.exe' `
+     --web http://10.126.126.2:8788 --token-file D:\Code\Kanalib\.kanalib\sync-token `
+     --dir D:\Pictures\相册 --recursive [--dry-run] [--limit 20]
+   ```
+
+   `kanalib-sync` 扫描 jpg/jpeg/png/webp/gif，按原图 sha1 生成 id；重复运行是幂等的（`updated` 后重新上传原图）。
+
+3. 服务端行为：`POST /api/desktop/items` 写元数据；`POST /api/desktop/upload` 把原图写到 `media/originals/{id}.{ext}`，再用 `image` 解码生成 t256/t512（长边 ≥1024/2048 时加 t1024/t2048）JPEG q90，刷新 FTS 与作品封面。`/original/{id}` 对本地条目直接读盘，仍要求 HMAC 签名与有效期。
+
+4. 网络注意：本机当前访问 `10.126.126.0/24` 的 **TCP** 会返回 Windows `WSAEACCES 10013`（ICMP 正常，box 与 web 之间的 8788 正常）。这是本机过滤层（安全软件 / EasyTier 接口 profile），不是服务端问题。绕行方式：
+
+   ```powershell
+   ssh -N -L 18788:10.126.126.2:8788 yorigami@128.1.132.31
+   kanalib-sync --web http://127.0.0.1:18788 --token-file .kanalib\sync-token --dir <目录>
+   ```
+
+   2026-11-27 已用该隧道在 Windows 客户端实测 2 张图发布成功（含 PNG 1200×800、JPEG 900×1400），公网缩略图 t256/t512/t1024 与私网原图均 200，重复运行幂等；测试条目已清理。
 - 读配置做排障时先脱敏（`sed -E 's/(secret|token|key|password)\s*=\s*".*"/\1 = "<redacted>"/I'`）。
 - 诊断快照只读，脱敏 URL 凭据与 token 类键值。
 
