@@ -12,6 +12,8 @@
 > 状态：**I2 代码已落地**（规则层/补标/review/决策/管理页/指标，`086cfcb`）；**I5 box 部署与网页联调已实机跑通**。本文件定职责、契约、数据模型与验收。
 >
 > 2026-11-25 优化：无需补标即可终态判定的条目不调用打标服务；缩略图改为 Lanczos3 + q90 AVIF/q90 JPEG 双格式，公网按 `Accept` 协商。已部署到 box/云端，29 条旧 `allow` 条目完成回填与推送，公网 AVIF/JPEG 协商抽检通过。
+>
+> **2026-11-27：打标服务已随 GPU 主机回收彻底下线**。box 的 `[tagging].backend/endpoint` 已删除，`sidecar/tagger` 与云端 8793 代理不再运行。需要补标的条目直接记 `review`（`tag budget short; tagger unavailable`），不再发 HTTP、不阻塞同轮其它 `allow` 条目推送；文中涉及打标调用/补标的章节仅作历史设计保留。
 
 ## 0. 一句话
 

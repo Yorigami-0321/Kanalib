@@ -60,6 +60,8 @@ timeout_secs = 60
 batch_items = 60
 
 [tagging]
+# 2026-11-27：GPU 打标机已回收，默认不配置 backend/endpoint。
+# 未配置时，需要补标的条目直接转 review，不影响同轮其它 allow 条目推送。
 # 标签不足 min_tags 时调用一次；endpoint 指向 box 上的 sidecar。
 # backend = "http"
 # endpoint = "http://127.0.0.1:8793/tag"

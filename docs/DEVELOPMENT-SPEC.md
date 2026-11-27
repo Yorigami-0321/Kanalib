@@ -358,21 +358,22 @@ python scripts\wall_manifest_check.py web/public/data
                        └─ /easytier/ ──> 127.0.0.1:11012（EasyTier WSS）
 
 EasyTier 虚拟网 10.126.126.0/24
-  ├─ 10.126.126.1  kanalib-pc（本机 Windows，打标 GPU）
+  ├─ 10.126.126.1  kanalib-pc（本机 Windows）
   ├─ 10.126.126.2  kanalib-web（2c2g 云，private 8788）
   └─ 10.126.126.3  kanalib-box（入库，ingest 8790 / admin 8792）
-
-打标链路（实测）：
-box ──> 10.126.126.2:8793（云端代理）──> 10.126.126.1:8793（本机 GPU）
 ```
+
+打标服务（原 `sidecar/tagger` + 云端 8793 代理）已于 2026-11-27 随 GPU 主机被服务商回收而彻底下线；`ingest.toml` 的 `[tagging].backend/endpoint` 已删除，box 不再发起任何打标请求。
 
 | 节点 | 地址 | 运行内容 | 实测 |
 |---|---|---|---|
-| 云端 web | `10.126.126.2`，公网 `128.1.132.31` / `patchouli.us.ci` | Nginx 443、`kanalib-web` public `127.0.0.1:8787`、private `10.126.126.2:8788` | `https://patchouli.us.ci/api/health` → `{"ok":true,"db":true,"media_root":true,"version":"0.1.0"}` |
-| box | `10.126.126.3` | `kanalib-ingest`（`--config /etc/kanalib/ingest.toml`）、`kanalib-easytier`、`kanalib-etproxy` | 服务 active；`/admin/api/health` → `schema 7`、`rules 2026-11-25.1`、`rules_hash 088c3f1f…` |
-| 本机 | `10.126.126.1` | `easytier-gui` Windows 服务、`sidecar/tagger/http_server.py`（`10.126.126.1:8793`） | `easytier-cli peer`：web `p2p ~370ms`、box `relay(2) ~680ms`（中继流量不计入该表 `rx/tx` 列，已实测可达）；`curl 10.126.126.1:8793/health` → `{"ok":true,"device":"cuda","half":true,"classes":30877}`（tagger 未启动时为 `000`） |
+| 云端 web | `10.126.126.2`，公网 `128.1.132.31` / `patchouli.us.ci` | Nginx 443、`kanalib-web` public `127.0.0.1:8787`、private `10.126.126.2:8788` | `https://patchouli.us.ci/api/health` → `{"ok":true,"db":true,"media_root":true}` |
+| box | `10.126.126.3` | `kanalib-ingest`（`--config /etc/kanalib/ingest.toml`）、`kanalib-easytier`、`kanalib-etproxy` | 服务 active；`/admin/api/health` 免 token `200`，其余管理接口需 `x-admin-token`；`push_batches` 无 pending/failed |
+| 本机 | `10.126.126.1` | `easytier-gui` Windows 服务 | `easytier-cli peer`：web `p2p ~370ms`、box `relay(2) ~680ms`（中继流量不计入该表 `rx/tx` 列，已实测可达） |
 
-**打标路径**：`ingest.toml` 的 `[tagging].endpoint` 当前为云端代理 `http://10.126.126.2:8793/tag`（web 上的 `kanalib-tagger-proxy`）。本机与 box 之间的 EasyTier relay 现已可用：`ping 10.126.126.3` → ~680ms，`curl 10.126.126.3:8792/admin/api/health` → `200`。此前不通的根因是本机 `secure_mode.local_public_key` 与私钥不匹配——`secure_mode` 下中继数据要先做端到端 Noise 握手，公钥错误使握手必然失败、数据被静默缓冲丢弃；2026-11-27 已修正（原文件备份为 `config.d/kanalib.toml.bak-20261127-pubkey`）。`peer` 表里 box 仍显示 `relay(2)`/`rx,tx 0 B` 属正常，中继流量不记在直连列。保留代理不影响功能；若要省云出口，先启动本机 tagger，再从 box 验证 `10.126.126.1:8793` 后改直连。
+**无打标端时的行为**：规则判定到 `needs_tagging` 时，`pipeline::decide_item` 检测到没有 backend 就把该条目直接记 `review`（原因 `tag budget short; tagger unavailable`），不发起 HTTP、不占全局锁，同一轮里其它 `allow` 条目照常进入推送队列。2026-11-27 实测：`ingest.toml` 移除 backend 后，25 条 allow 批次 `allow-4d8a0eb8…` 全部 ack，t256/t512 各 50 个缩略图落到 web 媒体目录；服务每 60s 一轮稳定 `decided=0`，日志无打标相关错误。
+
+本机与 box 之间的 EasyTier relay 现已可用：`ping 10.126.126.3` → ~680ms，`curl 10.126.126.3:8792/admin/api/health` → `200`。此前不通的根因是本机 `secure_mode.local_public_key` 与私钥不匹配——`secure_mode` 下中继数据要先做端到端 Noise 握手，公钥错误使握手必然失败、数据被静默缓冲丢弃；2026-11-27 已修正（原文件备份为 `config.d/kanalib.toml.bak-20261127-pubkey`）。`peer` 表里 box 仍显示 `relay(2)`/`rx,tx 0 B` 属正常，中继流量不记在直连列。
 
 端口约定：
 
@@ -383,9 +384,9 @@ box ──> 10.126.126.2:8793（云端代理）──> 10.126.126.1:8793（本�
 | 8788 | web | `kanalib-web` private listener（ingest / desktop / 原图） | 仅 EasyTier |
 | 8790 | box | `kanalib-ingest` 媒体/公开基址 | 仅 EasyTier |
 | 8792 | box | 管理页与指标 | 仅 EasyTier |
-| 8793 | 云端 `10.126.126.2` | 打标代理 → 本机 `10.126.126.1:8793` | 仅 EasyTier |
-| 8793 | 本机 `10.126.126.1` | GPU 打标 `POST /tag`、`GET /health` | 仅 EasyTier |
 | 11012 | web | EasyTier WSS 入口（`/easytier/` 反代） | 公网（协议自身鉴权） |
+
+`8793` 随打标服务于 2026-11-27 下线，云端代理与本机 sidecar 均不再监听。
 
 ### 15.2 访问方式
 
@@ -413,7 +414,6 @@ ssh -o BatchMode=yes -i $env:USERPROFILE\.ssh\kanalib_deploy $deployHost "hostna
 ```powershell
 ipconfig | Select-String 10.126.126.1
 & 'D:\APP\Easytier\easytier-cli.exe' -p 127.0.0.1:15999 peer
-curl.exe --noproxy '*' http://10.126.126.1:8793/health
 ```
 
 - **目标态**是业务配置只写 FQDN（`kanalib-web.et.net` / `kanalib-box.et.net`），换 IP 只改 EasyTier 配置。
@@ -431,10 +431,9 @@ box 上执行（通过 box MCP `shell`）：
 systemctl status kanalib-ingest --no-pager -n 15
 curl -s --noproxy '*' http://10.126.126.3:8792/admin/api/health
 curl -s --noproxy '*' http://10.126.126.2:8788/api/health
-curl -s --noproxy '*' http://10.126.126.2:8793/health
 ```
 
-实测：`8788`、`8792` 正常；`10.126.126.2:8787` 从 box 不可达——public listener 只绑回环（正确）。`8793`（代理与直连）在 2026-11-27 复测均为 `000`，原因是本机 tagger 未启动，不是链路问题；box→本机 relay 的 ICMP 已通（~660ms）。
+实测：`8788`、`8792` 正常；`10.126.126.2:8787` 从 box 不可达——public listener 只绑回环（正确）。box→本机 relay 的 ICMP 已通（~660ms）。
 
 box 上还有两条容易踩的网络事实：
 
@@ -506,6 +505,7 @@ box 上还有两条容易踩的网络事实：
 | `ingest.toml` | box `/etc/kanalib/` | `0640` root:kanalib | 来源、打标、推送、管理口 |
 | `rules.toml` | box `/etc/kanalib/` | `0664` root:kanalib（实测） | 规则；支持 `SIGHUP` 热重载；改前 `cp` 成 `rules.toml.bak-<日期>` |
 | `ingest-hmac` / `media-signing-key` | box `/etc/kanalib/` | `0600` kanalib | HMAC 与原图签名 |
+| `admin-token` | box `/etc/kanalib/` | `0600` root | `kanalib-ingest` 管理面 `x-admin-token`（`/admin/api/health` 免鉴权） |
 | `easytier.env` | 各节点 `/etc/kanalib/` | `0600` root | `ET_NETWORK_SECRET` |
 | `backup.env` / `health.env` / `keepalive.env` | box `/etc/kanalib/` | `0640` root:kanalib | 备份保留、健康阈值与告警 webhook、保活目标 |
 
@@ -513,6 +513,16 @@ box 上还有两条容易踩的网络事实：
 
 - 密钥只由进程环境读取，**不写进 unit 文件、不写进仓库、不进日志/报告**。
 - 轮换顺序：`new,old` → 重启 web → 切 box 到 `new` → 去掉 `old` → 再重启 web。
+
+### 15.5 线上基线（2026-11-27）
+
+| 服务 | 版本/哈希 | 备份与回滚 |
+|---|---|---|
+| `kanalib-web`（web） | `37314d9`，sha256 `fcaf3d8a1c1a8e18911e02a3548e1eb62b572d48af049b9dad5e37ea8e12ae37` | 二进制 `/usr/local/bin/kanalib-web.bak-20261127`；DB `/var/lib/kanalib-web/kanalib-web.db.bak-20261127`（schema 未变，可直接回退） |
+| `kanalib-ingest`（box） | `37314d9`，sha256 `4d5c43e8a9807888fce2a90ab7b16971fab839a17f9e53c72b3ef39c69ced93f` | 二进制 `/usr/local/bin/kanalib-ingest.bak-20261127`；配置 `/etc/kanalib/ingest.toml.bak-20261127-tagging` |
+
+- 两台二进制都必须 ≥ `0812627`（X-02：缩略图签名纳入批次 id）。只升一边会在缩略图上传处得到 `401/403`。
+- 重放方式：停 `kanalib-ingest` → `kanalib-ingest --config /etc/kanalib/ingest.toml --once --replay-push <batch-id>` → 起服务。手工重放会继承调用者的 `http_proxy`，私网地址不在 `NO_PROXY` 时会被 `3128` 代理 403 拦截；service 自身的 `ingest.env` 已含 `NO_PROXY=10.126.126.0/24,.et.net`，正常轮询不受影响。
 - 读配置做排障时先脱敏（`sed -E 's/(secret|token|key|password)\s*=\s*".*"/\1 = "<redacted>"/I'`）。
 - 诊断快照只读，脱敏 URL 凭据与 token 类键值。
 
