@@ -4336,6 +4336,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "kanalib-sync"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "image",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "sha1",
+]
+
+[[package]]
 name = "kanalib-ui"
 version = "0.1.0"
 dependencies = [
@@ -4367,6 +4380,7 @@ dependencies = [
  "getrandom 0.3.4",
  "hmac",
  "http-body-util",
+ "image",
  "kanalib-wall-model",
  "reqwest",
  "rusqlite",

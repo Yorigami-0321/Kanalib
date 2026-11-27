@@ -4,13 +4,20 @@ members = [
     "crates/kanalib-core",
     "crates/kanalib-ingest",
     "crates/kanalib-publish",
+    "crates/kanalib-sync",
     "crates/kanalib-ui",
     "crates/kanalib-wall-model",
     "crates/kanalib-web",
     "vendor/ely-gpui-components",
     "vendor/ely-gpui-components/crates/*",
 ]
-default-members = [".", "crates/kanalib-core", "crates/kanalib-publish", "crates/kanalib-ui"]
+default-members = [
+    ".",
+    "crates/kanalib-core",
+    "crates/kanalib-publish",
+    "crates/kanalib-sync",
+    "crates/kanalib-ui",
+]
 exclude = ["vendor/gpui-pre-windows"]
 resolver = "3"
 

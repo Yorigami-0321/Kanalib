@@ -10,5 +10,6 @@ pub mod query;
 pub mod response;
 pub mod routes;
 pub mod state;
+pub mod thumbs;
 
 pub use state::AppState;

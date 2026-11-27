@@ -1,4 +1,4 @@
-//! 网页自己的 SQLite：schema v1、只读连接与测试样本。
+//! 网页自己的 SQLite：schema v2（本地发布新增 `items.origin`）、只读连接与测试样本。
 
 use std::{collections::HashMap, path::Path, time::Duration};
 
@@ -18,7 +18,7 @@ use crate::query::{
     Cursor, ItemFilter, ItemSort, SearchField, SearchTerm, SortKey, SortKind, parse_search,
 };
 
-pub const SCHEMA_VERSION: u32 = 1;
+pub const SCHEMA_VERSION: u32 = 2;
 
 pub const SAMPLE_ITEM_A: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 pub const SAMPLE_ITEM_B: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
@@ -48,6 +48,7 @@ CREATE TABLE IF NOT EXISTS items (
     rules_version TEXT,
     revision INTEGER NOT NULL DEFAULT 1,
     deleted INTEGER NOT NULL DEFAULT 0,
+    origin TEXT NOT NULL DEFAULT 'ingest',
     created_at INTEGER NOT NULL DEFAULT (unixepoch()),
     updated_at INTEGER NOT NULL DEFAULT (unixepoch())
 );
@@ -256,8 +257,25 @@ pub fn open(path: &Path) -> Result<Connection> {
     conn.busy_timeout(Duration::from_secs(5))?;
     conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;")?;
     conn.execute_batch(SCHEMA_SQL)?;
+    ensure_origin_column(&conn)?;
     conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
     Ok(conn)
+}
+
+/// 旧库没有 `origin` 列；只做一次 additive 迁移，不改动已有行。
+fn ensure_origin_column(conn: &Connection) -> Result<()> {
+    let exists: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM pragma_table_info('items') WHERE name = 'origin')",
+        [],
+        |row| row.get(0),
+    )?;
+    if !exists {
+        conn.execute(
+            "ALTER TABLE items ADD COLUMN origin TEXT NOT NULL DEFAULT 'ingest'",
+            [],
+        )?;
+    }
+    Ok(())
 }
 
 pub fn open_read(path: &Path) -> Result<Connection> {
@@ -1496,6 +1514,199 @@ fn normalize_extension(value: Option<&str>) -> Option<String> {
         return None;
     }
     Some(value)
+}
+
+/// 桌面端发布的本地条目元数据；原图与缩略图就绪前保持 `review`。
+#[derive(Clone, Debug)]
+pub struct LocalItem {
+    pub id: String,
+    pub source: String,
+    pub name: String,
+    pub title: String,
+    pub width: u32,
+    pub height: u32,
+    pub rating: String,
+    pub star: u8,
+    pub favorite: bool,
+    pub mtime: i64,
+    pub posted_at: Option<i64>,
+    pub orig_ext: String,
+    pub group_name: String,
+    pub work_id: Option<String>,
+    pub work_title: String,
+    pub page: Option<u32>,
+    pub page_count: Option<u32>,
+    pub tags: Vec<IngestTag>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LocalWrite {
+    Created,
+    Updated,
+    /// 已存在但来源不是本地发布（例如 box 入库的同 id 条目），拒绝覆盖。
+    Exists,
+}
+
+/// 写入/更新本地条目；只改元数据，不触碰 `decision`、`star`、`favorite`。
+pub fn upsert_local_item(conn: &mut Connection, item: &LocalItem, now: i64) -> Result<LocalWrite> {
+    if !valid_item_id(&item.id) {
+        anyhow::bail!("invalid item id {}", item.id);
+    }
+    let tx = conn.transaction()?;
+    let previous: Option<String> = tx
+        .query_row(
+            "SELECT origin FROM items WHERE id = ?1",
+            [&item.id],
+            |row| row.get(0),
+        )
+        .optional()?;
+    if previous.as_deref().is_some_and(|origin| origin != "local") {
+        return Ok(LocalWrite::Exists);
+    }
+
+    if let Some(work_id) = &item.work_id {
+        tx.execute(
+            "INSERT INTO works (id, source, title, page_count, status)
+             VALUES (?1, ?2, ?3, COALESCE(?4, 1), 'active')
+             ON CONFLICT(id) DO UPDATE SET
+                title = CASE WHEN excluded.title <> '' THEN excluded.title ELSE works.title END,
+                page_count = COALESCE(?4, works.page_count)",
+            params![
+                work_id,
+                &item.source,
+                item.work_title.trim(),
+                item.page_count.map(|count| i64::from(count.max(1))),
+            ],
+        )?;
+    }
+
+    tx.execute(
+        "INSERT INTO items
+            (id, source, work_id, title, name, width, height, rating, star, favorite,
+             mtime, posted_at, orig_ext, group_name, decision, rules_version, revision,
+             deleted, origin, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10,
+                 ?11, ?12, ?13, ?14, 'review', 'local', 1, 0, 'local', ?15, ?15)
+         ON CONFLICT(id) DO UPDATE SET
+            source = excluded.source,
+            work_id = excluded.work_id,
+            title = excluded.title,
+            name = excluded.name,
+            width = excluded.width,
+            height = excluded.height,
+            rating = excluded.rating,
+            mtime = excluded.mtime,
+            posted_at = excluded.posted_at,
+            orig_ext = excluded.orig_ext,
+            group_name = excluded.group_name,
+            deleted = 0,
+            updated_at = excluded.updated_at",
+        params![
+            &item.id,
+            &item.source,
+            item.work_id.as_deref(),
+            item.title.trim(),
+            item.name.trim(),
+            i64::from(item.width),
+            i64::from(item.height),
+            normalize_rating(&item.rating),
+            i64::from(item.star.min(5)),
+            if item.favorite { 1 } else { 0 },
+            item.mtime,
+            item.posted_at,
+            &item.orig_ext,
+            item.group_name.trim(),
+            now,
+        ],
+    )?;
+
+    tx.execute(
+        "DELETE FROM item_tags WHERE item_id = ?1 AND origin = 'local'",
+        [&item.id],
+    )?;
+    for tag in &item.tags {
+        let name = tag.name.trim();
+        if name.is_empty() || name.len() > 256 {
+            continue;
+        }
+        let tag_id = upsert_tag(&tx, name, tag.category.trim())?;
+        tx.execute(
+            "INSERT INTO item_tags (item_id, tag_id, score, origin)
+             VALUES (?1, ?2, ?3, 'local')
+             ON CONFLICT(item_id, tag_id, origin) DO UPDATE SET score = excluded.score",
+            params![&item.id, tag_id, normalize_score(tag.score)],
+        )?;
+    }
+
+    if let (Some(work_id), Some(page)) = (&item.work_id, item.page) {
+        tx.execute(
+            "INSERT OR REPLACE INTO work_items (work_id, item_id, page) VALUES (?1, ?2, ?3)",
+            params![work_id, &item.id, i64::from(page)],
+        )?;
+    }
+
+    refresh_search_index(&tx, std::slice::from_ref(&item.id))?;
+    tx.commit()?;
+    Ok(match previous {
+        Some(_) => LocalWrite::Updated,
+        None => LocalWrite::Created,
+    })
+}
+
+/// 原图与缩略图都写好后把本地条目放上墙；尺寸以实际解码结果为准。
+pub fn finalize_local_item(
+    conn: &mut Connection,
+    id: &str,
+    width: u32,
+    height: u32,
+    sharp: u32,
+    now: i64,
+) -> Result<bool> {
+    let tx = conn.transaction()?;
+    let work_id: Option<Option<String>> = tx
+        .query_row(
+            "SELECT work_id FROM items
+              WHERE id = ?1 AND origin = 'local' AND deleted = 0",
+            [id],
+            |row| row.get(0),
+        )
+        .optional()?;
+    let Some(work_id) = work_id else {
+        return Ok(false);
+    };
+    tx.execute(
+        "UPDATE items
+            SET decision = 'allow', width = ?2, height = ?3, sharp = ?4,
+                revision = revision + 1, updated_at = ?5
+          WHERE id = ?1",
+        params![
+            id,
+            i64::from(width),
+            i64::from(height),
+            i64::from(sharp),
+            now
+        ],
+    )?;
+    if let Some(work_id) = work_id {
+        refresh_work_cover(&tx, &work_id)?;
+    }
+    refresh_search_index(&tx, &[id.to_string()])?;
+    tx.commit()?;
+    Ok(true)
+}
+
+/// 原图路由用：条目来源与原始扩展名（本地原图据此落盘）。
+pub fn item_origin_and_ext(
+    conn: &Connection,
+    id: &str,
+) -> Result<Option<(String, Option<String>)>> {
+    conn.query_row(
+        "SELECT origin, orig_ext FROM items WHERE id = ?1 AND deleted = 0",
+        [id],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )
+    .optional()
+    .map_err(Into::into)
 }
 
 /// 桌面 pull 的单行：DTO + 合并所需版本字段。

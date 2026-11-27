@@ -177,7 +177,7 @@ async fn health_and_index() {
 
     let (status, body) = get_json(&fixture.public, "/api/index").await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(body["schema"], 1);
+    assert_eq!(body["schema"], 2);
     assert_eq!(body["api_version"], 1);
     assert_eq!(body["count"], 2);
     assert_eq!(body["counts"]["works"], 1);
@@ -2024,6 +2024,156 @@ async fn desktop_upload_streams_and_enforces_cap() {
     assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE);
     let value: Value = serde_json::from_slice(&response).expect("json");
     assert_eq!(value["error"]["code"], "upload_too_large");
+}
+
+#[tokio::test]
+async fn desktop_local_publish_creates_visible_item_with_thumbs_and_original() {
+    let fixture = build_fixture_with(
+        false,
+        Some(WriteConfig {
+            ingest_secret: Some(Arc::from(INGEST_SECRET)),
+            box_origin: None,
+            media_signing_key: Some(Arc::from("w4-media-key")),
+            upload_limit_bytes: 32 * 1024 * 1024,
+            signed_url_ttl: Duration::from_secs(300),
+        }),
+    );
+    let conn = db::open(&fixture._dir.path().join("kanalib.db")).expect("open write db");
+    db::insert_device(
+        &conn,
+        "dev_local",
+        "local device",
+        &crypto::sha256_hex(DEVICE_TOKEN.as_bytes()),
+    )
+    .expect("insert device");
+    let auth = format!("Bearer {DEVICE_TOKEN}");
+
+    let mut jpeg = Vec::new();
+    let pixels = image::RgbImage::from_fn(1200, 800, |x, y| {
+        image::Rgb([(x % 256) as u8, (y % 256) as u8, 96])
+    });
+    image::codecs::jpeg::JpegEncoder::new_with_quality(&mut jpeg, 88)
+        .encode_image(&pixels)
+        .expect("encode jpeg");
+
+    let body = serde_json::json!({
+        "items": [{
+            "id": NEW_ITEM,
+            "name": "local-test.jpg",
+            "title": "Local Test",
+            "width": 1200,
+            "height": 800,
+            "rating": "G",
+            "orig": "jpg",
+            "tags": [{"name": "local", "category": "general", "score": 0.5}],
+            "work_id": "local-work-1",
+            "work_title": "Local Album",
+            "page": 1,
+            "page_count": 1,
+            "group": "local",
+            "mtime": 1_700_000_000i64
+        }, {
+            "id": db::SAMPLE_ITEM_A,
+            "name": "collision.jpg",
+            "width": 100,
+            "height": 100,
+            "orig": "jpg"
+        }]
+    });
+    let request = Request::builder()
+        .method(Method::POST)
+        .uri("/api/desktop/items")
+        .header("authorization", &auth)
+        .header("content-type", "application/json")
+        .body(Body::from(serde_json::to_vec(&body).unwrap()))
+        .expect("request");
+    let (status, _, response) = execute(&fixture.private, request).await;
+    assert_eq!(status, StatusCode::OK);
+    let value: Value = serde_json::from_slice(&response).expect("json");
+    assert_eq!(value["results"][0]["status"], "created", "{value}");
+    assert_eq!(value["results"][1]["status"], "exists");
+
+    let request = Request::builder()
+        .method(Method::POST)
+        .uri("/api/desktop/upload")
+        .header("authorization", &auth)
+        .header("x-kanalib-item-id", NEW_ITEM)
+        .body(Body::from(jpeg.clone()))
+        .expect("request");
+    let (status, _, response) = execute(&fixture.private, request).await;
+    assert_eq!(status, StatusCode::OK, "{response:?}");
+    let value: Value = serde_json::from_slice(&response).expect("json");
+    assert_eq!(value["file"], format!("originals/{NEW_ITEM}.jpg"));
+    let media = fixture._dir.path().join("media");
+    for tier in ["t256", "t512", "t1024"] {
+        let path = media.join(tier).join(format!("{NEW_ITEM}.jpg"));
+        let bytes = std::fs::read(path).expect("thumbnail");
+        assert!(bytes.starts_with(&[0xFF, 0xD8, 0xFF]), "{tier} is jpeg");
+    }
+    assert!(!media.join("t2048").join(format!("{NEW_ITEM}.jpg")).exists());
+
+    let (status, _, body) = send(
+        &fixture.public,
+        Method::GET,
+        &format!("/api/items/{NEW_ITEM}"),
+        &[],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let value: Value = serde_json::from_slice(&body).expect("json");
+    assert_eq!(value["id"], NEW_ITEM);
+
+    let (status, _, body) = send(
+        &fixture.public,
+        Method::GET,
+        "/api/items?q=local-test&limit=10",
+        &[],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let value: Value = serde_json::from_slice(&body).expect("json");
+    assert!(
+        value["items"]
+            .as_array()
+            .expect("items")
+            .iter()
+            .any(|item| item["id"] == NEW_ITEM)
+    );
+
+    let (status, headers, body) = send(
+        &fixture.public,
+        Method::GET,
+        &format!("/media/t256/{NEW_ITEM}.jpg"),
+        &[],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(body.starts_with(&[0xFF, 0xD8, 0xFF]));
+    assert_eq!(header_text(&headers, header::CONTENT_TYPE), "image/jpeg");
+
+    let (status, headers, _) = send(
+        &fixture.private,
+        Method::GET,
+        &format!("/api/items/{NEW_ITEM}/original"),
+        &[],
+    )
+    .await;
+    assert_eq!(status, StatusCode::FOUND);
+    let location = header_text(&headers, header::LOCATION);
+    assert!(location.starts_with(&format!("/original/{NEW_ITEM}?expires=")));
+    let (status, _, body) = send(&fixture.private, Method::GET, &location, &[]).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body, jpeg);
+
+    let (status, _, body) = send(
+        &fixture.public,
+        Method::GET,
+        &format!("/original/{NEW_ITEM}?expires=1&sig={}", "0".repeat(64)),
+        &[],
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert!(!body.starts_with(&[0xFF, 0xD8, 0xFF]));
 }
 
 #[tokio::test]

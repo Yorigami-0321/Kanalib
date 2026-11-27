@@ -85,6 +85,7 @@ pub fn private_router(state: AppState) -> Router {
         .route("/internal/ingest/thumb/{tier}/{file}", post(ingest::thumb))
         .route("/api/desktop/pull", get(desktop::pull))
         .route("/api/desktop/push", post(desktop::push))
+        .route("/api/desktop/items", post(desktop::items))
         .route("/api/desktop/upload", post(desktop::upload))
         .route("/api/desktop/uploads/{file}", get(desktop::serve_upload))
         .route("/api/items/{id}/original", get(original::original))

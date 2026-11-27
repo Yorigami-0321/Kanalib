@@ -21,6 +21,7 @@ clap = { workspace = true }
 getrandom = "0.3"
 hmac = { workspace = true }
 http-body-util = "0.1"
+image = { workspace = true, features = ["jpeg", "png", "webp", "gif"] }
 kanalib-wall-model = { workspace = true }
 reqwest = { workspace = true, features = ["stream"] }
 rusqlite = { workspace = true }
@@ -35,6 +36,7 @@ tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 
 [dev-dependencies]
+image = { workspace = true, features = ["jpeg", "png", "webp", "gif"] }
 tempfile = "3"
 
 [lints]

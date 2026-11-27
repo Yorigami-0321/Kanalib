@@ -16,6 +16,7 @@ use serde::Deserialize;
 
 use crate::{
     AppState, crypto, db,
+    media::serve_file_range,
     response::{internal, not_found},
 };
 
@@ -42,21 +43,23 @@ pub async fn original(State(state): State<AppState>, Path(id): Path<String>) -> 
     if !valid_item_id(&id) {
         return not_found();
     }
-    let (Some(key), true) = (
-        state.writes.media_signing_key.as_deref(),
-        state.writes.box_origin.is_some(),
-    ) else {
+    let Some(key) = state.writes.media_signing_key.as_deref() else {
         return not_found();
     };
+    let has_box = state.writes.box_origin.is_some();
 
     let db_path = state.db_path.as_ref().clone();
+    let media_root = state.media_root.as_ref().clone();
     let lookup = id.clone();
-    let exists = tokio::task::spawn_blocking(move || {
+    let available = tokio::task::spawn_blocking(move || {
         let conn = db::open_read(&db_path)?;
-        db::item_is_public(&conn, &lookup)
+        if !db::item_is_public(&conn, &lookup)? {
+            return Ok::<_, anyhow::Error>(false);
+        }
+        Ok(local_original(&conn, &media_root, &lookup).is_some() || has_box)
     })
     .await;
-    match exists {
+    match available {
         Ok(Ok(true)) => {}
         Ok(Ok(false)) => return not_found(),
         Ok(Err(error)) => {
@@ -104,7 +107,7 @@ pub(crate) async fn serve(
     if !valid_item_id(&id) {
         return not_found();
     }
-    let Some(origin) = state.writes.box_origin.as_deref() else {
+    let Some(key) = state.writes.media_signing_key.as_deref() else {
         return not_found();
     };
     let (Some(expires), Some(signature)) = (query.expires, query.sig.as_deref()) else {
@@ -113,6 +116,44 @@ pub(crate) async fn serve(
     if expires <= 0 || !valid_signature(signature) {
         return not_found();
     }
+    if crypto::unix_now() > expires {
+        return not_found();
+    }
+    let path = format!("/original/{id}");
+    let canonical = format!("GET\n{path}\n{expires}");
+    if !crypto::hmac_sha256_verify(key.as_bytes(), canonical.as_bytes(), signature) {
+        return not_found();
+    }
+
+    let db_path = state.db_path.as_ref().clone();
+    let media_root = state.media_root.as_ref().clone();
+    let lookup = id.clone();
+    let local = tokio::task::spawn_blocking(move || {
+        let conn = db::open_read(&db_path)?;
+        if !db::item_is_public(&conn, &lookup)? {
+            return Ok::<_, anyhow::Error>(None);
+        }
+        Ok(local_original(&conn, &media_root, &lookup))
+    })
+    .await;
+    let local = match local {
+        Ok(Ok(local)) => local,
+        Ok(Err(error)) => {
+            tracing::error!(%error, "original local lookup failed");
+            return internal();
+        }
+        Err(error) => {
+            tracing::error!(%error, "original local lookup task failed");
+            return internal();
+        }
+    };
+    if let Some((path, content_type)) = local {
+        return serve_file_range(&path, content_type, method, &headers, "no-store").await;
+    }
+
+    let Some(origin) = state.writes.box_origin.as_deref() else {
+        return not_found();
+    };
 
     let url = format!("{origin}/original/{id}?expires={expires}&sig={signature}");
     let mut request = client().request(method.clone(), url);
@@ -153,6 +194,22 @@ pub(crate) async fn serve(
 
 fn valid_signature(signature: &str) -> bool {
     signature.len() == 64 && signature.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
+/// 本地发布的条目把原图存在 `<media>/originals/{id}.{ext}`。
+fn local_original(
+    conn: &rusqlite::Connection,
+    media_root: &std::path::Path,
+    id: &str,
+) -> Option<(std::path::PathBuf, &'static str)> {
+    let (origin, ext) = db::item_origin_and_ext(conn, id).ok().flatten()?;
+    if origin != "local" {
+        return None;
+    }
+    let ext = ext?;
+    let content_type = crate::thumbs::content_type_for(&ext)?;
+    let path = media_root.join("originals").join(format!("{id}.{ext}"));
+    path.is_file().then_some((path, content_type))
 }
 
 /// 连接池与回源配置全局复用；原图可能很大，不设整体超时。

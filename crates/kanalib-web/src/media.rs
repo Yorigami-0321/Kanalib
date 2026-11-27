@@ -239,6 +239,93 @@ pub(crate) fn parse_range(value: &str, size: u64) -> RangeSpec {
     RangeSpec::Partial { start, end }
 }
 
+/// 单文件 GET/HEAD 与单区间 Range；供桌面上传回读和本地原图共用。
+pub(crate) async fn serve_file_range(
+    path: &Path,
+    content_type: &'static str,
+    method: Method,
+    headers: &HeaderMap,
+    cache_control: &'static str,
+) -> Response {
+    let metadata = match tokio::fs::metadata(path).await {
+        Ok(metadata) if metadata.is_file() => metadata,
+        _ => return not_found(),
+    };
+    let mut file = match tokio::fs::File::open(path).await {
+        Ok(file) => file,
+        Err(_) => return not_found(),
+    };
+    let size = metadata.len();
+    let range_spec = headers
+        .get(header::RANGE)
+        .and_then(|value| value.to_str().ok())
+        .map(|value| parse_range(value, size))
+        .unwrap_or(RangeSpec::Full);
+
+    let mut response = match range_spec {
+        RangeSpec::Unsatisfiable => Response::builder()
+            .status(StatusCode::RANGE_NOT_SATISFIABLE)
+            .header(header::CONTENT_RANGE, format!("bytes */{size}"))
+            .body(Body::empty()),
+        RangeSpec::Partial { start, end } => {
+            let length = end - start + 1;
+            if file.seek(SeekFrom::Start(start)).await.is_err() {
+                return api_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "internal",
+                    "internal error",
+                );
+            }
+            let body = if method == Method::HEAD {
+                Body::empty()
+            } else {
+                Body::from_stream(ReaderStream::new(file.take(length)))
+            };
+            Response::builder()
+                .status(StatusCode::PARTIAL_CONTENT)
+                .header(header::CONTENT_RANGE, format!("bytes {start}-{end}/{size}"))
+                .header(header::CONTENT_LENGTH, length.to_string())
+                .body(body)
+        }
+        RangeSpec::Full => {
+            let body = if method == Method::HEAD {
+                Body::empty()
+            } else {
+                Body::from_stream(ReaderStream::new(file))
+            };
+            Response::builder()
+                .status(StatusCode::OK)
+                .header(header::CONTENT_LENGTH, size.to_string())
+                .body(body)
+        }
+    }
+    .unwrap_or_else(|_| {
+        api_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "internal",
+            "internal error",
+        )
+    });
+    let response_headers = response.headers_mut();
+    response_headers.insert(
+        header::CONTENT_TYPE,
+        header::HeaderValue::from_static(content_type),
+    );
+    response_headers.insert(
+        header::CACHE_CONTROL,
+        header::HeaderValue::from_static(cache_control),
+    );
+    response_headers.insert(
+        header::ACCEPT_RANGES,
+        header::HeaderValue::from_static("bytes"),
+    );
+    response_headers.insert(
+        HeaderName::from_static("x-content-type-options"),
+        header::HeaderValue::from_static("nosniff"),
+    );
+    response
+}
+
 fn canonical_media_root(root: &Path) -> Option<PathBuf> {
     root.canonicalize().ok()
 }

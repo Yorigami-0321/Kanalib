@@ -4,19 +4,17 @@ use axum::{
     Json,
     body::Body,
     extract::{Path as AxumPath, Query, State},
-    http::{HeaderMap, HeaderName, Method, Request, StatusCode, header},
+    http::{HeaderMap, Method, Request, StatusCode, header},
     response::Response,
 };
 use http_body_util::BodyExt;
 use kanalib_wall_model::{IngestTag, WallItemDto, valid_item_id};
 use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicU64, Ordering};
-use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
-use tokio_util::io::ReaderStream;
+use tokio::io::AsyncWriteExt;
 
 use crate::{
     AppState, crypto, db,
-    media::{RangeSpec, parse_range},
     query::{base64url_decode, base64url_encode},
     response::{api_error, db_unavailable, internal, json_response, not_found},
 };
@@ -29,6 +27,7 @@ const MAX_TAG_NAME_LEN: usize = 256;
 const MAX_TAG_CATEGORY_LEN: usize = 64;
 const MAX_PUSH_COLLECTIONS: usize = 256;
 const MAX_EXT_LEN: usize = 8;
+const MAX_LOCAL_ITEMS: usize = 200;
 const MAX_UPLOAD_FILES: usize = 5_000;
 const MAX_UPLOAD_BYTES: u64 = 8 * 1024 * 1024 * 1024;
 static UPLOAD_PART_SEQ: AtomicU64 = AtomicU64::new(0);
@@ -123,6 +122,67 @@ struct UploadResponse {
     ok: bool,
     file: String,
     bytes: u64,
+}
+
+#[derive(Debug, Default, Deserialize)]
+pub struct LocalItemsBody {
+    #[serde(default)]
+    pub items: Vec<LocalItemWire>,
+}
+
+/// 本地发布的第一阶段：只写元数据，原图上传成功后再放上墙。
+#[derive(Debug, Deserialize)]
+pub struct LocalItemWire {
+    pub id: String,
+    pub name: String,
+    #[serde(default)]
+    pub title: String,
+    pub width: u32,
+    pub height: u32,
+    #[serde(default = "default_rating")]
+    pub rating: String,
+    #[serde(default)]
+    pub star: u8,
+    #[serde(default)]
+    pub favorite: bool,
+    #[serde(default)]
+    pub mtime: i64,
+    #[serde(default)]
+    pub posted_at: Option<i64>,
+    #[serde(default)]
+    pub orig: Option<String>,
+    #[serde(default)]
+    pub group: String,
+    #[serde(default)]
+    pub tags: Vec<IngestTag>,
+    #[serde(default)]
+    pub work_id: Option<String>,
+    #[serde(default)]
+    pub work_title: String,
+    #[serde(default)]
+    pub page: Option<u32>,
+    #[serde(default)]
+    pub page_count: Option<u32>,
+    #[serde(default)]
+    pub source: Option<String>,
+}
+
+#[derive(Serialize)]
+struct LocalItemResult {
+    id: String,
+    status: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
+}
+
+#[derive(Serialize)]
+struct LocalItemsResponse {
+    ok: bool,
+    results: Vec<LocalItemResult>,
+}
+
+fn default_rating() -> String {
+    "G".to_string()
 }
 
 pub async fn pull(
@@ -330,12 +390,10 @@ pub async fn upload(
     let lookup = id.clone();
     let found = tokio::task::spawn_blocking(move || {
         let conn = db::open_read(&db_path)?;
-        let live = db::item_is_live(&conn, &lookup)?;
-        let ext = db::item_orig_ext(&conn, &lookup)?;
-        Ok::<_, anyhow::Error>((live, ext))
+        db::item_origin_and_ext(&conn, &lookup)
     })
     .await;
-    let (live, item_ext) = match found {
+    let info = match found {
         Ok(Ok(value)) => value,
         Ok(Err(error)) => {
             tracing::error!(%error, "desktop upload lookup failed");
@@ -346,13 +404,21 @@ pub async fn upload(
             return internal();
         }
     };
-    if !live {
+    // `item_origin_and_ext` 已经过滤 deleted=1，所以不存在与已删除都按 404 处理。
+    let Some((origin, item_ext)) = info else {
         return not_found();
-    }
+    };
+    let local = origin == "local";
 
     let ext = match upload_ext(&headers, item_ext.as_deref()) {
         Ok(ext) => ext,
         Err(response) => return *response,
+    };
+    // 本地条目的扩展名以元数据为准，避免 header 与 DB 不一致导致原图路径找不到。
+    let ext = if local {
+        item_ext.clone().unwrap_or(ext)
+    } else {
+        ext
     };
     let limit = state.writes.upload_limit_bytes;
     if let Some(length) = headers
@@ -364,7 +430,10 @@ pub async fn upload(
         return payload_too_large();
     }
 
-    let root = state.media_root.as_ref().join("uploads");
+    let root = state
+        .media_root
+        .as_ref()
+        .join(if local { "originals" } else { "uploads" });
     if let Err(error) = tokio::fs::create_dir_all(&root).await {
         tracing::error!(%error, "create upload root failed");
         return internal();
@@ -426,16 +495,246 @@ pub async fn upload(
         cleanup_part(&part_path).await;
         return internal();
     }
-    enforce_upload_quota(&root).await;
+
+    if local {
+        let media_root = state.media_root.as_ref().clone();
+        let outcome =
+            match crate::thumbs::generate(media_root, id.clone(), ext.clone(), final_path.clone())
+                .await
+            {
+                Ok(outcome) => outcome,
+                Err(error) => {
+                    tracing::warn!(%error, %id, "local thumbnail generation failed");
+                    return api_error(
+                        StatusCode::BAD_REQUEST,
+                        "invalid_image",
+                        "image cannot be decoded",
+                    );
+                }
+            };
+        let long_edge = outcome.width.max(outcome.height);
+        let sharp = if long_edge >= 2048 {
+            2048
+        } else if long_edge >= 1024 {
+            1024
+        } else if long_edge >= 512 {
+            512
+        } else {
+            long_edge
+        };
+        let db_path = state.db_path.as_ref().clone();
+        let finalize_id = id.clone();
+        let finalized = tokio::task::spawn_blocking(move || {
+            let mut conn = db::open(&db_path)?;
+            db::finalize_local_item(
+                &mut conn,
+                &finalize_id,
+                outcome.width,
+                outcome.height,
+                sharp,
+                crypto::unix_now(),
+            )
+        })
+        .await;
+        match finalized {
+            Ok(Ok(true)) => {}
+            Ok(Ok(false)) => {
+                tracing::warn!(%id, "local item disappeared before finalize");
+                return not_found();
+            }
+            Ok(Err(error)) => {
+                tracing::error!(%error, "finalize local item failed");
+                return internal();
+            }
+            Err(error) => {
+                tracing::error!(%error, "finalize local item task failed");
+                return internal();
+            }
+        }
+    } else {
+        enforce_upload_quota(&root).await;
+    }
 
     json_response(
         StatusCode::OK,
         UploadResponse {
             ok: true,
-            file: format!("uploads/{file_name}"),
+            file: format!(
+                "{}/{file_name}",
+                if local { "originals" } else { "uploads" }
+            ),
             bytes: written,
         },
     )
+}
+
+/// 写入一批本地条目元数据；条目在原图与缩略图就绪前保持 hidden。
+pub async fn items(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<LocalItemsBody>,
+) -> Response {
+    if let Err(response) = authorize(&state, &headers, Capability::Push).await {
+        return *response;
+    }
+    if body.items.len() > MAX_LOCAL_ITEMS {
+        return api_error(
+            StatusCode::BAD_REQUEST,
+            "too_many_items",
+            "at most 200 items per request",
+        );
+    }
+
+    let mut prepared = Vec::new();
+    let mut results = Vec::new();
+    for wire in body.items {
+        let id = wire.id.clone();
+        match local_item_from_wire(wire) {
+            Ok(item) => prepared.push(item),
+            Err(error) => results.push(LocalItemResult {
+                id,
+                status: "rejected",
+                error: Some(error),
+            }),
+        }
+    }
+
+    let db_path = state.db_path.as_ref().clone();
+    let applied = tokio::task::spawn_blocking(move || {
+        let mut conn = db::open(&db_path)?;
+        let now = crypto::unix_now();
+        let mut out = Vec::with_capacity(prepared.len());
+        for item in &prepared {
+            match db::upsert_local_item(&mut conn, item, now) {
+                Ok(write) => out.push((item.id.clone(), Some(write), None)),
+                Err(error) => out.push((item.id.clone(), None, Some(error.to_string()))),
+            }
+        }
+        Ok::<_, anyhow::Error>(out)
+    })
+    .await;
+
+    let applied = match applied {
+        Ok(Ok(applied)) => applied,
+        Ok(Err(error)) => {
+            tracing::error!(%error, "local items write failed");
+            return internal();
+        }
+        Err(error) => {
+            tracing::error!(%error, "local items task failed");
+            return internal();
+        }
+    };
+    for (id, write, error) in applied {
+        let (status, error) = match (write, error) {
+            (Some(db::LocalWrite::Created), _) => ("created", None),
+            (Some(db::LocalWrite::Updated), _) => ("updated", None),
+            (Some(db::LocalWrite::Exists), _) => ("exists", None),
+            (None, Some(error)) => ("error", Some(error)),
+            (None, None) => ("error", Some("unknown error".to_string())),
+        };
+        results.push(LocalItemResult { id, status, error });
+    }
+
+    json_response(StatusCode::OK, LocalItemsResponse { ok: true, results })
+}
+
+fn local_item_from_wire(wire: LocalItemWire) -> Result<db::LocalItem, String> {
+    if !valid_item_id(&wire.id) {
+        return Err("id must be 40 or 64 lowercase hex".to_string());
+    }
+    let name = wire.name.trim();
+    if name.is_empty() || name.len() > 512 {
+        return Err("name must be 1-512 bytes".to_string());
+    }
+    if wire.title.len() > 512 {
+        return Err("title is too long".to_string());
+    }
+    if wire.width == 0 || wire.height == 0 || wire.width > 50_000 || wire.height > 50_000 {
+        return Err("width/height is out of range".to_string());
+    }
+    if wire.star > 5 {
+        return Err("star must be 0-5".to_string());
+    }
+    if wire.group.len() > 128 {
+        return Err("group is too long".to_string());
+    }
+    let rating = wire.rating.trim().to_ascii_uppercase();
+    if !matches!(rating.as_str(), "G" | "S" | "Q" | "E") {
+        return Err("rating must be G, S, Q or E".to_string());
+    }
+    let ext = wire
+        .orig
+        .as_deref()
+        .map(|value| value.trim().trim_start_matches('.').to_ascii_lowercase())
+        .filter(|value| {
+            !value.is_empty()
+                && value.len() <= MAX_EXT_LEN
+                && value.bytes().all(|byte| byte.is_ascii_alphanumeric())
+        })
+        .ok_or_else(|| "orig extension is invalid".to_string())?;
+    if wire.tags.len() > MAX_PUSH_TAGS {
+        return Err("too many tags".to_string());
+    }
+    for tag in &wire.tags {
+        if tag.name.trim().is_empty()
+            || tag.name.len() > MAX_TAG_NAME_LEN
+            || tag.category.len() > MAX_TAG_CATEGORY_LEN
+        {
+            return Err("tag name/category is invalid".to_string());
+        }
+    }
+    let source = wire.source.as_deref().unwrap_or("local").trim().to_string();
+    if source.is_empty()
+        || source.len() > 32
+        || !source
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+    {
+        return Err("source is invalid".to_string());
+    }
+    let work_id = match wire.work_id.as_deref().map(str::trim) {
+        None | Some("") => None,
+        Some(value) => {
+            if value.len() > 128
+                || !value.bytes().all(|byte| {
+                    byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b':')
+                })
+            {
+                return Err("work_id is invalid".to_string());
+            }
+            Some(value.to_string())
+        }
+    };
+    if let (Some(page), Some(count)) = (wire.page, wire.page_count)
+        && (count == 0 || page > count)
+    {
+        return Err("page is outside page_count".to_string());
+    }
+    Ok(db::LocalItem {
+        id: wire.id,
+        source,
+        name: name.to_string(),
+        title: wire.title.trim().to_string(),
+        width: wire.width,
+        height: wire.height,
+        rating,
+        star: wire.star,
+        favorite: wire.favorite,
+        mtime: if wire.mtime > 0 {
+            wire.mtime
+        } else {
+            crypto::unix_now()
+        },
+        posted_at: wire.posted_at,
+        orig_ext: ext,
+        group_name: wire.group.trim().to_string(),
+        work_id,
+        work_title: wire.work_title.trim().to_string(),
+        page: wire.page,
+        page_count: wire.page_count,
+        tags: wire.tags,
+    })
 }
 
 /// 上传文件目前不入库，但要能被授权客户端读回，否则只是磁盘死区。
@@ -473,73 +772,7 @@ pub async fn serve_upload(
     if !canonical.starts_with(&canonical_root) {
         return not_found();
     }
-    let metadata = match tokio::fs::metadata(&canonical).await {
-        Ok(metadata) if metadata.is_file() => metadata,
-        _ => return not_found(),
-    };
-    let mut file = match tokio::fs::File::open(&canonical).await {
-        Ok(file) => file,
-        Err(_) => return not_found(),
-    };
-    let size = metadata.len();
-    let range_spec = headers
-        .get(header::RANGE)
-        .and_then(|value| value.to_str().ok())
-        .map(|value| parse_range(value, size))
-        .unwrap_or(RangeSpec::Full);
-
-    let mut response = match range_spec {
-        RangeSpec::Unsatisfiable => Response::builder()
-            .status(StatusCode::RANGE_NOT_SATISFIABLE)
-            .header(header::CONTENT_RANGE, format!("bytes */{size}"))
-            .body(Body::empty()),
-        RangeSpec::Partial { start, end } => {
-            let length = end - start + 1;
-            if file.seek(std::io::SeekFrom::Start(start)).await.is_err() {
-                return internal();
-            }
-            let body = if method == Method::HEAD {
-                Body::empty()
-            } else {
-                Body::from_stream(ReaderStream::new(file.take(length)))
-            };
-            Response::builder()
-                .status(StatusCode::PARTIAL_CONTENT)
-                .header(header::CONTENT_RANGE, format!("bytes {start}-{end}/{size}"))
-                .header(header::CONTENT_LENGTH, length.to_string())
-                .body(body)
-        }
-        RangeSpec::Full => {
-            let body = if method == Method::HEAD {
-                Body::empty()
-            } else {
-                Body::from_stream(ReaderStream::new(file))
-            };
-            Response::builder()
-                .status(StatusCode::OK)
-                .header(header::CONTENT_LENGTH, size.to_string())
-                .body(body)
-        }
-    }
-    .unwrap_or_else(|_| internal());
-    let response_headers = response.headers_mut();
-    response_headers.insert(
-        header::CONTENT_TYPE,
-        header::HeaderValue::from_static(content_type),
-    );
-    response_headers.insert(
-        header::CACHE_CONTROL,
-        header::HeaderValue::from_static("no-store"),
-    );
-    response_headers.insert(
-        header::ACCEPT_RANGES,
-        header::HeaderValue::from_static("bytes"),
-    );
-    response_headers.insert(
-        HeaderName::from_static("x-content-type-options"),
-        header::HeaderValue::from_static("nosniff"),
-    );
-    response
+    crate::media::serve_file_range(&canonical, content_type, method, &headers, "no-store").await
 }
 
 /// 超出文件数或总字节上限时按 mtime 从旧到新清理。
@@ -709,7 +942,7 @@ async fn cleanup_part(path: &std::path::Path) {
 }
 
 fn original_available(state: &AppState) -> bool {
-    state.writes.box_origin.is_some() && state.writes.media_signing_key.is_some()
+    state.writes.media_signing_key.is_some()
 }
 
 fn media_links(id: &str, original: bool) -> MediaLinks {
