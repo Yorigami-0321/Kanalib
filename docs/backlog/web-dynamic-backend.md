@@ -408,7 +408,7 @@ pub struct Capabilities {
 2. push 按 `item_id + revision` 合并；同一字段双向都改过 → 进冲突列表，不静默覆盖。
 3. 设备令牌由网页后端生成，桌面手动粘贴；不在公网开放注册。
 4. 上传走原始 body 流式写盘；单文件上限可配置；只写网页媒体目录，不碰桌面库。
-5. 本地发布是两阶段的：`items` 写入时 `origin='local'`、`decision='review'`，条目对公网不可见；`upload` 成功生成缩略图后才翻成 `allow`，因此不会出现半张图。
+5. 本地发布是两阶段的：`items` 写入时 `origin='local'`、`decision='review'`、作品 `status='draft'`，条目、作品与搜索索引对公网都不可见；`upload` 成功生成缩略图后在同一事务里把条目翻成 `allow`、作品翻成 `active`，因此不会出现半张图或空作品。
 
 实现形状：
 

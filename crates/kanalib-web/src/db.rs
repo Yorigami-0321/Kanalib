@@ -170,7 +170,7 @@ pub fn rebuild_search_index(conn: &Connection) -> Result<()> {
                             FROM item_tags it JOIN tags t ON t.id = it.tag_id
                            WHERE it.item_id = i.id), ''),
                 replace(i.group_name, '_', ' '), i.rating
-           FROM items i WHERE i.deleted = 0",
+           FROM items i WHERE i.deleted = 0 AND i.decision = 'allow'",
         [],
     )?;
     Ok(())
@@ -180,9 +180,11 @@ pub fn rebuild_search_index(conn: &Connection) -> Result<()> {
 pub fn repair_search_index_if_needed(path: &Path) -> Result<bool> {
     let mut conn = open(path)?;
     let tx = conn.transaction()?;
-    let items: i64 = tx.query_row("SELECT COUNT(*) FROM items WHERE deleted = 0", [], |row| {
-        row.get(0)
-    })?;
+    let items: i64 = tx.query_row(
+        "SELECT COUNT(*) FROM items WHERE deleted = 0 AND decision = 'allow'",
+        [],
+        |row| row.get(0),
+    )?;
     let indexed: i64 = tx.query_row("SELECT COUNT(*) FROM item_search", [], |row| row.get(0))?;
     if items == indexed {
         return Ok(false);
@@ -208,7 +210,7 @@ pub fn refresh_search_index(conn: &Connection, item_ids: &[String]) -> Result<()
                             FROM item_tags it JOIN tags t ON t.id = it.tag_id
                            WHERE it.item_id = i.id), ''),
                 replace(i.group_name, '_', ' '), i.rating
-           FROM items i WHERE i.id = ?1 AND i.deleted = 0",
+           FROM items i WHERE i.id = ?1 AND i.deleted = 0 AND i.decision = 'allow'",
     )?;
     for item_id in item_ids {
         delete.execute([item_id])?;
@@ -423,7 +425,7 @@ const WORK_COLUMNS: &str =
 
 pub fn count_works(conn: &Connection) -> Result<u32> {
     let count: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM works WHERE status <> 'deleted'",
+        "SELECT COUNT(*) FROM works WHERE status = 'active'",
         [],
         |row| row.get(0),
     )?;
@@ -441,7 +443,10 @@ pub fn count_collections(conn: &Connection) -> Result<u32> {
 }
 
 pub fn get_item(conn: &Connection, id: &str) -> Result<Option<WallItemDto>> {
-    let sql = format!("SELECT {ITEM_COLUMNS} {ITEM_FROM} WHERE i.id = ?1 AND i.deleted = 0");
+    let sql = format!(
+        "SELECT {ITEM_COLUMNS} {ITEM_FROM}
+          WHERE i.id = ?1 AND i.deleted = 0 AND i.decision = 'allow'"
+    );
     let mut stmt = conn.prepare(&sql)?;
     let item = stmt.query_row([id], map_item_row).optional()?;
     let Some(mut item) = item else {
@@ -455,7 +460,7 @@ pub fn get_item(conn: &Connection, id: &str) -> Result<Option<WallItemDto>> {
 /// 媒体 ETag 用；只取未删除条目的 `updated_at`。
 pub fn item_updated_at(conn: &Connection, id: &str) -> Result<Option<i64>> {
     conn.query_row(
-        "SELECT updated_at FROM items WHERE id = ?1 AND deleted = 0",
+        "SELECT updated_at FROM items WHERE id = ?1 AND deleted = 0 AND decision = 'allow'",
         [id],
         |row| row.get(0),
     )
@@ -466,7 +471,7 @@ pub fn item_updated_at(conn: &Connection, id: &str) -> Result<Option<i64>> {
 pub fn list_works(conn: &Connection, limit: u32, offset: u32) -> Result<Vec<WorkDto>> {
     let sql = format!(
         "SELECT {WORK_COLUMNS} FROM works w \
-         WHERE w.status <> 'deleted' \
+         WHERE w.status = 'active' \
          ORDER BY w.posted_at DESC, w.id DESC LIMIT ?1 OFFSET ?2"
     );
     collect_works(conn, &sql, params![i64::from(limit), i64::from(offset)])
@@ -480,7 +485,7 @@ pub fn list_author_works(
 ) -> Result<Vec<WorkDto>> {
     let sql = format!(
         "SELECT {WORK_COLUMNS} FROM works w
-         WHERE w.author_id = ?1 AND w.status <> 'deleted' \
+         WHERE w.author_id = ?1 AND w.status = 'active' \
          ORDER BY w.posted_at DESC, w.id DESC LIMIT ?2 OFFSET ?3"
     );
     collect_works(
@@ -492,7 +497,7 @@ pub fn list_author_works(
 
 pub fn count_author_works(conn: &Connection, author_id: &str) -> Result<u32> {
     let count: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM works WHERE author_id = ?1 AND status <> 'deleted'",
+        "SELECT COUNT(*) FROM works WHERE author_id = ?1 AND status = 'active'",
         [author_id],
         |row| row.get(0),
     )?;
@@ -502,7 +507,7 @@ pub fn count_author_works(conn: &Connection, author_id: &str) -> Result<u32> {
 pub fn get_work(conn: &Connection, id: &str) -> Result<Option<WorkDto>> {
     let sql = format!(
         "SELECT {WORK_COLUMNS} FROM works w
-         WHERE w.id = ?1 AND w.status <> 'deleted'"
+         WHERE w.id = ?1 AND w.status = 'active'"
     );
     let mut stmt = conn.prepare(&sql)?;
     let work = stmt
@@ -524,10 +529,10 @@ pub fn list_authors(conn: &Connection, limit: u32, offset: u32) -> Result<Vec<Au
     let mut stmt = conn.prepare(
         "SELECT a.id, a.name, a.avatar_url,
                 (SELECT COUNT(*) FROM works w
-                  WHERE w.author_id = a.id AND w.status <> 'deleted'),
+                  WHERE w.author_id = a.id AND w.status = 'active'),
                 (SELECT COUNT(*) FROM items i JOIN works w ON w.id = i.work_id
                   WHERE w.author_id = a.id AND i.deleted = 0
-                    AND w.status <> 'deleted')
+                    AND i.decision = 'allow' AND w.status = 'active')
          FROM authors a ORDER BY a.name ASC, a.id ASC LIMIT ?1 OFFSET ?2",
     )?;
     let rows = stmt.query_map(params![i64::from(limit), i64::from(offset)], map_author_row)?;
@@ -543,10 +548,10 @@ pub fn get_author(conn: &Connection, id: &str) -> Result<Option<AuthorDto>> {
         .query_row(
             "SELECT a.id, a.name, a.avatar_url,
                     (SELECT COUNT(*) FROM works w
-                      WHERE w.author_id = a.id AND w.status <> 'deleted'),
+                      WHERE w.author_id = a.id AND w.status = 'active'),
                     (SELECT COUNT(*) FROM items i JOIN works w ON w.id = i.work_id
                       WHERE w.author_id = a.id AND i.deleted = 0
-                        AND w.status <> 'deleted')
+                        AND i.decision = 'allow' AND w.status = 'active')
              FROM authors a WHERE a.id = ?1",
             [id],
             map_author_row,
@@ -563,10 +568,12 @@ pub fn list_collections(conn: &Connection, limit: u32, offset: u32) -> Result<Ve
     let mut stmt = conn.prepare(
         "SELECT c.id, c.name, c.kind,
                 (SELECT COUNT(*) FROM collection_items ci JOIN items i ON i.id = ci.item_id
-                  WHERE ci.collection_id = c.id AND i.deleted = 0),
+                  WHERE ci.collection_id = c.id AND i.deleted = 0
+                    AND i.decision = 'allow'),
                 (SELECT COUNT(DISTINCT i.work_id)
                    FROM collection_items ci JOIN items i ON i.id = ci.item_id
                   WHERE ci.collection_id = c.id AND i.deleted = 0
+                    AND i.decision = 'allow'
                     AND i.work_id IS NOT NULL)
          FROM collections c ORDER BY c.id ASC LIMIT ?1 OFFSET ?2",
     )?;
@@ -593,7 +600,7 @@ pub fn collection_exists(conn: &Connection, id: i64) -> Result<bool> {
 pub fn count_collection_items(conn: &Connection, id: i64) -> Result<u32> {
     let count: i64 = conn.query_row(
         "SELECT COUNT(*) FROM collection_items ci JOIN items i ON i.id = ci.item_id
-         WHERE ci.collection_id = ?1 AND i.deleted = 0",
+         WHERE ci.collection_id = ?1 AND i.deleted = 0 AND i.decision = 'allow'",
         [id],
         |row| row.get(0),
     )?;
@@ -604,7 +611,8 @@ pub fn count_collection_works(conn: &Connection, id: i64) -> Result<u32> {
     let count: i64 = conn.query_row(
         "SELECT COUNT(DISTINCT i.work_id) FROM collection_items ci
           JOIN items i ON i.id = ci.item_id
-         WHERE ci.collection_id = ?1 AND i.deleted = 0 AND i.work_id IS NOT NULL",
+         WHERE ci.collection_id = ?1 AND i.deleted = 0 AND i.decision = 'allow'
+           AND i.work_id IS NOT NULL",
         [id],
         |row| row.get(0),
     )?;
@@ -623,7 +631,7 @@ pub fn list_collection_items(
           LEFT JOIN works w ON w.id = i.work_id
           LEFT JOIN work_items wi ON wi.item_id = i.id
           LEFT JOIN authors a ON a.id = w.author_id
-         WHERE ci.collection_id = ?1 AND i.deleted = 0
+         WHERE ci.collection_id = ?1 AND i.deleted = 0 AND i.decision = 'allow'
          ORDER BY i.updated_at DESC, i.id DESC LIMIT ?2 OFFSET ?3"
     );
     let mut stmt = conn.prepare(&sql)?;
@@ -646,7 +654,8 @@ pub fn list_collection_works(
         "SELECT DISTINCT {WORK_COLUMNS} FROM collection_items ci
           JOIN items i ON i.id = ci.item_id
           JOIN works w ON w.id = i.work_id
-         WHERE ci.collection_id = ?1 AND i.deleted = 0
+         WHERE ci.collection_id = ?1 AND i.deleted = 0 AND i.decision = 'allow'
+           AND w.status = 'active'
          ORDER BY w.posted_at DESC, w.id DESC LIMIT ?2 OFFSET ?3"
     );
     collect_works(conn, &sql, params![id, i64::from(limit), i64::from(offset)])
@@ -986,7 +995,10 @@ impl WhereParts {
     fn new() -> Self {
         Self {
             candidates: Vec::new(),
-            clauses: vec!["i.deleted = 0".to_string()],
+            clauses: vec![
+                "i.deleted = 0".to_string(),
+                "i.decision = 'allow'".to_string(),
+            ],
             params: Vec::new(),
             next_param: 0,
         }
@@ -1317,6 +1329,7 @@ fn refresh_work_cover(tx: &Transaction<'_>, work_id: &str) -> Result<()> {
                   FROM items i
                   LEFT JOIN work_items wi ON wi.item_id = i.id
                  WHERE i.work_id = works.id AND i.deleted = 0
+                   AND i.decision = 'allow'
                  ORDER BY COALESCE(wi.page, 2147483647), i.id
                  LIMIT 1)
           WHERE id = ?1",
@@ -1567,7 +1580,7 @@ pub fn upsert_local_item(conn: &mut Connection, item: &LocalItem, now: i64) -> R
     if let Some(work_id) = &item.work_id {
         tx.execute(
             "INSERT INTO works (id, source, title, page_count, status)
-             VALUES (?1, ?2, ?3, COALESCE(?4, 1), 'active')
+             VALUES (?1, ?2, ?3, COALESCE(?4, 1), 'draft')
              ON CONFLICT(id) DO UPDATE SET
                 title = CASE WHEN excluded.title <> '' THEN excluded.title ELSE works.title END,
                 page_count = COALESCE(?4, works.page_count)",
@@ -1688,6 +1701,10 @@ pub fn finalize_local_item(
         ],
     )?;
     if let Some(work_id) = work_id {
+        tx.execute(
+            "UPDATE works SET status = 'active' WHERE id = ?1 AND status = 'draft'",
+            [&work_id],
+        )?;
         refresh_work_cover(&tx, &work_id)?;
     }
     refresh_search_index(&tx, &[id.to_string()])?;
@@ -1729,7 +1746,7 @@ pub fn pull_items(
     let sql = format!(
         "SELECT {ITEM_COLUMNS}, i.revision, i.updated_at {ITEM_FROM}
           WHERE i.decision = 'allow'
-            AND (i.deleted = 1 OR i.work_id IS NULL OR w.status <> 'deleted')
+            AND (i.deleted = 1 OR i.work_id IS NULL OR w.status IS NULL OR w.status = 'active')
             AND (i.updated_at > ?1 OR (i.updated_at = ?1 AND i.id > ?2))
           ORDER BY i.updated_at ASC, i.id ASC
           LIMIT ?3"
@@ -1959,7 +1976,7 @@ pub fn item_is_public(conn: &Connection, id: &str) -> Result<bool> {
              WHERE i.id = ?1
                AND i.deleted = 0
                AND i.decision = 'allow'
-               AND (i.work_id IS NULL OR w.status IS NULL OR w.status <> 'deleted')
+               AND (i.work_id IS NULL OR w.status IS NULL OR w.status = 'active')
          )",
         [id],
         |row| row.get(0),
@@ -2163,7 +2180,7 @@ fn work_pages(conn: &Connection, id: &str) -> Result<Vec<WorkPageDto>> {
     let mut stmt = conn.prepare(
         "SELECT wi.item_id, wi.page, i.width, i.height, i.sharp, i.orig_ext
            FROM work_items wi JOIN items i ON i.id = wi.item_id
-          WHERE wi.work_id = ?1 AND i.deleted = 0
+          WHERE wi.work_id = ?1 AND i.deleted = 0 AND i.decision = 'allow'
           ORDER BY wi.page ASC",
     )?;
     let rows = stmt.query_map([id], |row| {
@@ -2193,7 +2210,8 @@ fn map_author_row(row: &Row<'_>) -> rusqlite::Result<AuthorDto> {
 fn author_covers(conn: &Connection, id: &str, limit: u32) -> Result<Vec<String>> {
     let mut stmt = conn.prepare(
         "SELECT i.id FROM items i JOIN works w ON w.id = i.work_id
-          WHERE w.author_id = ?1 AND i.deleted = 0
+          WHERE w.author_id = ?1 AND i.deleted = 0 AND i.decision = 'allow'
+            AND w.status = 'active'
           ORDER BY i.updated_at DESC, i.id DESC LIMIT ?2",
     )?;
     let rows = stmt.query_map(params![id, i64::from(limit)], |row| row.get(0))?;

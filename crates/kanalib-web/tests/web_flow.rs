@@ -2093,6 +2093,26 @@ async fn desktop_local_publish_creates_visible_item_with_thumbs_and_original() {
     assert_eq!(value["results"][0]["status"], "created", "{value}");
     assert_eq!(value["results"][1]["status"], "exists");
 
+    // 元数据已写入但原图/缩略图尚未到位：暂存条目与草稿作品都不能出现在公网。
+    for uri in [
+        format!("/api/items/{NEW_ITEM}"),
+        "/api/works/local-work-1".to_string(),
+        format!("/media/t256/{NEW_ITEM}.jpg"),
+    ] {
+        let (status, _, _) = send(&fixture.public, Method::GET, &uri, &[]).await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{uri} must stay hidden");
+    }
+    let (status, _, body) = send(&fixture.public, Method::GET, "/api/items?limit=100", &[]).await;
+    assert_eq!(status, StatusCode::OK);
+    let value: Value = serde_json::from_slice(&body).expect("json");
+    assert!(
+        !value["items"]
+            .as_array()
+            .expect("items")
+            .iter()
+            .any(|item| item["id"] == NEW_ITEM)
+    );
+
     let request = Request::builder()
         .method(Method::POST)
         .uri("/api/desktop/upload")
@@ -2122,6 +2142,9 @@ async fn desktop_local_publish_creates_visible_item_with_thumbs_and_original() {
     assert_eq!(status, StatusCode::OK);
     let value: Value = serde_json::from_slice(&body).expect("json");
     assert_eq!(value["id"], NEW_ITEM);
+
+    let (status, _, _) = send(&fixture.public, Method::GET, "/api/works/local-work-1", &[]).await;
+    assert_eq!(status, StatusCode::OK);
 
     let (status, _, body) = send(
         &fixture.public,

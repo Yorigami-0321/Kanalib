@@ -547,7 +547,7 @@ box 上还有两条容易踩的网络事实：
 
    `kanalib-sync` 扫描 jpg/jpeg/png/webp/gif，按原图 sha1 生成 id；重复运行是幂等的（`updated` 后重新上传原图）。
 
-3. 服务端行为：`POST /api/desktop/items` 写元数据；`POST /api/desktop/upload` 把原图写到 `media/originals/{id}.{ext}`，再用 `image` 解码生成 t256/t512（长边 ≥1024/2048 时加 t1024/t2048）JPEG q90，刷新 FTS 与作品封面。`/original/{id}` 对本地条目直接读盘，仍要求 HMAC 签名与有效期。
+3. 服务端行为：`POST /api/desktop/items` 写元数据（条目 `review`、作品 `draft`，对公网不可见）；`POST /api/desktop/upload` 把原图写到 `media/originals/{id}.{ext}`，再用 `image` 解码生成 t256/t512（长边 ≥1024/2048 时加 t1024/t2048）JPEG q90，最后在同一事务里把条目翻成 `allow`、作品翻成 `active`，刷新 FTS 与作品封面。`/original/{id}` 对本地条目直接读盘，仍要求 HMAC 签名与有效期。
 
 4. 网络注意：本机当前访问 `10.126.126.0/24` 的 **TCP** 会返回 Windows `WSAEACCES 10013`（ICMP 正常，box 与 web 之间的 8788 正常）。这是本机过滤层（安全软件 / EasyTier 接口 profile），不是服务端问题。绕行方式：
 
