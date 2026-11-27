@@ -135,6 +135,7 @@ function buildRecord(
   ratingRaw: unknown,
   tagTable: readonly string[],
   groupTable: readonly string[],
+  shard: number,
 ): SearchRecord {
   const name = fold(str(nameRaw, ''));
   const tags = tagNames(tagsRaw, tagTable);
@@ -143,7 +144,7 @@ function buildRecord(
   const rating = fold(str(ratingRaw, ''));
   const ratingLabel = fold(RATING_LABELS[rating.toUpperCase()] ?? '');
   const hay = [name, tags.join(' '), group, rating, ratingLabel].filter(Boolean).join(' ');
-  return { id, name, tags, group, rating, hay };
+  return { id, name, tags, group, rating, hay, shard };
 }
 
 /**
@@ -151,21 +152,44 @@ function buildRecord(
  * `{"v":1,"tags":[...],"groups":[...],"items":[["id","name",[tagIdx...],groupIdx,st,rt]]}`；
  * 同时兼容对象条目（`{id,n,tags,g,rt}`）与旧字段别名，未知字段忽略。
  */
-export function normalizeSearchIndex(raw: unknown): SearchIndexData | null {
+export function normalizeSearchIndex(
+  raw: unknown,
+  shardCounts: readonly number[] = [],
+): SearchIndexData | null {
   if (!isRecord(raw)) return null;
   const tagTable = stringTable(raw.tags ?? raw.tag_table ?? raw.tagTable);
   const groupTable = stringTable(raw.groups ?? raw.group_table ?? raw.groupTable);
   const listRaw = raw.items ?? raw.entries ?? raw.records ?? raw.docs;
   if (!Array.isArray(listRaw)) return null;
   const records = new Map<string, SearchRecord>();
+  // search-index 的行序与分片顺序一致；用 index.shards[].count 把行号映射回分片号。
+  // 行只在这里消费一次，非法行也占一个位置，避免后续行整体错位。
+  // 行数与分片声明不一致时宁可全部标 -1，让调用方退回全量，也不猜错分片。
+  const alignedShards =
+    shardCounts.length > 0 &&
+    shardCounts.every((count) => Number.isInteger(count) && count >= 0) &&
+    shardCounts.reduce((sum, count) => sum + count, 0) === listRaw.length;
+  let shardCursor = 0;
+  let rowInShard = 0;
+  const nextShard = (): number => {
+    if (!alignedShards) return -1;
+    while (shardCursor < shardCounts.length && rowInShard >= shardCounts[shardCursor]) {
+      shardCursor += 1;
+      rowInShard = 0;
+    }
+    if (shardCursor >= shardCounts.length) return -1;
+    rowInShard += 1;
+    return shardCursor;
+  };
   for (const entry of listRaw) {
+    const shard = nextShard();
     if (Array.isArray(entry)) {
       // 元组：id, name, tagIdx[], groupIdx, st, rt（st 当前不参与搜索）。
       const id = str(entry[0], '');
       if (!ID_RE.test(id)) continue;
       records.set(
         id,
-        buildRecord(id, entry[1], entry[2], entry[3], entry[5], tagTable, groupTable),
+        buildRecord(id, entry[1], entry[2], entry[3], entry[5], tagTable, groupTable, shard),
       );
       continue;
     }
@@ -184,6 +208,7 @@ export function normalizeSearchIndex(raw: unknown): SearchIndexData | null {
         entry.rt ?? entry.r ?? entry.rating,
         tagTable,
         groupTable,
+        shard,
       ),
     );
   }
@@ -219,11 +244,16 @@ export class StaticSource implements WallSource {
 
   private _index: WallIndex | null = null;
   private _items: WallItem[] = [];
+  private byId = new Map<string, WallItem>();
   private _paths: TierPaths = mergePaths(undefined);
   private shards: ShardRef[] = [];
+  /** 按分片号缓存的条目；重建 `_items` 时按分片顺序拼接。 */
+  private shardItems: Array<WallItem[] | null> = [];
+  private loadedShardSet = new Set<number>();
+  /** 同一分片只发一次请求（顺序补拉与筛选补拉可能同时命中）。 */
+  private inflightShards = new Map<number, Promise<WallItem[]>>();
   private cursor = 0;
   private inflight: Promise<WallItem[]> | null = null;
-  private seen = new Set<string>();
   /** `init()` 的代号：重载后丢弃旧请求的结果，避免旧分片追加到新集合。 */
   private generation = 0;
   /** 被丢弃的不合约条目数（用于状态栏提示，不打断渲染）。 */
@@ -256,11 +286,11 @@ export class StaticSource implements WallSource {
   }
 
   getItem(id: string): WallItem | undefined {
-    return this._items.find((item) => item.id === id);
+    return this.byId.get(id);
   }
 
   hasMore(): boolean {
-    return this.cursor < this.shards.length;
+    return this.cursor < this.shards.length && this.loadedShardSet.size < this.shards.length;
   }
 
   async init(): Promise<WallIndex> {
@@ -326,11 +356,14 @@ export class StaticSource implements WallSource {
       this._index = index;
       this._paths = mergePaths(index.paths);
       this.shards = shards;
+      this.shardItems = shards.map(() => null);
+      this.loadedShardSet = new Set();
+      this.inflightShards = new Map();
       this.cursor = 0;
       this.generation += 1;
       this.inflight = null;
       this._items = [];
-      this.seen = new Set();
+      this.byId = new Map();
       this.skipped = 0;
       this.shardsLoaded = 0;
       return index;
@@ -350,15 +383,19 @@ export class StaticSource implements WallSource {
       return Promise.reject(new DataError('StaticSource: 还没有 init()，无法加载分片'));
     }
     if (this.inflight) return this.inflight;
-    if (!this.hasMore()) return Promise.resolve([] as WallItem[]);
-    const shard = this.shards[this.cursor];
+    // 筛选补拉可能已经拿过前面的分片（游标没动）：顺序补拉时直接跳过。
+    while (this.cursor < this.shards.length && this.loadedShardSet.has(this.cursor)) {
+      this.cursor += 1;
+    }
+    if (this.cursor >= this.shards.length) return Promise.resolve([] as WallItem[]);
+    const index = this.cursor;
     const generation = this.generation;
     // 只有成功后才推进游标：失败的分片下次仍是同一片，可以原样补拉，
     // 不会像旧实现那样「先消费再请求」，把失败片永久跳过。
-    const task: Promise<WallItem[]> = this.fetchShard(shard, generation)
+    const task: Promise<WallItem[]> = this.fetchShardAt(index, generation)
       .then((appended) => {
         if (generation !== this.generation) return [] as WallItem[];
-        this.cursor += 1;
+        this.cursor = index + 1;
         return appended;
       })
       .finally(() => {
@@ -366,6 +403,38 @@ export class StaticSource implements WallSource {
       });
     this.inflight = task;
     return task;
+  }
+
+  /**
+   * 只拉指定分片：筛选/搜索先用 search-index 算出命中分片，再按需取图。
+   * 最多 4 路并发；已加载的分片直接跳过。失败时保留已成功的分片并抛出首个错误。
+   */
+  async loadShards(indices: readonly number[]): Promise<WallItem[]> {
+    if (!this._index) throw new DataError('StaticSource: 还没有 init()，无法加载分片');
+    const wanted = [...new Set(indices)]
+      .filter((index) => Number.isInteger(index) && index >= 0 && index < this.shards.length)
+      .filter((index) => !this.loadedShardSet.has(index))
+      .sort((left, right) => left - right);
+    if (wanted.length === 0) return [];
+    const generation = this.generation;
+    let firstError: unknown = null;
+    for (let start = 0; start < wanted.length; start += 4) {
+      const batch = wanted.slice(start, start + 4);
+      const results = await Promise.allSettled(
+        batch.map((index) => this.fetchShardAt(index, generation)),
+      );
+      for (const result of results) {
+        if (result.status === 'rejected' && firstError === null) firstError = result.reason;
+      }
+    }
+    if (generation !== this.generation) return [];
+    const appended: WallItem[] = [];
+    for (const index of wanted) {
+      const items = this.shardItems[index];
+      if (items) appended.push(...items);
+    }
+    if (firstError !== null) throw firstError;
+    return appended;
   }
 
   /** 已就绪的搜索索引；未加载/不可用时为 null。 */
@@ -402,7 +471,10 @@ export class StaticSource implements WallSource {
       } catch {
         return null;
       }
-      const data = normalizeSearchIndex(payload);
+      const data = normalizeSearchIndex(
+        payload,
+        this.shards.map((shard) => shard.count),
+      );
       if (!data) return null;
       if (generation === this.generation) {
         this._search = data;
@@ -429,6 +501,28 @@ export class StaticSource implements WallSource {
     return task;
   }
 
+  private fetchShardAt(index: number, generation: number): Promise<WallItem[]> {
+    if (this.loadedShardSet.has(index)) {
+      return Promise.resolve(this.shardItems[index] ?? []);
+    }
+    const existing = this.inflightShards.get(index);
+    if (existing) return existing;
+    const task: Promise<WallItem[]> = this.fetchShard(this.shards[index], generation)
+      .then((items) => {
+        if (generation !== this.generation) return [] as WallItem[];
+        this.shardItems[index] = items;
+        this.loadedShardSet.add(index);
+        this.shardsLoaded = this.loadedShardSet.size;
+        this.rebuildItems();
+        return items;
+      })
+      .finally(() => {
+        if (this.inflightShards.get(index) === task) this.inflightShards.delete(index);
+      });
+    this.inflightShards.set(index, task);
+    return task;
+  }
+
   private async fetchShard(shard: ShardRef, generation: number): Promise<WallItem[]> {
     const url = dataUrl(shard.path);
     const payload = await this.fetchJson(url);
@@ -436,20 +530,32 @@ export class StaticSource implements WallSource {
     if (generation !== this.generation) return [];
     const rawList = isRecord(payload) ? payload.items : undefined;
     const rawItems: unknown[] = Array.isArray(rawList) ? rawList : [];
-    const appended: WallItem[] = [];
+    const items: WallItem[] = [];
     for (const raw of rawItems) {
       const item = normalizeItem(raw);
       if (!item) {
         this.skipped += 1;
         continue;
       }
-      if (this.seen.has(item.id)) continue;
-      this.seen.add(item.id);
-      appended.push(item);
+      items.push(item);
     }
-    this._items = this._items.concat(appended);
-    this.shardsLoaded += 1;
-    return appended;
+    return items;
+  }
+
+  /** 分片可能乱序到达；`items()` 始终按 index.shards 的顺序给出，并在重建时按 id 去重。 */
+  private rebuildItems() {
+    const items: WallItem[] = [];
+    const byId = new Map<string, WallItem>();
+    for (const shard of this.shardItems) {
+      if (!shard) continue;
+      for (const item of shard) {
+        if (byId.has(item.id)) continue;
+        byId.set(item.id, item);
+        items.push(item);
+      }
+    }
+    this._items = items;
+    this.byId = byId;
   }
 
   private async fetchJson(url: string): Promise<unknown> {

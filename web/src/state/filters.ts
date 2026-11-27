@@ -62,6 +62,11 @@ function fold(value: string): string {
   return value.toLowerCase().replace(/_+/g, ' ').replace(/\s+/g, ' ').trim();
 }
 
+/** 与索引/路由标签同一套折叠规则；供筛选分片时复用。 */
+export function foldSearchTerm(value: string): string {
+  return fold(value);
+}
+
 function unquote(value: string): string {
   if (value.length >= 2 && value.startsWith('"') && value.endsWith('"')) {
     return value.slice(1, -1);
@@ -139,16 +144,14 @@ function matchesTerm(term: SearchTerm, value: string): boolean {
   return value.includes(term.value);
 }
 
-function matchesItem(
-  item: WallItem,
-  record: SearchRecord | undefined,
+function matchesFields(
+  name: string,
+  tags: readonly string[],
+  group: string,
+  rating: string,
+  hay: string,
   terms: readonly SearchTerm[],
 ): boolean {
-  const name = record ? record.name : fold(item.n);
-  const tags = record ? record.tags : item.tags.map((tag) => fold(tag[0]));
-  const group = record ? record.group : fold(item.group ?? '');
-  const rating = record ? record.rating : fold(item.rt);
-  const hay = record ? record.hay : haystackOf(name, tags, group, rating);
   for (const term of terms) {
     let hit: boolean;
     switch (term.field) {
@@ -170,6 +173,24 @@ function matchesItem(
     if (hit === term.exclude) return false;
   }
   return true;
+}
+
+function matchesItem(
+  item: WallItem,
+  record: SearchRecord | undefined,
+  terms: readonly SearchTerm[],
+): boolean {
+  const name = record ? record.name : fold(item.n);
+  const tags = record ? record.tags : item.tags.map((tag) => fold(tag[0]));
+  const group = record ? record.group : fold(item.group ?? '');
+  const rating = record ? record.rating : fold(item.rt);
+  const hay = record ? record.hay : haystackOf(name, tags, group, rating);
+  return matchesFields(name, tags, group, rating, hay, terms);
+}
+
+/** 搜索索引行与 `filterItems` 使用同一套匹配语义。 */
+export function matchesRecord(record: SearchRecord, terms: readonly SearchTerm[]): boolean {
+  return matchesFields(record.name, record.tags, record.group, record.rating, record.hay, terms);
 }
 
 /**

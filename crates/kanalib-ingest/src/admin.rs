@@ -77,7 +77,6 @@ impl AdminState {
 
 pub fn router(state: AdminState) -> Router {
     let api = Router::new()
-        .route("/admin/api/health", get(health))
         .route("/admin/api/status", get(status))
         .route("/admin/api/metrics", get(metrics_text))
         .route("/admin/api/review", get(review_list))
@@ -101,6 +100,9 @@ pub fn router(state: AdminState) -> Router {
     Router::new()
         .route("/admin", get(page))
         .route("/admin/", get(page))
+        // 存活探针必须能在没有管理 token 的 systemd/keepalive 脚本里调用；
+        // 其余管理 API 仍由 require_admin_auth 保护。
+        .route("/admin/api/health", get(health))
         .merge(api)
         .with_state(state)
 }

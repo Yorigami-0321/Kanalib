@@ -462,6 +462,10 @@ pub fn evaluate(input: DecisionInput<'_>) -> Result<RuleOutcome> {
             return Ok(RuleOutcome::block("author blacklist", matched));
         }
     }
+    if subject.ai == AiType::Ai && !config.rules.ai.allow {
+        matched.push("ai:generated".to_string());
+        return Ok(RuleOutcome::block("ai generation disabled", matched));
+    }
 
     let tag_names = || {
         subject
@@ -542,6 +546,40 @@ pub fn evaluate(input: DecisionInput<'_>) -> Result<RuleOutcome> {
     {
         matched.push("rating:sanity".to_string());
         return Ok(RuleOutcome::review("rating sanity review", matched));
+    }
+
+    let rating = match (subject.rating, subject.x_restrict) {
+        (Rating::Unknown, Some(0)) => "all",
+        (Rating::Unknown, Some(1)) => "r18",
+        (Rating::Unknown, Some(2)) => "r18g",
+        (Rating::All, _) => "all",
+        (Rating::R18, _) => "r18",
+        (Rating::R18G, _) => "r18g",
+        (Rating::Unknown, _) => "unknown",
+    };
+    if config
+        .rules
+        .rating
+        .block
+        .iter()
+        .any(|value| value == rating)
+    {
+        matched.push(format!("rating:{rating}"));
+        return Ok(RuleOutcome::block("rating blocked", matched));
+    }
+    if rating == "unknown" {
+        matched.push("rating:unknown".to_string());
+        return Ok(RuleOutcome::review("rating unknown", matched));
+    }
+    if !config
+        .rules
+        .rating
+        .allow
+        .iter()
+        .any(|value| value == rating)
+    {
+        matched.push(format!("rating:{rating}"));
+        return Ok(RuleOutcome::block("rating not allowed", matched));
     }
 
     let mut hits = blacklist_hits(&tags);
@@ -1095,6 +1133,75 @@ none = ["1BOY"]
         .unwrap();
         assert_eq!(outcome.decision, Decision::Review);
         assert_eq!(outcome.matched, vec!["rating:sanity"]);
+    }
+
+    #[test]
+    fn ai_generation_can_be_disabled_by_config() {
+        let mut rules = config(&[], &[]);
+        rules.rules.ai.allow = false;
+        let mut subject = subject();
+        subject.ai = AiType::Ai;
+        let db = crate::db::Db::open_in_memory().unwrap();
+        let outcome = evaluate(DecisionInput {
+            db: &db,
+            config: &rules,
+            subject: &subject,
+        })
+        .unwrap();
+        assert_eq!(outcome.decision, Decision::Block);
+        assert_eq!(outcome.reason, "ai generation disabled");
+        assert_eq!(outcome.matched, vec!["ai:generated"]);
+
+        subject.ai = AiType::Unknown;
+        let outcome = evaluate(DecisionInput {
+            db: &db,
+            config: &rules,
+            subject: &subject,
+        })
+        .unwrap();
+        assert_eq!(
+            outcome.decision,
+            Decision::Allow,
+            "unknown AI state must not be treated as AI"
+        );
+    }
+
+    #[test]
+    fn rating_allow_list_is_enforced() {
+        let mut rules = config(&[], &[]);
+        rules.rules.rating.allow = vec!["all".to_string()];
+        let mut subject = subject();
+        subject.rating = Rating::R18;
+        subject.x_restrict = Some(1);
+        let db = crate::db::Db::open_in_memory().unwrap();
+        let outcome = evaluate(DecisionInput {
+            db: &db,
+            config: &rules,
+            subject: &subject,
+        })
+        .unwrap();
+        assert_eq!(outcome.decision, Decision::Block);
+        assert_eq!(outcome.reason, "rating not allowed");
+        assert_eq!(outcome.matched, vec!["rating:r18"]);
+    }
+
+    #[test]
+    fn unknown_rating_goes_to_review() {
+        let rules = config(&[], &[]);
+        let mut subject = subject();
+        subject.rating = Rating::Unknown;
+        subject.x_restrict = None;
+        subject.sanity_level = Some(1);
+        let db = crate::db::Db::open_in_memory().unwrap();
+        let outcome = evaluate(DecisionInput {
+            db: &db,
+            config: &rules,
+            subject: &subject,
+        })
+        .unwrap();
+        assert_eq!(outcome.decision, Decision::Review);
+        assert_eq!(outcome.reason, "rating unknown");
+        assert_eq!(outcome.matched, vec!["rating:unknown"]);
     }
 
     #[test]

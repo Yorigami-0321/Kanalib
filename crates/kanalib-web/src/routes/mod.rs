@@ -59,6 +59,7 @@ pub fn public_router(state: AppState) -> Router {
         .route("/api/index", get(read::index))
         .route("/api/items", get(read::items))
         .route("/api/items/{id}", get(read::item))
+        .route("/api/items/{id}/neighbors", get(read::neighbors))
         .route("/api/items/{id}/original", get(original_not_available))
         .route("/api/works", get(read::works))
         .route("/api/works/{id}", get(read::work))

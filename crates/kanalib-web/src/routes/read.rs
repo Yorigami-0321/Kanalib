@@ -372,6 +372,31 @@ pub async fn item(State(state): State<AppState>, Path(id): Path<String>) -> Resp
     }
 }
 
+/// 详情页前后条目；参数与 `/api/items` 一致，按同一筛选/排序定位。
+pub async fn neighbors(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Query(query): Query<ItemQuery>,
+) -> Response {
+    if !valid_item_id(&id) {
+        return not_found();
+    }
+    let filter = query.filter();
+    let sort = query.sort();
+    let result = run_db(&state, move |conn| {
+        if !db::item_is_public(conn, &id)? {
+            return Ok(None);
+        }
+        db::item_neighbors(conn, &id, &filter, &sort)
+    })
+    .await;
+    match result {
+        Ok(Some(neighbors)) => json_response(StatusCode::OK, neighbors),
+        Ok(None) => not_found(),
+        Err(response) => *response,
+    }
+}
+
 pub async fn works(State(state): State<AppState>, Query(query): Query<PageQuery>) -> Response {
     let limit = query.limit();
     let offset = query.offset();

@@ -137,6 +137,8 @@ pub struct Stats {
     pub originals: FileStats,
     pub stale_shards: usize,
     pub pruned_shards: usize,
+    pub stale_media: usize,
+    pub pruned_media: usize,
 }
 
 impl fmt::Display for Stats {
@@ -196,7 +198,15 @@ impl fmt::Display for Stats {
             self.originals.skipped,
             self.originals.missing,
             self.originals.failed
-        )
+        )?;
+        if self.stale_media > 0 {
+            write!(
+                f,
+                "；陈旧图片 {} 个（已清理 {}）",
+                self.stale_media, self.pruned_media
+            )?;
+        }
+        Ok(())
     }
 }
 
@@ -553,12 +563,32 @@ fn original_extension(path: &Path) -> Option<String> {
     Some(ext)
 }
 
+/// 账本里的相对路径必须是 `<tier>/<40|64 位 hex>.<ext>`，避免异常账本把删除引到目录外。
+fn valid_media_rel(rel: &str) -> bool {
+    let Some((dir, file)) = rel.split_once('/') else {
+        return false;
+    };
+    if file.contains(['/', '\\']) || !matches!(dir, "t256" | "t512" | "t1024" | "t2048" | "o") {
+        return false;
+    }
+    let Some((stem, extension)) = file.rsplit_once('.') else {
+        return false;
+    };
+    !extension.is_empty()
+        && (40..=64).contains(&stem.len())
+        && stem
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
 struct Publisher<'a> {
     options: &'a Options,
     /// 上次发布的账本（用于增量跳过）。
     previous: Ledger,
     /// 本次发布写出的账本。
     next: Ledger,
+    /// 本次实际写出/确认存在的相对路径，用于和旧账本比对出真正的陈旧产物。
+    written_files: HashSet<String>,
     seen: HashSet<String>,
     /// 同内容重复副本的标签池（键是小写 sha1 / blake3）：保留的那份没标签时用来补位。
     duplicate_tags: HashMap<String, Vec<TagHit>>,
@@ -581,6 +611,7 @@ impl<'a> Publisher<'a> {
             options,
             previous: Ledger::load(&options.out_dir),
             next: Ledger::default(),
+            written_files: HashSet::new(),
             seen: HashSet::new(),
             duplicate_tags: HashMap::new(),
             tag_counts: HashMap::new(),
@@ -1166,6 +1197,7 @@ impl<'a> Publisher<'a> {
                 entry.files.push(rel.to_string());
             }
         }
+        self.written_files.insert(rel.to_string());
     }
 
     fn flush_shard(&mut self) -> Result<()> {
@@ -1234,8 +1266,9 @@ impl<'a> Publisher<'a> {
         let bytes = serde_json::to_vec(&index).context("序列化 index.json 失败")?;
         fsutil::write_atomic(&self.options.out_dir.join("index.json"), &bytes)?;
         search.write(&self.options.out_dir)?;
-        self.next.save(&self.options.out_dir)?;
         self.prune_stale()?;
+        self.prune_media()?;
+        self.next.save(&self.options.out_dir)?;
         eprintln!(
             "[kanalib-publish] 已写出 {}（index.json + {} 分片 + {SEARCH_INDEX_FILE} + 账本 {LEDGER_FILE}）",
             self.options.out_dir.display(),
@@ -1307,6 +1340,70 @@ impl<'a> Publisher<'a> {
             }
         }
         self.stats.pruned_shards = removed;
+        Ok(())
+    }
+
+    /// 清理未被本次账本引用的旧缩略图/锐利档/原图。
+    ///
+    /// 暂存目录会预置（硬链接）旧产物；不主动回收时，源文件删除或换 id 后旧图片会一直留在正式目录。
+    /// 只清理上一版账本登记过的文件：导出目录可能同时接收 ingest 推送的 AVIF，不能全目录扫删。
+    /// `--limit` 是部分导出，账本也只覆盖部分资产，此时跳过清理。
+    fn prune_media(&mut self) -> Result<()> {
+        if self.options.limit.is_some() {
+            return Ok(());
+        }
+        let mut seen = HashSet::new();
+        let mut stale = Vec::new();
+        for (id, entry) in &self.previous.assets {
+            for rel in &entry.files {
+                if self.written_files.contains(rel)
+                    || !valid_media_rel(rel)
+                    || !seen.insert(rel.clone())
+                {
+                    continue;
+                }
+                let path = self.options.out_dir.join(rel);
+                if path.is_file() {
+                    stale.push((id.clone(), rel.clone(), path));
+                }
+            }
+        }
+        stale.sort_by(|left, right| left.1.cmp(&right.1));
+        self.stats.stale_media = stale.len();
+        if stale.is_empty() {
+            return Ok(());
+        }
+        if !self.options.prune_stale {
+            eprintln!(
+                "[kanalib-publish] 警告：{} 个图片产物未被本次清单引用（如 {}）；确认后可用 --prune-stale 清理",
+                stale.len(),
+                stale[0].1
+            );
+            // 账本每次都会重写；不把未删的旧文件登记回去，下一次发布就再也找不到它们了。
+            for (id, rel, _) in stale {
+                if let Some(entry) = self.next.assets.get_mut(&id) {
+                    if !entry.files.iter().any(|file| file == &rel) {
+                        entry.files.push(rel);
+                    }
+                } else if let Some(entry) = self.previous.assets.get(&id) {
+                    self.next.assets.insert(id, entry.clone());
+                }
+            }
+            return Ok(());
+        }
+        let mut removed = 0;
+        for (_, rel, path) in stale {
+            match fs::remove_file(&path) {
+                Ok(()) => {
+                    removed += 1;
+                    eprintln!("[kanalib-publish] 已删除陈旧图片 {rel}");
+                }
+                Err(error) => {
+                    eprintln!("[kanalib-publish] 警告：删除陈旧图片 {rel} 失败（{error}）");
+                }
+            }
+        }
+        self.stats.pruned_media = removed;
         Ok(())
     }
 }

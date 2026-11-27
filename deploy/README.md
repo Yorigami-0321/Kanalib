@@ -142,6 +142,8 @@ KANALIB_INGEST_HEALTH=http://10.126.126.3:8792/admin/api/health \
 非 0 退出即需要处理。阈值见 `monitor/README.md`；可选
 `KANALIB_TLS_HOST` 检查证书剩余天数，`KANALIB_ALERT_WEBHOOK` 在失败时 POST 报告。
 webhook 只放 `/etc/kanalib/health.env`，不写入仓库。
+`/admin/api/health` 不需要 token；`/admin/api/metrics` 需要，脚本会读取
+`KANALIB_INGEST_ADMIN_TOKEN` 或默认的 `/etc/kanalib/admin-token`。
 
 告警收件箱由 `kanalib-alert-sink.service` 提供：公网
 `https://patchouli.us.ci/kanalib-alert/<token>`，box 用私网

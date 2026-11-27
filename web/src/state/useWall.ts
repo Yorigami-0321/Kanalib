@@ -32,6 +32,8 @@ export interface WallController extends WallSnapshot {
   findItem: (id: string) => Promise<WallItem | undefined>;
   /** 详情页找不到条目时手动继续拉片。 */
   loadMoreUntilFound: (id: string) => Promise<WallItem | undefined>;
+  /** 静态源：只拉指定分片（筛选命中分片），不推进顺序游标。 */
+  loadShards: (indices: readonly number[]) => Promise<void>;
   /** 切换服务端查询（仅 API 源有效）：清空集合后重新 init + 加载第一页。 */
   reset: (query?: WallQuery) => Promise<void>;
 }
@@ -76,6 +78,8 @@ export function useWall(source: WallSource): WallController {
   const retryTimer = useRef(0);
   /** request 需要在自己的 catch 里调度下一次补拉，用 ref 断开自引用。 */
   const requestRef = useRef<(() => Promise<void>) | null>(null);
+  /** 筛选分片请求的代号：换筛选后，旧请求的 finally 不能再改快照。 */
+  const shardRun = useRef(0);
 
   const sync = useCallback(
     (phase: WallPhase, error: string | null = null) => {
@@ -247,5 +251,24 @@ export function useWall(source: WallSource): WallController {
     [source, sync],
   );
 
-  return { ...snapshot, loadMore, retry, findItem, loadMoreUntilFound, reset };
+  const loadShards = useCallback(
+    async (indices: readonly number[]) => {
+      if (!source.loadShards) return;
+      const gen = generation.current;
+      if (!alive.current || gen !== generation.current) return;
+      const run = shardRun.current + 1;
+      shardRun.current = run;
+      setSnapshot((prev) => (prev.phase === 'loading' ? prev : { ...prev, phase: 'loading' }));
+      try {
+        await source.loadShards(indices);
+      } finally {
+        if (alive.current && gen === generation.current && run === shardRun.current) {
+          sync(source.hasMore() ? 'idle' : 'end');
+        }
+      }
+    },
+    [source, sync],
+  );
+
+  return { ...snapshot, loadMore, retry, findItem, loadMoreUntilFound, loadShards, reset };
 }

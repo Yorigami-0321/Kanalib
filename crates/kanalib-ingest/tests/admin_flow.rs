@@ -1,10 +1,11 @@
 //! 管理页 API：审核放行/拒绝、规则草稿应用与快照重载。
 
-use std::{path::Path, sync::Arc};
+use std::{net::SocketAddr, path::Path, sync::Arc};
 
 use axum::{
     Router,
     body::Body,
+    extract::ConnectInfo,
     http::{Request, StatusCode, header},
 };
 use kanalib_ingest::{
@@ -196,6 +197,13 @@ async fn admin_api_requires_token_when_configured() {
     let fixture = fixture();
     let app = authed_app(&fixture);
 
+    let response = app.clone().oneshot(get("/admin/api/health")).await.unwrap();
+    assert_eq!(
+        response.status(),
+        StatusCode::OK,
+        "liveness probe must not require the admin token"
+    );
+
     let response = app.clone().oneshot(get("/admin/api/status")).await.unwrap();
     assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
 
@@ -206,6 +214,36 @@ async fn admin_api_requires_token_when_configured() {
         .unwrap();
     let response = app.oneshot(request).await.unwrap();
     assert_eq!(response.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn admin_api_enforces_allowed_ips_when_connect_info_is_present() {
+    let fixture = fixture();
+    let app = admin::router(
+        AdminState::new(
+            fixture.db_path.clone(),
+            Arc::clone(&fixture.state),
+            Some(fixture.rules_path.clone()),
+            Arc::new(Metrics::default()),
+        )
+        .with_auth(None, vec!["127.0.0.1".parse().unwrap()]),
+    );
+
+    let allowed = Request::builder()
+        .uri("/admin/api/status")
+        .extension(ConnectInfo(SocketAddr::from(([127, 0, 0, 1], 1234))))
+        .body(Body::empty())
+        .unwrap();
+    let response = app.clone().oneshot(allowed).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let denied = Request::builder()
+        .uri("/admin/api/status")
+        .extension(ConnectInfo(SocketAddr::from(([127, 0, 0, 2], 1234))))
+        .body(Body::empty())
+        .unwrap();
+    let response = app.oneshot(denied).await.unwrap();
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
 }
 
 #[tokio::test]

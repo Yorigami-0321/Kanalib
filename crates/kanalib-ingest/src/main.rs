@@ -555,10 +555,12 @@ async fn start_admin_server(
                 Ok(listener) => {
                     info!(%bind, "admin UI listening");
                     let mut serve_shutdown = shutdown.clone();
-                    let serve =
-                        axum::serve(listener, router.clone()).with_graceful_shutdown(async move {
-                            let _ = serve_shutdown.changed().await;
-                        });
+                    let service = router
+                        .clone()
+                        .into_make_service_with_connect_info::<std::net::SocketAddr>();
+                    let serve = axum::serve(listener, service).with_graceful_shutdown(async move {
+                        let _ = serve_shutdown.changed().await;
+                    });
                     if let Err(error) = serve.await {
                         warn!(%error, "admin UI stopped");
                     }
@@ -585,6 +587,8 @@ async fn start_admin_server(
 struct ReqwestImageTransport {
     client: reqwest::Client,
 }
+
+const MAX_IMAGE_BYTES: u64 = 256 * 1024 * 1024;
 
 impl ReqwestImageTransport {
     fn new(timeout: Duration) -> Result<Self> {
@@ -618,7 +622,7 @@ impl download::ImageTransport for ReqwestImageTransport {
             if let Some(start) = range_start {
                 request = request.header(header::RANGE, format!("bytes={start}-"));
             }
-            let response = request
+            let mut response = request
                 .send()
                 .await
                 .map_err(|error| source::SourceError::network(error.to_string()))?;
@@ -634,11 +638,28 @@ impl download::ImageTransport for ReqwestImageTransport {
                 .and_then(|value| value.to_str().ok())
                 .map(str::to_string);
             let content_length = response.content_length();
-            let body = response
-                .bytes()
+            if content_length.is_some_and(|length| length > MAX_IMAGE_BYTES) {
+                return Err(source::SourceError::internal(format!(
+                    "image exceeds the {MAX_IMAGE_BYTES} byte limit"
+                )));
+            }
+            let mut body = Vec::new();
+            while let Some(chunk) = response
+                .chunk()
                 .await
                 .map_err(|error| source::SourceError::network(error.to_string()))?
-                .to_vec();
+            {
+                let next_len = body
+                    .len()
+                    .checked_add(chunk.len())
+                    .ok_or_else(|| source::SourceError::internal("image size overflow"))?;
+                if next_len as u64 > MAX_IMAGE_BYTES {
+                    return Err(source::SourceError::internal(format!(
+                        "image exceeds the {MAX_IMAGE_BYTES} byte limit"
+                    )));
+                }
+                body.extend_from_slice(&chunk);
+            }
             Ok(download::ImageResponse {
                 status,
                 content_type,

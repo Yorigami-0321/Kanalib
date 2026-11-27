@@ -4,16 +4,19 @@ use axum::{
     Json,
     body::Body,
     extract::{Path as AxumPath, Query, State},
-    http::{HeaderMap, Request, StatusCode, header},
+    http::{HeaderMap, HeaderName, Method, Request, StatusCode, header},
     response::Response,
 };
 use http_body_util::BodyExt;
 use kanalib_wall_model::{IngestTag, WallItemDto, valid_item_id};
 use serde::{Deserialize, Serialize};
-use tokio::io::AsyncWriteExt;
+use std::sync::atomic::{AtomicU64, Ordering};
+use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
+use tokio_util::io::ReaderStream;
 
 use crate::{
     AppState, crypto, db,
+    media::{RangeSpec, parse_range},
     query::{base64url_decode, base64url_encode},
     response::{api_error, db_unavailable, internal, json_response, not_found},
 };
@@ -21,9 +24,14 @@ use crate::{
 const DEFAULT_PULL_LIMIT: u32 = 100;
 const MAX_PULL_LIMIT: u32 = 200;
 const MAX_PUSH_ITEMS: usize = 1_000;
+const MAX_PUSH_TAGS: usize = 256;
+const MAX_TAG_NAME_LEN: usize = 256;
+const MAX_TAG_CATEGORY_LEN: usize = 64;
+const MAX_PUSH_COLLECTIONS: usize = 256;
 const MAX_EXT_LEN: usize = 8;
 const MAX_UPLOAD_FILES: usize = 5_000;
 const MAX_UPLOAD_BYTES: u64 = 8 * 1024 * 1024 * 1024;
+static UPLOAD_PART_SEQ: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Clone, Copy)]
 enum Capability {
@@ -209,12 +217,61 @@ pub async fn push(
                 "base_revision is required",
             );
         };
+        if entry.star.is_some_and(|star| star > 5) {
+            return api_error(
+                StatusCode::BAD_REQUEST,
+                "invalid_push",
+                "star must be between 0 and 5",
+            );
+        }
+        let rating = match entry.rating {
+            Some(rating) => {
+                let rating = rating.trim().to_ascii_uppercase();
+                if !matches!(rating.as_str(), "G" | "S" | "Q" | "E") {
+                    return api_error(
+                        StatusCode::BAD_REQUEST,
+                        "invalid_rating",
+                        "rating must be one of G/S/Q/E",
+                    );
+                }
+                Some(rating)
+            }
+            None => None,
+        };
+        if let Some(tags) = &entry.tags {
+            if tags.len() > MAX_PUSH_TAGS {
+                return api_error(StatusCode::BAD_REQUEST, "invalid_push", "too many tags");
+            }
+            for tag in tags {
+                if tag.name.trim().is_empty()
+                    || tag.name.len() > MAX_TAG_NAME_LEN
+                    || tag.category.len() > MAX_TAG_CATEGORY_LEN
+                {
+                    return api_error(
+                        StatusCode::BAD_REQUEST,
+                        "invalid_push",
+                        "tag name/category is invalid",
+                    );
+                }
+            }
+        }
+        if entry
+            .collections
+            .as_ref()
+            .is_some_and(|collections| collections.len() > MAX_PUSH_COLLECTIONS)
+        {
+            return api_error(
+                StatusCode::BAD_REQUEST,
+                "invalid_push",
+                "too many collections",
+            );
+        }
         updates.push(db::PushUpdate {
             id: entry.id,
             base_revision,
             star: entry.star,
             favorite: entry.favorite,
-            rating: entry.rating,
+            rating,
             tags: entry.tags,
             collections: entry.collections,
         });
@@ -314,7 +371,11 @@ pub async fn upload(
     }
     let file_name = format!("{id}.{ext}");
     let final_path = root.join(&file_name);
-    let part_path = root.join(format!("{file_name}.part"));
+    let sequence = UPLOAD_PART_SEQ.fetch_add(1, Ordering::Relaxed);
+    let part_path = root.join(format!(
+        "{file_name}.{}-{sequence}.part",
+        std::process::id()
+    ));
     let mut file = match tokio::fs::File::create(&part_path).await {
         Ok(file) => file,
         Err(error) => {
@@ -381,6 +442,7 @@ pub async fn upload(
 pub async fn serve_upload(
     State(state): State<AppState>,
     AxumPath(file): AxumPath<String>,
+    method: Method,
     headers: HeaderMap,
 ) -> Response {
     if let Err(response) = authorize(&state, &headers, Capability::Pull).await {
@@ -400,12 +462,66 @@ pub async fn serve_upload(
         "avif" => "image/avif",
         _ => return not_found(),
     };
-    let path = state.media_root.as_ref().join("uploads").join(&file);
-    let bytes = match tokio::fs::read(&path).await {
-        Ok(bytes) => bytes,
+    let root = state.media_root.as_ref().join("uploads");
+    let path = root.join(&file);
+    let Ok(canonical_root) = root.canonicalize() else {
+        return not_found();
+    };
+    let Ok(canonical) = path.canonicalize() else {
+        return not_found();
+    };
+    if !canonical.starts_with(&canonical_root) {
+        return not_found();
+    }
+    let metadata = match tokio::fs::metadata(&canonical).await {
+        Ok(metadata) if metadata.is_file() => metadata,
+        _ => return not_found(),
+    };
+    let mut file = match tokio::fs::File::open(&canonical).await {
+        Ok(file) => file,
         Err(_) => return not_found(),
     };
-    let mut response = Response::new(Body::from(bytes));
+    let size = metadata.len();
+    let range_spec = headers
+        .get(header::RANGE)
+        .and_then(|value| value.to_str().ok())
+        .map(|value| parse_range(value, size))
+        .unwrap_or(RangeSpec::Full);
+
+    let mut response = match range_spec {
+        RangeSpec::Unsatisfiable => Response::builder()
+            .status(StatusCode::RANGE_NOT_SATISFIABLE)
+            .header(header::CONTENT_RANGE, format!("bytes */{size}"))
+            .body(Body::empty()),
+        RangeSpec::Partial { start, end } => {
+            let length = end - start + 1;
+            if file.seek(std::io::SeekFrom::Start(start)).await.is_err() {
+                return internal();
+            }
+            let body = if method == Method::HEAD {
+                Body::empty()
+            } else {
+                Body::from_stream(ReaderStream::new(file.take(length)))
+            };
+            Response::builder()
+                .status(StatusCode::PARTIAL_CONTENT)
+                .header(header::CONTENT_RANGE, format!("bytes {start}-{end}/{size}"))
+                .header(header::CONTENT_LENGTH, length.to_string())
+                .body(body)
+        }
+        RangeSpec::Full => {
+            let body = if method == Method::HEAD {
+                Body::empty()
+            } else {
+                Body::from_stream(ReaderStream::new(file))
+            };
+            Response::builder()
+                .status(StatusCode::OK)
+                .header(header::CONTENT_LENGTH, size.to_string())
+                .body(body)
+        }
+    }
+    .unwrap_or_else(|_| internal());
     let response_headers = response.headers_mut();
     response_headers.insert(
         header::CONTENT_TYPE,
@@ -414,6 +530,14 @@ pub async fn serve_upload(
     response_headers.insert(
         header::CACHE_CONTROL,
         header::HeaderValue::from_static("no-store"),
+    );
+    response_headers.insert(
+        header::ACCEPT_RANGES,
+        header::HeaderValue::from_static("bytes"),
+    );
+    response_headers.insert(
+        HeaderName::from_static("x-content-type-options"),
+        header::HeaderValue::from_static("nosniff"),
     );
     response
 }
@@ -426,6 +550,11 @@ async fn enforce_upload_quota(root: &std::path::Path) {
         return;
     };
     while let Ok(Some(entry)) = dir.next_entry().await {
+        let name = entry.file_name();
+        if name.to_string_lossy().ends_with(".part") {
+            // 正在写入的分片不参与配额淘汰；成功上传后会 rename 成正式文件。
+            continue;
+        }
         let Ok(metadata) = entry.metadata().await else {
             continue;
         };

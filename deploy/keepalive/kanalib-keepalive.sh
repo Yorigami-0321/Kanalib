@@ -15,7 +15,8 @@ local_ok=1
 ping -c 1 -W "$PEER_TIMEOUT" "$PEER" >/dev/null 2>&1 && peer_ok=0
 curl -fsS --max-time 5 "$LOCAL_HEALTH" 2>/dev/null | grep -q '"ok":true' && local_ok=0
 
-if (( peer_ok == 0 && local_ok == 0 )); then
+if (( peer_ok == 0 )); then
+    # 云端私网可达：链路正常，之前累计的失败应清零。
     rm -f "$STATE"
     exit 0
 fi
@@ -30,7 +31,7 @@ esac
 
 echo "keepalive peer=$PEER peer_ok=$peer_ok local_ok=$local_ok" >&2
 
-if (( peer_ok == 0 )); then
+if (( local_ok == 0 )); then
     # 本地正常但云端不可达，按连续失败计数；本地异常已由 systemd 负责。
     count=$((count + 1))
     printf '%s\n' "$count" > "$STATE"
@@ -40,6 +41,10 @@ if (( peer_ok == 0 )); then
         systemctl restart kanalib-easytier || true
         rm -f "$STATE"
     fi
+else
+    # 本地 ingest 也不健康时无法区分是链路还是本机服务故障；
+    # 不自作主张重启 EasyTier，交给 systemd 恢复本地服务。
+    echo "local ingest unhealthy; leaving restart to systemd" >&2
 fi
 
 exit 1

@@ -36,12 +36,21 @@ import {
   EMPTY_FILTERS,
   filterItems,
   filterSignature,
+  foldSearchTerm,
   isFilterActive,
+  matchesRecord,
+  parseQuery,
   type FilterState,
   type SearchIndexPhase,
 } from './state/filters';
 import { useWall } from './state/useWall';
-import type { SearchRecord, TagFacet, WallItem, WallQuery } from './source/types';
+import type {
+  ItemNeighbors,
+  SearchRecord,
+  TagFacet,
+  WallItem,
+  WallQuery,
+} from './source/types';
 
 const EMPTY_TAGS: TagFacet[] = [];
 const RATING_ORDER = ['G', 'S', 'Q', 'E'];
@@ -151,8 +160,14 @@ export function App() {
   }));
   const [sort, setSort] = useState<SortMode>(() => parseUiParams(window.location.hash).sort);
   const [detailItem, setDetailItem] = useState<WallItem | null>(null);
+  const [detailNeighbors, setDetailNeighbors] = useState<
+    (ItemNeighbors & { id: string }) | null
+  >(null);
   const [detailMissing, setDetailMissing] = useState(false);
   const [allLoaded, setAllLoaded] = useState(false);
+  /** 静态筛选：命中的分片已全部到齐（与“全库到齐”不同）。 */
+  const [selectionComplete, setSelectionComplete] = useState(false);
+  const [selectionFailed, setSelectionFailed] = useState(false);
   const [focusItems, setFocusItems] = useState<WallItem[]>([]);
   const [summaryId, setSummaryId] = useState<string | null>(null);
   const [spotlightItem, setSpotlightItem] = useState<WallItem | null>(null);
@@ -187,6 +202,11 @@ export function App() {
   /** 深链定位：记录「这个 id 探测到第几个分片」，纯 sync 不再触发新一轮 findItem。 */
   const detailProbe = useRef<{ id: string; loaded: number } | null>(null);
   const orderCache = useRef<{ source: readonly WallItem[]; list: WallItem[] }>({ source: [], list: [] });
+  /** 筛选分片选择的去重键与代号；换筛选时丢弃上一轮结果。 */
+  const selectionKeyRef = useRef('');
+  const selectionRun = useRef(0);
+  /** 进入详情前最后一条列表查询；深链没有列表时为空（默认排序）。 */
+  const listQueryRef = useRef<WallQuery | null>(null);
   const wallRef = useRef(wall);
   const wallControls = useRef<WallControls | null>(null);
   wallRef.current = wall;
@@ -253,6 +273,22 @@ export function App() {
     if (filters.query.trim().length > 0) requestSearchIndex();
   }, [filters.query, requestSearchIndex]);
 
+  // 静态筛选墙不需要全库分片，但需要 search-index 把标签/分组/分级命中行映射回分片。
+  // 索引体积远小于分片总量，且只加载一次。
+  useEffect(() => {
+    if (serverMode) return;
+    if (
+      route.view === 'tag' ||
+      route.view === 'group' ||
+      route.view === 'rating' ||
+      route.view === 'tags' ||
+      route.view === 'groups' ||
+      route.view === 'ratings'
+    ) {
+      requestSearchIndex();
+    }
+  }, [serverMode, route.view, requestSearchIndex]);
+
   // 浏览状态写进 hash query：replace 不产生历史条目，刷新/分享即可恢复。
   useEffect(() => {
     writeUiParams({ q: filters.query, sort, mono, matte });
@@ -278,6 +314,7 @@ export function App() {
   useEffect(() => {
     if (!serverQuery || serverQueryKey === appliedServerQuery.current) return;
     appliedServerQuery.current = serverQueryKey;
+    listQueryRef.current = serverQuery;
     void wall.reset(serverQuery);
   }, [serverQuery, serverQueryKey, wall.reset]);
 
@@ -335,8 +372,19 @@ export function App() {
   // 详情页的浏览序列跟用户当前看到的墙（筛后+排序后）一致。
   const detailBrowseItems = useMemo(() => {
     if (!detailItem) return orderedItems;
-    return shown.some((entry) => entry.id === detailItem.id) ? shown : orderedItems;
-  }, [detailItem, shown, orderedItems]);
+    const visible = shown.some((entry) => entry.id === detailItem.id);
+    let list = visible ? shown.slice() : [detailItem];
+    const neighbors = detailNeighbors?.id === detailItem.id ? detailNeighbors : null;
+    const prev = neighbors?.prev;
+    const next = neighbors?.next;
+    if (prev && !list.some((entry) => entry.id === prev.id)) {
+      list = [prev, ...list];
+    }
+    if (next && !list.some((entry) => entry.id === next.id)) {
+      list = [...list, next];
+    }
+    return list;
+  }, [detailItem, shown, orderedItems, detailNeighbors]);
 
   // 检查器只在详情页出现（双击放大后）：单击聚焦不再带信息面板，
   // 墙面上也没有右侧/底部让位（反馈问题 2）。
@@ -348,21 +396,39 @@ export function App() {
   const facetTags = wall.index?.facets?.tags ?? EMPTY_TAGS;
 
   const groups = useMemo(() => {
+    if (route.view !== 'group' && route.view !== 'groups') return [];
     const fromIndex = wall.index?.facets?.groups;
     if (fromIndex && fromIndex.length > 0) return fromIndex;
+    if (searchRecords) {
+      const seen = new Set<string>();
+      for (const record of searchRecords.values()) if (record.group) seen.add(record.group);
+      return [...seen].sort();
+    }
     const seen = new Set<string>();
     for (const item of wall.items) if (item.group) seen.add(item.group);
     return [...seen].sort();
-  }, [wall.index, wall.items]);
+  }, [route.view, wall.index, wall.items, searchRecords]);
 
   /** 标签封面：确定性 + 段内不相邻重复。规则见 photo-wall-status.md §7。 */
   const tagEntries = useMemo<TagEntry[]>(() => {
-    const byTag = new Map<string, WallItem[]>();
-    for (const item of wall.items) {
-      for (const tag of item.tags) {
-        const list = byTag.get(tag[0]);
-        if (list) list.push(item);
-        else byTag.set(tag[0], [item]);
+    if (route.view !== 'tag' && route.view !== 'tags') return [];
+    const byTag = new Map<string, string[]>();
+    if (searchRecords) {
+      // 搜索索引覆盖整库且含 id，封面不必等分片到齐。
+      for (const record of searchRecords.values()) {
+        for (const tag of record.tags) {
+          const list = byTag.get(tag);
+          if (list) list.push(record.id);
+          else byTag.set(tag, [record.id]);
+        }
+      }
+    } else {
+      for (const item of wall.items) {
+        for (const tag of item.tags) {
+          const list = byTag.get(tag[0]);
+          if (list) list.push(item.id);
+          else byTag.set(tag[0], [item.id]);
+        }
       }
     }
     const ordered = facetTags
@@ -371,7 +437,9 @@ export function App() {
         category: categoryLabel(facet.category),
         categoryKey: facet.category,
         count: facet.count,
-        candidates: (byTag.get(facet.name) ?? []).map((item) => item.id).sort(),
+        candidates: (
+          byTag.get(searchRecords ? foldSearchTerm(facet.name) : facet.name) ?? []
+        ).slice().sort(),
         fallbackCover: facet.cover,
       }))
       .sort((left, right) => right.count - left.count || left.name.localeCompare(right.name, 'zh-Hans-CN'));
@@ -416,10 +484,11 @@ export function App() {
       count: entry.count,
       coverId: covers.get(entry.name) ?? entry.fallbackCover,
     }));
-  }, [wall.items, facetTags]);
+  }, [route.view, wall.items, facetTags, searchRecords]);
 
   /** 收藏/分级/分组的第一层：计数与封面取原始加载顺序（mtime 降序），刷新稳定。 */
   const favEntries = useMemo<BucketEntry[]>(() => {
+    if (route.view !== 'fav' && route.view !== 'favs') return [];
     const items = wall.items.filter((item) => item.fav);
     return [
       {
@@ -430,24 +499,35 @@ export function App() {
         href: favHref(),
       },
     ];
-  }, [wall.items, wall.index]);
+  }, [route.view, wall.items, wall.index]);
 
-  const ratingEntries = useMemo<BucketEntry[]>(
-    () =>
-      RATING_ORDER.map((rating) => {
-        const items = wall.items.filter((item) => item.rt === rating);
-        return {
-          key: rating,
-          label: ratingLabel(rating),
-          count: wall.index?.stats?.ratings[rating] ?? items.length,
-          coverId: items[0]?.id,
-          href: ratingHref(rating),
-        };
-      }),
-    [wall.items, wall.index],
-  );
+  const ratingEntries = useMemo<BucketEntry[]>(() => {
+    if (route.view !== 'rating' && route.view !== 'ratings') return [];
+    const counts = new Map<string, number>();
+    const covers = new Map<string, string>();
+    if (searchRecords) {
+      for (const record of searchRecords.values()) {
+        if (!record.rating) continue;
+        counts.set(record.rating, (counts.get(record.rating) ?? 0) + 1);
+        if (!covers.has(record.rating)) covers.set(record.rating, record.id);
+      }
+    }
+    return RATING_ORDER.map((rating) => {
+      const items = wall.items.filter((item) => item.rt === rating);
+      return {
+        key: rating,
+        label: ratingLabel(rating),
+        count: searchRecords
+          ? counts.get(rating.toLowerCase()) ?? 0
+          : wall.index?.stats?.ratings[rating] ?? items.length,
+        coverId: searchRecords ? covers.get(rating.toLowerCase()) : items[0]?.id,
+        href: ratingHref(rating),
+      };
+    });
+  }, [route.view, wall.items, wall.index, searchRecords]);
 
   const groupEntries = useMemo<BucketEntry[]>(() => {
+    if (route.view !== 'group' && route.view !== 'groups') return [];
     const details = wall.index?.facets?.group_details;
     if (details && details.length > 0) {
       return details.map((group) => ({
@@ -457,6 +537,25 @@ export function App() {
         coverId: group.cover,
         href: groupHref(group.name),
       }));
+    }
+    if (searchRecords) {
+      const counts = new Map<string, number>();
+      const covers = new Map<string, string>();
+      for (const record of searchRecords.values()) {
+        if (!record.group) continue;
+        counts.set(record.group, (counts.get(record.group) ?? 0) + 1);
+        if (!covers.has(record.group)) covers.set(record.group, record.id);
+      }
+      return groups.map((group) => {
+        const key = foldSearchTerm(group);
+        return {
+          key: group,
+          label: displayGroup(group),
+          count: counts.get(key) ?? 0,
+          coverId: covers.get(key),
+          href: groupHref(group),
+        };
+      });
     }
     return (
       groups.map((group) => {
@@ -470,7 +569,7 @@ export function App() {
         };
       })
     );
-  }, [groups, wall.items, wall.index]);
+  }, [route.view, groups, wall.items, wall.index, searchRecords]);
 
   /** 角标用的「标签 → 张数」：来自 index.facets；facets 没到齐时角标只显示标签名。 */
   const tagCounts = useMemo(() => {
@@ -482,9 +581,10 @@ export function App() {
   // 分片全部到齐（或已无下一片）：此时已加载集合即全量，可当作计数兜底。
   // 不用 allLoaded 单指标：它比快照晚一帧，会让标签模式多闪一次。
   // API 模式没有“全量分片”概念：index 到达即视为计数/facets 完整。
+  const atEnd = !wall.hasMore && wall.phase === 'end';
   const dataComplete = serverMode
     ? Boolean(wall.index)
-    : allLoaded || (!wall.hasMore && wall.phase === 'end');
+    : allLoaded || atEnd;
 
   // 标签规模决定用不用无界空间：facets 是发布时算好的全量计数，index 到达即可用；
   // facets 缺这个标签时才退回已加载集合，且等全量到位后再采用，
@@ -506,6 +606,103 @@ export function App() {
     !queryActive &&
     sort === 'random';
 
+  // 静态筛选不必拉全库：search-index 的行序与分片顺序一致，先把命中行映射回分片号。
+  // 首页/标签随机墙是无界的，只取前几个命中分片循环展示；有限墙取全部命中分片。
+  const shardMapComplete = useMemo(() => {
+    if (!searchRecords || searchRecords.size === 0) return false;
+    for (const record of searchRecords.values()) {
+      if (record.shard < 0) return false;
+    }
+    return true;
+  }, [searchRecords]);
+
+  const selectiveRoute =
+    !serverMode &&
+    Boolean(source.loadShards) &&
+    Boolean(wall.index) &&
+    route.view !== 'detail' &&
+    route.view !== 'notfound' &&
+    (queryActive
+      ? route.view !== 'fav'
+      : route.view === 'tag' || route.view === 'group' || route.view === 'rating');
+
+  const selectiveHold =
+    selectiveRoute && !searchRecords && searchPhase !== 'unavailable';
+
+  // 标签/分组/分级总览的计数和封面都能从 search-index 直接得到，不需要分片。
+  const overviewRoute =
+    route.view === 'tags' || route.view === 'groups' || route.view === 'ratings';
+  const overviewFromIndex = Boolean(searchRecords) && overviewRoute;
+  const overviewHold =
+    !serverMode && overviewRoute && !searchRecords && searchPhase !== 'unavailable';
+
+  const selection = useMemo(() => {
+    if (!selectiveRoute || !shardMapComplete || !searchRecords) return null;
+    const terms = queryActive ? parseQuery(filters.query) : [];
+    if (queryActive && terms.length === 0) return null;
+    const tag = route.view === 'tag' ? foldSearchTerm(route.tag) : '';
+    const group = route.view === 'group' ? foldSearchTerm(route.group) : '';
+    const rating = route.view === 'rating' ? route.rating.toLowerCase() : '';
+    const shards = new Set<number>();
+    let count = 0;
+    for (const record of searchRecords.values()) {
+      if (tag && !record.tags.includes(tag)) continue;
+      if (group && record.group !== group) continue;
+      if (rating && record.rating !== rating) continue;
+      if (terms.length > 0 && !matchesRecord(record, terms)) continue;
+      count += 1;
+      if (record.shard >= 0) shards.add(record.shard);
+    }
+    const ordered = [...shards].sort((left, right) => left - right);
+    // 只有真正的无界墙才截断；有限搜索结果必须保留全部命中分片。
+    const capSelection = infiniteWall && (route.view !== 'tag' || tagItemCount !== null);
+    return { shards: capSelection ? ordered.slice(0, 2) : ordered, count };
+  }, [
+    selectiveRoute,
+    shardMapComplete,
+    searchRecords,
+    queryActive,
+    filters.query,
+    route,
+    infiniteWall,
+    tagItemCount,
+  ]);
+
+  const neededShards = selection?.shards ?? null;
+  const selectiveCount = selection?.count ?? null;
+  const selectiveActive = neededShards !== null && !selectionFailed;
+  const selectionKey = selection ? `s:${selection.shards.join(',')}` : '';
+
+  useEffect(() => {
+    if (!selection) {
+      selectionKeyRef.current = '';
+      selectionRun.current += 1;
+      setSelectionComplete(false);
+      setSelectionFailed(false);
+      setAllLoaded(false);
+      return;
+    }
+    if (selectionKeyRef.current === selectionKey) return;
+    selectionKeyRef.current = selectionKey;
+    selectionRun.current += 1;
+    const run = selectionRun.current;
+    setSelectionComplete(false);
+    setSelectionFailed(false);
+    setAllLoaded(false);
+    void wall
+      .loadShards(selection.shards)
+      .then(() => {
+        if (run !== selectionRun.current) return;
+        setSelectionComplete(true);
+        setAllLoaded(true);
+      })
+      .catch(() => {
+        if (run !== selectionRun.current) return;
+        setSelectionFailed(true);
+        setAllLoaded(false);
+      });
+  }, [selection, selectionKey, wall.loadShards]);
+
   // 世界模式也算进 resetKey：异常情况下（index 晚到、facets 缺失）模式切换时
   // 让相机按新世界重新定位，不会带着另一种坐标系的偏移进入画面。
   const signature =
@@ -523,13 +720,21 @@ export function App() {
     '|' +
     (infiniteWall ? 'infinite' : 'finite');
 
-  // 所有列表/总览页最终都要全量分片：搜索与封面计数必须在整库上算，
-  // 不能只看已滚到的部分（之前的"筛选只过滤已加载"就是这里的缺口）。
-  // 但"要全量"不等于"首屏等全量"：无限墙首片到达就铺满，剩余分片在空闲时补；
-  // 搜索/有限墙仍按序立刻补拉，避免搜索结果和排序长时间停在半库上。
-  // 未知路由只渲染缺失页，不需要拉数据。
-  // API 模式按游标翻页，不再后台拉全库；筛选/计数由服务端完成。
-  const needAll = !serverMode && route.view !== 'detail' && route.view !== 'notfound';
+  // 静态筛选/搜索与标签/分组/分级总览优先用 search-index；只有索引不可用、
+  // 收藏（索引不含 fav）或需要完整有限世界时才退回全量。
+  // 无界墙只循环已加载池，不再后台拉全库。
+  // 首页随机墙没有筛选，循环首片即可；标签墙只有 search-index 可用时才走命中分片，
+  // 否则仍要全量分片才能收集完整标签结果。
+  const canStopAllLoad = infiniteWall && route.view === 'wall';
+  const needAll =
+    !serverMode &&
+    route.view !== 'detail' &&
+    route.view !== 'notfound' &&
+    !selectiveActive &&
+    !selectiveHold &&
+    !overviewHold &&
+    !overviewFromIndex &&
+    !canStopAllLoad;
   useEffect(() => {
     if (!needAll || allLoaded) return;
     if (wall.phase === 'boot' || wall.phase === 'loading' || wall.phase === 'error') return;
@@ -557,7 +762,11 @@ export function App() {
   ]);
 
   useEffect(() => {
-    if (wall.loadedShards === 0) setAllLoaded(false);
+    if (wall.loadedShards === 0) {
+      setAllLoaded(false);
+      selectionKeyRef.current = '';
+      selectionRun.current += 1;
+    }
   }, [wall.loadedShards]);
 
   useEffect(() => {
@@ -597,6 +806,28 @@ export function App() {
       alive = false;
     };
   }, [detailId, wall.items, wall.loadedShards, wall.hasMore, wall.phase]);
+
+  // API 模式：按 id 单独取前后条目，避免深链只能浏览已加载页。
+  useEffect(() => {
+    if (!detailId || !serverMode || !source.fetchNeighbors) {
+      setDetailNeighbors(null);
+      return;
+    }
+    let alive = true;
+    const query = listQueryRef.current ?? undefined;
+    void source
+      .fetchNeighbors(detailId, query)
+      .then((neighbors) => {
+        if (!alive) return;
+        setDetailNeighbors(neighbors ? { id: detailId, ...neighbors } : null);
+      })
+      .catch(() => {
+        if (alive) setDetailNeighbors(null);
+      });
+    return () => {
+      alive = false;
+    };
+  }, [detailId, serverMode, source]);
 
   useEffect(() => {
     if (route.view !== 'detail') {
@@ -945,12 +1176,19 @@ export function App() {
   );
 
   const detailIndex = detailItem ? detailBrowseItems.findIndex((e) => e.id === detailItem.id) : -1;
+  // 目标不在当前筛选集合时 index 会等于 total，此时退回本地序列位置。
+  const detailPosition =
+    detailItem &&
+    detailNeighbors?.id === detailItem.id &&
+    detailNeighbors.index < detailNeighbors.total
+      ? detailNeighbors
+      : null;
   const detailOps = useMemo(
     () =>
       detailItem && detailIndex >= 0
         ? {
-            index: detailIndex,
-            total: detailBrowseItems.length,
+            index: detailPosition ? detailPosition.index : detailIndex,
+            total: detailPosition ? detailPosition.total : detailBrowseItems.length,
             hasPrev: detailIndex > 0,
             hasNext: detailIndex + 1 < detailBrowseItems.length,
             playing,
@@ -972,6 +1210,7 @@ export function App() {
       detailBrowseItems,
       detailIndex,
       detailItem,
+      detailPosition,
       handleBack,
       handleDetail,
       handleToggleMatte,
@@ -982,8 +1221,8 @@ export function App() {
   );
 
   const wallHead = useMemo(() => {
-    // 服务端模式下 index.count 就是当前路由/筛选的总数，不是已加载页数。
-    const count = serverMode ? total : shown.length;
+    // 服务端模式下 index.count 就是当前路由/筛选的总数；静态筛选命中数由 search-index 给出。
+    const count = serverMode ? total : selectiveCount ?? shown.length;
     switch (route.view) {
       case 'tag':
         return { title: displayTag(route.tag), count };
@@ -997,7 +1236,7 @@ export function App() {
         // 首页没有固定标题；搜索生效时补一个，让跨入口延续的 query 可见。
         return queryActive ? { title: '搜索结果', count } : null;
     }
-  }, [route, shown.length, serverMode, total, queryActive]);
+  }, [route, shown.length, serverMode, selectiveCount, total, queryActive]);
 
   const emptyText = queryActive
     ? '没有符合条件的图片'
@@ -1043,11 +1282,12 @@ export function App() {
     </button>
   ) : null;
 
-  // 标签总览的目录与张数来自 index.facets，index 一到就能出真数字；
-  // 收藏/分级/分组的计数只能从条目算，仍等全量到位再报数（卡片本身照常渐进渲染）。
+  // 标签总览的目录与张数来自 index.facets；分级/分组的计数和封面可从 search-index 直接算。
+  // 收藏（索引不含 fav）仍等全量分片到位再报数，卡片本身照常渐进渲染。
   const libraryIndexed = Boolean(wall.index);
-  const loadingTags = !libraryIndexed || (facetTags.length === 0 && !dataComplete);
-  const loadingBuckets = !dataComplete;
+  const loadingTags =
+    !libraryIndexed || (facetTags.length === 0 && !dataComplete && !searchRecords);
+  const loadingBuckets = !dataComplete && !overviewFromIndex;
 
   const inspector = inspectorItem
     ? {
@@ -1219,11 +1459,16 @@ export function App() {
               items={shown}
               paths={wall.paths}
               phase={wall.phase}
-              hasMore={wall.hasMore}
+              hasMore={wall.hasMore && !selectionComplete}
               resetKey={signature}
               filtered={filtered}
               infinite={infiniteWall}
-              ready={serverMode || allLoaded}
+              ready={serverMode || allLoaded || atEnd}
+              selecting={
+                selectiveActive
+                  ? !selectionComplete
+                  : selectiveHold || (needAll && !allLoaded && !atEnd)
+              }
               worldSeed={orderSeed}
               stableAppend={route.view === 'wall' && sort === 'random' && !queryActive}
               tagCounts={tagCounts}

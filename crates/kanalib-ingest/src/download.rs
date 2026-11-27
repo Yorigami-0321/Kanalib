@@ -75,23 +75,33 @@ pub fn recover(db: &Db, media_dir: &std::path::Path) -> Result<usize> {
     Ok(changed)
 }
 
-fn thumbnail_pair_ready(media_dir: &std::path::Path, item_id: &str, size: u32) -> bool {
+fn thumbnail_ready(media_dir: &std::path::Path, item_id: &str, size: u32) -> bool {
     let dir = media_dir.join("thumbs").join(format!("t{size}"));
-    ["jpg", "avif"]
-        .iter()
-        .all(|extension| dir.join(format!("{item_id}.{extension}")).is_file())
-        && dir.join(format!(".{item_id}.ready")).is_file()
+    let jpeg = dir.join(format!("{item_id}.jpg"));
+    let marker = dir.join(format!(".{item_id}.ready"));
+    if !jpeg.is_file() {
+        return false;
+    }
+    let state = std::fs::read(&marker).unwrap_or_default();
+    match state.as_slice() {
+        // AVIF 编码失败后写成 jpeg；这是明确的可接受降级，不再每次启动重试。
+        b"jpeg" => true,
+        // avif 或旧版 ready 标记都表示应有 AVIF；缺失时允许补一次。
+        _ => dir.join(format!("{item_id}.avif")).is_file(),
+    }
 }
 
 fn mark_thumbnail_ready(media_dir: &std::path::Path, item_id: &str, size: u32) -> Result<()> {
     let dir = media_dir.join("thumbs").join(format!("t{size}"));
-    if !["jpg", "avif"]
-        .iter()
-        .all(|extension| dir.join(format!("{item_id}.{extension}")).is_file())
-    {
+    if !dir.join(format!("{item_id}.jpg")).is_file() {
         return Ok(());
     }
-    std::fs::write(dir.join(format!(".{item_id}.ready")), b"ready")?;
+    let state = if dir.join(format!("{item_id}.avif")).is_file() {
+        b"avif".as_slice()
+    } else {
+        b"jpeg".as_slice()
+    };
+    std::fs::write(dir.join(format!(".{item_id}.ready")), state)?;
     Ok(())
 }
 
@@ -110,19 +120,34 @@ fn thumbnail_sizes(width: u32, height: u32) -> Vec<u32> {
 
 pub fn backfill_thumbnails(db: &Db, media_dir: &std::path::Path) -> Result<usize> {
     let mut statement = db.connection().prepare(
-        "SELECT id, original_path FROM items
+        "SELECT id, original_path, width, height FROM items
           WHERE original_path IS NOT NULL AND decision='allow'
           ORDER BY id",
     )?;
     let items = statement
         .query_map([], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, u32>(2)?,
+                row.get::<_, u32>(3)?,
+            ))
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     drop(statement);
 
     let mut refreshed = 0;
-    for (item_id, original_path) in items {
+    for (item_id, original_path, width, height) in items {
+        // 正常下载过的条目已有尺寸；先据此跳过完整项，避免每次启动解码整库。
+        if width > 0
+            && height > 0
+            && thumbnail_sizes(width, height)
+                .iter()
+                .all(|size| thumbnail_ready(media_dir, &item_id, *size))
+        {
+            continue;
+        }
+
         let bytes = match std::fs::read(&original_path) {
             Ok(bytes) => bytes,
             Err(error) => {
@@ -144,7 +169,7 @@ pub fn backfill_thumbnails(db: &Db, media_dir: &std::path::Path) -> Result<usize
         let sizes = thumbnail_sizes(decoded.width(), decoded.height());
         let complete = sizes
             .iter()
-            .all(|size| thumbnail_pair_ready(media_dir, &item_id, *size));
+            .all(|size| thumbnail_ready(media_dir, &item_id, *size));
         if complete {
             continue;
         }
@@ -608,5 +633,31 @@ mod tests {
             .decode()
             .unwrap();
         assert_eq!((decoded.width(), decoded.height()), (32, 16));
+    }
+
+    #[test]
+    fn ready_marker_only_requires_jpeg() {
+        let dir = TempDir::new().unwrap();
+        let item_id = "c".repeat(40);
+        let output = write_thumbnail(
+            dir.path(),
+            &item_id,
+            &image::DynamicImage::ImageRgba8(RgbaImage::from_pixel(
+                16,
+                16,
+                image::Rgba([1, 2, 3, 255]),
+            )),
+            256,
+        )
+        .expect("thumbnail");
+        std::fs::remove_file(std::path::Path::new(&output).with_extension("avif")).ok();
+
+        mark_thumbnail_ready(dir.path(), &item_id, 256).expect("ready marker");
+        assert!(thumbnail_ready(dir.path(), &item_id, 256));
+        assert_eq!(
+            std::fs::read(dir.path().join(format!("thumbs/t256/.{item_id}.ready")))
+                .expect("marker"),
+            b"jpeg"
+        );
     }
 }

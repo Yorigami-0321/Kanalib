@@ -3,6 +3,7 @@ import { DataError, isValidItemId, normalizeItem } from './StaticSource';
 import {
   type FacetGroup,
   type IndexStats,
+  type ItemNeighbors,
   type SourceCapabilities,
   type TierPaths,
   type WallIndex,
@@ -244,6 +245,25 @@ export class ApiSource implements WallSource {
     if (!item) return undefined;
     this.byId.set(item.id, item);
     return item;
+  }
+
+  async fetchNeighbors(id: string, query?: WallQuery): Promise<ItemNeighbors | undefined> {
+    if (!isValidItemId(id)) return undefined;
+    const params = query ? queryParams(query) : new URLSearchParams();
+    const suffix = params.toString();
+    const payload = await this.fetchJson(
+      apiUrl(`items/${id}/neighbors${suffix ? `?${suffix}` : ''}`),
+      true,
+    );
+    if (payload === undefined || !isRecord(payload)) return undefined;
+    const prev = isRecord(payload.prev) ? normalizeItem(payload.prev) : null;
+    const next = isRecord(payload.next) ? normalizeItem(payload.next) : null;
+    return {
+      prev: prev ?? undefined,
+      next: next ?? undefined,
+      index: num(payload.index, 0),
+      total: num(payload.total, 0),
+    };
   }
 
   private async fetchPage(

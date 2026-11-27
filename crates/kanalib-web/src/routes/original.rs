@@ -27,7 +27,7 @@ pub async fn original(State(state): State<AppState>, Path(id): Path<String>) -> 
     let lookup = id.clone();
     let exists = tokio::task::spawn_blocking(move || {
         let conn = db::open_read(&db_path)?;
-        db::item_is_live(&conn, &lookup)
+        db::item_is_public(&conn, &lookup)
     })
     .await;
     match exists {

@@ -101,8 +101,18 @@ fn fallback_tiers(tier: &str) -> &'static [&'static str] {
     }
 }
 
-fn etag(id: &str, updated_at: i64, tier: &str, format: ThumbFormat) -> String {
-    format!("W/\"{id}-{updated_at}-{tier}-{}\"", format.extension())
+fn etag(
+    id: &str,
+    updated_at: i64,
+    tier: &str,
+    format: ThumbFormat,
+    len: u64,
+    modified: u128,
+) -> String {
+    format!(
+        "W/\"{id}-{updated_at}-{tier}-{}-{len}-{modified}\"",
+        format.extension()
+    )
 }
 
 fn accepts_avif(headers: &HeaderMap) -> bool {
@@ -179,13 +189,13 @@ fn base_media_headers(etag_value: &str, format: ThumbFormat) -> HeaderMap {
     headers
 }
 
-enum RangeSpec {
+pub(crate) enum RangeSpec {
     Full,
     Partial { start: u64, end: u64 },
     Unsatisfiable,
 }
 
-fn parse_range(value: &str, size: u64) -> RangeSpec {
+pub(crate) fn parse_range(value: &str, size: u64) -> RangeSpec {
     let Some(spec) = value.strip_prefix("bytes=") else {
         return RangeSpec::Full;
     };
@@ -341,7 +351,20 @@ pub async fn serve_media(
         return not_found();
     };
 
-    let etag_value = etag(&id, updated_at, &tier, format);
+    let metadata = match tokio::fs::metadata(&path).await {
+        Ok(metadata) => metadata,
+        Err(error) => {
+            tracing::warn!(%error, path = %path.display(), "media metadata failed");
+            return not_found();
+        }
+    };
+    let modified = metadata
+        .modified()
+        .ok()
+        .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|duration| duration.as_nanos())
+        .unwrap_or(0);
+    let etag_value = etag(&id, updated_at, &tier, format, metadata.len(), modified);
     if if_none_match(&headers, &etag_value) {
         return (
             StatusCode::NOT_MODIFIED,
@@ -357,13 +380,7 @@ pub async fn serve_media(
             return not_found();
         }
     };
-    let size = match file.metadata().await {
-        Ok(metadata) => metadata.len(),
-        Err(error) => {
-            tracing::warn!(%error, "media metadata failed");
-            return not_found();
-        }
-    };
+    let size = metadata.len();
 
     let range_spec = headers
         .get(header::RANGE)

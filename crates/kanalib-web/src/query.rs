@@ -192,12 +192,12 @@ fn parse_term(token: &str) -> Option<SearchTerm> {
     }
 
     let mut field = SearchField::Any;
-    if let Some(colon) = rest.find([':', '：'])
-        && colon > 0
-        && let Some(alias) = field_alias(&rest[..colon])
+    if let Some((prefix, suffix)) = rest.split_once(|ch| ch == ':' || ch == '：')
+        && !prefix.is_empty()
+        && let Some(alias) = field_alias(prefix)
     {
         field = alias;
-        rest = &rest[colon + 1..];
+        rest = suffix;
     }
 
     let value = fold(unquote(rest));
@@ -390,6 +390,14 @@ mod tests {
         assert_eq!(terms.len(), 1);
         assert_eq!(terms[0].field, SearchField::Any);
         assert_eq!(terms[0].value, "is:failed");
+    }
+
+    #[test]
+    fn full_width_colon_field_alias_does_not_panic() {
+        let terms = parse_search("标签：foo");
+        assert_eq!(terms.len(), 1);
+        assert_eq!(terms[0].field, SearchField::Tag);
+        assert_eq!(terms[0].value, "foo");
     }
 
     #[test]

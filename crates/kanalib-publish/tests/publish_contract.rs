@@ -12,6 +12,7 @@ use image::{DynamicImage, Frame, Rgb, RgbImage, Rgba, RgbaImage};
 use kanalib_core::db::Db;
 use kanalib_core::media::ContentHashes;
 use kanalib_core::model::TagHit;
+use kanalib_publish::ledger::{LEDGER_FILE, Ledger};
 use kanalib_publish::{Options, run};
 
 struct TempDir {
@@ -603,6 +604,51 @@ fn ledger_skips_unchanged_assets_and_rewrites_changed() {
     assert_eq!(third.thumbs.skipped, 2);
     assert_eq!(third.originals.written, 1);
     assert_eq!(third.originals.skipped, 1);
+}
+
+#[test]
+fn prune_stale_reclaims_only_ledger_tracked_media() {
+    let fixture = Fixture::new("prune-media");
+    let db = fixture.open();
+    fixture.add(&db, "a.png", 100, &sha1_of(1), true);
+    drop(db);
+
+    let mut options = fixture.options();
+    let first = run(&options).unwrap();
+    assert_eq!(first.exported, 1);
+    let id = read_items(&options.out_dir)[0]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    // 模拟上一版账本登记过、本次已不再产出的两个文件。
+    let orphan = "0123456789abcdef0123456789abcdef01234567";
+    fs::create_dir_all(options.out_dir.join("t256")).unwrap();
+    let orphan_t256 = options.out_dir.join("t256").join(format!("{orphan}.jpg"));
+    let orphan_t512 = options.out_dir.join("t512").join(format!("{orphan}.jpg"));
+    fs::write(&orphan_t256, b"stale").unwrap();
+    fs::write(&orphan_t512, b"stale").unwrap();
+    // ingest 推送的 AVIF 不在账本里，不能被发布器误删。
+    let ingest_avif = options.out_dir.join("t512").join(format!("{orphan}.avif"));
+    fs::write(&ingest_avif, b"avif").unwrap();
+
+    let mut ledger = Ledger::load(&options.out_dir);
+    let entry = ledger.assets.get_mut(&id).unwrap();
+    entry.files.push(format!("t256/{orphan}.jpg"));
+    entry.files.push(format!("t512/{orphan}.jpg"));
+    ledger.save(&options.out_dir).unwrap();
+
+    let warned = run(&options).unwrap();
+    assert_eq!(warned.stale_media, 2);
+    assert_eq!(warned.pruned_media, 0);
+    assert!(orphan_t256.is_file() && orphan_t512.is_file());
+
+    options.prune_stale = true;
+    let pruned = run(&options).unwrap();
+    assert_eq!(pruned.pruned_media, 2);
+    assert!(!orphan_t256.exists() && !orphan_t512.exists());
+    assert!(ingest_avif.is_file(), "账本外的 ingest 产物必须保留");
+    assert!(options.out_dir.join(LEDGER_FILE).is_file());
 }
 
 /// 原子发布：暂存目录成功后才替换正式目录；失败不碰旧产物，也不留临时目录。

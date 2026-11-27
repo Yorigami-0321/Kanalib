@@ -23,6 +23,7 @@ const AUTHOR_ID: &str = "author-push";
 
 struct Scripted {
     responses: Arc<Mutex<VecDeque<Result<u16, String>>>>,
+    thumb_responses: Arc<Mutex<VecDeque<Result<u16, String>>>>,
     requests: Arc<Mutex<Vec<PushRequest>>>,
 }
 
@@ -30,12 +31,25 @@ impl Scripted {
     fn new(responses: Vec<Result<u16, String>>) -> Self {
         Self {
             responses: Arc::new(Mutex::new(responses.into())),
+            thumb_responses: Arc::new(Mutex::new(VecDeque::new())),
             requests: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
+    fn with_thumb_responses(mut self, responses: Vec<Result<u16, String>>) -> Self {
+        self.thumb_responses = Arc::new(Mutex::new(responses.into()));
+        self
+    }
+
     fn requests(&self) -> Vec<PushRequest> {
         self.requests.lock().expect("requests").clone()
+    }
+
+    fn batch_requests(&self) -> Vec<PushRequest> {
+        self.requests()
+            .into_iter()
+            .filter(|request| !request.url.contains("/internal/ingest/thumb/"))
+            .collect()
     }
 }
 
@@ -44,9 +58,14 @@ impl PushTransport for Scripted {
         &'a self,
         request: PushRequest,
     ) -> Pin<Box<dyn Future<Output = Result<PushResponse, PushError>> + Send + 'a>> {
+        let is_thumb = request.url.contains("/internal/ingest/thumb/");
         self.requests.lock().expect("requests").push(request);
-        let next = self
-            .responses
+        let queue = if is_thumb {
+            &self.thumb_responses
+        } else {
+            &self.responses
+        };
+        let next = queue
             .lock()
             .expect("responses")
             .pop_front()
@@ -65,6 +84,16 @@ impl PushTransport for Scripted {
 
 fn seeded_db() -> Db {
     let db = Db::open_in_memory().expect("db");
+    let thumb_dir =
+        std::env::temp_dir().join(format!("kanalib-push-thumbs-{}", std::process::id()));
+    for tier in ["t256", "t512", "t1024"] {
+        let dir = thumb_dir.join(tier);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join(format!("{ITEM_ID}.jpg")), b"jpeg").unwrap();
+        std::fs::write(dir.join(format!("{ITEM_ID}.avif")), b"avif").unwrap();
+    }
+    let thumb_256 = thumb_dir.join(format!("t256/{ITEM_ID}.jpg"));
+    let thumb_512 = thumb_dir.join(format!("t512/{ITEM_ID}.jpg"));
     db.connection()
         .execute(
             "INSERT INTO authors (id, source, external_id, name)
@@ -85,9 +114,14 @@ fn seeded_db() -> Db {
                 (id, work_id, source, page, width, height, ext, original_path,
                  thumb_256, thumb_512, decision, revision, updated_at)
              VALUES (?1, ?2, 'pixiv', 0, 1200, 1600, 'jpg', 'pages/push.jpg',
-                     'thumbs/t256/push.jpg', 'thumbs/t512/push.jpg',
+                     ?3, ?4,
                      'allow', 3, 1_700_000_000)",
-            params![ITEM_ID, WORK_ID],
+            params![
+                ITEM_ID,
+                WORK_ID,
+                thumb_256.to_string_lossy(),
+                thumb_512.to_string_lossy()
+            ],
         )
         .expect("item");
     db.connection()
@@ -232,7 +266,7 @@ async fn flush_retries_5xx_then_acks_with_signed_headers() {
     assert_eq!(pending(&db, 2_000, 10).expect("replayed").len(), 1);
     assert!(!push::replay(&db, "missing-batch").expect("missing"));
 
-    let requests = transport.requests();
+    let requests = transport.batch_requests();
     assert_eq!(requests.len(), 2);
     let first = &requests[0];
     assert_eq!(first.url, "http://127.0.0.1:8788/internal/ingest/batch");
@@ -254,7 +288,7 @@ async fn flush_retries_5xx_then_acks_with_signed_headers() {
 async fn flush_uploads_avif_and_jpeg_thumbnails_before_batch() {
     let db = seeded_db();
     let dir = tempfile::TempDir::new().unwrap();
-    for tier in ["t256", "t512"] {
+    for tier in ["t256", "t512", "t1024"] {
         let tier_dir = dir.path().join(tier);
         std::fs::create_dir_all(&tier_dir).unwrap();
         std::fs::write(tier_dir.join(format!("{ITEM_ID}.jpg")), b"jpeg").unwrap();
@@ -280,8 +314,8 @@ async fn flush_uploads_avif_and_jpeg_thumbnails_before_batch() {
     let outcome = flush(&db, &config(), &transport, 1_000, 10).await.unwrap();
     assert_eq!(outcome.acked, 1);
     let requests = transport.requests();
-    assert_eq!(requests.len(), 5);
-    for (index, tier) in ["t256", "t512"].into_iter().enumerate() {
+    assert_eq!(requests.len(), 7);
+    for (index, tier) in ["t256", "t512", "t1024"].into_iter().enumerate() {
         let avif = &requests[index * 2];
         let jpeg = &requests[index * 2 + 1];
         assert!(avif.url.ends_with(&format!("/{tier}/{ITEM_ID}.avif")));
@@ -295,7 +329,7 @@ async fn flush_uploads_avif_and_jpeg_thumbnails_before_batch() {
                 .contains(&("content-type".to_string(), "image/jpeg".to_string()))
         );
     }
-    assert!(requests[4].url.ends_with("/internal/ingest/batch"));
+    assert!(requests[6].url.ends_with("/internal/ingest/batch"));
 
     db.connection()
         .execute(
@@ -306,18 +340,25 @@ async fn flush_uploads_avif_and_jpeg_thumbnails_before_batch() {
     let retry_batch = build_allow_batch(&db, &[ITEM_ID.to_string()], None).unwrap();
     let retry_id = batch_id_for(&serde_json::to_vec(&retry_batch).unwrap());
     enqueue_allow(&db, &retry_id, &retry_batch).unwrap();
-    let fallback = Scripted::new(vec![Ok(400), Ok(200), Ok(400), Ok(200), Ok(200)]);
+    let fallback = Scripted::new(vec![Ok(200)]).with_thumb_responses(vec![
+        Ok(400),
+        Ok(200),
+        Ok(400),
+        Ok(200),
+        Ok(400),
+        Ok(200),
+    ]);
     let outcome = flush(&db, &config(), &fallback, 2_000, 10).await.unwrap();
     assert_eq!(outcome.acked, 1);
     assert_eq!(outcome.retried, 0);
     assert_eq!(outcome.rejected, 0);
     let requests = fallback.requests();
-    assert_eq!(requests.len(), 5);
+    assert_eq!(requests.len(), 7);
     assert!(requests[0].url.ends_with(".avif"));
     assert!(requests[1].url.ends_with(".jpg"));
     assert!(requests[2].url.ends_with(".avif"));
     assert!(requests[3].url.ends_with(".jpg"));
-    assert!(requests[4].url.ends_with("/internal/ingest/batch"));
+    assert!(requests[6].url.ends_with("/internal/ingest/batch"));
 }
 
 #[tokio::test]
@@ -346,7 +387,64 @@ async fn flush_rejects_4xx_and_stops_retrying() {
         .await
         .expect("flush");
     assert_eq!(outcome.acked + outcome.retried + outcome.rejected, 0);
-    assert_eq!(transport.requests().len(), 1);
+    assert_eq!(transport.batch_requests().len(), 1);
+}
+
+#[tokio::test]
+async fn rejected_batch_is_revived_after_cooldown() {
+    let db = seeded_db();
+    let batch = build_allow_batch(&db, &[ITEM_ID.to_string()], None).expect("batch");
+    let payload = serde_json::to_vec(&batch).expect("json");
+    let id = batch_id_for(&payload);
+    assert!(enqueue_allow(&db, &id, &batch).expect("enqueue"));
+    let transport = Scripted::new(vec![Ok(400), Ok(200)]);
+
+    let outcome = flush(&db, &config(), &transport, 1_000, 10)
+        .await
+        .expect("flush");
+    assert_eq!(outcome.rejected, 1);
+    let (state, attempts, next_retry): (String, i64, Option<i64>) = db
+        .connection()
+        .query_row(
+            "SELECT state, attempts, next_retry_at FROM push_batches WHERE id = ?1",
+            [&id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .expect("row");
+    assert_eq!(state, "rejected");
+    assert_eq!(attempts, 1);
+    assert_eq!(next_retry, Some(4_600));
+
+    // 冷却期内重复入队不会复活（enqueue 用的是墙钟，给一个未来时间模拟）。
+    db.connection()
+        .execute(
+            "UPDATE push_batches SET next_retry_at = ?2 WHERE id = ?1",
+            rusqlite::params![&id, i64::MAX / 2],
+        )
+        .expect("future cooldown");
+    assert!(!enqueue_allow(&db, &id, &batch).expect("cooldown"));
+    // 冷却到期后，下一轮 enqueue 自动重新排队并保留尝试次数。
+    db.connection()
+        .execute(
+            "UPDATE push_batches SET next_retry_at = 500 WHERE id = ?1",
+            [&id],
+        )
+        .expect("expire cooldown");
+    assert!(enqueue_allow(&db, &id, &batch).expect("revive"));
+    let state: String = db
+        .connection()
+        .query_row(
+            "SELECT state FROM push_batches WHERE id = ?1",
+            [&id],
+            |row| row.get(0),
+        )
+        .expect("state");
+    assert_eq!(state, "pending");
+
+    let outcome = flush(&db, &config(), &transport, 2_000, 10)
+        .await
+        .expect("flush");
+    assert_eq!(outcome.acked, 1);
 }
 
 #[tokio::test]

@@ -10,6 +10,7 @@ use axum::{
 };
 use kanalib_wall_model::{IngestBatch, IngestDelete, valid_item_id};
 use serde::Serialize;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::{
     AppState, crypto, db,
@@ -20,6 +21,7 @@ const MAX_BATCH_ITEMS: usize = 5_000;
 const MAX_TAGS_PER_ITEM: usize = 256;
 const MAX_TEXT_LEN: usize = 1_024;
 const MAX_THUMB_BYTES: usize = 8 * 1024 * 1024;
+static THUMB_TEMP_SEQ: AtomicU64 = AtomicU64::new(0);
 
 const SIGNATURE: &str = "x-kanalib-signature";
 const TIMESTAMP: &str = "x-kanalib-timestamp";
@@ -222,9 +224,16 @@ pub async fn thumb(
         let dir = media_root.join(&tier);
         std::fs::create_dir_all(&dir)?;
         let target = dir.join(&file);
-        let temp = dir.join(format!(".{file}.upload.tmp"));
+        let sequence = THUMB_TEMP_SEQ.fetch_add(1, Ordering::Relaxed);
+        let temp = dir.join(format!(
+            ".{file}.upload-{}-{sequence}.tmp",
+            std::process::id()
+        ));
         std::fs::write(&temp, &body)?;
-        std::fs::rename(&temp, &target)?;
+        if let Err(error) = std::fs::rename(&temp, &target) {
+            let _ = std::fs::remove_file(&temp);
+            return Err(error);
+        }
         Ok::<_, std::io::Error>(())
     })
     .await;

@@ -84,6 +84,11 @@ async fn main() -> Result<()> {
     } else if !args.db.exists() {
         db::open(&args.db).with_context(|| format!("initialize database {}", args.db.display()))?;
     }
+    if db::repair_search_index_if_needed(&args.db)
+        .with_context(|| format!("repair search index {}", args.db.display()))?
+    {
+        tracing::warn!(path = %args.db.display(), "search index repaired on startup");
+    }
     std::fs::create_dir_all(&args.media)
         .with_context(|| format!("create media root {}", args.media.display()))?;
 

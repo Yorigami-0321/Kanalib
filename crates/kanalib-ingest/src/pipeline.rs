@@ -3,7 +3,11 @@
 //! 失败语义固定在 rules 层：补标失败、无后端、返回空标签，一律 review，绝不 fail-open。
 //! 单个条目的读取/判定/写库异常只影响该条：转 review 后继续下一条，不阻断整轮。
 
-use std::{path::PathBuf, sync::Arc};
+use std::{
+    collections::VecDeque,
+    path::PathBuf,
+    sync::{Arc, Mutex},
+};
 
 use anyhow::Result;
 use futures::StreamExt;
@@ -55,6 +59,9 @@ pub async fn run_decisions_with_concurrency(
 ) -> Result<DecisionReport> {
     let pending = db.pending_decision_items()?;
     let mut report = DecisionReport::default();
+    if pending.is_empty() {
+        return Ok(report);
+    }
     if concurrency <= 1 {
         for item in &pending {
             let scan = process_one(db, config, tagging, metrics, item).await;
@@ -74,21 +81,33 @@ pub async fn run_decisions_with_concurrency(
         }
         return Ok(report);
     };
-    let scans = futures::stream::iter(pending)
-        .map(|item| {
+    // 每个 worker 复用一条连接，避免并发时每条都重开库、跑一遍迁移。
+    let workers = concurrency.clamp(1, 16).min(pending.len());
+    let queue = Arc::new(Mutex::new(pending.into_iter().collect::<VecDeque<_>>()));
+    let scans = futures::stream::iter(0..workers)
+        .map(|_| {
+            let queue = queue.clone();
             let path = path.clone();
             async move {
                 let Ok(db) = Db::open(&path) else {
-                    warn!(item = %item.id, "open decision connection failed");
-                    return ItemScan::Failed;
+                    warn!("open decision connection failed");
+                    return Vec::new();
                 };
-                process_one(&db, config, tagging, metrics, &item).await
+                let mut scans = Vec::new();
+                loop {
+                    let item = queue.lock().expect("decision queue").pop_front();
+                    let Some(item) = item else {
+                        break;
+                    };
+                    scans.push(process_one(&db, config, tagging, metrics, &item).await);
+                }
+                scans
             }
         })
-        .buffer_unordered(concurrency.clamp(1, 16))
+        .buffer_unordered(workers)
         .collect::<Vec<_>>()
         .await;
-    for scan in scans {
+    for scan in scans.into_iter().flatten() {
         tally(&mut report, scan, metrics);
     }
     Ok(report)

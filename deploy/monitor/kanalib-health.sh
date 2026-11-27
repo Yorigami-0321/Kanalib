@@ -8,6 +8,8 @@ PUBLIC_HEALTH="${KANALIB_PUBLIC_HEALTH-http://127.0.0.1:8787/api/health}"
 PRIVATE_HEALTH="${KANALIB_PRIVATE_HEALTH-}"
 INGEST_HEALTH="${KANALIB_INGEST_HEALTH-}"
 KANALIB_INGEST_METRICS="${KANALIB_INGEST_METRICS:-}"
+INGEST_TOKEN="${KANALIB_INGEST_ADMIN_TOKEN:-}"
+INGEST_TOKEN_FILE="${KANALIB_INGEST_ADMIN_TOKEN_FILE:-/etc/kanalib/admin-token}"
 MAX_MODEL_ERROR_STREAK="${KANALIB_MAX_MODEL_ERROR_STREAK:-10}"
 WEB_DB="${KANALIB_WEB_DB-/var/lib/kanalib-web/kanalib-web.db}"
 INGEST_DB="${KANALIB_INGEST_DB-/var/lib/kanalib-ingest/ingest.db}"
@@ -19,6 +21,10 @@ MAX_REVIEW="${KANALIB_MAX_REVIEW:-500}"
 TLS_HOST="${KANALIB_TLS_HOST:-}"
 TLS_MIN_DAYS="${KANALIB_TLS_MIN_DAYS:-14}"
 ALERT_WEBHOOK="${KANALIB_ALERT_WEBHOOK:-}"
+
+if [[ -z "$INGEST_TOKEN" && -r "$INGEST_TOKEN_FILE" ]]; then
+    INGEST_TOKEN="$(<"$INGEST_TOKEN_FILE")"
+fi
 
 fail=0
 REPORT=""
@@ -50,7 +56,11 @@ if [[ -z "$metrics_url" && -n "$INGEST_HEALTH" ]]; then
     metrics_url="${INGEST_HEALTH%/admin/api/health}/admin/api/metrics"
 fi
 if [[ -n "$metrics_url" ]]; then
-    if streak="$(curl -fsS --noproxy '*' --max-time 5 "$metrics_url" \
+    auth=()
+    if [[ -n "$INGEST_TOKEN" ]]; then
+        auth=(-H "x-admin-token: $INGEST_TOKEN")
+    fi
+    if streak="$(curl -fsS --noproxy '*' --max-time 5 "${auth[@]}" "$metrics_url" \
             | sed -n 's/^model_error_streak \([0-9][0-9]*\)$/\1/p')"; then
         if [[ -z "$streak" ]]; then
             bad "model_error_streak missing from $metrics_url"

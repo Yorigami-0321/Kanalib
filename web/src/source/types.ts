@@ -143,6 +143,8 @@ export interface SearchRecord {
   group: string;
   rating: string;
   hay: string;
+  /** 该行在 `index.shards` 里的分片号；无法由索引推出时为 -1。 */
+  shard: number;
 }
 
 export interface SearchIndexData {
@@ -151,6 +153,14 @@ export interface SearchIndexData {
   tagTable: string[];
   groupTable: string[];
   records: Map<string, SearchRecord>;
+}
+
+/** `/api/items/{id}/neighbors`：当前筛选/排序下的前后条目与位置。 */
+export interface ItemNeighbors {
+  prev?: WallItem;
+  next?: WallItem;
+  index: number;
+  total: number;
 }
 
 /**
@@ -180,8 +190,12 @@ export interface WallSource {
   paths(): TierPaths;
   /** 单条补齐；API 源直接取 `/api/items/{id}`，静态源不实现。 */
   fetchItem?(id: string): Promise<WallItem | undefined>;
+  /** 详情页前后条目；API 源按当前筛选/排序请求，静态源不实现。 */
+  fetchNeighbors?(id: string, query?: WallQuery): Promise<ItemNeighbors | undefined>;
   /** 设置服务端查询并清空已加载集合；静态源不实现。 */
   setQuery?(query: WallQuery): void;
   /** 按需加载静态搜索索引；API 源不实现（服务端已搜索）。 */
   loadSearchIndex?(): Promise<SearchIndexData | null>;
+  /** 静态源：只拉指定分片（用于筛选命中分片），保持分片顺序。 */
+  loadShards?(indices: readonly number[]): Promise<WallItem[]>;
 }

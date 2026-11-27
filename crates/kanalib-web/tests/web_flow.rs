@@ -6,6 +6,7 @@ use axum::{
     http::{HeaderMap, Method, Request, StatusCode, header},
 };
 use http_body_util::BodyExt;
+use kanalib_wall_model::{IngestBatch, IngestDelete, IngestDeleteItem};
 use kanalib_web::{AppState, crypto, db, routes, state::WriteConfig};
 use rusqlite::params;
 use serde_json::Value;
@@ -422,6 +423,19 @@ async fn media_range_and_etag() {
     assert_eq!(status, StatusCode::NOT_MODIFIED);
     assert!(body.is_empty());
     assert_eq!(header_text(&headers, header::ETAG), etag);
+
+    let path = fixture
+        ._dir
+        .path()
+        .join(format!("media/t512/{}.jpg", db::SAMPLE_ITEM_A));
+    std::fs::write(&path, b"0123456789abcdef-replaced").expect("replace media");
+    let (status, headers, _) = send(&fixture.public, Method::GET, &uri, &[]).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_ne!(
+        header_text(&headers, header::ETAG),
+        etag,
+        "etag must change when file contents change without updated_at"
+    );
 }
 
 #[tokio::test]
@@ -519,6 +533,36 @@ async fn spa_fallback_serves_index_but_api_stays_json_404() {
     let (status, body) = get_json(&fixture.public, "/api/does-not-exist").await;
     assert_eq!(status, StatusCode::NOT_FOUND);
     assert_eq!(body["error"]["code"], "not_found");
+}
+
+#[tokio::test]
+async fn item_neighbors_follow_sort_and_filter() {
+    let fixture = fixture();
+    let uri = format!("/api/items/{}/neighbors", db::SAMPLE_ITEM_A);
+    let (status, body) = get_json(&fixture.public, &uri).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["prev"]["id"], db::SAMPLE_ITEM_B);
+    assert!(body.get("next").is_none());
+    assert_eq!(body["index"], 1);
+    assert_eq!(body["total"], 2);
+
+    let uri = format!("{uri}?sort=name&order=asc");
+    let (status, body) = get_json(&fixture.public, &uri).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(body.get("prev").is_none());
+    assert_eq!(body["next"]["id"], db::SAMPLE_ITEM_B);
+    assert_eq!(body["index"], 0);
+    assert_eq!(body["total"], 2);
+
+    let uri = format!("/api/items/{}/neighbors?tag=nope", db::SAMPLE_ITEM_A);
+    let (status, body) = get_json(&fixture.public, &uri).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(body.get("prev").is_none());
+    assert!(body.get("next").is_none());
+    assert_eq!(body["total"], 0);
+
+    let (status, _) = get_json(&fixture.public, "/api/items/not-an-id/neighbors").await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
 }
 
 #[tokio::test]
@@ -1395,6 +1439,75 @@ async fn ingest_allow_batch_is_idempotent() {
     assert_eq!(item["st"], 4);
 }
 
+#[test]
+fn ingest_refreshes_page_count_and_cover_without_stale_pointers() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let path = dir.path().join("kanalib.db");
+    db::seed_sample(&path).expect("seed");
+    let mut conn = db::open(&path).expect("db");
+
+    let mut item = allow_item(NEW_ITEM);
+    item["work_id"] = serde_json::json!(db::SAMPLE_WORK);
+    item["page"] = serde_json::json!(2);
+    item["page_count"] = serde_json::json!(5);
+    let batch: IngestBatch =
+        serde_json::from_value(serde_json::json!({"source": "pixiv", "items": [item]}))
+            .expect("batch");
+    db::apply_ingest_batch(&mut conn, "b-work-1", &batch, 10).expect("apply");
+    let pages: i64 = conn
+        .query_row(
+            "SELECT page_count FROM works WHERE id = ?1",
+            [db::SAMPLE_WORK],
+            |row| row.get(0),
+        )
+        .expect("pages");
+    assert_eq!(pages, 5);
+
+    // 来源修正页数时应能下调，而不是只增不减。
+    let mut lower = allow_item(NEW_ITEM);
+    lower["revision"] = serde_json::json!(2);
+    lower["work_id"] = serde_json::json!(db::SAMPLE_WORK);
+    lower["page"] = serde_json::json!(2);
+    lower["page_count"] = serde_json::json!(3);
+    let batch: IngestBatch =
+        serde_json::from_value(serde_json::json!({"source": "pixiv", "items": [lower]}))
+            .expect("batch");
+    db::apply_ingest_batch(&mut conn, "b-work-2", &batch, 11).expect("apply");
+    let pages: i64 = conn
+        .query_row(
+            "SELECT page_count FROM works WHERE id = ?1",
+            [db::SAMPLE_WORK],
+            |row| row.get(0),
+        )
+        .expect("pages");
+    assert_eq!(pages, 3);
+
+    let cover = |conn: &rusqlite::Connection| -> Option<String> {
+        conn.query_row(
+            "SELECT cover_item_id FROM works WHERE id = ?1",
+            [db::SAMPLE_WORK],
+            |row| row.get(0),
+        )
+        .expect("cover")
+    };
+    assert_eq!(cover(&conn).as_deref(), Some(db::SAMPLE_ITEM_A));
+    for (batch_id, item_id) in [
+        ("b-del-a", db::SAMPLE_ITEM_A),
+        ("b-del-b", db::SAMPLE_ITEM_B),
+    ] {
+        let delete = IngestDelete {
+            source: "pixiv".to_string(),
+            rules_version: None,
+            items: vec![IngestDeleteItem {
+                id: item_id.to_string(),
+                revision: 99,
+            }],
+        };
+        db::apply_ingest_delete(&mut conn, batch_id, &delete, 12).expect("delete");
+    }
+    assert_eq!(cover(&conn).as_deref(), Some(NEW_ITEM));
+}
+
 #[tokio::test]
 async fn ingest_thumb_upload_writes_media_and_rejects_bad_signature() {
     let fixture = write_fixture();
@@ -1701,6 +1814,38 @@ async fn desktop_pull_requires_token_and_pages() {
 }
 
 #[tokio::test]
+async fn desktop_pull_excludes_non_allow_but_keeps_tombstones() {
+    let fixture = write_fixture();
+    let conn = db::open(&fixture._dir.path().join("kanalib.db")).expect("db");
+    conn.execute(
+        "UPDATE items SET decision = 'review' WHERE id = ?1",
+        [db::SAMPLE_ITEM_B],
+    )
+    .expect("mark review");
+    conn.execute(
+        "UPDATE items SET deleted = 1, revision = 2, updated_at = 1800000000 WHERE id = ?1",
+        [db::SAMPLE_ITEM_A],
+    )
+    .expect("tombstone");
+    drop(conn);
+
+    let auth = format!("Bearer {DEVICE_TOKEN}");
+    let (status, _, body) = send(
+        &fixture.private,
+        Method::GET,
+        "/api/desktop/pull?limit=10",
+        &[("authorization", auth.as_str())],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let value: Value = serde_json::from_slice(&body).expect("json");
+    let items = value["items"].as_array().expect("items");
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0]["id"], db::SAMPLE_ITEM_A);
+    assert_eq!(items[0]["del"], true);
+}
+
+#[tokio::test]
 async fn desktop_push_reports_conflict_and_missing() {
     let fixture = write_fixture();
     let auth = format!("Bearer {DEVICE_TOKEN}");
@@ -1760,6 +1905,47 @@ async fn desktop_push_reports_conflict_and_missing() {
 }
 
 #[tokio::test]
+async fn desktop_push_rejects_invalid_rating_and_oversized_tags() {
+    let fixture = write_fixture();
+    let auth = format!("Bearer {DEVICE_TOKEN}");
+
+    for (body, code) in [
+        (
+            serde_json::json!({
+                "items": [{
+                    "id": db::SAMPLE_ITEM_A,
+                    "base_revision": 1,
+                    "rating": "unknown"
+                }]
+            }),
+            "invalid_rating",
+        ),
+        (
+            serde_json::json!({
+                "items": [{
+                    "id": db::SAMPLE_ITEM_A,
+                    "base_revision": 1,
+                    "tags": [{"name": "tag", "category": "x".repeat(65)}]
+                }]
+            }),
+            "invalid_push",
+        ),
+    ] {
+        let request = Request::builder()
+            .method(Method::POST)
+            .uri("/api/desktop/push")
+            .header("authorization", &auth)
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_vec(&body).unwrap()))
+            .expect("request");
+        let (status, _, response) = execute(&fixture.private, request).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        let value: Value = serde_json::from_slice(&response).expect("json");
+        assert_eq!(value["error"]["code"], code);
+    }
+}
+
+#[tokio::test]
 async fn desktop_upload_streams_and_enforces_cap() {
     let fixture = write_fixture_with_limit(16);
     let auth = format!("Bearer {DEVICE_TOKEN}");
@@ -1782,6 +1968,50 @@ async fn desktop_upload_streams_and_enforces_cap() {
         .join("uploads")
         .join(format!("{}.jpg", db::SAMPLE_ITEM_A));
     assert_eq!(std::fs::metadata(uploaded).expect("uploaded file").len(), 8);
+
+    let uri = format!("/api/desktop/uploads/{}.jpg", db::SAMPLE_ITEM_A);
+    let (status, headers, body) = send(
+        &fixture.private,
+        Method::GET,
+        &uri,
+        &[("authorization", &auth)],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body, vec![7u8; 8]);
+    assert_eq!(header_text(&headers, header::CONTENT_LENGTH), "8");
+    assert_eq!(header_text(&headers, header::ACCEPT_RANGES), "bytes");
+
+    let (status, headers, body) = send(
+        &fixture.private,
+        Method::GET,
+        &uri,
+        &[("authorization", &auth), ("range", "bytes=2-5")],
+    )
+    .await;
+    assert_eq!(status, StatusCode::PARTIAL_CONTENT);
+    assert_eq!(body, vec![7u8; 4]);
+    assert_eq!(header_text(&headers, header::CONTENT_RANGE), "bytes 2-5/8");
+
+    let (status, _, _) = send(
+        &fixture.private,
+        Method::GET,
+        &uri,
+        &[("authorization", &auth), ("range", "bytes=100-")],
+    )
+    .await;
+    assert_eq!(status, StatusCode::RANGE_NOT_SATISFIABLE);
+
+    let (status, headers, body) = send(
+        &fixture.private,
+        Method::HEAD,
+        &uri,
+        &[("authorization", &auth)],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(body.is_empty());
+    assert_eq!(header_text(&headers, header::CONTENT_LENGTH), "8");
 
     let request = Request::builder()
         .method(Method::POST)
@@ -1832,6 +2062,21 @@ async fn original_proxy_signs_short_lived_box_url() {
     .await;
     assert_eq!(status, StatusCode::NOT_FOUND);
 
+    let conn = db::open(&fixture._dir.path().join("kanalib.db")).expect("db");
+    conn.execute(
+        "UPDATE items SET decision = 'review' WHERE id = ?1",
+        [db::SAMPLE_ITEM_B],
+    )
+    .expect("mark review");
+    let (status, _, _) = send(
+        &fixture.private,
+        Method::GET,
+        &format!("/api/items/{}/original", db::SAMPLE_ITEM_B),
+        &[],
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+
     let plain = build_fixture(false);
     let (status, _, _) = send(
         &plain.private,
@@ -1841,6 +2086,32 @@ async fn original_proxy_signs_short_lived_box_url() {
     )
     .await;
     assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn tag_facets_count_distinct_items() {
+    let fixture = fixture();
+    let conn = db::open(&fixture._dir.path().join("kanalib.db")).expect("db");
+    conn.execute(
+        "INSERT INTO item_tags (item_id, tag_id, score, origin)
+         VALUES (?1, 1, 0.1, 'desktop')",
+        [db::SAMPLE_ITEM_A],
+    )
+    .expect("duplicate tag row");
+    drop(conn);
+
+    let (status, body) = get_json(&fixture.public, "/api/index").await;
+    assert_eq!(status, StatusCode::OK);
+    let tag = body["facets"]["tags"]
+        .as_array()
+        .expect("tags")
+        .iter()
+        .find(|tag| tag["name"] == "1girl")
+        .expect("1girl facet");
+    assert_eq!(
+        tag["count"], 2,
+        "same item/tag with another origin must not inflate facet count"
+    );
 }
 
 #[tokio::test]

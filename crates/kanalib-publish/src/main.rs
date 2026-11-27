@@ -31,7 +31,7 @@ kanalib-publish —— 把 Kanalib 本地库导出成静态站点数据目录（
   --max-tags <N>        facets.tags 上限（默认 2000）
   --max-groups <N>      facets.groups 上限（默认 200）
   --root <DIR>          显式指定本地根目录，可重复；缺省读 settings 再回退 sources
-  --prune-stale         删除未被本次 index.json 引用的陈旧分片（默认只警告）
+  --prune-stale         删除未被本次清单引用的陈旧分片与图片（默认只警告；--limit 时不清理）
   -h, --help            显示本帮助
 ";
 

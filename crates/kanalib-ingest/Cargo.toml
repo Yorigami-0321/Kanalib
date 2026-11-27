@@ -34,7 +34,7 @@ futures = { workspace = true }
 hmac = { workspace = true }
 image = { workspace = true, features = ["jpeg", "png", "gif", "avif"] }
 kanalib-wall-model = { workspace = true }
-reqwest = { workspace = true, features = ["blocking", "multipart"] }
+reqwest = { workspace = true, features = ["blocking", "multipart", "stream"] }
 rusqlite = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

@@ -79,20 +79,20 @@ impl HttpTaggingBackend {
         item_id: &str,
         image_path: &std::path::Path,
     ) -> Result<TaggingResult, anyhow::Error> {
-        let bytes = tokio::fs::read(image_path)
+        let length = tokio::fs::metadata(image_path)
             .await
-            .with_context(|| format!("reading image {}", image_path.display()))?;
-        let file_name = image_path
-            .file_name()
-            .and_then(|name| name.to_str())
-            .unwrap_or("image")
-            .to_string();
+            .with_context(|| format!("reading image {}", image_path.display()))?
+            .len();
+        if length == 0 {
+            bail!("image {} is empty", image_path.display());
+        }
         let mut last_error = None;
         for _ in 0..self.attempts {
-            let form = reqwest::multipart::Form::new().part(
-                "image",
-                reqwest::multipart::Part::bytes(bytes.clone()).file_name(file_name.clone()),
-            );
+            // 直接从磁盘流式发送，整图不再进内存；重试时重新打开文件。
+            let part = reqwest::multipart::Part::file(image_path)
+                .await
+                .with_context(|| format!("reading image {}", image_path.display()))?;
+            let form = reqwest::multipart::Form::new().part("image", part);
             let mut request = self
                 .client
                 .post(&self.endpoint)

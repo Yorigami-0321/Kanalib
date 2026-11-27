@@ -20,6 +20,8 @@ pub const ALLOW_PATH: &str = "/internal/ingest/batch";
 pub const DELETE_PATH: &str = "/internal/ingest/delete";
 pub const THUMB_PREFIX: &str = "/internal/ingest/thumb";
 const ERROR_MAX_CHARS: usize = 512;
+/// 4xx 永久拒绝后的冷却时间；期间不重试，到期后允许重新入队。
+const REJECT_RETRY_COOLDOWN_SECS: i64 = 3_600;
 
 type HmacSha256 = Hmac<Sha256>;
 
@@ -367,9 +369,13 @@ fn enqueue(
         bail!("batch id must not be empty");
     }
     let changed = db.connection().execute(
-        "INSERT OR IGNORE INTO push_batches
+        "INSERT INTO push_batches
             (id, item_count, payload_hash, payload_json, kind, state, next_retry_at, created_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, 'pending', NULL, ?6)",
+         VALUES (?1, ?2, ?3, ?4, ?5, 'pending', NULL, ?6)
+         ON CONFLICT(id) DO UPDATE SET
+            state = 'pending', next_retry_at = NULL, last_error = NULL
+          WHERE push_batches.state = 'rejected'
+            AND COALESCE(push_batches.next_retry_at, 0) <= ?6",
         params![
             batch_id,
             item_count as i64,
@@ -416,7 +422,14 @@ pub async fn flush<T: PushTransport>(
                     outcome.acked += 1;
                 }
                 Disposition::Reject => {
-                    mark_rejected(db, &batch.id, attempts, &response.body)?;
+                    mark_rejected(
+                        db,
+                        &batch.id,
+                        attempts,
+                        config.max_attempts,
+                        now_ts,
+                        &response.body,
+                    )?;
                     outcome.rejected += 1;
                 }
                 Disposition::Retry(delay) => {
@@ -499,7 +512,10 @@ async fn sync_entry_thumbs<T: PushTransport>(
             .map_err(|error| format!("thumbnail lookup failed: {error}"))?
             .flatten();
         let Some(path) = path else {
-            continue;
+            return Err(format!(
+                "thumbnail {tier} path missing for {}",
+                entry.item.id
+            ));
         };
         let jpeg_path = if tier == "t1024" || tier == "t2048" {
             thumbnail_for_tier(std::path::Path::new(&path), tier)
@@ -566,7 +582,10 @@ async fn sync_entry_thumbs<T: PushTransport>(
             }
         }
         if !uploaded {
-            tracing::warn!(path, "thumbnail files missing; skipped");
+            return Err(format!(
+                "thumbnail {tier} jpeg missing for {}",
+                entry.item.id
+            ));
         }
     }
     Ok(())
@@ -642,12 +661,31 @@ fn mark_acked(db: &Db, batch: &PushBatch, now_ts: i64) -> Result<()> {
     Ok(())
 }
 
-fn mark_rejected(db: &Db, batch_id: &str, attempts: u32, error: &str) -> Result<()> {
+fn mark_rejected(
+    db: &Db,
+    batch_id: &str,
+    attempts: u32,
+    max_attempts: u32,
+    now_ts: i64,
+    error: &str,
+) -> Result<()> {
+    // 4xx 多半是配置/时钟问题，冷却后允许再试；达到上限才彻底失败。
+    let state = if attempts >= max_attempts {
+        "failed"
+    } else {
+        "rejected"
+    };
     db.connection().execute(
         "UPDATE push_batches
-            SET state = 'rejected', attempts = ?2, last_error = ?3
+            SET state = ?2, attempts = ?3, next_retry_at = ?4, last_error = ?5
           WHERE id = ?1",
-        params![batch_id, attempts, truncate(error)],
+        params![
+            batch_id,
+            state,
+            attempts,
+            now_ts.saturating_add(REJECT_RETRY_COOLDOWN_SECS),
+            truncate(error)
+        ],
     )?;
     Ok(())
 }

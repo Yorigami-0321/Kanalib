@@ -941,14 +941,15 @@ impl AppState {
             Vec::new()
         };
         let db = Db::open(&self.db_path)?;
-        let removed = db.delete_assets(&paths)?;
         for path in &paths {
             rules.insert_path(path);
         }
         for hash in &hashes {
             rules.insert_hash(hash);
         }
+        // 先持久化忽略规则，再删记录；规则写失败时资产仍留在图库，不会丢数据。
         scan_filter::save_ignore_rules(&db, &rules)?;
+        let removed = db.delete_assets(&paths)?;
 
         let targets = paths.iter().cloned().collect::<HashSet<_>>();
         let mut shared = self.shared.lock().unwrap();
@@ -2536,7 +2537,12 @@ impl AppState {
         let paths = pending
             .paths
             .iter()
-            .filter(|path| !path.exists())
+            .filter(|path| match std::fs::symlink_metadata(path) {
+                Ok(_) => false,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => true,
+                // 权限错误等瞬态问题不能当成文件已删除，否则会误删记录。
+                Err(_) => false,
+            })
             .cloned()
             .collect::<Vec<_>>();
         let kept = pending.paths.len() - paths.len();

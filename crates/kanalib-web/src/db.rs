@@ -175,6 +175,22 @@ pub fn rebuild_search_index(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
+/// 启动时修复 FTS 索引为空或行数与活动条目不一致的情况。
+pub fn repair_search_index_if_needed(path: &Path) -> Result<bool> {
+    let mut conn = open(path)?;
+    let tx = conn.transaction()?;
+    let items: i64 = tx.query_row("SELECT COUNT(*) FROM items WHERE deleted = 0", [], |row| {
+        row.get(0)
+    })?;
+    let indexed: i64 = tx.query_row("SELECT COUNT(*) FROM item_search", [], |row| row.get(0))?;
+    if items == indexed {
+        return Ok(false);
+    }
+    rebuild_search_index(&tx)?;
+    tx.commit()?;
+    Ok(true)
+}
+
 /// 只刷新受影响的条目；`item_search.rowid` 与 `items.rowid` 对齐后可按主键删改。
 pub fn refresh_search_index(conn: &Connection, item_ids: &[String]) -> Result<()> {
     if item_ids.is_empty() {
@@ -388,7 +404,11 @@ const WORK_COLUMNS: &str =
     "w.id, w.source, w.external_id, w.title, w.author_id, w.page_count, w.posted_at, w.status";
 
 pub fn count_works(conn: &Connection) -> Result<u32> {
-    let count: i64 = conn.query_row("SELECT COUNT(*) FROM works", [], |row| row.get(0))?;
+    let count: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM works WHERE status <> 'deleted'",
+        [],
+        |row| row.get(0),
+    )?;
     Ok(as_u32(count))
 }
 
@@ -428,6 +448,7 @@ pub fn item_updated_at(conn: &Connection, id: &str) -> Result<Option<i64>> {
 pub fn list_works(conn: &Connection, limit: u32, offset: u32) -> Result<Vec<WorkDto>> {
     let sql = format!(
         "SELECT {WORK_COLUMNS} FROM works w \
+         WHERE w.status <> 'deleted' \
          ORDER BY w.posted_at DESC, w.id DESC LIMIT ?1 OFFSET ?2"
     );
     collect_works(conn, &sql, params![i64::from(limit), i64::from(offset)])
@@ -440,7 +461,8 @@ pub fn list_author_works(
     offset: u32,
 ) -> Result<Vec<WorkDto>> {
     let sql = format!(
-        "SELECT {WORK_COLUMNS} FROM works w WHERE w.author_id = ?1 \
+        "SELECT {WORK_COLUMNS} FROM works w
+         WHERE w.author_id = ?1 AND w.status <> 'deleted' \
          ORDER BY w.posted_at DESC, w.id DESC LIMIT ?2 OFFSET ?3"
     );
     collect_works(
@@ -452,7 +474,7 @@ pub fn list_author_works(
 
 pub fn count_author_works(conn: &Connection, author_id: &str) -> Result<u32> {
     let count: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM works WHERE author_id = ?1",
+        "SELECT COUNT(*) FROM works WHERE author_id = ?1 AND status <> 'deleted'",
         [author_id],
         |row| row.get(0),
     )?;
@@ -460,7 +482,10 @@ pub fn count_author_works(conn: &Connection, author_id: &str) -> Result<u32> {
 }
 
 pub fn get_work(conn: &Connection, id: &str) -> Result<Option<WorkDto>> {
-    let sql = format!("SELECT {WORK_COLUMNS} FROM works w WHERE w.id = ?1");
+    let sql = format!(
+        "SELECT {WORK_COLUMNS} FROM works w
+         WHERE w.id = ?1 AND w.status <> 'deleted'"
+    );
     let mut stmt = conn.prepare(&sql)?;
     let work = stmt
         .query_row([id], |row| map_work_row(row, None))
@@ -480,9 +505,11 @@ pub fn get_work(conn: &Connection, id: &str) -> Result<Option<WorkDto>> {
 pub fn list_authors(conn: &Connection, limit: u32, offset: u32) -> Result<Vec<AuthorDto>> {
     let mut stmt = conn.prepare(
         "SELECT a.id, a.name, a.avatar_url,
-                (SELECT COUNT(*) FROM works w WHERE w.author_id = a.id),
+                (SELECT COUNT(*) FROM works w
+                  WHERE w.author_id = a.id AND w.status <> 'deleted'),
                 (SELECT COUNT(*) FROM items i JOIN works w ON w.id = i.work_id
-                  WHERE w.author_id = a.id AND i.deleted = 0)
+                  WHERE w.author_id = a.id AND i.deleted = 0
+                    AND w.status <> 'deleted')
          FROM authors a ORDER BY a.name ASC, a.id ASC LIMIT ?1 OFFSET ?2",
     )?;
     let rows = stmt.query_map(params![i64::from(limit), i64::from(offset)], map_author_row)?;
@@ -497,9 +524,11 @@ pub fn get_author(conn: &Connection, id: &str) -> Result<Option<AuthorDto>> {
     let author = conn
         .query_row(
             "SELECT a.id, a.name, a.avatar_url,
-                    (SELECT COUNT(*) FROM works w WHERE w.author_id = a.id),
+                    (SELECT COUNT(*) FROM works w
+                      WHERE w.author_id = a.id AND w.status <> 'deleted'),
                     (SELECT COUNT(*) FROM items i JOIN works w ON w.id = i.work_id
-                      WHERE w.author_id = a.id AND i.deleted = 0)
+                      WHERE w.author_id = a.id AND i.deleted = 0
+                        AND w.status <> 'deleted')
              FROM authors a WHERE a.id = ?1",
             [id],
             map_author_row,
@@ -611,13 +640,13 @@ pub fn index_facets_filtered(conn: &Connection, filter: &ItemFilter) -> Result<I
     let where_sql = parts.where_sql();
 
     let tags_sql = format!(
-        "SELECT t.name, t.category, COUNT(*), MIN(it.item_id)
+        "SELECT t.name, t.category, COUNT(DISTINCT it.item_id), MIN(it.item_id)
            FROM item_tags it
            JOIN tags t ON t.id = it.tag_id
            JOIN items i ON i.id = it.item_id
           WHERE {where_sql}
           GROUP BY t.id
-          ORDER BY COUNT(*) DESC, t.name ASC LIMIT 2000"
+          ORDER BY COUNT(DISTINCT it.item_id) DESC, t.name ASC LIMIT 2000"
     );
     let mut stmt = conn.prepare(&tags_sql)?;
     let bindings = parts.bindings();
@@ -719,6 +748,143 @@ pub fn search_items(
     let mut items = rows.into_iter().map(|(item, _)| item).collect::<Vec<_>>();
     attach_tags(conn, &mut items)?;
     Ok(ItemPage { items, next })
+}
+
+/// 详情页前后条目；`index`/`total` 是目标条目在当前筛选集合中的位置。
+#[derive(Clone, Debug, Default, Serialize)]
+pub struct ItemNeighbors {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub prev: Option<WallItemDto>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next: Option<WallItemDto>,
+    pub index: u32,
+    pub total: u32,
+}
+
+/// 按当前筛选/排序取目标条目的前一条与后一条。
+///
+/// 目标条目即使被筛选排除，也按它的排序键定位，保证深链仍有前后邻居。
+pub fn item_neighbors(
+    conn: &Connection,
+    id: &str,
+    filter: &ItemFilter,
+    sort: &ItemSort,
+) -> Result<Option<ItemNeighbors>> {
+    let Some(key) = item_sort_key(conn, id, sort)? else {
+        return Ok(None);
+    };
+    let prev = neighbor(conn, filter, sort, &key, id, false)?;
+    let next = neighbor(conn, filter, sort, &key, id, true)?;
+
+    let mut total_parts = filter_parts(filter);
+    total_parts.inline_candidates();
+    let total = total_parts.query_count(
+        conn,
+        &format!(
+            "SELECT COUNT(*) FROM items i WHERE {}",
+            total_parts.where_sql()
+        ),
+    )?;
+
+    let mut before_parts = filter_parts(filter);
+    before_parts.inline_candidates();
+    let before_expr = sort_expression(&mut before_parts, sort);
+    keyset_clause(&mut before_parts, sort, &before_expr, &key, id, false);
+    let before = before_parts.query_count(
+        conn,
+        &format!(
+            "SELECT COUNT(*) FROM items i WHERE {}",
+            before_parts.where_sql()
+        ),
+    )?;
+
+    Ok(Some(ItemNeighbors {
+        prev,
+        next,
+        index: as_u32(before),
+        total: as_u32(total),
+    }))
+}
+
+fn item_sort_key(conn: &Connection, id: &str, sort: &ItemSort) -> Result<Option<SortKey>> {
+    let mut parts = WhereParts::new();
+    let sort_expr = sort_expression(&mut parts, sort);
+    let id_param = parts.param(SqlValue::Text(id.to_string()));
+    let sql = format!(
+        "SELECT {sort_expr} FROM items i WHERE {} AND i.id = {id_param}",
+        parts.where_sql()
+    );
+    let mut statement = conn.prepare(&sql)?;
+    let bindings = parts.bindings();
+    let value = statement
+        .query_row(bindings.as_slice(), |row| row.get::<_, SqlValue>(0))
+        .optional()?;
+    Ok(value.map(sort_key_from_value))
+}
+
+fn neighbor(
+    conn: &Connection,
+    filter: &ItemFilter,
+    sort: &ItemSort,
+    key: &SortKey,
+    id: &str,
+    forward: bool,
+) -> Result<Option<WallItemDto>> {
+    let mut parts = filter_parts(filter);
+    parts.inline_candidates();
+    let sort_expr = sort_expression(&mut parts, sort);
+    keyset_clause(&mut parts, sort, &sort_expr, key, id, forward);
+    let direction = if sort.ascending { "ASC" } else { "DESC" };
+    let order = if forward {
+        direction
+    } else {
+        if sort.ascending { "DESC" } else { "ASC" }
+    };
+    let sql = format!(
+        "SELECT {ITEM_COLUMNS} {ITEM_FROM}
+          WHERE {}
+          ORDER BY {sort_expr} {order}, i.id {order}
+          LIMIT 1",
+        parts.where_sql()
+    );
+    let mut statement = conn.prepare(&sql)?;
+    let bindings = parts.bindings();
+    let item = statement
+        .query_row(bindings.as_slice(), map_item_row)
+        .optional()?;
+    let Some(mut item) = item else {
+        return Ok(None);
+    };
+    attach_tags(conn, std::slice::from_mut(&mut item))?;
+    Ok(Some(item))
+}
+
+fn keyset_clause(
+    parts: &mut WhereParts,
+    sort: &ItemSort,
+    sort_expr: &str,
+    key: &SortKey,
+    id: &str,
+    forward: bool,
+) {
+    let key = match key {
+        SortKey::Int(value) => parts.param(SqlValue::Integer(*value)),
+        SortKey::Text(value) => parts.param(SqlValue::Text(value.clone())),
+    };
+    let id = parts.param(SqlValue::Text(id.to_string()));
+    let operator = if forward == sort.ascending { ">" } else { "<" };
+    parts.and(format!(
+        "({sort_expr} {operator} {key} OR ({sort_expr} = {key} AND i.id {operator} {id}))"
+    ));
+}
+
+fn sort_key_from_value(value: SqlValue) -> SortKey {
+    match value {
+        SqlValue::Integer(value) => SortKey::Int(value),
+        SqlValue::Real(value) => SortKey::Int(value as i64),
+        SqlValue::Text(value) => SortKey::Text(value),
+        SqlValue::Null | SqlValue::Blob(_) => SortKey::Text(String::new()),
+    }
 }
 
 pub fn index_counts(conn: &Connection, filter: &ItemFilter) -> Result<IndexCounts> {
@@ -921,17 +1087,17 @@ fn search_clause(parts: &mut WhereParts, term: &SearchTerm) {
     );
     let clause = match term.field {
         SearchField::Any => format!(
-            "(i.name LIKE {placeholder} ESCAPE '\\'
-              OR i.group_name LIKE {placeholder} ESCAPE '\\'
+            "(replace(i.name, '_', ' ') LIKE {placeholder} ESCAPE '\\'
+              OR replace(i.group_name, '_', ' ') LIKE {placeholder} ESCAPE '\\'
               OR i.rating LIKE {placeholder} ESCAPE '\\'
               OR {any_tag})"
         ),
         SearchField::Name => {
-            format!("i.name LIKE {placeholder} ESCAPE '\\'")
+            format!("replace(i.name, '_', ' ') LIKE {placeholder} ESCAPE '\\'")
         }
         SearchField::Tag => any_tag,
         SearchField::Group => {
-            format!("i.group_name LIKE {placeholder} ESCAPE '\\'")
+            format!("replace(i.group_name, '_', ' ') LIKE {placeholder} ESCAPE '\\'")
         }
         SearchField::Rating => format!(
             "(i.rating LIKE {placeholder} ESCAPE '\\'
@@ -1024,16 +1190,24 @@ pub fn apply_ingest_batch(
     batch: &IngestBatch,
     now: i64,
 ) -> Result<IngestApply> {
-    if batch_exists(conn, batch_id)? {
+    let tx = conn.transaction()?;
+    if !record_batch(
+        &tx,
+        batch_id,
+        &batch.source,
+        batch.items.len(),
+        batch.rules_version.as_deref(),
+        now,
+    )? {
         return Ok(IngestApply {
             duplicate: true,
             ..IngestApply::default()
         });
     }
 
-    let tx = conn.transaction()?;
     let mut apply = IngestApply::default();
     let mut touched = Vec::new();
+    let mut works = std::collections::BTreeSet::new();
     for entry in &batch.items {
         match upsert_ingest_item(&tx, batch, entry, now)? {
             ItemWrite::Inserted => {
@@ -1046,15 +1220,13 @@ pub fn apply_ingest_batch(
             }
             ItemWrite::Stale => apply.stale += 1,
         }
+        if let Some(work_id) = &entry.item.work_id {
+            works.insert(work_id.clone());
+        }
     }
-    record_batch(
-        &tx,
-        batch_id,
-        &batch.source,
-        batch.items.len(),
-        batch.rules_version.as_deref(),
-        now,
-    )?;
+    for work_id in &works {
+        refresh_work_cover(&tx, work_id)?;
+    }
     refresh_search_index(&tx, &touched)?;
     tx.commit()?;
     Ok(apply)
@@ -1067,64 +1239,78 @@ pub fn apply_ingest_delete(
     delete: &IngestDelete,
     now: i64,
 ) -> Result<DeleteApply> {
-    if batch_exists(conn, batch_id)? {
-        return Ok(DeleteApply {
-            duplicate: true,
-            ..DeleteApply::default()
-        });
-    }
-
     let tx = conn.transaction()?;
-    let mut apply = DeleteApply::default();
-    let mut touched = Vec::new();
-    for entry in &delete.items {
-        let current: Option<i64> = tx
-            .query_row(
-                "SELECT revision FROM items WHERE id = ?1",
-                [&entry.id],
-                |row| row.get(0),
-            )
-            .optional()?;
-        match current {
-            None => apply.missing += 1,
-            Some(revision) if revision > entry.revision => apply.stale += 1,
-            Some(_) => {
-                tx.execute(
-                    "UPDATE items SET deleted = 1, revision = ?2, updated_at = ?3
-                      WHERE id = ?1",
-                    params![&entry.id, entry.revision, now],
-                )?;
-                apply.deleted += 1;
-                touched.push(entry.id.clone());
-            }
-        }
-    }
-    record_batch(
+    if !record_batch(
         &tx,
         batch_id,
         &delete.source,
         delete.items.len(),
         delete.rules_version.as_deref(),
         now,
-    )?;
+    )? {
+        return Ok(DeleteApply {
+            duplicate: true,
+            ..DeleteApply::default()
+        });
+    }
+
+    let mut apply = DeleteApply::default();
+    let mut touched = Vec::new();
+    let mut works = std::collections::BTreeSet::new();
+    for entry in &delete.items {
+        let current: Option<(i64, Option<String>)> = tx
+            .query_row(
+                "SELECT revision, work_id FROM items WHERE id = ?1",
+                [&entry.id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+        match current {
+            None => apply.missing += 1,
+            Some((revision, _)) if revision > entry.revision => apply.stale += 1,
+            Some((_, work_id)) => {
+                tx.execute(
+                    "UPDATE items SET deleted = 1, revision = ?2, updated_at = ?3
+                      WHERE id = ?1",
+                    params![&entry.id, entry.revision, now],
+                )?;
+                if let Some(work_id) = work_id {
+                    works.insert(work_id);
+                }
+                apply.deleted += 1;
+                touched.push(entry.id.clone());
+            }
+        }
+    }
+    for work_id in &works {
+        refresh_work_cover(&tx, work_id)?;
+    }
     refresh_search_index(&tx, &touched)?;
     tx.commit()?;
     Ok(apply)
+}
+
+/// 封面必须指向仍可见的条目；以页码最小的活动条目兜底，没有条目时置空。
+fn refresh_work_cover(tx: &Transaction<'_>, work_id: &str) -> Result<()> {
+    tx.execute(
+        "UPDATE works
+            SET cover_item_id = (
+                SELECT i.id
+                  FROM items i
+                  LEFT JOIN work_items wi ON wi.item_id = i.id
+                 WHERE i.work_id = works.id AND i.deleted = 0
+                 ORDER BY COALESCE(wi.page, 2147483647), i.id
+                 LIMIT 1)
+          WHERE id = ?1",
+        [work_id],
+    )?;
+    Ok(())
 }
 
 enum ItemWrite {
     Inserted,
     Updated,
     Stale,
-}
-
-fn batch_exists(conn: &Connection, batch_id: &str) -> Result<bool> {
-    let exists: i64 = conn.query_row(
-        "SELECT EXISTS(SELECT 1 FROM ingest_batches WHERE id = ?1)",
-        [batch_id],
-        |row| row.get(0),
-    )?;
-    Ok(exists != 0)
 }
 
 fn record_batch(
@@ -1134,14 +1320,15 @@ fn record_batch(
     item_count: usize,
     rules_version: Option<&str>,
     now: i64,
-) -> Result<()> {
+) -> Result<bool> {
     let item_count = i64::try_from(item_count).unwrap_or(i64::MAX);
-    tx.execute(
-        "INSERT INTO ingest_batches (id, source, item_count, rules_version, received_at)
+    let changed = tx.execute(
+        "INSERT OR IGNORE INTO ingest_batches
+            (id, source, item_count, rules_version, received_at)
          VALUES (?1, ?2, ?3, ?4, ?5)",
         params![batch_id, source, item_count, rules_version, now],
     )?;
-    Ok(())
+    Ok(changed == 1)
 }
 
 fn upsert_ingest_item(
@@ -1182,17 +1369,17 @@ fn upsert_ingest_item(
         tx.execute(
             "INSERT INTO works
                 (id, source, title, author_id, page_count, status, cover_item_id)
-             VALUES (?1, ?2, ?3, ?4, ?5, 'active', NULL)
+             VALUES (?1, ?2, ?3, ?4, COALESCE(?5, 1), 'active', NULL)
              ON CONFLICT(id) DO UPDATE SET
                 title = CASE WHEN excluded.title <> '' THEN excluded.title ELSE works.title END,
                 author_id = COALESCE(excluded.author_id, works.author_id),
-                page_count = MAX(works.page_count, excluded.page_count)",
+                page_count = COALESCE(?5, works.page_count)",
             params![
                 work_id,
                 &batch.source,
                 item.title.as_deref().unwrap_or("").trim(),
                 item.author_id.as_deref(),
-                i64::from(item.page_count.unwrap_or(1).max(1)),
+                item.page_count.map(|count| i64::from(count.max(1))),
             ],
         )?;
     }
@@ -1279,12 +1466,6 @@ fn upsert_ingest_item(
                 params![work_id, &item.id, i64::from(page)],
             )?;
         }
-        if item.page.unwrap_or(0) == 0 {
-            tx.execute(
-                "UPDATE works SET cover_item_id = COALESCE(cover_item_id, ?2) WHERE id = ?1",
-                params![work_id, &item.id],
-            )?;
-        }
     }
 
     Ok(match previous {
@@ -1325,7 +1506,9 @@ pub struct PullItem {
     pub updated_at: i64,
 }
 
-/// 按 `(updated_at, id)` keyset 拉取，包含已删除条目，方便桌面同步下架。
+/// 按 `(updated_at, id)` keyset 拉取。
+///
+/// 只同步 allow 条目；已删除条目仍要返回 tombstone（`del=true`），供桌面下架。
 pub fn pull_items(
     conn: &Connection,
     since_updated: i64,
@@ -1334,7 +1517,9 @@ pub fn pull_items(
 ) -> Result<(Vec<PullItem>, bool)> {
     let sql = format!(
         "SELECT {ITEM_COLUMNS}, i.revision, i.updated_at {ITEM_FROM}
-          WHERE (i.updated_at > ?1 OR (i.updated_at = ?1 AND i.id > ?2))
+          WHERE i.decision = 'allow'
+            AND (i.deleted = 1 OR i.work_id IS NULL OR w.status <> 'deleted')
+            AND (i.updated_at > ?1 OR (i.updated_at = ?1 AND i.id > ?2))
           ORDER BY i.updated_at ASC, i.id ASC
           LIMIT ?3"
     );
@@ -1548,6 +1733,23 @@ pub fn insert_device(conn: &Connection, id: &str, name: &str, token_hash: &str) 
 pub fn item_is_live(conn: &Connection, id: &str) -> Result<bool> {
     let exists: i64 = conn.query_row(
         "SELECT EXISTS(SELECT 1 FROM items WHERE id = ?1 AND deleted = 0)",
+        [id],
+        |row| row.get(0),
+    )?;
+    Ok(exists != 0)
+}
+
+/// 公开网页可见：未删除、已审核 allow，且作品未整体下架。
+pub fn item_is_public(conn: &Connection, id: &str) -> Result<bool> {
+    let exists: i64 = conn.query_row(
+        "SELECT EXISTS(
+             SELECT 1 FROM items i
+             LEFT JOIN works w ON w.id = i.work_id
+             WHERE i.id = ?1
+               AND i.deleted = 0
+               AND i.decision = 'allow'
+               AND (i.work_id IS NULL OR w.status IS NULL OR w.status <> 'deleted')
+         )",
         [id],
         |row| row.get(0),
     )?;

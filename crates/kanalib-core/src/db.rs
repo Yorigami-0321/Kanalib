@@ -3123,6 +3123,11 @@ impl Db {
         let Some(old_id) = old_id else {
             bail!("asset not found: {old_string}");
         };
+        let old_thumb: Option<String> = tx
+            .query_row("SELECT thumb FROM assets WHERE id = ?1", [old_id], |row| {
+                row.get(0)
+            })
+            .optional()?;
         tx.execute(
             "UPDATE assets SET
                 source_id = ?1, path = ?2, folder = ?3, name = ?4, media_kind = ?5,
@@ -3149,6 +3154,13 @@ impl Db {
                 old_id,
             ],
         )?;
+        if let Some(old_thumb) = old_thumb
+            && !old_thumb.is_empty()
+            && old_thumb != thumb_string
+        {
+            // thumb_sources 以缩略图路径为主键；资产改名后旧路径不再对应任何文件。
+            tx.execute("DELETE FROM thumb_sources WHERE thumb = ?1", [&old_thumb])?;
+        }
         tx.commit()?;
         self.load_asset(new_path)
     }
@@ -5410,6 +5422,7 @@ mod tests {
         let db = Db::open(&root.join("kanalib.db")).unwrap();
         let old = PathBuf::from("C:\\lib\\old.png");
         let new = PathBuf::from("C:\\lib\\renamed.png");
+        let old_thumb = PathBuf::from("C:\\thumbs\\old.jpg");
         let hashes = ContentHashes {
             sha1: "c".repeat(40),
             blake3: "d".repeat(64),
@@ -5417,7 +5430,19 @@ mod tests {
             decode_ok: true,
             decode_error: None,
         };
-        db.upsert_meta("C:\\lib", &old, None, 10, 20, 100, 10, &hashes, false)
+        db.upsert_meta(
+            "C:\\lib",
+            &old,
+            Some(&old_thumb),
+            10,
+            20,
+            100,
+            10,
+            &hashes,
+            false,
+        )
+        .unwrap();
+        db.record_thumb_source(&old_thumb, &old, 10, 100, 0)
             .unwrap();
         let mut asset = db.load_asset(&old).unwrap();
         asset.tagged = true;
@@ -5452,6 +5477,15 @@ mod tests {
                 .unwrap()
                 .contains(&new)
         );
+        let stale_thumb: i64 = db
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM thumb_sources WHERE thumb = ?1",
+                [old_thumb.to_string_lossy().to_string()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(stale_thumb, 0, "改名后旧缩略图映射必须删除");
 
         drop(db);
         fs::remove_dir_all(&root).unwrap();

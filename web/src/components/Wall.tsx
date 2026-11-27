@@ -75,6 +75,8 @@ export interface WallViewProps {
   infinite?: boolean;
   /** 无限空间要求条目全量到齐后再生成，否则分片到达会让整屏重排。 */
   ready?: boolean;
+  /** 静态筛选正在补命中分片：空集合先显示骨架，不要提前报“没有图片”。 */
+  selecting?: boolean;
   /** 世界种子：决定每个格子拿哪批图（刷新即换）。 */
   worldSeed?: number;
   /** 标签 → 张数，透传给卡片角标。 */
@@ -169,6 +171,7 @@ export function WallView({
   stableAppend = false,
   infinite = false,
   ready = true,
+  selecting = false,
   worldSeed = 1,
   tagCounts,
   emptyText,
@@ -1419,10 +1422,10 @@ export function WallView({
     return Math.min(340, (column + row) * 30);
   };
   const isEmpty = items.length === 0;
-  const showEmpty = isEmpty && phase !== 'boot' && phase !== 'loading';
+  const showEmpty = isEmpty && phase !== 'boot' && phase !== 'loading' && !selecting;
   // 首次 boot（一张都没有）才让加载态占位；已有条目就渲染当前格子，
   // 失败/补拉窗口不再把画面清空。全量到齐后 ready 只影响格子重排。
-  const awaitingWorld = infinite && !ready && isEmpty && phase !== 'error';
+  const awaitingWorld = infinite && (!ready || selecting) && isEmpty && phase !== 'error';
   // 传给 memo 卡片的回调必须引用稳定，否则纯平移时卡片仍会整批重渲染。
   const handleCardOpen = useCallback(
     (openedItem: WallItem, openedIndex: number, originRect?: Rect) => {
@@ -1465,7 +1468,7 @@ export function WallView({
       }}
     >
       {/* 弱网首屏：boot/首片未到时先铺图位骨架，避免白屏或纯黑；真实卡片到达后整层卸载。 */}
-      {isEmpty && (phase === 'boot' || phase === 'loading') ? (
+      {isEmpty && (phase === 'boot' || phase === 'loading' || selecting) ? (
         <div className="wall-skeleton" role="status" aria-live="polite">
           <span className="sr-only">正在加载图片</span>
           <div className="wall-skeleton__grid" aria-hidden="true">
