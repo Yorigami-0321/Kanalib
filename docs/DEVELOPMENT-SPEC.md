@@ -369,10 +369,10 @@ box ──> 10.126.126.2:8793（云端代理）──> 10.126.126.1:8793（本�
 | 节点 | 地址 | 运行内容 | 实测 |
 |---|---|---|---|
 | 云端 web | `10.126.126.2`，公网 `128.1.132.31` / `patchouli.us.ci` | Nginx 443、`kanalib-web` public `127.0.0.1:8787`、private `10.126.126.2:8788` | `https://patchouli.us.ci/api/health` → `{"ok":true,"db":true,"media_root":true,"version":"0.1.0"}` |
-| box | `10.126.126.3` | `kanalib-ingest`（`--config /etc/kanalib/ingest.toml`）、`kanalib-easytier`、`kanalib-etproxy` | 服务 active；`/admin/api/health` → `schema 7`、`rules 2026-11-23.3`、`rules_hash 720987e2…` |
-| 本机 | `10.126.126.1` | `easytier-gui` Windows 服务、`sidecar/tagger/http_server.py`（`10.126.126.1:8793`） | `easytier-cli peer`：web `p2p ~390ms / 2% loss`、box `relay(2) ~925ms / rx,tx 0 B`；本机 `curl 10.126.126.1:8793/health` → `{"ok":true,"device":"cuda","half":true,"classes":30877}` |
+| box | `10.126.126.3` | `kanalib-ingest`（`--config /etc/kanalib/ingest.toml`）、`kanalib-easytier`、`kanalib-etproxy` | 服务 active；`/admin/api/health` → `schema 7`、`rules 2026-11-25.1`、`rules_hash 088c3f1f…` |
+| 本机 | `10.126.126.1` | `easytier-gui` Windows 服务、`sidecar/tagger/http_server.py`（`10.126.126.1:8793`） | `easytier-cli peer`：web `p2p ~370ms`、box `relay(2) ~680ms`（中继流量不计入该表 `rx/tx` 列，已实测可达）；`curl 10.126.126.1:8793/health` → `{"ok":true,"device":"cuda","half":true,"classes":30877}`（tagger 未启动时为 `000`） |
 
-**打标路径实测**：box 直连 `10.126.126.1:8793` 不通（`000`），但 `10.126.126.2:8793/health` 返回 200 且回包是本机模型路径——即 box 经云端代理到本机。`ingest.toml` 的 `[tagging].endpoint` 当前为 `http://10.126.126.2:8793/tag`。box 与本机之间走 EasyTier relay，实测 `rx/tx = 0 B`，不能假设两者可直连。
+**打标路径**：`ingest.toml` 的 `[tagging].endpoint` 当前为云端代理 `http://10.126.126.2:8793/tag`（web 上的 `kanalib-tagger-proxy`）。本机与 box 之间的 EasyTier relay 现已可用：`ping 10.126.126.3` → ~680ms，`curl 10.126.126.3:8792/admin/api/health` → `200`。此前不通的根因是本机 `secure_mode.local_public_key` 与私钥不匹配——`secure_mode` 下中继数据要先做端到端 Noise 握手，公钥错误使握手必然失败、数据被静默缓冲丢弃；2026-11-27 已修正（原文件备份为 `config.d/kanalib.toml.bak-20261127-pubkey`）。`peer` 表里 box 仍显示 `relay(2)`/`rx,tx 0 B` 属正常，中继流量不记在直连列。保留代理不影响功能；若要省云出口，先启动本机 tagger，再从 box 验证 `10.126.126.1:8793` 后改直连。
 
 端口约定：
 
@@ -434,7 +434,7 @@ curl -s --noproxy '*' http://10.126.126.2:8788/api/health
 curl -s --noproxy '*' http://10.126.126.2:8793/health
 ```
 
-实测：`8788`、`8792`、`8793`（代理）正常；`10.126.126.2:8787` 与 `10.126.126.1:8793` 从 box 不可达——前者是 public listener 只绑回环（正确），后者是 box↔本机无直连（走代理）。
+实测：`8788`、`8792` 正常；`10.126.126.2:8787` 从 box 不可达——public listener 只绑回环（正确）。`8793`（代理与直连）在 2026-11-27 复测均为 `000`，原因是本机 tagger 未启动，不是链路问题；box→本机 relay 的 ICMP 已通（~660ms）。
 
 box 上还有两条容易踩的网络事实：
 
@@ -539,7 +539,7 @@ KANALIB_INGEST_METRICS=http://10.126.126.3:8792/admin/api/metrics \
 | 现象 | 先查 | 处理 |
 |---|---|---|
 | 公网 502/超时 | `systemctl is-active nginx kanalib-web`、`curl 127.0.0.1:8787/api/health` | 重启 `kanalib-web`；看 `journalctl -u kanalib-web` |
-| 私网不可达 | `easytier-cli peer`、`ip -4 addr show et0` | 重启 EasyTier（需管理员）；确认 `secure_mode` 私钥存在 |
+| 私网不可达 | `easytier-cli peer`、`ip -4 addr show et0` | 重启 EasyTier（需管理员）；确认 `secure_mode` 私钥存在。本机 `local_public_key` 必须由同一私钥推导（不匹配时 relay 握手静默失败，表现为 `relay(2)`/`rx,tx 0 B`） |
 | box 入库停滞 | `journalctl -u kanalib-ingest -n 50`、`/admin/api/health` | 看 `model_error_streak`、规则版本、队列 |
 | 打标失败 | 本机 `curl 10.126.126.1:8793/health`；box `curl 10.126.126.2:8793/health` | 本机打标服务与云端代理是否都在线；离线时条目应落 `review` |
 | 推送失败 | box `[push]` 配置、HMAC 文件权限 | 用 `--replay-push <BATCH_ID>` 重放，不改内容 |
