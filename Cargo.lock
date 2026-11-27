@@ -4368,6 +4368,7 @@ dependencies = [
  "hmac",
  "http-body-util",
  "kanalib-wall-model",
+ "reqwest",
  "rusqlite",
  "serde",
  "serde_json",

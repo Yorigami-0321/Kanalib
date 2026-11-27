@@ -33,7 +33,8 @@ impl AppState {
 pub struct WriteConfig {
     /// box → 网页批次签名共享密钥。
     pub ingest_secret: Option<Arc<str>>,
-    /// box 原图回源根地址，例如 `http://10.126.126.3:8789`。
+    /// box 原图服务根地址，例如 `http://10.126.126.3:8789`；私网 listener
+    /// 用它反代 `/original/{id}`，地址不会出现在客户端可见的 `Location` 里。
     pub box_origin: Option<Arc<str>>,
     /// 网页签发 box 原图 URL 的媒体密钥。
     pub media_signing_key: Option<Arc<str>>,

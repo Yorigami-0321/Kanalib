@@ -18,6 +18,11 @@ server {
         return 404;
     }
 
+    # 302 之后的相对回源路径只存在于私网 listener；公网直接拒绝。
+    location ^~ /original/ {
+        return 404;
+    }
+
     location ^~ /internal/ {
         return 404;
     }

@@ -313,7 +313,7 @@ pub struct Capabilities {
 | `m/NNNN.json` | `GET /api/items?cursor=&limit=` → `PageDto<WallItemDto>` |
 | `search-index.json` | 不返回；服务端搜索替代 |
 | `t256/<id>.jpg` | `GET /media/t256/<id>.jpg` |
-| `o/<id>.<ext>` | 不直接提供；`GET /api/items/{id}/original` 返回 302 到 box 的短期签名 URL |
+| `o/<id>.<ext>` | 不直接提供；`GET /api/items/{id}/original` 返回 302 到相对路径 `/original/{id}`，由 private listener 反代 box |
 
 `schema` 是条目/目录契约版本，不是「静态/动态」开关；动态也返回 1。`api_version` 只描述 HTTP 层。
 
@@ -341,7 +341,7 @@ pub struct Capabilities {
 | GET | `/api/tags` | 标签 facets（`limit`） |
 | GET | `/media/{tier}/{file}` | 缩略图；`tier ∈ t256,t512,t1024,t2048` |
 
-`/api/items/{id}/original` **不在 public listener**：它只挂 private listener；公网访问返回 404，前端回退到 t2048。
+`/api/items/{id}/original` 与它签发的 `/original/{id}` **都不在 public listener**：两者只挂 private listener，公网访问返回 404，前端回退到 t2048。
 
 ### 5.2 内部写入
 
@@ -352,7 +352,8 @@ pub struct Capabilities {
 | POST | `/internal/ingest/batch` | box 推送 allow 批次；HMAC + 时间戳 + 幂等键 |
 | POST | `/internal/ingest/delete` | box 通知下架/删除；只置 `deleted=1` |
 | POST | `/internal/ingest/thumb/{tier}/{id}.{jpg,avif}` | box 上传缩略图；HMAC + 时间戳；扩展名、magic bytes 与 MIME 必须一致 |
-| GET | `/api/items/{id}/original` | 302 到 box 签名 URL；只对 EasyTier 私网可用 |
+| GET | `/api/items/{id}/original` | 302 到相对路径 `/original/{id}?expires=&sig=`；只对 EasyTier 私网可用 |
+| GET/HEAD | `/original/{id}?expires=&sig=` | 服务端反代 `{box_origin}/original/{id}`；流式转发、单区间 Range；地址不出现在响应里 |
 
 约束：
 
@@ -474,7 +475,8 @@ box 为每个新条目同时生成并上传 t256/t512 的 AVIF 与 JPEG。AVIF �
 
 ### 6.2 原图回源
 
-- 网页默认不存原图；`GET /api/items/{id}/original` 只挂 private listener，校验条目存在后，用共享媒体签名密钥生成短期签名 URL（默认 5 分钟），返回 302 到 box。
+- 网页默认不存原图；`GET /api/items/{id}/original` 只挂 private listener，校验条目公开后，用共享媒体签名密钥生成短期签名（默认 5 分钟），返回 302 到**本服务的相对路径** `/original/{id}?expires=…&sig=…`。
+- private listener 的 `GET/HEAD /original/{id}` 校验签名参数格式后反代 `{box_origin}/original/{id}`，流式转发响应体与 `Range`/`HEAD`；`box_origin` 不出现在任何客户端可见的响应里。
 - box 侧只接受签名 + 过期时间；不暴露目录列表。
 - 未配置 box 回源时返回 404，前端回退到最高可用缩略图。
 - 公网不提供原图；详情页在公网模式最多取 t2048。
@@ -485,7 +487,7 @@ box 为每个新条目同时生成并上传 t256/t512 的 AVIF 与 JPEG。AVIF �
 GET\n/original/{item_id}\n{expires}
 ```
 
-- 302 目标：`{box_origin}/original/{item_id}?expires={unix}&sig={hex}`。
+- 302 目标：`/original/{item_id}?expires={unix}&sig={hex}`；服务端再请求 `{box_origin}/original/{item_id}?expires={unix}&sig={hex}`。
 - 网页只在 `--box-origin` 与 `--media-signing-key` 同时配置时启用；否则 404。
 
 ### 6.3 性能
@@ -629,7 +631,7 @@ cargo run -p kanalib-web -- --db .kanalib-web/kanalib-web.db --media .kanalib-we
 - 二进制 + `web/dist` + SQLite + 媒体目录；媒体单独挂盘，避免系统盘打满。
 - 前置 Nginx/Caddy：TLS、`/api` 与 `/media` 反代、gzip/brotli；静态资源可加 CDN。
 - **两个 listener**：public `127.0.0.1:8787` 只读（给 Nginx）；private `10.126.126.2:8788` 只给 EasyTier 虚拟网。
-- Nginx 显式拒绝 `/internal/*`、`/api/desktop/*`、`/api/items/*/original`，作为第二道保险。
+- Nginx 显式拒绝 `/internal/*`、`/api/desktop/*`、`/api/items/*/original`、`/original/*`，作为第二道保险。
 - SQLite 开 WAL；每日备份到对象存储；保留最近 7 天。
 - 现成脚本：`deploy/backup/kanalib-web-backup.sh`（`.backup` + `integrity_check` + gzip + 保留天数），timer 模板在 `deploy/systemd/`。
 - 内存目标 <150MB；如超，先降 `limit` 上限与并发，不引入重型缓存。
@@ -693,7 +695,7 @@ cargo run -p kanalib-web -- --db .kanalib-web/kanalib-web.db --media .kanalib-we
 - box 推送 100 条，网页只出现 allow；block/review 不出现。
 - 断网/DB 锁定：`/api/health` 503，网页错误条可重试。
 - 原图回源：签名 URL 5 分钟内可用，过期 403；未配置时 404。
-- 公网原图：`/api/items/{id}/original` 公网 404；EasyTier 私网内可用。
+- 公网原图：`/api/items/{id}/original` 与 `/original/{id}` 公网 404；EasyTier 私网内可用。
 - 桌面直连 box：`easytier-cli route` 的 `next_hop` 为 `DIRECT`；云出口流量接近 0。
 - 移动端：底部导航 + 详情 sheet 不回归。
 

@@ -162,12 +162,12 @@ EasyTier 也支持 `txt://` 和 `srv://` 发现；本项目先用 HTTPS 文本�
 | listener | 路由 | 谁能访问 |
 |---|---|---|
 | public `127.0.0.1:8787` | `/api/health`、`/api/index`、`/api/items`、`/api/works`、`/api/authors`、`/api/collections`、`/api/tags`、`/media/*` | Nginx，经公网 HTTPS 只读 |
-| private `10.126.126.2:8788` | `/internal/ingest/*`、`/api/desktop/*`、`/api/items/{id}/original` | 仅 EasyTier 虚拟网 |
+| private `10.126.126.2:8788` | `/internal/ingest/*`、`/api/desktop/*`、`/api/items/{id}/original`、`/original/{id}` | 仅 EasyTier 虚拟网 |
 
 约束：
 
 1. public listener **不注册**写路由；即使请求打进来也是 404，而不是 401。
-2. Nginx 额外显式拒绝 `/internal/*`、`/api/desktop/*`，作为第二道保险。
+2. Nginx 额外显式拒绝 `/internal/*`、`/api/desktop/*`、`/original/*`，作为第二道保险。
 3. private listener 绑虚拟 IP，不绑 `0.0.0.0`；公网扫描不到 8788。
 4. 两个 listener 共享同一个 SQLite 和媒体目录；写路由只挂在 private router。
 5. 主机防火墙再兜一层：只允许 `et0` 入站到 8788。

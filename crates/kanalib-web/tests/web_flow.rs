@@ -3,7 +3,7 @@
 use axum::{
     Router,
     body::Body,
-    http::{HeaderMap, Method, Request, StatusCode, header},
+    http::{HeaderMap, HeaderValue, Method, Request, StatusCode, header},
 };
 use http_body_util::BodyExt;
 use kanalib_wall_model::{IngestBatch, IngestDelete, IngestDeleteItem};
@@ -2034,7 +2034,11 @@ async fn original_proxy_signs_short_lived_box_url() {
     assert_eq!(status, StatusCode::FOUND);
     let location = header_text(&headers, header::LOCATION);
     let (base, query) = location.split_once('?').expect("query");
-    assert_eq!(base, format!("{BOX_ORIGIN}/original/{}", db::SAMPLE_ITEM_A));
+    assert_eq!(base, format!("/original/{}", db::SAMPLE_ITEM_A));
+    assert!(
+        !location.contains(BOX_ORIGIN),
+        "location must not leak the box origin: {location}"
+    );
     let mut expires = None;
     let mut signature = None;
     for pair in query.split('&') {
@@ -2082,6 +2086,133 @@ async fn original_proxy_signs_short_lived_box_url() {
         &plain.private,
         Method::GET,
         &format!("/api/items/{}/original", db::SAMPLE_ITEM_A),
+        &[],
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+const BOX_BODY: &[u8] = b"01234567";
+
+async fn mock_box_original(
+    axum::extract::Path(id): axum::extract::Path<String>,
+    axum::extract::Query(query): axum::extract::Query<std::collections::HashMap<String, String>>,
+    method: Method,
+    headers: HeaderMap,
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+
+    if id != db::SAMPLE_ITEM_A
+        || !query.contains_key("expires")
+        || !query
+            .get("sig")
+            .is_some_and(|signature| signature.len() == 64)
+    {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+    let (status, content_range, payload): (StatusCode, Option<&str>, &[u8]) =
+        match header_text(&headers, header::RANGE).as_str() {
+            "" => (StatusCode::OK, None, BOX_BODY),
+            "bytes=2-4" => (
+                StatusCode::PARTIAL_CONTENT,
+                Some("bytes 2-4/8"),
+                &BOX_BODY[2..=4],
+            ),
+            _ => (StatusCode::RANGE_NOT_SATISFIABLE, Some("bytes */8"), &[]),
+        };
+    let body = if method == Method::HEAD {
+        Vec::new()
+    } else {
+        payload.to_vec()
+    };
+    let mut response = (status, body).into_response();
+    let out = response.headers_mut();
+    out.insert(header::CONTENT_TYPE, HeaderValue::from_static("image/jpeg"));
+    out.insert(header::ACCEPT_RANGES, HeaderValue::from_static("bytes"));
+    out.insert(
+        header::CACHE_CONTROL,
+        HeaderValue::from_static("private, max-age=300"),
+    );
+    out.insert(
+        header::CONTENT_LENGTH,
+        HeaderValue::from_str(&payload.len().to_string()).expect("content length"),
+    );
+    if let Some(value) = content_range {
+        out.insert(header::CONTENT_RANGE, HeaderValue::from_static(value));
+    }
+    response
+}
+
+#[tokio::test]
+async fn private_listener_proxies_original_bytes_and_range() {
+    let box_listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+        .await
+        .expect("bind mock box");
+    let box_addr = box_listener.local_addr().expect("mock box addr");
+    let box_router = Router::new().route("/original/{id}", axum::routing::get(mock_box_original));
+    tokio::spawn(async move {
+        let _ = axum::serve(box_listener, box_router).await;
+    });
+
+    let mut config = write_config(32 * 1024 * 1024);
+    config.box_origin = Some(Arc::from(format!("http://{box_addr}")));
+    let fixture = build_fixture_with(false, Some(config));
+
+    let sign_uri = format!("/api/items/{}/original", db::SAMPLE_ITEM_A);
+    let (status, headers, _) = send(&fixture.private, Method::GET, &sign_uri, &[]).await;
+    assert_eq!(status, StatusCode::FOUND);
+    let location = header_text(&headers, header::LOCATION);
+    assert!(location.starts_with("/original/"), "{location}");
+
+    let (status, headers, body) = send(&fixture.private, Method::GET, &location, &[]).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body, BOX_BODY);
+    assert_eq!(header_text(&headers, header::CONTENT_TYPE), "image/jpeg");
+    assert_eq!(header_text(&headers, header::CONTENT_LENGTH), "8");
+    assert_eq!(header_text(&headers, header::ACCEPT_RANGES), "bytes");
+    assert_eq!(
+        header_text(&headers, header::CACHE_CONTROL),
+        "private, max-age=300"
+    );
+
+    let (status, headers, body) = send(
+        &fixture.private,
+        Method::GET,
+        &location,
+        &[("range", "bytes=2-4")],
+    )
+    .await;
+    assert_eq!(status, StatusCode::PARTIAL_CONTENT);
+    assert_eq!(body, b"234");
+    assert_eq!(header_text(&headers, header::CONTENT_RANGE), "bytes 2-4/8");
+    assert_eq!(header_text(&headers, header::CONTENT_LENGTH), "3");
+
+    let (status, headers, body) = send(&fixture.private, Method::HEAD, &location, &[]).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(body.is_empty());
+    assert_eq!(header_text(&headers, header::CONTENT_LENGTH), "8");
+
+    let public_uris = [
+        location.clone(),
+        format!("/original/{}", db::SAMPLE_ITEM_A),
+        format!("/original/{}?expires=1&sig=zz", db::SAMPLE_ITEM_A),
+    ];
+    for uri in &public_uris {
+        let (status, _, _) = send(&fixture.public, Method::GET, uri, &[]).await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "public {uri}");
+    }
+    let (status, _, _) = send(
+        &fixture.private,
+        Method::GET,
+        &format!("/original/{}", db::SAMPLE_ITEM_A),
+        &[],
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    let (status, _, _) = send(
+        &fixture.private,
+        Method::GET,
+        &format!("/original/{}?expires=1&sig=zz", db::SAMPLE_ITEM_A),
         &[],
     )
     .await;

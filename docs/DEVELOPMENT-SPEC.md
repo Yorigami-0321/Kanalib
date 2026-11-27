@@ -495,7 +495,7 @@ box 上还有两条容易踩的网络事实：
 - **只有 owner 明确要求才部署**；默认交付到本地预览。
 - 部署前必须 `npm run build` + 对应探针通过；不在服务器上改代码、不手改 `dist`。
 - `web/public/data` 含真实库内容，上传走加密通道，不放进仓库、不贴到聊天。
-- Nginx 必须显式 404 `/internal/`、`/api/desktop/`、`/api/items/<id>/original`（模板已写）。
+- Nginx 必须显式 404 `/internal/`、`/api/desktop/`、`/api/items/<id>/original`、`/original/`（模板已写）。
 
 ### 15.4 密钥与配置位置
 

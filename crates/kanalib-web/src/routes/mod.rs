@@ -71,6 +71,7 @@ pub fn public_router(state: AppState) -> Router {
         .route("/api/collections/{id}/works", get(read::collection_works))
         .route("/api/tags", get(read::tags))
         .route("/media/{tier}/{file}", get(crate::media::serve_media))
+        .route("/original/{id}", get(original_not_available))
         .fallback(public_fallback)
         .layer(middleware::from_fn(security_headers))
         .with_state(state)
@@ -87,6 +88,7 @@ pub fn private_router(state: AppState) -> Router {
         .route("/api/desktop/upload", post(desktop::upload))
         .route("/api/desktop/uploads/{file}", get(desktop::serve_upload))
         .route("/api/items/{id}/original", get(original::original))
+        .route("/original/{id}", get(original::serve))
         .layer(DefaultBodyLimit::max(64 * 1024 * 1024))
         .fallback(private_fallback)
         .layer(middleware::from_fn(security_headers))
@@ -97,7 +99,7 @@ async fn private_fallback() -> Response {
     not_found()
 }
 
-/// 公网 listener 永远不暴露原图（包括 302 的目标私网地址）。
+/// 公网 listener 永远不暴露原图或它的回源代理。
 async fn original_not_available() -> Response {
     not_found()
 }
@@ -108,6 +110,8 @@ async fn public_fallback(State(state): State<AppState>, request: Request<Body>) 
         || path.starts_with("/api/")
         || path == "/internal"
         || path.starts_with("/internal/")
+        || path == "/original"
+        || path.starts_with("/original/")
     {
         return not_found();
     }
