@@ -27,6 +27,8 @@ export interface InspectorProps {
   apiMode?: boolean;
   /** API 模式且服务端开启签名回源时，原图入口指向 `/api/items/{id}/original`。 */
   originalProxy?: boolean;
+  sheetOpen: boolean;
+  onSheetOpenChange: (open: boolean) => void;
   onClose: () => void;
   onBack?: () => void;
   onTagClick: (tag: string) => void;
@@ -45,6 +47,8 @@ export function Inspector({
   paths,
   apiMode = false,
   originalProxy = false,
+  sheetOpen,
+  onSheetOpenChange,
   onClose,
   onBack,
   onTagClick,
@@ -58,8 +62,6 @@ export function Inspector({
       return false;
     }
   });
-  /** 移动端底部 sheet 的展开态；桌面端把手隐藏，该状态不生效。 */
-  const [sheetOpen, setSheetOpen] = useState(true);
   const [copied, setCopied] = useState(false);
   const copyTimer = useRef(0);
   useEffect(() => () => window.clearTimeout(copyTimer.current), []);
@@ -135,7 +137,7 @@ export function Inspector({
         aria-expanded={sheetOpen}
         aria-controls="inspector-body"
         title={sheetOpen ? '收起信息' : '展开信息'}
-        onClick={() => setSheetOpen((value) => !value)}
+        onClick={() => onSheetOpenChange(!sheetOpen)}
       >
         <span className="sr-only">{sheetOpen ? '收起信息' : '展开信息'}</span>
       </button>

@@ -178,6 +178,9 @@ export function App() {
   /** 被点卡片在点击瞬间的世界矩形：聚焦重排以它为锚，图片不会被搬到固定英雄位。 */
   const [spotlightRect, setSpotlightRect] = useState<Rect | null>(null);
   const [detailInfoHidden, setDetailInfoHidden] = useState(false);
+  const [detailSheetOpen, setDetailSheetOpen] = useState(
+    () => typeof window === 'undefined' || window.innerWidth > 900,
+  );
   const [playing, setPlaying] = useState(false);
   const [mono, setMono] = useState(() => parseUiParams(window.location.hash).mono);
   const [matte, setMatte] = useState(() => parseUiParams(window.location.hash).matte);
@@ -895,6 +898,11 @@ export function App() {
   useEffect(() => {
     const wasList = previousRoute.current.view !== 'detail';
     const isList = route.view !== 'detail';
+    // 从非详情进入详情（深链、前进/后退）恢复默认信息态；详情内换图保留用户选择。
+    if (wasList && !isList && route.view === 'detail') {
+      setDetailInfoHidden(false);
+      setDetailSheetOpen(typeof window === 'undefined' || window.innerWidth > 900);
+    }
     if (wasList && !isList) {
       scrollMemo.current = window.scrollY;
       window.scrollTo(0, 0);
@@ -1020,6 +1028,7 @@ export function App() {
     (item: WallItem, _index: number, origin?: Rect) => {
       setSummaryId(null);
       setDetailInfoHidden(false);
+      setDetailSheetOpen(typeof window === 'undefined' || window.innerWidth > 900);
       returnFocusId.current = item.id;
       const reduced = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
       if (origin && !reduced) {
@@ -1044,7 +1053,6 @@ export function App() {
   const handleDetail = useCallback((id: string) => {
     returnFocusId.current = id;
     setSummaryId(null);
-    setDetailInfoHidden(false);
     // 详情内翻页/放映：replace 当前历史条目，一次后退直接回列表。
     replaceNavigate(detailHref(id));
   }, []);
@@ -1312,6 +1320,8 @@ export function App() {
         paths: wall.paths,
         apiMode: wall.capabilities?.source === 'api',
         originalProxy: wall.capabilities?.original_proxy === true,
+        sheetOpen: detailSheetOpen,
+        onSheetOpenChange: setDetailSheetOpen,
         onClose: handleCloseInspector,
         onBack: handleBack,
         onTagClick: handleOpenTag,
@@ -1320,7 +1330,14 @@ export function App() {
     : null;
 
   return (
-    <div className={'app' + (inspectorOpen ? ' has-inspector' : '') + (mono ? ' is-mono' : '')}>
+    <div
+      className={
+        'app' +
+        (inspectorOpen ? ' has-inspector' : '') +
+        (detailId ? ' is-detail' : '') +
+        (mono ? ' is-mono' : '')
+      }
+    >
       <Sidebar
         view={railView}
         onHome={handleHome}

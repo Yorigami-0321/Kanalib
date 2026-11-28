@@ -350,10 +350,10 @@
   .inspector {
     top: auto;
     right: 0;
-    bottom: 0;
+    bottom: var(--seam-h);
     left: var(--seam-w);
     width: auto;
-    max-height: 55vh;
+    max-height: 38vh;
     transition: max-height 240ms var(--ease);
     border-top: 1px solid var(--hairline);
     border-right: 0;
@@ -383,7 +383,7 @@
   .inspector__handle {
     display: flex;
     width: 100%;
-    height: 22px;
+    height: 28px;
     flex: none;
     align-items: center;
     justify-content: center;
@@ -412,7 +412,7 @@
     transform: scaleX(0.72);
   }
 
-  /* 收起态只留把手 + 标题行：内容与操作区隐藏，画面让出 55vh。 */
+  /* 收起态只留把手 + 标题行：内容与操作区隐藏。 */
   .inspector--collapsed {
     max-height: 112px;
   }
@@ -438,7 +438,7 @@
   /* 底部 sheet：footer 用安全区内边距，390 首屏就能点到返回/复制/全屏/原图。 */
   .inspector > .inspector__actions {
     gap: 6px;
-    padding: 10px 16px calc(12px + env(safe-area-inset-bottom, 0px));
+    padding: 10px 16px 12px;
   }
 
   .inspector__head {

@@ -122,6 +122,7 @@ a {
   position: relative;
   z-index: 3;
   min-height: 100vh;
+  min-height: 100dvh;
 }
 
 /* 信息检查器展开时，详情 stage 让出 seam + 300px；窄屏是底部 sheet，不占水平空间。 */
@@ -139,6 +140,7 @@ a {
   position: relative;
   z-index: 3;
   height: 100vh;
+  height: 100dvh;
   padding-left: var(--seam-w);
   overflow-y: auto;
   overscroll-behavior: contain;
@@ -1584,12 +1586,16 @@ a {
      缝区拦截由 Wall.tsx 按 --seam-w / --seam-h 双向绕开。 ===== */
   :root {
     /* 底栏高度：Wall.tsx 的手势拦截和 .stage 的底部留白都读这个值。 */
-    --seam-h: 56px;
+    --seam-h: calc(56px + env(safe-area-inset-bottom, 0px));
   }
 
   .stage {
     padding-left: 0;
     padding-bottom: var(--seam-h);
+  }
+
+  .view {
+    bottom: var(--seam-h);
   }
 
   .seam.rail {
@@ -1601,7 +1607,7 @@ a {
     width: auto;
     height: var(--seam-h);
     gap: 6px;
-    padding: 8px 10px;
+    padding: 6px 8px calc(6px + env(safe-area-inset-bottom, 0px));
     overflow-x: auto;
     overflow-y: hidden;
     border-right: 0;
@@ -1626,6 +1632,11 @@ a {
     flex: none;
     gap: 3px;
     padding: 5px 8px;
+  }
+
+  /* 详情页底栏只保留详情操作，避免 15 个图标横向溢出。 */
+  .app.is-detail .seam.rail .seam__nav {
+    display: none;
   }
 
   .seam.rail .seam__label {

@@ -6,11 +6,13 @@
  *   node scripts/wall_probe_inspector_sheet.mjs --base http://127.0.0.1:4273/
  *
  * 断言：
- *  1) 390×844 详情页：sheet 展开时 `.inspector` 高度 > 200px，把手 `aria-expanded=true`。
- *  2) 点把手后：`aria-expanded=false`、带 `inspector--collapsed`、高度 ≤130px、操作区不可见。
- *  3) 再点一次恢复展开，高度回到 >200px。
- *  4) 桌面 1440×900：把手隐藏（display:none），检查器仍是 300px 左侧栏。
- *  5) 全流程 console error 0。
+ *  1) 390×844 详情页：默认折叠，`aria-expanded=false`、高度 ≤130px、操作区不可见。
+ *  2) 点把手后展开：`aria-expanded=true`、高度 >200px 且 ≤45vh，footer 不被底栏覆盖，
+ *     主图可见比例 ≥50%。
+ *  3) 再点一次恢复折叠；换图后 sheet 仍折叠；隐藏信息后换图仍隐藏，重新显示时仍折叠。
+ *  4) 移动详情 `--seam-h` 解析为 56px，`.view` 底边让出底栏，底栏隐藏全局导航。
+ *  5) 桌面 1440×900：把手隐藏（display:none），检查器仍是 300px 左侧栏。
+ *  6) 全流程 console error 0。
  *
  * 退出码：0 通过；1 断言失败；2 环境问题。
  */
@@ -207,8 +209,36 @@ async function main() {
         const aside = document.querySelector('.inspector');
         const handle = document.querySelector('.inspector__handle');
         const actions = document.querySelector('.inspector > .inspector__actions');
+        const rail = document.querySelector('.seam.rail');
+        const nav = document.querySelector('.seam.rail .seam__nav');
+        const view = document.querySelector('.view');
         const rect = aside ? aside.getBoundingClientRect() : null;
+        const actionsRect = actions ? actions.getBoundingClientRect() : null;
+        const railRect = rail ? rail.getBoundingClientRect() : null;
+        const viewRect = view ? view.getBoundingClientRect() : null;
         const handleStyle = handle ? getComputedStyle(handle) : null;
+        const railStyle = rail ? getComputedStyle(rail) : null;
+        const navStyle = nav ? getComputedStyle(nav) : null;
+        const pane = document.querySelectorAll('.view__pane')[1] ?? null;
+        const img = pane ? pane.querySelector('.view__img') : null;
+        let image = null;
+        let visibleRatio = null;
+        if (pane && img && img.naturalWidth > 0 && img.naturalHeight > 0) {
+          const box = pane.getBoundingClientRect();
+          const ratio = img.naturalWidth / img.naturalHeight;
+          const renderWidth = Math.min(box.width, box.height * ratio);
+          const renderHeight = Math.min(box.height, box.width / ratio);
+          const top = box.top + (box.height - renderHeight) / 2;
+          image = {
+            top: Math.round(top),
+            height: Math.round(renderHeight),
+            width: Math.round(renderWidth),
+          };
+          if (rect) {
+            const shownBottom = Math.min(top + renderHeight, rect.top);
+            visibleRatio = Math.max(0, shownBottom - top) / renderHeight;
+          }
+        }
         return {
           present: Boolean(aside),
           collapsed: Boolean(aside && aside.classList.contains('inspector--collapsed')),
@@ -218,9 +248,26 @@ async function main() {
           width: rect ? Math.round(rect.width) : null,
           top: rect ? Math.round(rect.top) : null,
           actionsVisible: Boolean(actions && actions.getBoundingClientRect().height > 0),
+          actionsBottom: actionsRect ? Math.round(actionsRect.bottom) : null,
+          navTop: railRect ? Math.round(railRect.top) : null,
+          navDisplay: navStyle ? navStyle.display : null,
+          seamHeight: railStyle ? railStyle.height : null,
+          viewBottom: viewRect ? Math.round(viewRect.bottom) : null,
+          image,
+          visibleRatio: visibleRatio === null ? null : Math.round(visibleRatio * 1000) / 1000,
           title: document.querySelector('.inspector__title')?.textContent?.trim() ?? null,
         };
       })()`);
+
+    const waitImage = async (timeoutMs = 8000) => {
+      const deadline = Date.now() + timeoutMs;
+      while (Date.now() < deadline) {
+        const state = await measure();
+        if (state.image) return state;
+        await sleep(200);
+      }
+      throw new Error('详情主图没有加载');
+    };
 
     const waitInspector = async (timeoutMs = 12000) => {
       const deadline = Date.now() + timeoutMs;
@@ -238,14 +285,63 @@ async function main() {
     await sleep(900);
     const open = await waitInspector();
     await sleep(400);
-    const beforeClick = await measure();
+    const initiallyCollapsed = await waitImage();
     await evaluate(`document.querySelector('.inspector__handle')?.click()`);
     await sleep(500);
-    const collapsed = await measure();
+    const expanded = await waitImage();
     await evaluate(`document.querySelector('.inspector__handle')?.click()`);
     await sleep(500);
-    const reopened = await measure();
-    report.cases.mobile = { open, beforeClick, collapsed, reopened };
+    const collapsedAgain = await measure();
+
+    const clickNav = () =>
+      evaluate(`(() => {
+        const buttons = [...document.querySelectorAll('.seam__ops--detail button')];
+        const next = buttons.find((b) => (b.title || '').startsWith('下一张') && !b.disabled);
+        const prev = buttons.find((b) => (b.title || '').startsWith('上一张') && !b.disabled);
+        const pick = next || prev;
+        if (!pick) return null;
+        const direction = pick === next ? 'next' : 'prev';
+        pick.click();
+        return direction;
+      })()`);
+
+    const navDirection = await clickNav();
+    await sleep(1200);
+    const afterNav = await measure();
+
+    const hidInfo = await evaluate(`(() => {
+      const button = [...document.querySelectorAll('.seam__ops--detail button')]
+        .find((b) => (b.title || '').startsWith('收起信息'));
+      button?.click();
+      return Boolean(button);
+    })()`);
+    await sleep(600);
+    const infoHidden = await measure();
+    const navAgain = await clickNav();
+    await sleep(1200);
+    const afterHiddenNav = await measure();
+    await evaluate(`(() => {
+      const button = [...document.querySelectorAll('.seam__ops--detail button')]
+        .find((b) => (b.title || '').startsWith('显示信息'));
+      button?.click();
+      return Boolean(button);
+    })()`);
+    await sleep(800);
+    const infoRestored = await measure();
+
+    report.cases.mobile = {
+      open,
+      initiallyCollapsed,
+      expanded,
+      collapsedAgain,
+      navDirection,
+      afterNav,
+      hidInfo,
+      infoHidden,
+      navAgain,
+      afterHiddenNav,
+      infoRestored,
+    };
 
     // ---- 桌面 ----
     await setViewport(1440, 900, false);
@@ -259,19 +355,36 @@ async function main() {
     const d = report.cases.desktop;
     report.passed =
       report.consoleErrors.length === 0 &&
-      m.beforeClick.expanded === 'true' &&
-      !m.beforeClick.collapsed &&
-      m.beforeClick.height > 200 &&
-      m.beforeClick.actionsVisible === true &&
-      m.collapsed.expanded === 'false' &&
-      m.collapsed.collapsed === true &&
-      m.collapsed.height > 0 &&
-      m.collapsed.height <= 130 &&
-      m.collapsed.actionsVisible === false &&
-      m.reopened.expanded === 'true' &&
-      !m.reopened.collapsed &&
-      m.reopened.height > 200 &&
-      m.reopened.actionsVisible === true &&
+      m.initiallyCollapsed.expanded === 'false' &&
+      m.initiallyCollapsed.collapsed === true &&
+      m.initiallyCollapsed.height > 0 &&
+      m.initiallyCollapsed.height <= 130 &&
+      m.initiallyCollapsed.actionsVisible === false &&
+      m.expanded.expanded === 'true' &&
+      !m.expanded.collapsed &&
+      m.expanded.height > 200 &&
+      m.expanded.height <= Math.round(844 * 0.45) &&
+      m.expanded.actionsVisible === true &&
+      m.expanded.actionsBottom <= m.expanded.navTop + 1 &&
+      m.expanded.visibleRatio >= 0.5 &&
+      m.collapsedAgain.expanded === 'false' &&
+      m.collapsedAgain.collapsed === true &&
+      m.collapsedAgain.height <= 130 &&
+      m.collapsedAgain.actionsVisible === false &&
+      m.initiallyCollapsed.seamHeight === '56px' &&
+      m.initiallyCollapsed.navDisplay === 'none' &&
+      m.initiallyCollapsed.viewBottom <= m.initiallyCollapsed.navTop + 1 &&
+      m.navDirection !== null &&
+      m.afterNav.title !== m.collapsedAgain.title &&
+      m.afterNav.expanded === 'false' &&
+      m.afterNav.collapsed === true &&
+      m.hidInfo === true &&
+      m.infoHidden.present === false &&
+      m.navAgain !== null &&
+      m.afterHiddenNav.present === false &&
+      m.infoRestored.present === true &&
+      m.infoRestored.expanded === 'false' &&
+      m.infoRestored.collapsed === true &&
       d.handleDisplay === 'none' &&
       d.width === 300 &&
       d.height > 500 &&
@@ -290,7 +403,7 @@ async function main() {
   console.log(
     JSON.stringify({
       passed: report.passed,
-      mobile: report.cases.mobile?.collapsed,
+      mobile: report.cases.mobile?.initiallyCollapsed,
       desktop: report.cases.desktop,
       errors: report.consoleErrors,
     }),
