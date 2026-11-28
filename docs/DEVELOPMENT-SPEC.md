@@ -518,7 +518,7 @@ box 上还有两条容易踩的网络事实：
 
 | 服务 | 版本/哈希 | 备份与回滚 |
 |---|---|---|
-| `kanalib-web`（web） | `aa2b850`，sha256 `4a6633298006d876d6b74dcb0ae43c108ca899f04e7866719392fc702e8cd2b9` | 二进制 `/usr/local/bin/kanalib-web.bak-20261127-b`（上一版 `…bak-20261127`）；DB `/var/lib/kanalib-web/kanalib-web.db.bak-20261127-local`。schema v2 只新增 `items.origin`，旧库自动 ALTER |
+| `kanalib-web`（web） | `fe41a39`，sha256 `c8298a8a45943bc0ac5c28bc28016af77e09d4713da3eff8abb2f55afa6a895b` | 二进制 `/usr/local/bin/kanalib-web.bak-20261128-hide`（上一版 `…bak-20261127-b`）；DB `/var/lib/kanalib-web/kanalib-web.db.bak-20261128-hide`。schema v2 只新增 `items.origin`，旧库自动 ALTER |
 | `kanalib-ingest`（box） | `37314d9`，sha256 `4d5c43e8a9807888fce2a90ab7b16971fab839a17f9e53c72b3ef39c69ced93f` | 二进制 `/usr/local/bin/kanalib-ingest.bak-20261127`；配置 `/etc/kanalib/ingest.toml.bak-20261127-tagging` |
 
 - 两台二进制都必须 ≥ `0812627`（X-02：缩略图签名纳入批次 id）。只升一边会在缩略图上传处得到 `401/403`。
@@ -548,6 +548,8 @@ box 上还有两条容易踩的网络事实：
    `kanalib-sync` 扫描 jpg/jpeg/png/webp/gif，按原图 sha1 生成 id；重复运行是幂等的（`updated` 后重新上传原图）。
 
 3. 服务端行为：`POST /api/desktop/items` 写元数据（条目 `review`、作品 `draft`，对公网不可见）；`POST /api/desktop/upload` 把原图写到 `media/originals/{id}.{ext}`，再用 `image` 解码生成 t256/t512（长边 ≥1024/2048 时加 t1024/t2048）JPEG q90，最后在同一事务里把条目翻成 `allow`、作品翻成 `active`，刷新 FTS 与作品封面。`/original/{id}` 对本地条目直接读盘，仍要求 HMAC 签名与有效期。
+
+   公网读路径统一要求条目 `decision='allow'` 且作品 `status='active'`；只写了元数据、还没传完图的条目在 `/api/items`、`/api/works`、搜索、facets 与计数里都查不到。
 
 4. 网络注意：本机当前访问 `10.126.126.0/24` 的 **TCP** 会返回 Windows `WSAEACCES 10013`（ICMP 正常，box 与 web 之间的 8788 正常）。这是本机过滤层（安全软件 / EasyTier 接口 profile），不是服务端问题。绕行方式：
 
